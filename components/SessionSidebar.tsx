@@ -1215,6 +1215,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
           <button
             onClick={() => setDropdownOpen((v) => !v)}
             title={selectedProject?.root ?? selectedCwd ?? ""}
+            data-current-cwd={selectedCwd ?? selectedCwdProp ?? ""}
             style={{
               width: "100%",
               display: "flex",

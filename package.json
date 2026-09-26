@@ -1,6 +1,6 @@
 {
   "name": "@agegr/pi-web",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "piWebEdition": "koxir-standalone",
   "standalone": true,
   "description": "Pi Web Standalone Edition — Web UI for the pi coding agent",

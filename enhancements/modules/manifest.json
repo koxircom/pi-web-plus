@@ -1,12 +1,12 @@
 {
   "schemaVersion": 1,
-  "edition": "koxir-standalone-1.0.3",
-  "version": "1.0.3",
+  "edition": "koxir-standalone-1.0.4",
+  "version": "1.0.4",
   "targetFile": "enhancements/pi-web-enhancements.js",
   "mirrorFile": "public/pi-web-enhancements.js",
   "totalLines": 55285,
   "totalBytes": 2344423,
-  "bundleSha256": "eb34612efd598b53f9f24c7e162b006524ea1e91d3a93b18e67e210508afd418",
+  "bundleSha256": "15169ebc91ceff09e2bf936ace1433da949348e69041b1804e624e753b1a0681",
   "modules": [
     {
       "index": 1,
@@ -39,7 +39,7 @@
       ],
       "lineRangeText": "8597-14615",
       "bytes": 254699,
-      "sha256": "b98272e4dfb648de0a4f3660f475d8a90413c5b259613cfa192e6407de2d41c2",
+      "sha256": "9a16361a31e1ef0072d083ce8ce21df10287dbce489486f625d36e8278c54068",
       "responsibility": "ENHANCEMENT_PLUGINS (76 个插件) 注册表与默认配置 Schema、模块与插件启闭持久化、用户消息状态对齐与大图去重、会话置顶/归档/背景色/多维彩色标签/Odoo 插件更新状态胶囊与分组保留策略。"
     },
     {
