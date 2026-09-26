@@ -679,12 +679,160 @@
   wasRunning = false;
   notRunningConsecutiveTicks = 0;
 
+  function clearLiveStopwatchDom() {
+    if (!document.querySelectorAll) return;
+    for (const timer of document.querySelectorAll(".pi-enh-live-timer")) {
+      timer.remove();
+    }
+    for (const fb of document.querySelectorAll('[data-pi-enh-live-fallback="true"]')) {
+      fb.remove();
+    }
+  }
+
+  function isElementVisibleForLiveTimer(el) {
+    if (!el) return false;
+    let cur = el;
+    while (cur && cur.nodeType === 1) {
+      if (cur.hasAttribute?.("hidden") || cur.hasAttribute?.("data-pi-enh-orphan-grouped")) return false;
+      const st = cur.style;
+      if (st && (st.display === "none" || st.visibility === "hidden")) return false;
+      if (typeof window !== "undefined" && typeof window.getComputedStyle === "function") {
+        try {
+          const cs = window.getComputedStyle(cur);
+          if (cs && (cs.display === "none" || cs.visibility === "hidden")) return false;
+        } catch {}
+      }
+      cur = cur.parentElement;
+    }
+    return true;
+  }
+
+  function isCompletedAssistantMsg(m) {
+    if (!m) return true;
+    if (m.hasAttribute?.("data-pi-enh-completed")) return true;
+    if (m.querySelector && m.querySelector(".pi-enh-duration-badge")) return true;
+    const entryId = getMessageEntryId(m);
+    if (entryId && knownTurnMetrics.has(entryId)) return true;
+    return false;
+  }
+
+  function isCandidateNativeFooter(el, msgRoot) {
+    if (!el || el === msgRoot) return false;
+    if (el.hasAttribute?.("data-pi-enh-live-fallback")) return false;
+    if (!isElementVisibleForLiveTimer(el)) return false;
+    const rawStyle = String(el.getAttribute?.("style") || "");
+    const flexDir = el.style?.flexDirection || "";
+    if (/flex-direction\s*:\s*column|flexDirection\s*:\s*column/i.test(rawStyle) || flexDir === "column") {
+      return false;
+    }
+    if (el.querySelector?.("pre, [data-pi-enh-tool-card], [data-message-text]")) {
+      return false;
+    }
+    let cur = el;
+    while (cur && cur !== msgRoot) {
+      if (cur.hasAttribute?.("data-pi-enh-tool-card")) return false;
+      const cs = String(cur.getAttribute?.("style") || "");
+      if (/border-radius\s*:\s*7px/i.test(cs) || cur.style?.borderRadius === "7px") return false;
+      cur = cur.parentElement;
+    }
+    return true;
+  }
+
+  function findAvailableAssistantFooter(m) {
+    if (!m) return null;
+    if (typeof m.querySelectorAll === "function") {
+      const marginCandidates = m.querySelectorAll('div[style*="margin-top: 4px"], div[style*="marginTop: 4px"]');
+      for (let j = marginCandidates.length - 1; j >= 0; j--) {
+        if (isCandidateNativeFooter(marginCandidates[j], m)) return marginCandidates[j];
+      }
+      const gapCandidates = m.querySelectorAll('div[style*="gap: 8px"]');
+      for (let j = gapCandidates.length - 1; j >= 0; j--) {
+        if (isCandidateNativeFooter(gapCandidates[j], m)) return gapCandidates[j];
+      }
+    }
+    if (typeof m.querySelector === "function") {
+      const f = m.querySelector('div[style*="margin-top: 4px"], div[style*="marginTop: 4px"]') ||
+                m.querySelector('div[style*="gap: 8px"]');
+      if (f && isCandidateNativeFooter(f, m)) return f;
+    }
+    return null;
+  }
+
+  function findChatTailFallbackHost(lastUserMsg) {
+    if (lastUserMsg && isElementVisibleForLiveTimer(lastUserMsg)) {
+      const userRow = (typeof lastUserMsg.closest === "function" && lastUserMsg.closest("[data-entry-id]")) || lastUserMsg;
+      const parent = userRow.parentElement;
+      if (parent && parent.tagName && parent.tagName.toLowerCase() !== "html" && isElementVisibleForLiveTimer(parent)) {
+        return parent;
+      }
+    }
+    if (!document.querySelector) return null;
+    const candidates = [
+      document.querySelector('.chat-content div[style*="--chat-content-max-width"]'),
+      document.querySelector(".chat-content .message-content"),
+      typeof getChatScrollContainer === "function" ? getChatScrollContainer() : null,
+      document.querySelector(".chat-content"),
+    ];
+    for (let i = 0; i < candidates.length; i++) {
+      const c = candidates[i];
+      if (c && isElementVisibleForLiveTimer(c)) return c;
+    }
+    return null;
+  }
+
+  function ensureLiveTimerFallbackFooter(host) {
+    if (!host || typeof document.createElement !== "function") return null;
+    let fb = null;
+    const children = host.children || [];
+    for (let i = 0; i < children.length; i++) {
+      if (children[i]?.getAttribute?.("data-pi-enh-live-fallback") === "true") {
+        fb = children[i];
+        break;
+      }
+    }
+    if (!fb) {
+      fb = document.createElement("div");
+      fb.className = "pi-enh-live-timer-fallback";
+      fb.setAttribute("data-pi-enh-live-fallback", "true");
+      if (fb.style) {
+        fb.style.display = "flex";
+        fb.style.alignItems = "center";
+        fb.style.justifyContent = "flex-end";
+        fb.style.gap = "6px";
+        fb.style.marginTop = "6px";
+        fb.style.width = "100%";
+      }
+    }
+    let spacer = null;
+    for (let i = children.length - 1; i >= 0; i--) {
+      const ch = children[i];
+      if (ch === fb) continue;
+      if (ch.getAttribute?.("aria-hidden") === "true" && !(ch.textContent || "").trim() && (!ch.children || ch.children.length === 0)) {
+        spacer = ch;
+      }
+      break;
+    }
+    if (spacer && typeof host.insertBefore === "function") {
+      if (fb.nextElementSibling !== spacer) {
+        host.insertBefore(fb, spacer);
+      }
+    } else if (fb.parentElement !== host || host.lastElementChild !== fb) {
+      host.appendChild(fb);
+    }
+    if (document.querySelectorAll) {
+      for (const other of document.querySelectorAll('[data-pi-enh-live-fallback="true"]')) {
+        if (other !== fb) other.remove();
+      }
+    }
+    return fb;
+  }
+
   function handleSessionSwitchLiveCleanup() {
     activeTurnStartTime = null;
     activeTurnEntryId = null;
     wasRunning = false;
     notRunningConsecutiveTicks = 0;
-    document.querySelectorAll(".pi-enh-live-timer").forEach((el) => el.remove());
+    clearLiveStopwatchDom();
   }
 
   function isLiveRunning(sessionId) {
@@ -737,9 +885,7 @@
 
   function tickLiveDuration() {
     if (!isPluginEnabled("live-stopwatch")) {
-      for (const timer of document.querySelectorAll(".pi-enh-live-timer")) {
-        timer.remove();
-      }
+      clearLiveStopwatchDom();
       return;
     }
     const currentSessionId = getCurrentSessionId();
@@ -768,21 +914,25 @@
       const elapsed = Math.max(0, (Date.now() - turnStartTime) / 1000);
       const timeStr = formatSec(elapsed);
 
-      // 找出当前活跃轮次（严格位于最新 user 消息之后）的所有 assistant 消息
+      // 找出当前活跃轮次（严格位于最新 user 消息之后、未完成且可见）的所有 assistant 消息
       const userMsgs = findUserMessages();
       const lastUserMsg = userMsgs.length > 0 ? userMsgs[userMsgs.length - 1] : null;
       const assistantMsgs = document.querySelectorAll ? document.querySelectorAll('div[data-message-role="assistant"]') : [];
       const activeAssistantMsgs = [];
       for (let i = 0; i < assistantMsgs.length; i++) {
         const m = assistantMsgs[i];
+        if (!isElementVisibleForLiveTimer(m)) continue;
+        if (isCompletedAssistantMsg(m)) continue;
         if (!lastUserMsg) {
           // 若暂无已识别的 user 消息，仅将最后一条未完成的助手消息视作候选活跃卡片，绝不把历史已完成消息全部囊括
-          if (i === assistantMsgs.length - 1 && !m.hasAttribute("data-pi-enh-completed")) {
+          if (i === assistantMsgs.length - 1) {
             activeAssistantMsgs.push(m);
           }
         } else if (typeof lastUserMsg.compareDocumentPosition === "function") {
-          const isPreceding = Boolean(lastUserMsg.compareDocumentPosition(m) & 2);
-          if (!isPreceding && m !== lastUserMsg) {
+          const pos = lastUserMsg.compareDocumentPosition(m);
+          const isPreceding = Boolean(pos & 2);
+          const isDisconnected = Boolean(pos & 1);
+          if (!isPreceding && !isDisconnected && m !== lastUserMsg) {
             activeAssistantMsgs.push(m);
           }
         } else {
@@ -790,59 +940,38 @@
         }
       }
 
-      // 寻找当前活跃回合中挂载秒表的最佳卡片及 footer
+      // 寻找当前活跃回合中挂载秒表的最佳卡片及 footer（若缺失原生 footer 则启用当前会话聊天区尾部可见兜底）
       let currentMsg = null;
       let footer = null;
+      let usingFallbackFooter = false;
 
-      // 1. 优先寻找未标记 completed 且具有合法 footer 的最新 assistant 消息
-      for (let i = activeAssistantMsgs.length - 1; i >= 0; i--) {
-        const m = activeAssistantMsgs[i];
-        if (!m.hasAttribute("data-pi-enh-completed")) {
-          const f = m.querySelector('div[style*="margin-top: 4px"], div[style*="marginTop: 4px"]') ||
-                    m.querySelector('div[style*="gap: 8px"]');
-          if (f) {
-            currentMsg = m;
-            footer = f;
-            break;
-          }
+      if (activeAssistantMsgs.length > 0) {
+        const latestActiveMsg = activeAssistantMsgs[activeAssistantMsgs.length - 1];
+        const nativeFooter = findAvailableAssistantFooter(latestActiveMsg);
+        if (nativeFooter) {
+          currentMsg = latestActiveMsg;
+          footer = nativeFooter;
+        } else {
+          currentMsg = latestActiveMsg;
+          footer = ensureLiveTimerFallbackFooter(latestActiveMsg);
+          usingFallbackFooter = Boolean(footer);
         }
-      }
-
-      // 2. 多步工具与等待模型鲁棒保障：如果最新消息尚在流式等待（无 footer），
-      // 只要当前回合处于运行中（isRunning），从后往前在当前活跃未完成的助手卡片中选取拥有合法 footer 的卡片挂载秒表！
-      if (!footer && activeAssistantMsgs.length > 0) {
-        for (let i = activeAssistantMsgs.length - 1; i >= 0; i--) {
-          const m = activeAssistantMsgs[i];
-          const entryId = getMessageEntryId(m);
-          // 铁律：已完成的历史消息或已有正式耗时徽章的卡片，坚决保留，绝对严禁被秒表剥夺或互删！
-          if (m.hasAttribute("data-pi-enh-completed") || m.querySelector(".pi-enh-duration-badge") || (entryId && knownTurnMetrics.has(entryId))) {
-            continue;
-          }
-          const f = m.querySelector('div[style*="margin-top: 4px"], div[style*="marginTop: 4px"]') ||
-                    m.querySelector('div[style*="gap: 8px"]');
-          if (f) {
-            currentMsg = m;
-            footer = f;
-            break;
-          }
+      } else {
+        const tailHost = findChatTailFallbackHost(lastUserMsg);
+        if (tailHost) {
+          footer = ensureLiveTimerFallbackFooter(tailHost);
+          usingFallbackFooter = Boolean(footer);
         }
-      }
-
-      // 3. 终极保底：当前回合刚开始，尚未产生带标准 footer 的助手消息
-      if (!footer && activeAssistantMsgs.length > 0) {
-        currentMsg = activeAssistantMsgs[activeAssistantMsgs.length - 1];
-        footer = currentMsg.querySelector('div[style*="margin-top: 4px"], div[style*="marginTop: 4px"]') ||
-                 currentMsg.querySelector('div[style*="gap: 8px"]') ||
-                 currentMsg.lastElementChild;
       }
 
       syncAllModelSpeedBadges();
 
-      // ONLY attach liveBadge to the active uncompleted message
+      // ONLY attach liveBadge to the active uncompleted message or current turn chat-tail fallback
       // NEVER attach to any previously completed assistant message!
-      if (currentMsg && footer) {
-        activeTurnEntryId = getMessageEntryId(currentMsg) || null;
-        let liveBadge = footer.querySelector(".pi-enh-live-timer");
+      if (footer) {
+        activeTurnEntryId = currentMsg ? (getMessageEntryId(currentMsg) || null) : null;
+        let liveBadge = footer.querySelector(".pi-enh-live-timer") ||
+                        (document.querySelector ? document.querySelector(".pi-enh-live-timer") : null);
         const copyBtn = findCopyButton(footer);
         const usageEl = typeof findUsageElement === "function" ? findUsageElement(footer) : null;
         const timeSpan = findTimestampElement(footer);
@@ -885,7 +1014,28 @@
         } else {
           anchorLiveTimer(liveBadge);
         }
+        if (!liveBadge.__piEnhRemoveWrapped) {
+          const nativeRemove = liveBadge.remove;
+          liveBadge.remove = function () {
+            const parentFb = this.parentElement?.getAttribute?.("data-pi-enh-live-fallback") === "true"
+              ? this.parentElement
+              : null;
+            if (typeof nativeRemove === "function") {
+              nativeRemove.call(this);
+            }
+            if (parentFb && (!parentFb.querySelector || !parentFb.querySelector(".pi-enh-live-timer"))) {
+              parentFb.remove();
+            }
+          };
+          liveBadge.__piEnhRemoveWrapped = true;
+        }
         liveBadge.textContent = `⏱️ 运行中 ${timeStr}`;
+
+        if (!usingFallbackFooter && document.querySelectorAll) {
+          for (const fb of document.querySelectorAll('[data-pi-enh-live-fallback="true"]')) {
+            fb.remove();
+          }
+        }
 
         // 清理多余的残留 liveBadge
         const allLiveTimers = document.querySelectorAll(".pi-enh-live-timer");
@@ -894,6 +1044,7 @@
         }
       }
     } else {
+      clearLiveStopwatchDom();
       // Transition from running -> completed
       if (wasRunning) {
         if (hasActiveAskUserOnScreen() || isCurrentSessionInAttention(currentSessionId)) {
@@ -921,7 +1072,7 @@
 
           // Find the assistant message that just finished (latest assistant message in active turn)
           const assistantMsgs = document.querySelectorAll('div[data-message-role="assistant"]');
-          const userMsgs = document.querySelectorAll ? document.querySelectorAll('div[data-message-role="user"]') : [];
+          const userMsgs = findUserMessages();
           const lastUserMsg = userMsgs.length > 0 ? userMsgs[userMsgs.length - 1] : null;
 
           let lastActiveAssistantMsg = null;
@@ -929,7 +1080,9 @@
             for (let i = assistantMsgs.length - 1; i >= 0; i--) {
               const cand = assistantMsgs[i];
               if (!lastUserMsg) {
-                lastActiveAssistantMsg = cand;
+                if (!isCompletedAssistantMsg(cand)) {
+                  lastActiveAssistantMsg = cand;
+                }
                 break;
               } else if (typeof lastUserMsg.compareDocumentPosition === "function") {
                 const isPreceding = Boolean(lastUserMsg.compareDocumentPosition(cand) & 2);
@@ -948,16 +1101,13 @@
           if (!targetMsg && activeTurnEntryId) {
             targetMsg = document.querySelector(`div[data-message-role="assistant"][data-entry-id="${activeTurnEntryId}"]`);
           }
-          if (!targetMsg) {
+          if (!targetMsg && !lastUserMsg) {
             for (let i = assistantMsgs.length - 1; i >= 0; i--) {
-              if (!assistantMsgs[i].hasAttribute("data-pi-enh-completed")) {
+              if (!isCompletedAssistantMsg(assistantMsgs[i])) {
                 targetMsg = assistantMsgs[i];
                 break;
               }
             }
-          }
-          if (!targetMsg && assistantMsgs.length > 0) {
-            targetMsg = assistantMsgs[assistantMsgs.length - 1];
           }
 
           if (targetMsg && lastUserMsg) {
@@ -968,6 +1118,9 @@
             if (isPreceding) {
               targetMsg = null;
             }
+          }
+          if (targetMsg && isCompletedAssistantMsg(targetMsg)) {
+            targetMsg = null;
           }
 
           if (targetMsg) {

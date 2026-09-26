@@ -4991,7 +4991,7 @@ window.__PI_ENH_RENDER_USAGE_PANEL__ = renderUsagePanel;
       if (typeof dismissToast === "function") {
         try { dismissToast(true); } catch (e) {}
       }
-      for (const el of document.querySelectorAll(".pi-enh-menu, .pi-enh-quote-bar, #pi-enh-protocol-frame, .pi-enh-draft-badge, .pi-enh-plugins-panel, .pi-enh-notifications-panel, .pi-enh-archived-panel, [data-pi-enh-tab], .pi-enh-search-group-divider, .pi-enh-search-archived-badge, .pi-enh-search-restore-btn, .pi-enh-attachments-bar, .pi-enh-attachment-card, dialog.pi-enh-image-zoom-dialog, .pi-enh-toast, .pi-enh-annotation-rail")) {
+      for (const el of document.querySelectorAll(".pi-enh-menu, .pi-enh-quote-bar, #pi-enh-protocol-frame, .pi-enh-draft-badge, .pi-enh-plugins-panel, .pi-enh-notifications-panel, .pi-enh-archived-panel, [data-pi-enh-tab], .pi-enh-search-group-divider, .pi-enh-search-archived-badge, .pi-enh-search-restore-btn, .pi-enh-attachments-bar, .pi-enh-attachment-card, .pi-enh-video-preview-backdrop, dialog.pi-enh-image-zoom-dialog, .pi-enh-toast, .pi-enh-annotation-rail")) {
         try { el.remove(); } catch (e) {}
       }
       if (durationTooltip && durationTooltip.parentNode) {

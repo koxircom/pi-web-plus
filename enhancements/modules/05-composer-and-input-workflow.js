@@ -949,6 +949,7 @@
   function composerHasAnySendPayload(textarea) {
     if (!textarea) return false;
     if (String(textarea.value || "").trim()) return true;
+    if (typeof pendingComposerAttachments !== "undefined" && Array.isArray(pendingComposerAttachments) && pendingComposerAttachments.length > 0) return true;
     if (typeof listAnnotations === "function" && listAnnotations().length > 0) return true;
     const root = textarea.closest?.("fieldset") || textarea.closest?.("form") || textarea.parentElement?.parentElement || textarea.parentElement;
     if (root?.querySelector?.(".pi-enh-attachment-card")) return true;
@@ -982,7 +983,7 @@
   function restoreEmptySendContinueButton(button, textarea = findComposerTextarea()) {
     if (!button) return;
     button.removeAttribute(EMPTY_SEND_CONTINUE_ATTR);
-    if (button.getAttribute("data-pi-enh-annotation-enabled") === "true") return;
+    if (button.getAttribute("data-pi-enh-annotation-enabled") === "true" || button.getAttribute("data-pi-enh-attachment-send") === "true") return;
     if (isEmptySendContinueButton(button) && !composerHasAnySendPayload(textarea)) {
       button.disabled = true;
       button.setAttribute("disabled", "");
@@ -1494,6 +1495,10 @@
     "dockerfile", "makefile", "gemfile", "pipfile", "procfile"
   ]);
 
+  const VIDEO_FILE_EXTENSIONS = new Set([
+    "mp4", "m4v", "mov", "webm", "mkv", "avi", "flv", "wmv", "3gp", "ogv", "mpeg", "mpg", "m2ts", "mts"
+  ]);
+
   const COMPOSER_TEXT_SIZE_LIMIT = 64 * 1024; // 64KB 文本限制，优先内存暂存零磁盘占用
   const SESSION_UPLOADS_KEY = "pi-enh-session-uploads";
 
@@ -1506,8 +1511,25 @@
     return (bytes / (1024 * 1024)).toFixed(1).replace(/\.0$/, "") + " MB";
   }
 
+  function isVideoFile(fileOrName, mimeType) {
+    if (!fileOrName && !mimeType) return false;
+    const rawMime = typeof mimeType === "string"
+      ? mimeType.trim().toLowerCase()
+      : (typeof fileOrName === "object" && fileOrName && typeof fileOrName.type === "string" ? fileOrName.type.trim().toLowerCase() : "");
+    if (rawMime.startsWith("video/")) return true;
+    const rawName = typeof fileOrName === "string"
+      ? fileOrName.trim().toLowerCase()
+      : (typeof fileOrName === "object" && fileOrName && typeof fileOrName.name === "string" ? fileOrName.name.trim().toLowerCase() : "");
+    if (!rawName) return false;
+    const clean = rawName.split(/[?#]/)[0];
+    const base = clean.split(/[\\/]/).pop() || clean;
+    const ext = base.includes(".") ? base.split(".").pop() : "";
+    return Boolean(ext && VIDEO_FILE_EXTENSIONS.has(ext));
+  }
+
   function isTextFile(file) {
     if (!file) return false;
+    if (file.type && file.type.toLowerCase().startsWith("video/")) return false;
     const name = (file.name || "").trim().toLowerCase();
     const base = name.split(/[\\/]/).pop() || name;
     if (base === "dockerfile" || base.startsWith("dockerfile.") ||
@@ -1517,6 +1539,9 @@
       return true;
     }
     const ext = base.includes(".") ? base.split(".").pop() : "";
+    if (ext && VIDEO_FILE_EXTENSIONS.has(ext)) {
+      return false;
+    }
     if (ext && TEXT_FILE_EXTENSIONS.has(ext)) {
       return true;
     }
@@ -1629,7 +1654,18 @@
         iconSvg: buildDocSvg("#7C3AED", "#EDE9FE", "CODE", "#FFFFFF")
       };
     }
-    // 5. Archive (压缩包)
+    // 5. Video (视频文件 - 在 Archive 之前)
+    if (isVideoFile(filename, mimeType)) {
+      const badge = (ext || "VIDEO").toUpperCase().slice(0, 5);
+      const fontSize = badge.length >= 4 ? "11.5" : "13.5";
+      return {
+        isVideo: true,
+        typeLabel: `${(ext || "VIDEO").toUpperCase()} Video`,
+        bgColor: "transparent",
+        iconSvg: `<svg width="34" height="34" viewBox="0 0 100 100" fill="none"><rect x="14" y="14" width="72" height="72" rx="16" fill="#EDE9FE" stroke="#8B5CF6" stroke-width="6.5"/><circle cx="50" cy="42" r="15" fill="#8B5CF6" fill-opacity="0.16"/><path d="M45 33.5L60 42L45 50.5V33.5Z" fill="#8B5CF6" stroke="#8B5CF6" stroke-width="3" stroke-linejoin="round"/><rect x="18" y="64" width="64" height="22" rx="5" fill="#8B5CF6"/><text x="50" y="79.5" fill="#FFFFFF" font-family="-apple-system, BlinkMacSystemFont, Arial, sans-serif" font-size="${fontSize}" font-weight="900" text-anchor="middle" letter-spacing="0.5">${badge}</text></svg>`
+      };
+    }
+    // 6. Archive (压缩包)
     if (["zip", "tar", "gz", "tgz", "7z", "rar"].includes(ext)) {
       return {
         typeLabel: "Archive",
@@ -1654,6 +1690,22 @@
   function encodePathForApi(p) {
     const norm = (/^[a-zA-Z]:[\\/]/.test(p) || p.startsWith("\\\\")) ? p.replace(/\\/g, "/") : p;
     return norm.split("/").filter(Boolean).map(encodeURIComponent).join("/");
+  }
+
+  function getEffectiveComposerCwdSyncOrEmpty() {
+    const sessionId = getCurrentSessionId();
+    if (sessionId && window.__PI_CURRENT_SESSION_DATA__?.info?.cwd) {
+      return window.__PI_CURRENT_SESSION_DATA__.info.cwd;
+    }
+    try {
+      const workspaceEl = document.querySelector("[data-current-cwd]") ||
+        document.querySelector(".workspace-picker-button");
+      const domCwd = workspaceEl?.getAttribute("data-current-cwd") || workspaceEl?.textContent?.trim() || "";
+      if (domCwd && domCwd.length > 1 && !domCwd.includes("...")) {
+        return domCwd;
+      }
+    } catch (e) {}
+    return "";
   }
 
   async function getEffectiveComposerCwd() {
@@ -1816,17 +1868,38 @@
     });
     if (!res.ok) {
       let errMsg = `上传失败 (HTTP ${res.status})`;
+      let errData = {};
       try {
-        const errData = await res.json();
+        errData = await res.json();
         if (errData.error) errMsg = errData.error;
       } catch (e) {}
+      if (res.status === 413) {
+        errMsg = `文件超过单次上传上限 (25MB): ${errData.error || ""}`.replace(/:\s*$/, "");
+      }
       throw new Error(errMsg);
     }
     return await res.json();
   }
 
+  const INLINE_VIDEO_EXTENSIONS = new Set(["mp4", "m4v", "webm", "mov", "ogv"]);
+  const INLINE_VIDEO_MIME_TYPES = new Set(["video/mp4", "video/quicktime", "video/webm", "video/ogg"]);
+
+  function getAttachmentExtension(filename) {
+    const clean = String(filename || "").split(/[?#]/)[0];
+    const base = clean.split(/[\\/]/).pop() || clean;
+    const dotIndex = base.lastIndexOf(".");
+    return dotIndex > 0 ? base.slice(dotIndex + 1).toLowerCase() : "";
+  }
+
+  function isInlineVideoAttachment(att) {
+    const ext = getAttachmentExtension(att?.name) || getAttachmentExtension(att?.serverRelativePath);
+    if (INLINE_VIDEO_EXTENSIONS.has(ext)) return true;
+    if (ext) return false;
+    return INLINE_VIDEO_MIME_TYPES.has(String(att?.type || "").trim().toLowerCase());
+  }
+
   function getMimeTypeFromExt(filename) {
-    const ext = (filename || "").split(".").pop().toLowerCase();
+    const ext = getAttachmentExtension(filename);
     const map = {
       pdf: "application/pdf",
       xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -1839,6 +1912,20 @@
       webp: "image/webp",
       gif: "image/gif",
       svg: "image/svg+xml",
+      mp4: "video/mp4",
+      m4v: "video/mp4",
+      mov: "video/quicktime",
+      webm: "video/webm",
+      mkv: "video/x-matroska",
+      avi: "video/x-msvideo",
+      flv: "video/x-flv",
+      wmv: "video/x-ms-wmv",
+      "3gp": "video/3gpp",
+      ogv: "video/ogg",
+      mpeg: "video/mpeg",
+      mpg: "video/mpeg",
+      m2ts: "video/mp2t",
+      mts: "video/mp2t",
       txt: "text/plain",
       json: "application/json",
       csv: "text/csv",
@@ -1860,10 +1947,301 @@
     return `/api/files/${encoded}?type=${type}`;
   }
 
+  let activeVideoPreviewBackdrop = null;
+  let activeVideoPreviewEscHandler = null;
+  let activeVideoPreviewObjectUrl = "";
+  let activeVideoPreviewRequestToken = 0;
+
+  function revokeVideoPreviewObjectUrl(url) {
+    if (!url || typeof URL === "undefined" || typeof URL.revokeObjectURL !== "function") return;
+    try { URL.revokeObjectURL(url); } catch (e) {}
+  }
+
+  function revokeActiveVideoPreviewObjectUrl() {
+    revokeVideoPreviewObjectUrl(activeVideoPreviewObjectUrl);
+    activeVideoPreviewObjectUrl = "";
+  }
+
+  async function fetchVideoDownloadObjectUrl(att, cwd) {
+    const downloadUrl = (att?.serverRelativePath || att?.name)
+      ? resolveAttachmentApiUrl(att, cwd, "download")
+      : "";
+    if (!downloadUrl || typeof fetch !== "function" || typeof URL === "undefined"
+      || typeof URL.createObjectURL !== "function" || typeof Blob === "undefined") return "";
+    try {
+      const response = await fetch(downloadUrl);
+      if (!response?.ok) return "";
+      const responseBlob = await response.blob();
+      const attachmentMime = String(att?.type || "").trim();
+      const fallbackMime = getMimeTypeFromExt(att?.name || att?.serverRelativePath);
+      const mimeType = attachmentMime || fallbackMime || responseBlob.type || "";
+      const playableBlob = mimeType && responseBlob.type !== mimeType
+        ? new Blob([responseBlob], { type: mimeType })
+        : responseBlob;
+      return URL.createObjectURL(playableBlob);
+    } catch (e) {
+      return "";
+    }
+  }
+
+  function closeVideoPreviewModal() {
+    activeVideoPreviewRequestToken++;
+    revokeActiveVideoPreviewObjectUrl();
+    if (activeVideoPreviewEscHandler && typeof document !== "undefined") {
+      document.removeEventListener("keydown", activeVideoPreviewEscHandler, true);
+      activeVideoPreviewEscHandler = null;
+    }
+    if (activeVideoPreviewBackdrop) {
+      try {
+        const video = activeVideoPreviewBackdrop.querySelector?.("video");
+        if (video) {
+          try { video.pause?.(); } catch (e) {}
+          video.removeAttribute?.("src");
+          try { video.load?.(); } catch (e) {}
+        }
+        activeVideoPreviewBackdrop.remove?.();
+      } catch (e) {}
+      activeVideoPreviewBackdrop = null;
+    }
+  }
+
+  function openVideoPreviewModal(att, cwd) {
+    if (!att) return null;
+    const effectiveCwd = cwd || getEffectiveComposerCwdSyncOrEmpty();
+    const hasAttachmentPath = Boolean(att.serverRelativePath || att.name);
+    const inlineVideo = isInlineVideoAttachment(att);
+    const apiReadUrl = hasAttachmentPath
+      ? resolveAttachmentApiUrl(att, effectiveCwd, "read")
+      : "";
+    const apiDownloadUrl = hasAttachmentPath
+      ? resolveAttachmentApiUrl(att, effectiveCwd, "download")
+      : "";
+    // The read endpoint is a Range-capable inline stream only for the five
+    // MIME extensions supported by the server. Other videos must never receive
+    // its JSON metadata response as a <video> source.
+    const videoSrc = att.previewUrl || (inlineVideo ? apiReadUrl : "");
+    const fallbackVideoSrc = videoSrc || apiDownloadUrl;
+    if (!fallbackVideoSrc) return null;
+
+    if (typeof document === "undefined" || !document.body || typeof document.createElement !== "function") {
+      if (typeof window !== "undefined" && typeof window.open === "function") {
+        window.open(fallbackVideoSrc, "_blank");
+      }
+      return null;
+    }
+
+    closeVideoPreviewModal();
+    const requestToken = activeVideoPreviewRequestToken;
+    let currentVideoSource = videoSrc || apiDownloadUrl;
+
+    const meta = getFileCategoryMeta(att.name, att.type);
+    const sizeStr = att.sizeStr || formatFileSize(att.size);
+    const subtitleText = sizeStr ? `${meta.typeLabel} · ${sizeStr}` : meta.typeLabel;
+    const rawName = String(att.name || "视频预览");
+
+    const backdrop = document.createElement("div");
+    backdrop.className = "pi-enh-video-preview-backdrop";
+    backdrop.setAttribute("role", "dialog");
+    backdrop.setAttribute("aria-modal", "true");
+    backdrop.setAttribute("aria-label", `视频预览: ${rawName}`);
+
+    const modal = document.createElement("div");
+    modal.className = "pi-enh-video-preview-modal";
+    modal.addEventListener("click", (e) => e.stopPropagation());
+
+    const header = document.createElement("div");
+    header.className = "pi-enh-video-preview-header";
+
+    const titleWrap = document.createElement("div");
+    titleWrap.className = "pi-enh-video-preview-title-wrap";
+
+    const titleEl = document.createElement("div");
+    titleEl.className = "pi-enh-video-preview-title";
+    titleEl.textContent = rawName;
+    titleEl.title = rawName;
+
+    const subtitleEl = document.createElement("div");
+    subtitleEl.className = "pi-enh-video-preview-subtitle";
+    subtitleEl.textContent = subtitleText;
+
+    titleWrap.appendChild(titleEl);
+    titleWrap.appendChild(subtitleEl);
+
+    const actions = document.createElement("div");
+    actions.className = "pi-enh-video-preview-actions";
+
+    const openTabBtn = document.createElement("button");
+    openTabBtn.type = "button";
+    openTabBtn.className = "pi-enh-video-preview-btn";
+    openTabBtn.title = "新窗口打开";
+    openTabBtn.textContent = "新窗口打开";
+    openTabBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      const targetUrl = currentVideoSource || apiDownloadUrl;
+      if (typeof window !== "undefined" && typeof window.open === "function") {
+        window.open(targetUrl, "_blank");
+      }
+    });
+
+    const downloadBtn = document.createElement("button");
+    downloadBtn.type = "button";
+    downloadBtn.className = "pi-enh-video-preview-btn";
+    downloadBtn.title = "下载视频";
+    downloadBtn.textContent = "下载";
+    downloadBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      if (att.previewUrl && !att.serverRelativePath) {
+        const a = document.createElement("a");
+        a.href = att.previewUrl;
+        a.download = rawName;
+        a.style.display = "none";
+        document.body.appendChild(a);
+        a.click();
+        setTimeout(() => a.remove(), 100);
+      } else {
+        downloadAttachmentFile(att, effectiveCwd);
+      }
+    });
+
+    const closeBtn = document.createElement("button");
+    closeBtn.type = "button";
+    closeBtn.className = "pi-enh-video-preview-btn pi-enh-video-preview-close";
+    closeBtn.title = "关闭预览 (Esc)";
+    closeBtn.setAttribute("aria-label", "关闭视频预览");
+    closeBtn.textContent = "×";
+    closeBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      closeVideoPreviewModal();
+    });
+
+    actions.appendChild(openTabBtn);
+    actions.appendChild(downloadBtn);
+    actions.appendChild(closeBtn);
+
+    header.appendChild(titleWrap);
+    header.appendChild(actions);
+
+    const body = document.createElement("div");
+    body.className = "pi-enh-video-preview-body";
+
+    const player = document.createElement("video");
+    player.className = "pi-enh-video-preview-player";
+    player.controls = true;
+    player.autoplay = true;
+    player.playsInline = true;
+    player.preload = "metadata";
+    player.setAttribute("controls", "");
+    player.setAttribute("playsinline", "");
+    player.setAttribute("preload", "metadata");
+    if (videoSrc) player.src = videoSrc;
+
+    body.appendChild(player);
+    modal.appendChild(header);
+    modal.appendChild(body);
+    backdrop.appendChild(modal);
+
+    backdrop.addEventListener("click", (e) => {
+      if (e.target === backdrop) {
+        closeVideoPreviewModal();
+      }
+    });
+
+    activeVideoPreviewEscHandler = (e) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopPropagation();
+        if (typeof e.stopImmediatePropagation === "function") {
+          e.stopImmediatePropagation();
+        }
+        closeVideoPreviewModal();
+      }
+    };
+    document.addEventListener("keydown", activeVideoPreviewEscHandler, true);
+
+    const playPlayer = () => {
+      try {
+        const playPromise = player.play?.();
+        if (playPromise && typeof playPromise.catch === "function") {
+          playPromise.catch(() => {});
+        }
+      } catch (e) {}
+    };
+
+    document.body.appendChild(backdrop);
+    activeVideoPreviewBackdrop = backdrop;
+    if (videoSrc) {
+      playPlayer();
+    } else {
+      void (async () => {
+        const objectUrl = await fetchVideoDownloadObjectUrl(att, effectiveCwd);
+        if (requestToken !== activeVideoPreviewRequestToken || activeVideoPreviewBackdrop !== backdrop) {
+          revokeVideoPreviewObjectUrl(objectUrl);
+          return;
+        }
+        if (objectUrl) {
+          activeVideoPreviewObjectUrl = objectUrl;
+          currentVideoSource = objectUrl;
+          player.src = objectUrl;
+        } else {
+          // A binary download URL is still a safe fallback; unlike type=read,
+          // it cannot be mistaken for the endpoint's JSON metadata response.
+          currentVideoSource = apiDownloadUrl;
+          player.src = apiDownloadUrl;
+        }
+        try { player.load?.(); } catch (e) {}
+        playPlayer();
+      })();
+    }
+    return backdrop;
+  }
+
+  function attachVideoThumbnailToIconWrap(iconWrap, videoSrc, fallbackSvg) {
+    if (!iconWrap || !videoSrc || typeof document === "undefined" || typeof document.createElement !== "function") return;
+    try {
+      iconWrap.classList.add("pi-enh-attachment-icon-video");
+      iconWrap.innerHTML = "";
+      const videoEl = document.createElement("video");
+      videoEl.className = "pi-enh-attachment-video-thumb";
+      videoEl.src = videoSrc;
+      videoEl.muted = true;
+      videoEl.playsInline = true;
+      videoEl.preload = "metadata";
+      videoEl.setAttribute("muted", "");
+      videoEl.setAttribute("playsinline", "");
+      videoEl.setAttribute("preload", "metadata");
+      videoEl.addEventListener("loadeddata", () => {
+        try {
+          if (videoEl.currentTime === 0 && videoEl.duration > 0.1) {
+            videoEl.currentTime = 0.1;
+          }
+        } catch (e) {}
+      }, { once: true });
+      videoEl.addEventListener("error", () => {
+        iconWrap.classList.remove("pi-enh-attachment-icon-video");
+        iconWrap.innerHTML = fallbackSvg;
+      }, { once: true });
+
+      const badge = document.createElement("span");
+      badge.className = "pi-enh-attachment-video-play-badge";
+      badge.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><path d="M8 5.14v14l11-7-11-7z"/></svg>`;
+
+      iconWrap.appendChild(videoEl);
+      iconWrap.appendChild(badge);
+    } catch (e) {
+      iconWrap.innerHTML = fallbackSvg;
+    }
+  }
+
   function openAttachmentPreview(att, cwd) {
+    if (!att) return;
+    const effectiveCwd = cwd || getEffectiveComposerCwdSyncOrEmpty();
+    if (isVideoFile(att.name, att.type)) {
+      openVideoPreviewModal(att, effectiveCwd);
+      return;
+    }
     const ext = (att.name || "").split(".").pop().toLowerCase();
     const type = ext === "docx" ? "preview" : "read";
-    const url = resolveAttachmentApiUrl(att, cwd, type);
+    const url = resolveAttachmentApiUrl(att, effectiveCwd, type);
     if (typeof window !== "undefined" && typeof window.open === "function") {
       window.open(url, "_blank");
     }
@@ -1898,6 +2276,18 @@
     iconWrap.className = "pi-enh-msg-attachment-icon";
     iconWrap.style.background = meta.bgColor;
     iconWrap.innerHTML = meta.iconSvg;
+    if (meta.isVideo) {
+      card.classList.add("pi-enh-attachment-card-video");
+      card.title = "点击预览播放视频";
+      const videoSrc = att.previewUrl || (
+        isInlineVideoAttachment(att) && (att.serverRelativePath || att.name)
+          ? resolveAttachmentApiUrl(att, cwd, "read")
+          : ""
+      );
+      if (videoSrc) {
+        attachVideoThumbnailToIconWrap(iconWrap, videoSrc, meta.iconSvg);
+      }
+    }
 
     const metaWrap = document.createElement("div");
     metaWrap.className = "pi-enh-msg-attachment-meta";
@@ -2157,6 +2547,13 @@
     }
   }
 
+  function revokeAttachmentPreviewUrl(att) {
+    if (att && att.previewUrl && typeof URL !== "undefined" && typeof URL.revokeObjectURL === "function") {
+      try { URL.revokeObjectURL(att.previewUrl); } catch (e) {}
+      att.previewUrl = "";
+    }
+  }
+
   // --- ChatGPT 风格胶囊卡片渲染与管理 ---
   function createAttachmentPillCard(att, onRemove) {
     const card = document.createElement("div");
@@ -2174,6 +2571,25 @@
     iconWrap.className = "pi-enh-attachment-icon-wrap";
     iconWrap.style.background = meta.bgColor;
     iconWrap.innerHTML = meta.iconSvg;
+
+    if (meta.isVideo) {
+      card.classList.add("pi-enh-attachment-card-video");
+      card.title = "点击预览播放视频";
+      const cwd = getEffectiveComposerCwdSyncOrEmpty();
+      const videoSrc = att.previewUrl || (
+        isInlineVideoAttachment(att) && (att.serverRelativePath || att.name)
+          ? resolveAttachmentApiUrl(att, cwd, "read")
+          : ""
+      );
+      if (videoSrc) {
+        attachVideoThumbnailToIconWrap(iconWrap, videoSrc, meta.iconSvg);
+      }
+      card.addEventListener("click", (e) => {
+        if (e.target?.closest?.(".pi-enh-attachment-remove")) return;
+        e.stopPropagation();
+        openAttachmentPreview(att, getEffectiveComposerCwdSyncOrEmpty());
+      });
+    }
 
     const metaWrap = document.createElement("div");
     metaWrap.className = "pi-enh-attachment-meta";
@@ -2221,9 +2637,12 @@
     const host = textarea.parentElement || textarea;
     const grandParent = host.parentElement;
     let bar = findComposerAttachmentBar(textarea);
+    const composerCard = textarea.closest?.('.pi-enh-cursor-composer, fieldset > div[style*="max-width"]');
 
     if (pendingComposerAttachments.length === 0) {
       if (bar) bar.remove();
+      if (composerCard) updateCardContentState(composerCard, textarea);
+      if (typeof syncEmptySendContinue === "function") syncEmptySendContinue();
       return;
     }
 
@@ -2239,7 +2658,11 @@
 
     // 主同步循环每 800ms 执行一次；队列未变化时绝不能重建卡片，否则入场动画会造成闪动。
     const renderKey = pendingComposerAttachments.map((att) => [att.id, att.name, att.size, att.type, att.serverRelativePath || "", att.isText ? "text" : "file"].join("\u001f")).join("\u001e");
-    if (bar.getAttribute("data-pi-enh-attachments-key") === renderKey) return;
+    if (bar.getAttribute("data-pi-enh-attachments-key") === renderKey) {
+      if (composerCard) updateCardContentState(composerCard, textarea);
+      if (typeof syncEmptySendContinue === "function") syncEmptySendContinue();
+      return;
+    }
 
     // 显式移除旧卡片：兼容原生 DOM 与轻量测试 DOM，避免重复渲染附件。
     if (typeof bar.replaceChildren === "function") {
@@ -2250,6 +2673,7 @@
     }
     for (const att of pendingComposerAttachments) {
       const card = createAttachmentPillCard(att, async (targetAtt) => {
+        revokeAttachmentPreviewUrl(targetAtt);
         pendingComposerAttachments = pendingComposerAttachments.filter(x => x.id !== targetAtt.id);
         syncComposerAttachmentBar(textarea);
         if (targetAtt.serverAbsPath) {
@@ -2264,6 +2688,8 @@
       bar.appendChild(card);
     }
     bar.setAttribute("data-pi-enh-attachments-key", renderKey);
+    if (composerCard) updateCardContentState(composerCard, textarea);
+    if (typeof syncEmptySendContinue === "function") syncEmptySendContinue();
   }
 
   function assembleComposerAttachments(textarea) {
@@ -2273,6 +2699,7 @@
     let extraText = "";
 
     for (const att of pendingComposerAttachments) {
+      revokeAttachmentPreviewUrl(att);
       if (att.isText && att.textContent) {
         const lang = getLanguageForFilename(att.name);
         const safeText = att.textContent.endsWith("\n") ? att.textContent : (att.textContent + "\n");
@@ -2374,13 +2801,20 @@
           }
           recordSessionUploadedFile(sessionId, serverAbsPath);
 
+          let previewUrl = "";
+          if (isVideoFile(file.name, file.type) && typeof URL !== "undefined" && typeof URL.createObjectURL === "function" && typeof Blob !== "undefined" && file instanceof Blob) {
+            try { previewUrl = URL.createObjectURL(file); } catch (e) {}
+          }
+
           const attId = "att-" + Math.random().toString(36).slice(2, 9);
           pendingComposerAttachments.push({
             id: attId,
             name: file.name, // 原始真实未转义文件名
             size: file.size,
-            type: file.type,
+            type: file.type || getMimeTypeFromExt(file.name),
             isText: false,
+            isVideo: isVideoFile(file.name, file.type),
+            previewUrl,
             sessionId,
             serverRelativePath,
             serverAbsPath,
@@ -2400,15 +2834,142 @@
 
   activeComposerPasteTextarea = null;
   let activeComposerPasteForm = null;
+  let activeComposerPasteHost = null;
+  let activeComposerFileInput = null;
   let composerPasteHandler = null;
   let composerDragOverHandler = null;
   let composerDragLeaveHandler = null;
   let composerDropHandler = null;
+  let composerHostDragOverHandler = null;
+  let composerHostDragLeaveHandler = null;
+  let composerHostDropHandler = null;
+  let composerFileInputChangeHandler = null;
   let composerKeydownHandler = null;
   let composerSubmitHandler = null;
 
+  const COMPOSER_EXTENDED_FILE_ACCEPT = "image/*,video/*";
+
+  function syncComposerFileInputAndToolbar(textarea) {
+    if (typeof document === "undefined") return;
+    const root = textarea?.closest?.("fieldset") || textarea?.closest?.("form") || document;
+    const fileInput = root.querySelector?.('input[type="file"]') ||
+      document.querySelector?.('fieldset input[type="file"], form input[type="file"]');
+    if (fileInput) {
+      if (!fileInput.hasAttribute("data-pi-orig-accept")) {
+        fileInput.setAttribute("data-pi-orig-accept", fileInput.getAttribute("accept") || "image/*");
+      }
+      if (fileInput.getAttribute("accept") !== COMPOSER_EXTENDED_FILE_ACCEPT) {
+        fileInput.setAttribute("accept", COMPOSER_EXTENDED_FILE_ACCEPT);
+      }
+      if (activeComposerFileInput !== fileInput || !fileInput.__piEnhFileInputBound) {
+        if (activeComposerFileInput && composerFileInputChangeHandler) {
+          activeComposerFileInput.removeEventListener("change", composerFileInputChangeHandler, true);
+          activeComposerFileInput.__piEnhFileInputBound = false;
+        }
+        composerFileInputChangeHandler = (event) => {
+          if (!isPluginEnabled("composer-file-paste")) return;
+          const input = event.currentTarget || fileInput;
+          const selectedFiles = Array.from(input?.files || []);
+          if (selectedFiles.length === 0) return;
+
+          const imageFiles = [];
+          const nonImageFiles = [];
+          for (const f of selectedFiles) {
+            const isImg = Boolean(f.type && f.type.startsWith("image/")) && !isVideoFile(f.name, f.type);
+            if (isImg) {
+              imageFiles.push(f);
+            } else {
+              nonImageFiles.push(f);
+            }
+          }
+
+          if (nonImageFiles.length === 0) return;
+
+          const targetTextarea = findComposerTextarea() || textarea;
+          if (imageFiles.length === 0) {
+            event.stopPropagation();
+            if (typeof event.stopImmediatePropagation === "function") {
+              event.stopImmediatePropagation();
+            }
+            try { input.value = ""; } catch (e) {}
+            void processComposerFiles(nonImageFiles, targetTextarea);
+          } else {
+            try {
+              if (typeof DataTransfer !== "undefined") {
+                const dt = new DataTransfer();
+                for (const img of imageFiles) dt.items.add(img);
+                const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement?.prototype || {}, "files")?.set;
+                if (setter) setter.call(input, dt.files);
+                else input.files = dt.files;
+              }
+            } catch (e) {}
+            void processComposerFiles(nonImageFiles, targetTextarea);
+          }
+        };
+        fileInput.addEventListener("change", composerFileInputChangeHandler, true);
+        fileInput.__piEnhFileInputBound = true;
+        activeComposerFileInput = fileInput;
+      }
+    }
+
+    const attachBtns = document.querySelectorAll?.('button[data-pi-attach-image]') || [];
+    for (const btn of attachBtns) {
+      if (!btn.hasAttribute("data-pi-orig-title")) {
+        btn.setAttribute("data-pi-orig-title", btn.getAttribute("title") || "");
+      }
+      if (!btn.hasAttribute("data-pi-orig-aria")) {
+        btn.setAttribute("data-pi-orig-aria", btn.getAttribute("aria-label") || "");
+      }
+      if (btn.getAttribute("title") !== "添加图片或视频") {
+        btn.setAttribute("title", "添加图片或视频");
+      }
+      if (btn.getAttribute("aria-label") !== "添加图片或视频") {
+        btn.setAttribute("aria-label", "添加图片或视频");
+      }
+    }
+  }
+
+  function restoreComposerFileInputAndToolbar() {
+    if (activeComposerFileInput) {
+      if (composerFileInputChangeHandler) {
+        activeComposerFileInput.removeEventListener("change", composerFileInputChangeHandler, true);
+      }
+      activeComposerFileInput.__piEnhFileInputBound = false;
+      activeComposerFileInput = null;
+    }
+    composerFileInputChangeHandler = null;
+    if (typeof document === "undefined") return;
+    const inputs = document.querySelectorAll?.('input[type="file"][data-pi-orig-accept]') || [];
+    for (const input of inputs) {
+      const origAccept = input.getAttribute("data-pi-orig-accept");
+      if (origAccept !== null) input.setAttribute("accept", origAccept);
+      input.removeAttribute("data-pi-orig-accept");
+      input.__piEnhFileInputBound = false;
+    }
+    const attachBtns = document.querySelectorAll?.('button[data-pi-attach-image]') || [];
+    for (const btn of attachBtns) {
+      if (btn.hasAttribute("data-pi-orig-title")) {
+        const origTitle = btn.getAttribute("data-pi-orig-title");
+        if (origTitle) btn.setAttribute("title", origTitle);
+        else btn.removeAttribute("title");
+        btn.removeAttribute("data-pi-orig-title");
+      }
+      if (btn.hasAttribute("data-pi-orig-aria")) {
+        const origAria = btn.getAttribute("data-pi-orig-aria");
+        if (origAria) btn.setAttribute("aria-label", origAria);
+        else btn.removeAttribute("aria-label");
+        btn.removeAttribute("data-pi-orig-aria");
+      }
+    }
+  }
+
   function removeComposerFilePaste() {
     composerFileProcessingGeneration++;
+    closeVideoPreviewModal();
+    for (const att of pendingComposerAttachments) {
+      revokeAttachmentPreviewUrl(att);
+    }
+    restoreComposerFileInputAndToolbar();
     if (activeComposerPasteTextarea) {
       if (composerPasteHandler) {
         activeComposerPasteTextarea.removeEventListener("paste", composerPasteHandler, true);
@@ -2435,6 +2996,27 @@
 
       activeComposerPasteTextarea = null;
     }
+    if (activeComposerPasteHost) {
+      if (composerHostDragOverHandler) {
+        activeComposerPasteHost.removeEventListener("dragover", composerHostDragOverHandler, true);
+      }
+      if (composerHostDragLeaveHandler) {
+        activeComposerPasteHost.removeEventListener("dragleave", composerHostDragLeaveHandler, true);
+      }
+      if (composerHostDropHandler) {
+        activeComposerPasteHost.removeEventListener("drop", composerHostDropHandler, true);
+      }
+      try {
+        activeComposerPasteHost.classList.remove("pi-enh-composer-drop-active");
+      } catch (e) {}
+      activeComposerPasteHost.__piEnhHostDropBound = false;
+      activeComposerPasteHost = null;
+    }
+    if (typeof document !== "undefined") {
+      for (const el of document.querySelectorAll?.(".pi-enh-composer-drop-active") || []) {
+        try { el.classList.remove("pi-enh-composer-drop-active"); } catch (e) {}
+      }
+    }
     if (activeComposerPasteForm) {
       if (composerSubmitHandler) {
         activeComposerPasteForm.removeEventListener("submit", composerSubmitHandler, true);
@@ -2446,6 +3028,9 @@
     composerDragOverHandler = null;
     composerDragLeaveHandler = null;
     composerDropHandler = null;
+    composerHostDragOverHandler = null;
+    composerHostDragLeaveHandler = null;
+    composerHostDropHandler = null;
     composerKeydownHandler = null;
     composerSubmitHandler = null;
     pendingComposerAttachments = [];
@@ -2466,12 +3051,15 @@
       return;
     }
 
+    syncComposerFileInputAndToolbar(textarea);
+
     if (activeComposerPasteTextarea === textarea && textarea.__piEnhFilePasteBound) {
       syncComposerAttachmentBar(textarea);
       return;
     }
 
     removeComposerFilePaste();
+    syncComposerFileInputAndToolbar(textarea);
 
     activeComposerPasteTextarea = textarea;
     textarea.__piEnhFilePasteBound = true;
@@ -2479,16 +3067,27 @@
     composerPasteHandler = (event) => {
       if (!isPluginEnabled("composer-file-paste")) return;
       const files = Array.from(event.clipboardData?.files || []);
-      if (!files || files.length === 0) return;
+      const items = Array.from(event.clipboardData?.items || []);
+      const itemFiles = items
+        .filter((it) => it && it.kind === "file" && typeof it.getAsFile === "function")
+        .map((it) => it.getAsFile())
+        .filter(Boolean);
+      const allFiles = files.length > 0 ? files : itemFiles;
+      if (!allFiles || allFiles.length === 0) return;
 
-      // 如果全部为图片文件，放行给原生图片处理
-      const allImages = files.every((f) => f.type && f.type.startsWith("image/"));
-      if (allImages) return;
+      // 如果全部为纯图片文件（且非视频），放行给原生图片处理
+      const nonImageFiles = allFiles.filter((f) => !(f.type && f.type.startsWith("image/")) || isVideoFile(f.name, f.type));
+      if (nonImageFiles.length === 0) return;
 
       event.preventDefault();
       event.stopPropagation();
-      processComposerFiles(files, textarea);
+      processComposerFiles(nonImageFiles, textarea);
     };
+
+    const getDropHighlightTarget = () =>
+      textarea.closest?.('.pi-enh-cursor-composer, fieldset > div[style*="max-width"]') ||
+      activeComposerPasteHost ||
+      textarea;
 
     composerDragOverHandler = (event) => {
       if (!isPluginEnabled("composer-file-paste")) return;
@@ -2497,6 +3096,7 @@
         event.preventDefault();
         try { event.dataTransfer.dropEffect = "copy"; } catch (e) {}
         textarea.classList.add("pi-enh-composer-drop-active");
+        getDropHighlightTarget()?.classList?.add?.("pi-enh-composer-drop-active");
       }
     };
 
@@ -2509,20 +3109,27 @@
     composerDropHandler = (event) => {
       try {
         textarea.classList.remove("pi-enh-composer-drop-active");
+        getDropHighlightTarget()?.classList?.remove?.("pi-enh-composer-drop-active");
       } catch (e) {}
-      if (!isPluginEnabled("composer-file-paste")) return;
+      if (!isPluginEnabled("composer-file-paste") || event.__piEnhDropHandled) return;
       const files = Array.from(event.dataTransfer?.files || []);
       if (!files || files.length === 0) return;
 
+      const nonImageFiles = files.filter((f) => !(f.type && f.type.startsWith("image/")) || isVideoFile(f.name, f.type));
+      if (nonImageFiles.length === 0) return;
+
+      event.__piEnhDropHandled = true;
       event.preventDefault();
       event.stopPropagation();
-      processComposerFiles(files, textarea);
+      processComposerFiles(nonImageFiles, textarea);
     };
 
     composerKeydownHandler = (event) => {
       if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
         recordActiveTurnStart(getCurrentSessionId(), Date.now(), null, false);
         if (pendingComposerAttachments.length > 0) {
+          // Let the native textarea Enter handler submit exactly once after
+          // assembling the attachment marker; do not schedule a second send.
           assembleComposerAttachments(textarea);
         }
       }
@@ -2533,6 +3140,55 @@
     textarea.addEventListener("dragleave", composerDragLeaveHandler);
     textarea.addEventListener("drop", composerDropHandler);
     textarea.addEventListener("keydown", composerKeydownHandler, true);
+
+    const composerHost = textarea.closest?.("fieldset") || textarea.closest?.("form") || textarea.parentElement;
+    if (composerHost && composerHost !== textarea) {
+      activeComposerPasteHost = composerHost;
+      composerHost.__piEnhHostDropBound = true;
+
+      composerHostDragOverHandler = (event) => {
+        if (!isPluginEnabled("composer-file-paste")) return;
+        const types = Array.from(event.dataTransfer?.types || []);
+        if (types.includes("Files")) {
+          event.preventDefault();
+          try { event.dataTransfer.dropEffect = "copy"; } catch (e) {}
+          textarea.classList.add("pi-enh-composer-drop-active");
+          getDropHighlightTarget()?.classList?.add?.("pi-enh-composer-drop-active");
+        }
+      };
+
+      composerHostDragLeaveHandler = (event) => {
+        if (event.relatedTarget && composerHost.contains?.(event.relatedTarget)) return;
+        try {
+          textarea.classList.remove("pi-enh-composer-drop-active");
+          getDropHighlightTarget()?.classList?.remove?.("pi-enh-composer-drop-active");
+          composerHost.classList.remove("pi-enh-composer-drop-active");
+        } catch (e) {}
+      };
+
+      composerHostDropHandler = (event) => {
+        try {
+          textarea.classList.remove("pi-enh-composer-drop-active");
+          getDropHighlightTarget()?.classList?.remove?.("pi-enh-composer-drop-active");
+          composerHost.classList.remove("pi-enh-composer-drop-active");
+        } catch (e) {}
+        if (!isPluginEnabled("composer-file-paste") || event.__piEnhDropHandled) return;
+        const files = Array.from(event.dataTransfer?.files || []);
+        if (!files || files.length === 0) return;
+
+        const nonImageFiles = files.filter((f) => !(f.type && f.type.startsWith("image/")) || isVideoFile(f.name, f.type));
+        if (nonImageFiles.length === 0) return;
+
+        event.__piEnhDropHandled = true;
+        event.preventDefault();
+        event.stopPropagation();
+        processComposerFiles(nonImageFiles, textarea);
+      };
+
+      composerHost.addEventListener("dragover", composerHostDragOverHandler, true);
+      composerHost.addEventListener("dragleave", composerHostDragLeaveHandler, true);
+      composerHost.addEventListener("drop", composerHostDropHandler, true);
+    }
 
     // 监听可能点击发送按钮的行为（外层 form 提交或点击提交按钮）
     const form = textarea.closest ? textarea.closest("form") : null;
@@ -2554,6 +3210,9 @@
 
   activeCleanups.push(removeComposerFilePaste);
   window.__PI_ENH_IS_TEXT_FILE__ = isTextFile;
+  window.__PI_ENH_IS_VIDEO_FILE__ = isVideoFile;
+  window.__PI_ENH_OPEN_VIDEO_PREVIEW__ = openVideoPreviewModal;
+  window.__PI_ENH_CLOSE_VIDEO_PREVIEW__ = closeVideoPreviewModal;
   window.__PI_ENH_GET_LANG_FOR_FILENAME__ = getLanguageForFilename;
   window.__PI_ENH_FORMAT_TEXT_SNIPPET__ = formatTextFileSnippet;
   window.__PI_ENH_PROCESS_COMPOSER_FILES__ = processComposerFiles;
@@ -6161,9 +6820,11 @@
         .pi-enh-cursor-composer .pi-enh-cursor-send:not(:disabled),
         .pi-enh-cursor-composer .pi-enh-cursor-send[data-pi-enh-empty-send-continue="true"],
         .pi-enh-cursor-composer .pi-enh-cursor-send[data-pi-enh-annotation-enabled="true"],
+        .pi-enh-cursor-composer .pi-enh-cursor-send[data-pi-enh-attachment-send="true"],
         button.pi-enh-cursor-send:not(:disabled),
         button.pi-enh-cursor-send[data-pi-enh-empty-send-continue="true"],
-        button.pi-enh-cursor-send[data-pi-enh-annotation-enabled="true"] {
+        button.pi-enh-cursor-send[data-pi-enh-annotation-enabled="true"],
+        button.pi-enh-cursor-send[data-pi-enh-attachment-send="true"] {
           background: #efefef !important;
           color: #262626 !important;
           cursor: pointer !important;
@@ -6188,9 +6849,11 @@
         html[data-theme="light"] .pi-enh-cursor-composer .pi-enh-cursor-send:not(:disabled),
         html[data-theme="light"] .pi-enh-cursor-composer .pi-enh-cursor-send[data-pi-enh-empty-send-continue="true"],
         html[data-theme="light"] .pi-enh-cursor-composer .pi-enh-cursor-send[data-pi-enh-annotation-enabled="true"],
+        html[data-theme="light"] .pi-enh-cursor-composer .pi-enh-cursor-send[data-pi-enh-attachment-send="true"],
         html[data-theme="light"] button.pi-enh-cursor-send:not(:disabled),
         html[data-theme="light"] button.pi-enh-cursor-send[data-pi-enh-empty-send-continue="true"],
         html[data-theme="light"] button.pi-enh-cursor-send[data-pi-enh-annotation-enabled="true"],
+        html[data-theme="light"] button.pi-enh-cursor-send[data-pi-enh-attachment-send="true"],
         [data-theme="light"] .pi-enh-cursor-composer .pi-enh-cursor-send:not(:disabled),
         [data-theme="light"] button.pi-enh-cursor-send:not(:disabled) {
           background: #0e0e11 !important;
@@ -7935,9 +8598,23 @@
     const html = event.clipboardData?.getData("text/html") || "";
     const plain = event.clipboardData?.getData("text/plain") || "";
 
-    // 检查剪贴板中是否有图片文件或图片项
+    // 检查剪贴板中是否有文件或图片项
     const files = Array.from(event.clipboardData?.files || []);
     const items = Array.from(event.clipboardData?.items || []);
+    const itemFiles = items
+      .filter((it) => it && it.kind === "file" && typeof it.getAsFile === "function")
+      .map((it) => it.getAsFile())
+      .filter(Boolean);
+    const allClipboardFiles = files.length > 0 ? files : itemFiles;
+    const nonImageFiles = allClipboardFiles.filter((f) => !(f.type && f.type.startsWith("image/")) || isVideoFile(f.name, f.type));
+
+    if (nonImageFiles.length > 0 && isPluginEnabled("composer-file-paste")) {
+      event.preventDefault();
+      event.stopPropagation();
+      void processComposerFiles(nonImageFiles, textarea);
+      return;
+    }
+
     const imageFile = files.find((f) => f.type && f.type.startsWith("image/")) ||
       items.find((it) => it.type && it.type.startsWith("image/"))?.getAsFile?.();
 
@@ -8007,15 +8684,34 @@
     }
 
     const hasImageAttachments = Boolean(card.querySelector('img[src*="blob:"], div[style*="flex-wrap"] img, fieldset img'));
+    const hasFileAttachments = pendingComposerAttachments.length > 0 || Boolean(card.querySelector(".pi-enh-attachment-card"));
     const val = textarea.value || "";
     // One content predicate for both the CSS class and native running-group
-    // visibility. Quotes are sendable content, without global style overrides.
-    const hasContent = val.trim().length > 0 || hasImageAttachments
+    // visibility. Quotes and pending file/video cards are sendable content.
+    const hasContent = val.trim().length > 0 || hasImageAttachments || hasFileAttachments
       || (isPluginEnabled("quick-quote") && listAnnotations().length > 0);
     if (hasContent) {
       card.classList.add("has-user-content");
     } else {
       card.classList.remove("has-user-content");
+    }
+
+    const sendBtns = card.querySelectorAll('.pi-enh-cursor-send, button[title*="发送"], button[aria-label*="发送"]');
+    for (const sendBtn of sendBtns) {
+      if (hasFileAttachments) {
+        if (sendBtn.disabled || sendBtn.hasAttribute("disabled")) {
+          sendBtn.disabled = false;
+          sendBtn.removeAttribute("disabled");
+          sendBtn.removeAttribute("aria-disabled");
+          sendBtn.setAttribute("data-pi-enh-attachment-send", "true");
+        }
+      } else if (sendBtn.getAttribute("data-pi-enh-attachment-send") === "true") {
+        sendBtn.removeAttribute("data-pi-enh-attachment-send");
+        if (!hasContent && sendBtn.getAttribute("data-pi-enh-annotation-enabled") !== "true" && !sendBtn.hasAttribute(EMPTY_SEND_CONTINUE_ATTR)) {
+          sendBtn.disabled = true;
+          sendBtn.setAttribute("disabled", "");
+        }
+      }
     }
 
     const isEditorContainer = (el) => {
@@ -8308,6 +9004,46 @@
     return true;
   }
 
+  // 捕获阶段组装待发附件（视频、文档、代码卡片）：确保点击发送/引导/后续消息按钮时 React 拿到完整的 [附件: @...]
+  addManagedListener(document, "click", (event) => {
+    if (nativeComposerSubmissionDispatching) return;
+    if (pendingComposerAttachments.length === 0) return;
+    const btn = event.target?.closest?.("button");
+    if (!btn || btn.disabled) return;
+    if (btn.classList.contains("pi-enh-attachment-remove") || btn.closest(".pi-enh-attachments-bar")) return;
+    const title = btn.getAttribute("title") || btn.getAttribute("aria-label") || "";
+    const text = btn.textContent || "";
+    const isSend = btn.classList.contains("pi-enh-cursor-send") ||
+                   btn.classList.contains("pi-enh-cursor-followup") ||
+                   btn.classList.contains("pi-enh-cursor-steer") ||
+                   btn.getAttribute("data-pi-enh-attachment-send") === "true" ||
+                   Boolean(btn.closest("fieldset") && (
+                     /发送|引导|后续消息|send|steer|follow/i.test(title) ||
+                     /发送|引导|后续消息|send/i.test(text) ||
+                     btn.querySelector('svg polyline[points*="12 19 12 5"], svg path[d*="M12 19V5"], svg path[d*="M5 12l7-7 7 7"]')
+                   ));
+    if (!isSend) return;
+    const textarea = findComposerTextarea();
+    if (!textarea) return;
+    if (activeFormattedComposer && activeFormattedComposer.__boundTextarea === textarea && activeFormattedComposer.style.display !== "none") {
+      const md = extractMarkdownFromFormattedComposer(activeFormattedComposer);
+      setComposerTextareaValue(textarea, md, { focus: false });
+    }
+    recordActiveTurnStart(getCurrentSessionId(), Date.now(), null, false);
+    assembleComposerAttachments(textarea);
+    const reactProps = getReactProps(btn);
+    if (reactProps && reactProps.disabled) {
+      event.preventDefault();
+      event.stopPropagation();
+      if (typeof event.stopImmediatePropagation === "function") {
+        event.stopImmediatePropagation();
+      }
+      addManagedTimeout(() => {
+        sendComposerText(textarea);
+      }, 0);
+    }
+  }, true);
+
   // 点击后等待原生消费及 DOM 提交完成，再同步可见表面；不提前清草稿。
   addManagedListener(document, "click", (event) => {
     const btn = event.target?.closest?.("button");
@@ -8390,6 +9126,10 @@
         const md = extractMarkdownFromFormattedComposer(activeFormattedComposer);
         rawText = md;
         setComposerTextareaValue(textarea, md, { focus: false });
+      }
+      if (pendingComposerAttachments.length > 0) {
+        assembleComposerAttachments(textarea);
+        rawText = textarea.value || "";
       }
 
       dispatchComposerNativeSubmission({
@@ -9748,7 +10488,7 @@
       <span class="pi-enh-composer-menu-icon">${SVG_ATTACH_ICON}</span>
       <span class="pi-enh-composer-menu-label">
         <span class="pi-enh-composer-menu-title">添加附件</span>
-        <span class="pi-enh-composer-menu-desc">图片与文件</span>
+        <span class="pi-enh-composer-menu-desc">图片与视频</span>
       </span>
     `;
     attachItem.addEventListener("click", (e) => {
@@ -12107,12 +12847,16 @@
       setComposerTextareaValue(textarea, md, { focus: false });
     }
 
+    const assembledAttachments = pendingComposerAttachments.length > 0
+      ? assembleComposerAttachments(textarea)
+      : false;
+
     const fieldset = textarea.closest("fieldset") || document.querySelector("fieldset");
     if (!fieldset) return false;
 
     const buttons = Array.from(fieldset.querySelectorAll("button"));
     const sendBtn = buttons.find((btn) => {
-      if (btn.disabled) return false;
+      if (btn.disabled && !assembledAttachments) return false;
       const title = btn.getAttribute("title") || btn.getAttribute("aria-label") || "";
       const text = btn.textContent || "";
       if (/发送|send/i.test(title) || /发送|send/i.test(text)) return true;
@@ -12122,9 +12866,16 @@
       return false;
     });
 
-    if (sendBtn && !sendBtn.disabled) {
-      sendBtn.click();
-      return true;
+    if (sendBtn) {
+      const reactProps = getReactProps(sendBtn);
+      if (!sendBtn.disabled && (!reactProps || !reactProps.disabled)) {
+        sendBtn.click();
+        return true;
+      }
+      if (assembledAttachments) {
+        sendComposerText(textarea);
+        return true;
+      }
     }
 
     const native = readNativeComposerDraft();

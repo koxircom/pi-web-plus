@@ -405,9 +405,6 @@
       res.push(node);
     }
 
-    const explicit = document.querySelectorAll ? document.querySelectorAll('[data-message-role="user"], [data-pi-enh-role="user"]') : [];
-    for (let i = 0; i < explicit.length; i++) pushNode(explicit[i]);
-
     if (document.querySelectorAll) {
       const userBubbles = document.querySelectorAll('div[style*="var(--user-bg)"], div[style*="var(--bg-user)"]');
       for (let i = 0; i < userBubbles.length; i++) {
@@ -423,9 +420,26 @@
           pushNode(msgContainer);
         }
       }
+
+      const explicit = document.querySelectorAll('[data-message-role="user"], [data-pi-enh-role="user"]');
+      for (let i = 0; i < explicit.length; i++) pushNode(explicit[i]);
     }
 
-    return res;
+    const deduped = res.length > 1
+      ? res.filter((node) => !res.some((other) => other !== node && typeof other.contains === "function" && other.contains(node)))
+      : res;
+
+    if (deduped.length > 1) {
+      deduped.sort((a, b) => {
+        if (a === b || typeof a?.compareDocumentPosition !== "function") return 0;
+        const pos = a.compareDocumentPosition(b);
+        if (pos & 4) return -1;
+        if (pos & 2) return 1;
+        return 0;
+      });
+    }
+
+    return deduped;
   }
 
   function insertDurationBadge(msg, totalSec, queueSec = 0, toolCounts = {}, uTime = 0, aTime = 0, activeSec = null, pausedSec = 0, steerCount = 0, interruptCount = 0) {
@@ -4585,7 +4599,15 @@
 
       const header = toolbar?.querySelector(".pi-enh-minimap-header");
       if (header) {
-        const headerHtml = `<span>会话导航</span><span class="pi-enh-minimap-header-badge">💬 共 ${history.totalTurns} 轮 · 当前 ${visibleTurns} 轮</span>`;
+        const activeNode = nodes.find((node) => node.hasAttribute("data-minimap-node-active"));
+        const rawActiveIndex = activeNode?.getAttribute("data-minimap-node-index");
+        const activeIndex = rawActiveIndex !== null ? parseInt(rawActiveIndex, 10) : -1;
+        const focusIndex = Number.isFinite(locatedIndex) && locatedIndex >= 0 ? locatedIndex : activeIndex;
+        const focusTurnNumber = Number.isFinite(focusIndex) && focusIndex >= 0 && focusIndex < loadedTurnCount
+          ? Math.min(history.totalTurns || loadedTurnCount, absoluteOffset + focusIndex + 1)
+          : null;
+        const focusLabel = focusTurnNumber === null ? "" : ` · 定位第 ${focusTurnNumber} 轮`;
+        const headerHtml = `<span>会话导航</span><span class="pi-enh-minimap-header-badge">💬 共 ${history.totalTurns} 轮 · 已显示 ${visibleTurns} 轮${focusLabel}</span>`;
         if (header.innerHTML !== headerHtml) header.innerHTML = headerHtml;
       }
 

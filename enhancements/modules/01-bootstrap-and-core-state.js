@@ -6909,7 +6909,15 @@
     .pi-enh-attachment-card:hover {
       border-color: color-mix(in srgb, var(--accent, #3b82f6) 40%, var(--border));
     }
+    .pi-enh-attachment-card-video {
+      cursor: pointer;
+    }
+    .pi-enh-attachment-card-video:hover {
+      border-color: color-mix(in srgb, #8b5cf6 55%, var(--border));
+      transform: translateY(-1px);
+    }
     .pi-enh-attachment-icon-wrap {
+      position: relative;
       width: 32px;
       height: 32px;
       border-radius: 8px;
@@ -6917,6 +6925,33 @@
       align-items: center;
       justify-content: center;
       flex-shrink: 0;
+      overflow: hidden;
+    }
+    .pi-enh-attachment-icon-video {
+      width: 36px;
+      height: 36px;
+      background: #09090b;
+      border: 1px solid rgba(139, 92, 246, 0.38);
+    }
+    .pi-enh-attachment-video-thumb {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      border-radius: 7px;
+      display: block;
+      background: #09090b;
+      pointer-events: none;
+    }
+    .pi-enh-attachment-video-play-badge {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: rgba(9, 9, 11, 0.38);
+      color: #ffffff;
+      border-radius: 7px;
+      pointer-events: none;
     }
     .pi-enh-attachment-meta {
       display: flex;
@@ -7000,6 +7035,7 @@
       box-shadow: 0 4px 12px rgba(0, 0, 0, 0.22);
     }
     .pi-enh-msg-attachment-icon {
+      position: relative;
       width: 32px;
       height: 32px;
       border-radius: 8px;
@@ -7060,6 +7096,122 @@
     }
     .pi-enh-msg-attachment-hidden-mark {
       display: none !important;
+    }
+
+    /* 内嵌高清视频播放器模态预览弹窗 */
+    .pi-enh-video-preview-backdrop {
+      position: fixed;
+      inset: 0;
+      z-index: 2147483645;
+      background: rgba(9, 9, 11, 0.82);
+      backdrop-filter: blur(8px);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+      box-sizing: border-box;
+      animation: piEnhFadeIn 0.16s ease;
+    }
+    .pi-enh-video-preview-backdrop[style*="display: none"],
+    .pi-enh-video-preview-backdrop[hidden] {
+      display: none !important;
+    }
+    .pi-enh-video-preview-modal {
+      width: min(960px, 94vw);
+      max-height: 90vh;
+      background: var(--bg-panel, #18181b);
+      border: 1px solid var(--border, rgba(255, 255, 255, 0.16));
+      border-radius: 14px;
+      box-shadow: 0 24px 64px rgba(0, 0, 0, 0.65);
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    .pi-enh-video-preview-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 12px 16px;
+      border-bottom: 1px solid var(--border, rgba(255, 255, 255, 0.1));
+      background: color-mix(in srgb, var(--bg-panel, #18181b) 92%, #000000);
+    }
+    .pi-enh-video-preview-title-wrap {
+      display: flex;
+      flex-direction: column;
+      min-width: 0;
+      flex: 1;
+    }
+    .pi-enh-video-preview-title {
+      font-size: 14px;
+      font-weight: 600;
+      color: var(--text, #f4f4f5);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      line-height: 1.35;
+    }
+    .pi-enh-video-preview-subtitle {
+      font-size: 11.5px;
+      color: var(--text-dim, #a1a1aa);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      line-height: 1.25;
+    }
+    .pi-enh-video-preview-actions {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-shrink: 0;
+    }
+    .pi-enh-video-preview-btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      height: 30px;
+      padding: 0 12px;
+      border-radius: 8px;
+      border: 1px solid var(--border, rgba(255, 255, 255, 0.16));
+      background: color-mix(in srgb, var(--bg-panel, #27272a) 80%, transparent);
+      color: var(--text, #f4f4f5);
+      font-size: 12px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.14s ease;
+    }
+    .pi-enh-video-preview-btn:hover {
+      background: color-mix(in srgb, var(--accent, #8b5cf6) 22%, var(--bg-panel, #27272a));
+      border-color: color-mix(in srgb, var(--accent, #8b5cf6) 55%, var(--border));
+      color: #ffffff;
+    }
+    .pi-enh-video-preview-close {
+      width: 30px;
+      padding: 0;
+      font-size: 18px;
+      line-height: 1;
+    }
+    .pi-enh-video-preview-close:hover {
+      background: #ef4444;
+      border-color: #ef4444;
+      color: #ffffff;
+    }
+    .pi-enh-video-preview-body {
+      position: relative;
+      background: #000000;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 260px;
+      max-height: calc(90vh - 60px);
+      overflow: hidden;
+    }
+    .pi-enh-video-preview-player {
+      width: 100%;
+      max-height: calc(90vh - 60px);
+      outline: none;
+      display: block;
+      background: #000000;
     }
 
     /* 底栏“压缩上下文”按钮显隐控制（默认隐藏，可在增强插件中开启） */
