@@ -109,7 +109,6 @@
     annotationEditor,
     quoteBar,
     quoteBarInteracting,
-    attentionNotices,
     projectStatusModel,
     projectStatusState,
     projectStatusCatalog,
@@ -8289,7 +8288,6 @@
     { id: "native-error", name: "错误提示", desc: "error 级别的故障提示，建议保持开启。", group: "异常与安全", defaultEnabled: true },
     { id: "security-guard", name: "安全拦截与防护", desc: "WSL、NAS、Pi Web 重启及超时看门狗等高危操作拦截提示。", group: "异常与安全", defaultEnabled: true },
     { id: "enhancement-toast", name: "网页增强操作提示", desc: "复制、归档、缓存、插件切换等网页操作的轻量提示。", group: "网页提醒", defaultEnabled: true },
-    { id: "attention-inpage", name: "后台待处理站内提醒", desc: "需要确认或输入时显示可直达的站内提醒卡片。", group: "后台任务", defaultEnabled: true },
     { id: "attention-sound", name: "审批提示音", desc: "后台任务等待人工处理时播放提示音。", group: "后台任务", defaultEnabled: true },
     { id: "attention-desktop", name: "桌面待处理通知", desc: "后台任务需要处理时发送浏览器/系统桌面通知。", group: "后台任务", defaultEnabled: false },
   ];
@@ -8341,7 +8339,6 @@
   function classifyNotification(message, type = "info", channel = "native") {
     const text = String(message || "");
     if (channel === "toast") return "enhancement-toast";
-    if (channel === "attention-inpage") return "attention-inpage";
     if (channel === "attention-sound") return "attention-sound";
     if (channel === "attention-desktop") return "attention-desktop";
     if (/会话标题(?:已自动提炼|自动提炼)/i.test(text)) return "session-title";
@@ -8658,6 +8655,13 @@
       defaultEnabled: true,
     },
     {
+      id: "subagent-default-profile",
+      name: "默认子 Agent profile",
+      desc: "从当前工作目录下实际生效且已启用的 profile 中选择服务端默认值；显式指定 subagent_type 的调用不受影响。",
+      category: "偏好记忆",
+      defaultEnabled: true,
+    },
+    {
       id: "history-scroll-stability",
       name: "历史滚动位置稳定",
       desc: "自动加载早期记录并保留阅读位置；打开已完成会话后若已在底部，后续正文、图片与缓存校验加载期间持续贴底，主动上滚立即停止；支持手机阻尼下拉、慢响应和超时重试提示。",
@@ -8695,8 +8699,8 @@
     },
     {
       id: "model-scope-warning",
-      name: "模型范围警告去重",
-      desc: "对完全相同的模型范围警告卡片进行去重，保留首张真实警告可见；关闭插件后立即恢复全部原生警告。",
+      name: "隐藏模型范围警告",
+      desc: "隐藏输入区的模型范围警告，并在模型菜单对应选项后显示黄色提示图标；关闭插件后恢复原生警告。",
       category: "显示增强",
       defaultEnabled: true,
     },
@@ -8802,13 +8806,6 @@
       id: "project-status-indicator",
       name: "跨项目会话状态提示",
       desc: "精简标签页标题，移除冗余 Pi Web 标识与跳动的计时秒数。运行中以蓝色小球 🔵 纯净指示，需要确认 🟠、错误 🔴、已完成 🟢 显示状态文字与对应颜色小球；多标签页一目了然。", 
-      category: "运行监控",
-      defaultEnabled: true,
-    },
-    {
-      id: "session-attention-notifications",
-      name: "后台待处理站内提醒",
-      desc: "需要确认或输入时在右下角显示可直达的任务提醒，保留至处理或手动收起；不抢焦点，声音由独立子功能控制。", 
       category: "运行监控",
       defaultEnabled: true,
     },
@@ -9136,7 +9133,7 @@
     },
   ];
 
-  const ENHANCEMENT_SUITE_VERSION = window.__PI_WEB_STANDALONE_VERSION__ || "1.0.2";
+  const ENHANCEMENT_SUITE_VERSION = window.__PI_WEB_STANDALONE_VERSION__ || "1.0.3";
   const ENHANCEMENT_SETTINGS_SCHEMA_VERSION = 1;
   const ENHANCEMENT_SETTINGS_STORAGE_KEY = "pi-enh-settings-v1";
   const ENHANCEMENT_PLUGIN_SETTINGS = {
@@ -9162,11 +9159,12 @@
   const ENHANCEMENT_MODULES = [
     { id: "task-insights", name: "任务运行信息", desc: "集中管理任务耗时、速度和回合用量信息。", category: "运行监控", version: "1.0.0", defaultEnabled: true, features: ["model-generation-speed", "turn-duration", "live-stopwatch", "turn-usage-total", "usage-cost-dashboard"] },
     { id: "conversation-navigation", name: "对话阅读与导航", desc: "管理过程折叠、工具卡片布局、滚动稳定、会话导航和回到底部工具。", category: "交互增强", version: "1.0.0", defaultEnabled: true, features: ["task-tool-auto-collapse", "tool-card-layout-stability", "subagent-dispatch-cards", "history-scroll-stability", "session-scroll-restore", "session-virtual-scroll", "compaction-auto-collapse", "chat-scrollbar", "native-message-font", "minimap-full-nav", "scroll-to-bottom", "image-dblclick-preview"] },
+    { id: "subagent-dispatch", name: "子 Agent 调度", desc: "管理未显式指定 subagent_type 时使用的服务端默认 profile；实际调度始终由服务端动态读取。", category: "偏好记忆", version: "1.0.0", defaultEnabled: true, features: ["subagent-default-profile"] },
     { id: "selection-context", name: "划选引用与上下文", desc: "管理文本划选引用、注释与发送上下文。", category: "交互增强", version: "1.0.0", defaultEnabled: true, features: ["quick-quote"] },
     { id: "session-sidebar", name: "会话列表增强", desc: "管理会话列表的快捷菜单、归档、标签、布局、颜色、快捷入口和搜索。", category: "交互增强", version: "1.0.0", defaultEnabled: true, features: ["context-menu", "session-pin-archive", "session-section-headers", "session-model-label", "session-item-compact", "session-color", "session-tags", "session-odoo-addons", "session-dblclick-rename", "session-search-shortcut", "session-search-project-folding", "session-batch-actions", "settings-tab-shortcuts", "mobile-swipe-drawer"] },
     { id: "composer-workflow", name: "输入与附件增强", desc: "管理编辑器快捷操作、草稿、附件和移动端输入保护。", category: "交互增强", version: "1.0.0", defaultEnabled: true, features: ["quick-action-buttons", "empty-send-continue", "composer-draft-cache", "composer-file-paste", "composer-image-zoom", "mobile-enter-newline", "mobile-model-keyboard-guard", "composer-clean-placeholder", "codex-composer-layout", "composer-model-reasoning-pill", "composer-queue-panel", "running-model-switch", "composer-markdown-format", "composer-format-toggle", "composer-compact-button", "composer-tool-preset", "composer-modes", "at-mention-plugins"] },
     { id: "ask-user-experience", name: "ask_user 交互", desc: "管理网页原生问答选择器与批量原型预览。", category: "交互增强", version: "1.1.1", defaultEnabled: true, features: ["ask-user-web-native", "ask-user-batch-prototype"] },
-    { id: "background-attention", name: "后台会话提醒", desc: "管理跨项目状态、站内提醒与桌面通知。", category: "运行监控", version: "1.0.0", defaultEnabled: true, features: ["project-status-indicator", "session-attention-notifications", "session-attention-sound", "session-attention-desktop"] },
+    { id: "background-attention", name: "后台会话提醒", desc: "管理跨项目状态、提示音与桌面通知。", category: "运行监控", version: "1.0.0", defaultEnabled: true, features: ["project-status-indicator", "session-attention-sound", "session-attention-desktop"] },
     { id: "notification-management", name: "通知管理", desc: "管理所有站内通知、网页操作提示、提示音与桌面提醒，并查看通知历史。", category: "偏好记忆", version: "1.0.0", defaultEnabled: true, features: ["notification-center"] },
     { id: "safety-performance", name: "安全与性能保护", desc: "管理误触保护、模型警告可见性和代码块扫描保护。", category: "安全防护", version: "1.0.0", defaultEnabled: true, features: ["model-scope-warning", "esc-guard", "code-block-scan-guard", "streaming-thinking-guard", "client-crash-diagnostics"] },
     { id: "local-workspace", name: "本地工作区工具", desc: "管理本地路径直达和会话缓存。", category: "快捷操作", version: "1.0.0", defaultEnabled: true, features: ["local-path-launcher", "obsidian-markdown-viewer", "session-memory-cache", "session-history-integrity", "session-history-order-guard", "cross-device-session-sync", "session-panel-binding", "file-panel-overlay-guard", "general-settings-dashboard", "workspace-picker-hover", "settings-sidebar-layout"] },
@@ -9175,6 +9173,9 @@
   const ENHANCEMENT_MODULE_SETTINGS = {
     "safety-performance": [
       { kind: "action", action: "download-crash-diagnostics", label: "导出客户端异常记录（仅本地）" },
+    ],
+    "subagent-dispatch": [
+      { kind: "subagent-profile", featureId: "subagent-default-profile", key: "defaultProfile", label: "默认子 Agent profile", description: "仅在调用未显式指定 subagent_type 时生效；选项来自当前 cwd 下实际生效且已启用的 profile。" },
     ],
     "composer-workflow": [
       { kind: "setting", featureId: "mobile-enter-newline", key: "deviceMode", label: "回车设备模式" },
@@ -9633,9 +9634,6 @@
       setProjectStatusMonitoring(enabled);
       if (!enabled) removeProjectStatusIndicators();
       else syncProjectStatusIndicators();
-    } else if (id === "session-attention-notifications") {
-      if (!enabled) document.querySelector(".pi-enh-attention-notice")?.remove();
-      else { renderAttentionNotices(); void notifyProjectStatusRequests(getDesktopPendingRequests()); }
     } else if (id === "session-attention-sound") {
       if (!enabled) disposeApprovalSound();
       else void unlockApprovalSound();
@@ -9855,11 +9853,14 @@
 
   const MODEL_SCOPE_WARNING_MARKER = "data-pi-enh-model-scope-warning";
   const MODEL_SCOPE_WARNING_ORIGINAL_DISPLAY = "data-pi-enh-model-scope-warning-display";
+  const MODEL_SCOPE_WARNING_ICON_SELECTOR = ".pi-enh-model-scope-warning-icon";
   const MODEL_SCOPE_WARNING_TEXT_MARKERS = [
     "模型范围警告",
     "model scope warning",
     "no models match pattern",
   ];
+  const MODEL_SCOPE_WARNING_PATTERN_RE = /no models match(?:es)? pattern\s+(?:["“'‘]([^"”'’\r\n]+)["”'’]|([^\s,;]+))/gi;
+  const MODEL_SCOPE_WARNING_REASONING_SUFFIX_RE = /:(?:none|off|minimal|low|medium|high|xhigh|max)$/i;
 
   function isModelScopeWarningCard(card) {
     if (!card || card.getAttribute?.("role") !== "alert") return false;
@@ -9876,11 +9877,144 @@
     card.removeAttribute(MODEL_SCOPE_WARNING_ORIGINAL_DISPLAY);
   }
 
+  function removeModelScopeWarningIndicators() {
+    for (const icon of document.querySelectorAll(MODEL_SCOPE_WARNING_ICON_SELECTOR)) {
+      icon.remove();
+    }
+  }
+
   function clearModelScopeWarningVisibility() {
     for (const card of document.querySelectorAll('[role="alert"]')) {
       restoreModelScopeWarningCard(card);
     }
+    removeModelScopeWarningIndicators();
     document.documentElement?.classList?.remove("pi-enh-model-scope-warning-hidden");
+  }
+
+  function normalizeModelScopeIdentity(value) {
+    return String(value || "").toLocaleLowerCase().replace(/[^a-z0-9]/g, "");
+  }
+
+  function collectModelScopeWarningPatterns(cards) {
+    const patternsByModel = new Map();
+    for (const card of cards) {
+      const text = String(card.textContent || "");
+      MODEL_SCOPE_WARNING_PATTERN_RE.lastIndex = 0;
+      let match;
+      while ((match = MODEL_SCOPE_WARNING_PATTERN_RE.exec(text))) {
+        const rawPattern = String(match[1] || match[2] || "").trim().replace(/[.!?]+$/, "");
+        const modelRef = rawPattern.replace(MODEL_SCOPE_WARNING_REASONING_SUFFIX_RE, "").trim();
+        if (!modelRef) continue;
+        const key = modelRef.toLocaleLowerCase();
+        let warning = patternsByModel.get(key);
+        if (!warning) {
+          const parts = modelRef.split("/").filter(Boolean);
+          warning = {
+            modelRef,
+            provider: parts.length > 1 ? parts[0] : "",
+            modelName: parts[parts.length - 1] || modelRef,
+            rawPatterns: new Set(),
+          };
+          patternsByModel.set(key, warning);
+        }
+        warning.rawPatterns.add(rawPattern);
+      }
+    }
+    return Array.from(patternsByModel.values());
+  }
+
+  function getModelScopeOptionProvider(option, listbox) {
+    const group = option?.parentElement;
+    if (!group || group === listbox) return "";
+    for (const child of Array.from(group.children || [])) {
+      if (child === option || child.matches?.('button[role="option"]')) continue;
+      if (child.querySelector?.('button[role="option"]')) continue;
+      const label = String(child.textContent || "").trim();
+      if (label) return label;
+    }
+    return "";
+  }
+
+  function modelScopeWarningMatchesOption(option, listbox, warning) {
+    const modelNameIdentity = normalizeModelScopeIdentity(warning.modelName);
+    const modelRefIdentity = normalizeModelScopeIdentity(warning.modelRef);
+    const explicitModel = option.getAttribute("data-model-id") ||
+      option.getAttribute("data-model") ||
+      option.getAttribute("data-provider-model") ||
+      option.getAttribute("value") || "";
+    if (explicitModel) {
+      const explicitIdentity = normalizeModelScopeIdentity(explicitModel.replace(MODEL_SCOPE_WARNING_REASONING_SUFFIX_RE, ""));
+      if (explicitIdentity === modelRefIdentity || explicitIdentity === modelNameIdentity) {
+        const explicitProvider = option.getAttribute("data-provider") || "";
+        return !warning.provider || !explicitProvider ||
+          normalizeModelScopeIdentity(explicitProvider) === normalizeModelScopeIdentity(warning.provider);
+      }
+    }
+
+    const labelNode = option.querySelector?.("[title]");
+    const label = String(labelNode?.getAttribute("title") || labelNode?.textContent || option.textContent || "").trim();
+    const labelIdentity = normalizeModelScopeIdentity(label);
+    if (!modelNameIdentity || !labelIdentity.includes(modelNameIdentity)) return false;
+
+    const provider = option.getAttribute("data-provider") || getModelScopeOptionProvider(option, listbox);
+    return !warning.provider || !provider ||
+      normalizeModelScopeIdentity(provider) === normalizeModelScopeIdentity(warning.provider);
+  }
+
+  function createModelScopeWarningIcon(warning) {
+    const svgNamespace = "http://www.w3.org/2000/svg";
+    const icon = document.createElementNS(svgNamespace, "svg");
+    icon.classList.add("pi-enh-model-scope-warning-icon");
+    icon.setAttribute("viewBox", "0 0 24 24");
+    icon.setAttribute("width", "15");
+    icon.setAttribute("height", "15");
+    icon.setAttribute("fill", "none");
+    icon.setAttribute("stroke", "#eab308");
+    icon.setAttribute("stroke-width", "2");
+    icon.setAttribute("stroke-linecap", "round");
+    icon.setAttribute("stroke-linejoin", "round");
+    icon.setAttribute("role", "img");
+    icon.style.cssText = "display:block;width:15px;height:15px;flex:0 0 15px;margin-left:6px;color:#eab308";
+
+    const triangle = document.createElementNS(svgNamespace, "path");
+    triangle.setAttribute("d", "M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0Z");
+    const exclamation = document.createElementNS(svgNamespace, "path");
+    exclamation.setAttribute("d", "M12 9v4");
+    const dot = document.createElementNS(svgNamespace, "circle");
+    dot.setAttribute("cx", "12");
+    dot.setAttribute("cy", "17");
+    dot.setAttribute("r", "0.5");
+    dot.setAttribute("fill", "#eab308");
+    dot.setAttribute("stroke", "none");
+    icon.append(triangle, exclamation, dot);
+    return icon;
+  }
+
+  function syncModelScopeWarningIndicators(warnings) {
+    const matchedOptions = new Set();
+    if (warnings.length) {
+      for (const listbox of document.querySelectorAll('.model-selector div[role="listbox"]')) {
+        for (const option of listbox.querySelectorAll('[role="option"]')) {
+          const matchedWarnings = warnings.filter((warning) => modelScopeWarningMatchesOption(option, listbox, warning));
+          if (!matchedWarnings.length) continue;
+          matchedOptions.add(option);
+          let icon = option.querySelector(MODEL_SCOPE_WARNING_ICON_SELECTOR);
+          if (!icon) {
+            icon = createModelScopeWarningIcon(matchedWarnings[0]);
+            option.appendChild(icon);
+          }
+          const tooltip = `模型范围警告：${matchedWarnings.flatMap((warning) =>
+            Array.from(warning.rawPatterns, (pattern) => `No models match pattern "${pattern}"`)
+          ).join("；")}`;
+          if (icon.getAttribute("title") !== tooltip) icon.setAttribute("title", tooltip);
+          if (icon.getAttribute("aria-label") !== tooltip) icon.setAttribute("aria-label", tooltip);
+        }
+      }
+    }
+    for (const icon of document.querySelectorAll(MODEL_SCOPE_WARNING_ICON_SELECTOR)) {
+      if (!matchedOptions.has(icon.parentElement)) icon.remove();
+    }
+    return matchedOptions.size;
   }
 
   function syncModelScopeWarnings() {
@@ -9895,30 +10029,22 @@
 
     if (!isPluginEnabled("model-scope-warning")) {
       for (const card of matchingCards) restoreModelScopeWarningCard(card);
+      removeModelScopeWarningIndicators();
       document.documentElement?.classList?.remove("pi-enh-model-scope-warning-hidden");
       return;
     }
 
-    const seenTexts = new Set();
-    let hiddenDuplicatesCount = 0;
-
     for (const card of matchingCards) {
-      const textKey = String(card.textContent || "").trim();
-      if (!seenTexts.has(textKey)) {
-        // 第一张真实警告卡片始终可见：若此前曾被标记为隐藏，立即恢复原 display
-        seenTexts.add(textKey);
-        restoreModelScopeWarningCard(card);
-      } else {
-        // 完全相同的后续重复卡片：执行去重隐藏并保留原 display
-        if (!card.hasAttribute(MODEL_SCOPE_WARNING_MARKER)) {
-          card.setAttribute(MODEL_SCOPE_WARNING_ORIGINAL_DISPLAY, card.style?.display || "");
-        }
-        card.setAttribute(MODEL_SCOPE_WARNING_MARKER, "true");
-        if (card.style) card.style.display = "none";
-        hiddenDuplicatesCount++;
+      if (!card.hasAttribute(MODEL_SCOPE_WARNING_MARKER)) {
+        card.setAttribute(MODEL_SCOPE_WARNING_ORIGINAL_DISPLAY, card.style?.display || "");
       }
+      card.setAttribute(MODEL_SCOPE_WARNING_MARKER, "true");
+      if (card.style && card.style.display !== "none") card.style.display = "none";
     }
-    document.documentElement?.classList?.toggle("pi-enh-model-scope-warning-hidden", hiddenDuplicatesCount > 0);
+
+    const warningPatterns = collectModelScopeWarningPatterns(matchingCards);
+    syncModelScopeWarningIndicators(warningPatterns);
+    document.documentElement?.classList?.toggle("pi-enh-model-scope-warning-hidden", matchingCards.length > 0);
   }
 
   window.__PI_ENH_SYNC_MODEL_SCOPE_WARNINGS__ = syncModelScopeWarnings;
@@ -15295,9 +15421,6 @@
       if (typeof projectStatusState !== "undefined" && projectStatusState?.sessions?.[sessionId]?.status === "attention") {
         return true;
       }
-      if (typeof attentionNotices !== "undefined" && Array.from(attentionNotices.values()).includes(sessionId)) {
-        return true;
-      }
     } catch (e) {}
     return false;
   }
@@ -15762,10 +15885,18 @@
       if (detail.sessionId !== sessionId || !(typeof detail.leafId === "string" || detail.leafId === null)) {
         throw new Error("无法取得原生会话末条记录，已阻止删除");
       }
-      return { ...meta, leafId: detail.leafId };
+      return {
+        ...meta,
+        leafId: detail.leafId,
+        usageDeleteGuard: typeof detail.usageDeleteGuard === "number" ? detail.usageDeleteGuard : 0,
+      };
     };
     try {
       let meta = await freshMeta();
+      if (meta.usageDeleteGuard >= 1) {
+        knownSessionsMap.set(sessionId, meta);
+        return true;
+      }
       if (!isSessionIngested(sessionId, meta)) {
         const refreshHost = (typeof window !== "undefined" && window.location?.hostname) ? window.location.hostname : "127.0.0.1";
         let result;
@@ -15783,21 +15914,7 @@
         await window.PiUsagePanel.fetchSnapshotOnce(controller.signal);
         meta = await freshMeta();
         if (!isSessionIngested(sessionId, meta)) {
-          const currentSeal = window.__PI_ENH_USAGE_LEDGER__?.sessions?.[sessionId]?.ingestion;
-          // 若最新快照已覆盖至当前会话末条记录 (lastEntryId 一致)，仅因历史悬挂工具或快照非关键标志未对齐：
-          // 后端路由 DELETE 挂载有 sealAndDeleteSync 事务作为最终防线，会在物理删除前强制完成封存。
-          // 此时安全放行删除，避免阻断用户正常删除。
-          const isAtSameWatermark = Boolean(
-            currentSeal &&
-            currentSeal.lastEntryId &&
-            meta.leafId &&
-            currentSeal.lastEntryId === meta.leafId
-          );
-          if (isAtSameWatermark) {
-            console.warn(`[usage-delete] Session ${sessionId} at latest watermark (${meta.leafId}) but incomplete seal, delegating to backend sealAndDeleteSync.`);
-          } else {
-            throw new Error("会话仍有未入账用量、未结束工具或版本变化，已阻止删除");
-          }
+          throw new Error("会话仍有未入账用量、未结束工具或版本变化，已阻止删除");
         }
       }
       knownSessionsMap.set(sessionId, meta);
@@ -24127,9 +24244,7 @@
   }
   // END APPROVAL SOUND
 
-  let approvalSound = null, approvalSoundNotifier = null, siteAttentionNotifier = null;
-  attentionNotices = new Map();
-  let attentionNoticeSignature = "";
+  let approvalSound = null, approvalSoundNotifier = null;
   let projectStatusLastLegacyResponseAt = 0;
   function isProjectStatusHealthy() {
     if (projectStatusDisposed) return false;
@@ -24186,132 +24301,9 @@
   addManagedListener(document, "click", event => { if (event.target?.closest?.("[data-attention-sound-preview]")) void unlockApprovalSound(true); });
   activeCleanups.push(disposeApprovalSound);
 
-  let currentAttentionQueueIndex = 0;
-
-  function getRequestsSignature(pendingRequests) {
-    if (!Array.isArray(pendingRequests) || !pendingRequests.length) return "";
-    return pendingRequests.map(r => `${r.id || ""}:${r.method || ""}`).sort().join("|");
-  }
-  const sessionAttentionRequestSignatures = new Map();
-  const dismissedAttentionSessions = new Set();
-  const dismissedAttentionSignatures = new Map();
-
   function renderAttentionNotices() {
-    const old = document.querySelector(".pi-enh-attention-notice");
-    if (projectStatusDisposed || !isPluginEnabled("project-status-indicator") || !isPluginEnabled("session-attention-notifications")) { old?.remove(); attentionNoticeSignature = ""; return; }
-    const currentKey = getCurrentProjectStatusKey();
-    const activeAttentionIds = (typeof projectStatusModel !== "undefined" ? projectStatusModel.list() : [])
-      .filter(item => getEffectiveProjectStatusEntry(item.id)?.status === "attention")
-      .map(item => item.id);
-    const allCandidateIds = [...new Set([...attentionNotices.values(), ...activeAttentionIds])];
-    const allIds = allCandidateIds.filter(id => {
-      if (!dismissedAttentionSessions.has(id)) return true;
-      const entry = projectStatusModel.entry(id);
-      const currentSig = getRequestsSignature(entry?.pendingRequests);
-      const dismissedSig = dismissedAttentionSignatures.get(id);
-      // 仅当 request 签名变更时才解禁重显；相同签名保持收起
-      if (dismissedSig && currentSig && dismissedSig !== currentSig) {
-        dismissedAttentionSessions.delete(id);
-        dismissedAttentionSignatures.delete(id);
-        return true;
-      }
-      return false;
-    });
-    // 严格按当前标签页所属项目过滤：只在所属项目标签页中展示待办卡片，避免跨项目冒领与误判
-    const ids = currentKey
-      ? allIds.filter(id => {
-          const entry = projectStatusModel.entry(id);
-          return !entry.projectKey || entry.projectKey === currentKey;
-        })
-      : allIds;
-    if (!ids.length) { old?.remove(); attentionNoticeSignature = ""; return; }
-    if (currentAttentionQueueIndex >= ids.length) currentAttentionQueueIndex = 0;
-    const signature = JSON.stringify({
-      index: currentAttentionQueueIndex,
-      total: ids.length,
-      items: ids.map(id => { const entry = projectStatusModel.entry(id); return [id, entry.title, entry.pendingRequests]; }),
-    });
-    if (old && attentionNoticeSignature === signature) return;
-    attentionNoticeSignature = signature;
-    const summary = ids.map(id => projectStatusModel.entry(id)?.title || "后台任务").join("、");
-    const enabled = recordNotificationEvent(`待你处理：${summary}`, "warning", "attention-inpage", "attention-inpage");
-    if (!isNotificationEnabled("attention-inpage") || !enabled) { old?.remove(); return; }
-    old?.remove();
-
-    const notice = document.createElement("aside");
-    notice.className = "pi-enh-attention-notice pi-enh-approval-queue-card";
-    notice.setAttribute("role", "status");
-    notice.setAttribute("aria-live", "polite");
-
-    const dismiss = id => {
-      for (const [key, value] of attentionNotices) if (value === id) attentionNotices.delete(key);
-      const entry = projectStatusModel.entry(id);
-      const sig = getRequestsSignature(entry?.pendingRequests);
-      dismissedAttentionSessions.add(id);
-      dismissedAttentionSignatures.set(id, sig);
-      if (currentAttentionQueueIndex > 0 && currentAttentionQueueIndex >= ids.length - 1) {
-        currentAttentionQueueIndex = Math.max(0, ids.length - 2);
-      }
-      renderAttentionNotices();
-    };
-
-    if (ids.length > 1) {
-      const queueHeader = document.createElement("div");
-      queueHeader.className = "pi-enh-queue-header";
-      queueHeader.innerHTML = `
-        <div class="pi-enh-queue-title">
-          <span class="pi-enh-queue-badge">待审批队列</span>
-          <span>${currentAttentionQueueIndex + 1} / ${ids.length}</span>
-        </div>
-        <div class="pi-enh-queue-nav">
-          <button type="button" class="pi-enh-queue-nav-btn prev-btn" title="上一个待办">◀</button>
-          <button type="button" class="pi-enh-queue-nav-btn next-btn" title="下一个待办">▶</button>
-        </div>
-      `;
-      queueHeader.querySelector(".prev-btn").onclick = (e) => {
-        e.stopPropagation();
-        currentAttentionQueueIndex = (currentAttentionQueueIndex - 1 + ids.length) % ids.length;
-        renderAttentionNotices();
-      };
-      queueHeader.querySelector(".next-btn").onclick = (e) => {
-        e.stopPropagation();
-        currentAttentionQueueIndex = (currentAttentionQueueIndex + 1) % ids.length;
-        renderAttentionNotices();
-      };
-      notice.appendChild(queueHeader);
-    } else {
-      const heading = document.createElement("strong");
-      heading.textContent = "待你处理与确认";
-      notice.appendChild(heading);
-    }
-
-    const activeId = ids[currentAttentionQueueIndex] || ids[0];
-    const entry = projectStatusModel.entry(activeId);
-    const row = document.createElement("div");
-    row.className = "pi-enh-attention-notice-item pi-enh-approval-active-item";
-
-    const go = document.createElement("button");
-    go.type = "button";
-    go.setAttribute("data-attention-notice-session", activeId);
-    const title = document.createElement("span");
-    title.className = "pi-enh-attention-notice-title";
-    title.textContent = entry.title;
-    const kind = document.createElement("span");
-    kind.className = "pi-enh-attention-notice-kind";
-    kind.textContent = `${getPendingInteractionLabel(entry)} · ${entry.pendingRequests.length} 项等待确认 · 点击直达`;
-    go.title = entry.title;
-    go.append(title, kind);
-    go.onclick = () => { openProjectStatusSession(activeId); dismiss(activeId); };
-
-    const hide = document.createElement("button");
-    hide.type = "button";
-    hide.textContent = ids.length > 1 ? "跳过/稍后" : "收起提醒";
-    hide.onclick = () => dismiss(activeId);
-
-    row.append(go, hide);
-    notice.appendChild(row);
-
-    document.body.appendChild(notice);
+    // Keep the cleanup hook for existing call sites, but do not recreate the removed in-page card.
+    document.querySelector(".pi-enh-attention-notice")?.remove();
   }
 
   let desktopAttentionNotifier = null;
@@ -24401,7 +24393,6 @@
   // A ChatWindow session-load failure is local transport state, not an Agent
   // execution outcome. Keep it outside the authoritative cross-tab model.
   const localSessionLoadErrors = new Map();
-  const PROJECT_STATUS_STORAGE_KEY = "pi-enh-status-notified-v2";
   const PROJECT_STATUS_STORAGE_KEY_V1 = "pi-enh-project-status-v1";
   const PROJECT_STATUS_META = {
     attention: { color: "#f59e0b", label: "待你处理", title: "待处理" },
@@ -24480,15 +24471,6 @@
       ? options.pendingRequests
       : existing.pendingRequests?.length ? existing.pendingRequests : [{ id: "local-ask", method: "select" }];
 
-    const newSig = getRequestsSignature(pendingRequests);
-    const dismissedSig = dismissedAttentionSignatures.get(sessionId);
-    // 仅当 request 签名变更才重置已收起状态；相同请求签名绝不重弹
-    if (dismissedSig && newSig && dismissedSig !== newSig) {
-      dismissedAttentionSessions.delete(sessionId);
-      dismissedAttentionSignatures.delete(sessionId);
-    }
-    sessionAttentionRequestSignatures.set(sessionId, newSig);
-
     projectStatusState.sessions[sessionId] = {
       ...existing,
       id: sessionId,
@@ -24503,7 +24485,6 @@
     syncProjectStatusIndicators();
     // 绝不盲目强行更新当前标签页标题为 attention！必须完全由 syncProjectStatusIndicators 根据当前标签页所在项目的真实有效状态统一计算判定，杜绝跨项目污染与闪烁
     if (options.notify !== false) {
-      void notifyProjectStatusRequests(getDesktopPendingRequests());
       syncApprovalSound();
       syncDesktopAttention();
     }
@@ -24947,8 +24928,6 @@
   window.__PI_ENH_GET_CURRENT_PROJECT_STATUS_KEY__ = getCurrentProjectStatusKey;
   window.__PI_ENH_GET_CURRENT_EFFECTIVE_STATUS__ = getCurrentEffectiveStatus;
   window.__PI_ENH_GET_PROJECT_STATUS_FOR_SUMMARY__ = getProjectStatusForSummary;
-  window.__PI_ENH_RENDER_ATTENTION_NOTICES__ = renderAttentionNotices;
-  window.__PI_ENH_ATTENTION_NOTICES__ = attentionNotices;
 
   let attentionTitleAlertTick = 0;
   let attentionTitleAlertTimer = null;
@@ -25071,8 +25050,6 @@
   function removeProjectStatusIndicators() {
     disposeDesktopAttention();
     disposeApprovalSound();
-    siteAttentionNotifier?.dispose(); siteAttentionNotifier = null;
-    attentionNotices.clear(); attentionNoticeSignature = "";
     document.documentElement.removeAttribute("data-pi-enh-interaction-sync");
     for (const node of document.querySelectorAll(".pi-enh-project-status-summary, .pi-enh-status-popover, .pi-enh-attention-notice")) node.remove();
     for (const row of getSessionStatusRows()) restoreStatusRow(row);
@@ -25082,9 +25059,6 @@
 
   function clearSessionAttention(sessionId, nextStatus = null) {
     if (!sessionId) return;
-    dismissedAttentionSessions.delete(sessionId);
-    dismissedAttentionSignatures.delete(sessionId);
-    sessionAttentionRequestSignatures.delete(sessionId);
     projectStatusModel.clearAttention(sessionId, nextStatus);
     if (projectStatusState.sessions[sessionId]) {
       const current = projectStatusState.sessions[sessionId];
@@ -25094,9 +25068,6 @@
         pendingRequests: [],
       };
     }
-    for (const [tag, sId] of Array.from(attentionNotices.entries())) {
-      if (sId === sessionId) attentionNotices.delete(tag);
-    }
     renderAttentionNotices();
     persistProjectStatusState();
     syncProjectStatusIndicators();
@@ -25105,7 +25076,6 @@
     const requests = getDesktopPendingRequests();
     desktopAttentionNotifier?.reconcile(requests);
     approvalSoundNotifier?.reconcile(requests);
-    siteAttentionNotifier?.reconcile(requests);
   }
 
   function resolveCurrentAskUserStatus(sessionId = getSessionIdFromCurrentUrl()) {
@@ -25166,7 +25136,6 @@
       projectStatusModel.setCompletedRead(readCompletedTokens());
       if (typeof reconcileUnreadSessions === "function") reconcileUnreadSessions();
       persistProjectStatusState();
-      void notifyProjectStatusRequests(getDesktopPendingRequests());
       syncApprovalSound();
       syncDesktopAttention();
     }
@@ -25182,7 +25151,6 @@
         projectStatusModel.setCompletedRead(readCompletedTokens());
         if (typeof reconcileUnreadSessions === "function") reconcileUnreadSessions();
         persistProjectStatusState();
-        void notifyProjectStatusRequests(getDesktopPendingRequests());
         syncApprovalSound();
         syncDesktopAttention();
       }
@@ -25337,22 +25305,6 @@
     // are intentionally removed to keep the project header uncluttered.
     document.querySelector(".pi-enh-project-status-summary")?.remove();
     document.querySelector(".pi-enh-status-popover")?.remove();
-  }
-
-  async function notifyProjectStatusRequests(requests) {
-    if (!siteAttentionNotifier) siteAttentionNotifier = createDesktopAttentionNotifier({
-      canNotify: () => isProjectStatusHealthy() && isPluginEnabled("project-status-indicator") && isPluginEnabled("session-attention-notifications") && !document.hidden,
-      isPending: isAttentionRequestPending,
-      readSeen: () => readNoticeSeen(PROJECT_STATUS_STORAGE_KEY), writeSeen: value => writeNoticeSeen(PROJECT_STATUS_STORAGE_KEY, value),
-      withLock: work => withAttentionDeliveryLock("pi-web-status-notice-v2", work),
-      deliver: async payload => {
-        attentionNotices.set(payload.tag, payload.sessionId); renderAttentionNotices();
-        return () => { attentionNotices.delete(payload.tag); renderAttentionNotices(); };
-      },
-    });
-    siteAttentionNotifier.reconcile(requests);
-    await siteAttentionNotifier.notify(requests);
-    renderAttentionNotices();
   }
 
   function readUnreadSessionIds() {
@@ -25571,9 +25523,6 @@
   window.__PI_ENH_PROJECT_STATUS_MODEL__ = projectStatusModel;
   window.__PI_ENH_IS_PROJECT_STATUS_HEALTHY__ = isProjectStatusHealthy;
   window.__PI_ENH_RECEIVE_PROJECT_STATUS__ = receiveProjectStatus;
-  window.__PI_ENH_DISMISSED_ATTENTION_SIGNATURES__ = dismissedAttentionSignatures;
-  window.__PI_ENH_DISMISSED_ATTENTION_SESSIONS__ = dismissedAttentionSessions;
-  window.__PI_ENH_REQUEST_SIGNATURES__ = sessionAttentionRequestSignatures;
   window.__PI_ENH_RENDER_NOTIFICATION_PANEL__ = renderNotificationPanel;
   window.__PI_ENH_SHOW_NOTIFICATION_PANEL__ = showNotificationPanel;
   window.__PI_ENH_DEBUG_NOTIF_CONDITIONS__ = () => ({
@@ -26529,7 +26478,7 @@
   function isAgentStopButton(btn) {
     if (!btn || btn.disabled) return false;
     // 排除消息体（用户/助手消息）、代码块、文件预览、工具卡片内部的任何按钮
-    if (typeof btn.closest === "function" && btn.closest('div[data-message-role], pre, code, .pi-enh-tool-card, [data-pi-enh-tool-card]')) {
+    if (typeof btn.closest === "function" && btn.closest('div[data-message-role], pre, code, .pi-enh-tool-card, [data-pi-enh-tool-card], #chat-message-list')) {
       return false;
     }
     const title = String(btn.getAttribute("title") || "").trim();
@@ -26541,23 +26490,77 @@
       return false;
     }
     if (/\.(py|sh|js|ts|json|md|txt|html|css|yaml|yml|sql|rs|go|c|cpp|h)\b/i.test(title) ||
-        /\.(py|sh|js|ts|json|md|txt|html|css|yaml|yml|sql|rs|go|c|cpp|h)\b/i.test(ariaLabel)) {
+        /\.(py|sh|js|ts|json|md|txt|html|css|yaml|yml|sql|rs|go|c|cpp|h)\b/i.test(ariaLabel) ||
+        /\.(py|sh|js|ts|json|md|txt|html|css|yaml|yml|sql|rs|go|c|cpp|h)\b/i.test(text)) {
       return false;
     }
 
+    if (btn.classList?.contains?.("pi-enh-cursor-stop")) return true;
+    if (typeof btn.querySelector === "function" && btn.querySelector('svg rect[x="1.5"]')) return true;
+
     // 仅匹配明确属于中止/停止 Agent 的交互按钮
-    const stopRegex = /^(停止 Agent|停止|中止|取消|Stop Agent|Stop|Cancel Agent|Cancel)$/i;
+    const stopRegex = /^(停止\s*Agent|停止代理|停止|中止|取消|Stop\s*Agent|Stop|Cancel\s*Agent|Cancel)$/i;
     return stopRegex.test(title) || stopRegex.test(ariaLabel) || stopRegex.test(text);
+  }
+
+  function getComposerSearchScopes(textarea = findComposerTextarea(), fallbackRoot = document) {
+    const scopes = [];
+    const addScope = (node) => {
+      if (node && typeof node.querySelectorAll === "function" && !scopes.includes(node)) {
+        scopes.push(node);
+      }
+    };
+    if (fallbackRoot && fallbackRoot !== document) {
+      addScope(fallbackRoot);
+    }
+    if (textarea) {
+      addScope(textarea.closest?.("fieldset"));
+      addScope(textarea.closest?.(".pi-enh-cursor-composer"));
+      addScope(textarea.closest?.("form"));
+      addScope(textarea.closest?.(".chat-input-container, [data-chat-input-wrap], .relative.shrink-0"));
+      addScope(textarea.closest?.(".chat-content > div"));
+      addScope(textarea.parentElement?.parentElement);
+      addScope(textarea.parentElement);
+    }
+    if (scopes.length === 0) {
+      addScope(fallbackRoot || document);
+    }
+    return scopes;
+  }
+
+  function getComposerEffectivePlaceholder(textarea = findComposerTextarea()) {
+    if (!textarea) return "";
+    const direct = String(textarea.getAttribute?.("placeholder") || textarea.placeholder || "");
+    if (direct) return direct;
+    if (
+      (typeof isPluginEnabled === "function" && isPluginEnabled("composer-clean-placeholder")) ||
+      textarea.classList?.contains?.("pi-enh-clean-placeholder")
+    ) {
+      return String(textarea.getAttribute?.("data-pi-orig-placeholder") || "");
+    }
+    return "";
+  }
+
+  function isRunningPlaceholderText(ph) {
+    const text = String(ph || "");
+    return (
+      text.includes("引导") ||
+      text.includes("排队") ||
+      text.includes("运行中") ||
+      text.includes("代理正在运行") ||
+      text.includes("Steer") ||
+      text.includes("running")
+    );
   }
 
   function findActiveStopButton(root = document) {
     const textarea = findComposerTextarea();
-    const bottomArea = textarea ? (textarea.closest(".chat-content > div:last-child") || textarea.parentElement?.parentElement) : null;
-    const searchScope = bottomArea || (root && typeof root.querySelectorAll === "function" ? root : document);
-    if (!searchScope || typeof searchScope.querySelectorAll !== "function") return null;
-    const buttons = searchScope.querySelectorAll("button");
-    for (const btn of buttons) {
-      if (isAgentStopButton(btn)) return btn;
+    const scopes = getComposerSearchScopes(textarea, root);
+    for (const scope of scopes) {
+      const buttons = scope.querySelectorAll("button");
+      for (const btn of buttons) {
+        if (isAgentStopButton(btn)) return btn;
+      }
     }
     return null;
   }
@@ -26567,14 +26570,21 @@
 
     const textarea = findComposerTextarea();
     if (textarea) {
-      const ph = String(textarea.getAttribute("placeholder") || textarea.placeholder || "");
-      if (ph.includes("引导") || ph.includes("排队") || ph.includes("运行中") || ph.includes("Steer") || ph.includes("running")) return true;
+      const ph = getComposerEffectivePlaceholder(textarea);
+      if (isRunningPlaceholderText(ph)) return true;
     }
-    const bottomArea = textarea ? (textarea.closest(".chat-content > div:last-child") || textarea.parentElement?.parentElement) : document;
-    if (bottomArea && typeof bottomArea.querySelectorAll === "function") {
-      for (const btn of bottomArea.querySelectorAll("button")) {
+    const scopes = getComposerSearchScopes(textarea, document);
+    for (const scope of scopes) {
+      for (const btn of scope.querySelectorAll("button")) {
         // 排除消息体、工具卡片、以及外部队列面板内部的按钮
-        if (typeof btn.closest === "function" && btn.closest(".pi-enh-queue-panel, div[data-message-role], pre, code, .pi-enh-tool-card")) {
+        if (typeof btn.closest === "function" && btn.closest(".pi-enh-queue-panel, div[data-message-role], pre, code, .pi-enh-tool-card, [data-pi-enh-tool-card], #chat-message-list")) {
+          continue;
+        }
+        if (
+          btn.hasAttribute?.("data-pi-enh-quick-reply") ||
+          btn.getAttribute?.("title")?.includes("快捷回复") ||
+          btn.getAttribute?.("aria-label")?.includes("快捷回复")
+        ) {
           continue;
         }
         if (isAgentStopButton(btn)) return true;
@@ -26586,22 +26596,75 @@
     return false;
   }
 
-  function isChatSessionRunning(sessionId) {
-    const sid = sessionId || getCurrentSessionId();
-    if (sid && typeof projectStatusModel !== "undefined" && projectStatusModel?.entry) {
+  function isComposerExplicitlyIdle() {
+    const textarea = findComposerTextarea();
+    if (!textarea) return false;
+    if (isComposerIndicatingRunning()) return false;
+    const ph = getComposerEffectivePlaceholder(textarea).trim();
+    if (ph && !isRunningPlaceholderText(ph)) {
+      return true;
+    }
+    return false;
+  }
+
+  function isServerRunningForSession(sid) {
+    if (!sid) return false;
+    const hasRunningIdsList =
+      typeof projectStatusLastPayload !== "undefined" &&
+      Array.isArray(projectStatusLastPayload?.runningSessionIds);
+    const inRunningIds = hasRunningIdsList && projectStatusLastPayload.runningSessionIds.includes(sid);
+
+    if (typeof projectStatusModel !== "undefined" && projectStatusModel?.health?.().state === "live" && projectStatusModel?.entry) {
       const statusEntry = projectStatusModel.entry(sid);
       if (statusEntry?.execution === "running") {
         return true;
       }
-      if (["ended", "completed", "idle", "stopped"].includes(statusEntry?.execution) ||
-          ["completed", "idle", "stopped", "interrupted"].includes(statusEntry?.status)) {
-        if (!isComposerIndicatingRunning()) {
+      if (!inRunningIds && (
+        ["ended", "completed", "idle", "stopped"].includes(statusEntry?.execution) ||
+        ["completed", "idle", "stopped", "interrupted"].includes(statusEntry?.status)
+      )) {
+        return false;
+      }
+    }
+
+    if (inRunningIds) {
+      const healthy = typeof isProjectStatusHealthy === "function" ? isProjectStatusHealthy() : true;
+      if (healthy) {
+        const memEntry = typeof sessionMemoryCache !== "undefined" ? sessionMemoryCache?.get?.(sid) : null;
+        if (!memEntry || memEntry.isRunning !== false) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  function isChatSessionRunning(sessionId) {
+    const currentSid = getCurrentSessionId();
+    const sid = sessionId || currentSid;
+    const isCurrent = !sid || !currentSid || sid === currentSid;
+
+    if (isCurrent && isComposerIndicatingRunning()) {
+      return true;
+    }
+
+    if (sid) {
+      if (isCurrent && isComposerExplicitlyIdle()) {
+        return false;
+      }
+      if (isServerRunningForSession(sid)) {
+        return true;
+      }
+      if (typeof projectStatusModel !== "undefined" && projectStatusModel?.health?.().state === "live" && projectStatusModel?.entry) {
+        const statusEntry = projectStatusModel.entry(sid);
+        if (["ended", "completed", "idle", "stopped"].includes(statusEntry?.execution) ||
+            ["completed", "idle", "stopped", "interrupted"].includes(statusEntry?.status)) {
           return false;
         }
       }
     }
 
-    return isComposerIndicatingRunning();
+    return isCurrent ? isComposerIndicatingRunning() : false;
   }
   window.__PI_ENH_IS_CHAT_SESSION_RUNNING__ = isChatSessionRunning;
   window.__PI_ENH_FIND_ACTIVE_STOP_BUTTON__ = findActiveStopButton;
@@ -26753,6 +26816,21 @@
       document.querySelector("textarea");
   }
 
+  function syncComposerTextareaAutoHeight(textarea) {
+    if (!textarea || textarea.tagName !== "TEXTAREA") return;
+    if (!textarea.hasAttribute("rows")) textarea.setAttribute("rows", "1");
+    if (textarea.style.display === "none") return;
+    if (!textarea.value) {
+      textarea.style.height = "auto";
+      return;
+    }
+    textarea.style.height = "auto";
+    const sh = textarea.scrollHeight || 0;
+    if (sh > 0) {
+      textarea.style.height = `${Math.min(sh, 200)}px`;
+    }
+  }
+
   function setComposerTextareaValue(textarea, value, { focus = true } = {}) {
     if (!textarea) return false;
     try {
@@ -26765,6 +26843,7 @@
       textarea.value = value;
     }
     textarea.dispatchEvent(new Event("input", { bubbles: true }));
+    syncComposerTextareaAutoHeight(textarea);
     if (focus) {
       textarea.focus();
       if (typeof textarea.setSelectionRange === "function") {
@@ -27036,6 +27115,7 @@
   // Never import them, and never share a fallback key between new sessions.
   const DRAFT_STORAGE_PREFIX = "pi-enh-composer-draft-v3:";
   const MAX_PERSISTED_DRAFTS = 10;
+  const EMPTY_DRAFT_SIGNATURE = JSON.stringify({ value: "", images: [] });
   let nativeDraftContexts = new WeakMap();
   let activeNativeDraft = null;
   let draftListeners = [];
@@ -27046,6 +27126,9 @@
   let draftRestoreRequested = true;
   let lastObservedNativeDraftKey = null;
   const submittedDraftKeys = new Set();
+  const pendingDraftSubmissions = new Map();
+  let draftSubmissionPollFrame = 0;
+  let clearingStaleDraftSurface = false;
 
   function validDraftImages(images) {
     return Array.isArray(images) && images.length <= 10 && images.every((img) =>
@@ -27083,6 +27166,7 @@
         images: draft.images.map(({ data, mimeType }) => ({ data, mimeType })),
         updatedAt: Date.now(),
       }));
+      submittedDraftKeys.delete(key);
       const keys = [];
       for (let i = 0; i < localStorage.length; i++) {
         const storageKey = localStorage.key(i);
@@ -27164,17 +27248,172 @@
       images: ctx.imagesRef.current.map(({ data, mimeType }) => ({ data, mimeType })) };
   }
 
+  function isDraftSubmissionAccepted(sub) {
+    return Boolean(sub && sub.keyRef?.current === sub.owner
+      && sub.valueRef?.current === ""
+      && Array.isArray(sub.imagesRef?.current)
+      && sub.imagesRef.current.length === 0);
+  }
+
+  function clearStaleRemountedNativeComposer(native, owner) {
+    if (!native || native.key !== owner || native.keyRef?.current !== owner) return false;
+    const prevClearing = clearingStaleDraftSurface;
+    clearingStaleDraftSurface = true;
+    try {
+      if (Array.isArray(native.imagesRef?.current) && native.imagesRef.current.length > 0) {
+        const prevImages = native.imagesRef.current;
+        native.imagesRef.current = [];
+        if (native.imageStateHook && typeof native.imageStateHook.queue?.dispatch === "function") {
+          try { native.imageStateHook.queue.dispatch([]); } catch {}
+        } else if (native.fieldset) {
+          for (const img of native.fieldset.querySelectorAll("img")) {
+            if (/^(blob:|data:image\/)/.test(img.getAttribute("src") || "")) {
+              img.parentElement?.querySelector("button")?.click();
+            }
+          }
+        }
+        for (const img of prevImages) {
+          if (typeof img?.previewUrl === "string" && img.previewUrl.startsWith("blob:")
+            && typeof URL?.revokeObjectURL === "function") {
+            try { URL.revokeObjectURL(img.previewUrl); } catch {}
+          }
+        }
+      }
+      if (native.valueRef?.current !== "" || native.textarea?.value !== "") {
+        native.valueRef.current = "";
+        setComposerTextareaValue(native.textarea, "", { focus: false });
+      }
+      instantlyClearComposerSurface(native.textarea, owner);
+      removePersistedDraft(owner);
+      return true;
+    } finally {
+      clearingStaleDraftSurface = prevClearing;
+    }
+  }
+
+  function markDraftSubmissionAccepted(sub) {
+    if (!sub) return false;
+    const firstAccept = !sub.accepted;
+    sub.accepted = true;
+    submittedDraftKeys.add(sub.owner);
+    removePersistedDraft(sub.owner);
+    const oldCtx = nativeDraftContexts.get(sub.keyRef);
+    if (oldCtx && oldCtx.key === sub.owner) {
+      oldCtx.initialized = true;
+      oldCtx.lastSaved = EMPTY_DRAFT_SIGNATURE;
+    }
+    if (firstAccept) {
+      const generation = draftRuntimeGeneration;
+      queueMicrotask(() => {
+        if (generation !== draftRuntimeGeneration || !isPluginEnabled("composer-draft-cache")) return;
+        syncNativeComposerDraft(false);
+      });
+      if (typeof requestAnimationFrame === "function") {
+        requestAnimationFrame(() => {
+          if (generation !== draftRuntimeGeneration || !isPluginEnabled("composer-draft-cache")) return;
+          syncNativeComposerDraft(false);
+        });
+      }
+    }
+    return true;
+  }
+
+  function reconcilePendingDraftSubmission(native) {
+    if (activeNativeDraft && activeNativeDraft.lastSaved
+      && activeNativeDraft.lastSaved !== EMPTY_DRAFT_SIGNATURE
+      && isDraftSubmissionAccepted({
+        owner: activeNativeDraft.key,
+        keyRef: activeNativeDraft.keyRef,
+        valueRef: activeNativeDraft.valueRef,
+        imagesRef: activeNativeDraft.imagesRef,
+      })) {
+      let tracked = pendingDraftSubmissions.get(activeNativeDraft.key);
+      if (!tracked || tracked.keyRef !== activeNativeDraft.keyRef) {
+        tracked = {
+          owner: activeNativeDraft.key,
+          keyRef: activeNativeDraft.keyRef,
+          valueRef: activeNativeDraft.valueRef,
+          imagesRef: activeNativeDraft.imagesRef,
+          signature: activeNativeDraft.lastSaved,
+          accepted: false,
+        };
+        pendingDraftSubmissions.set(activeNativeDraft.key, tracked);
+      }
+      markDraftSubmissionAccepted(tracked);
+    }
+    for (const [, sub] of pendingDraftSubmissions) {
+      if (!sub.accepted && isDraftSubmissionAccepted(sub)) {
+        markDraftSubmissionAccepted(sub);
+      }
+    }
+    if (!native) return;
+    const sub = pendingDraftSubmissions.get(native.key);
+    if (!sub) return;
+    if (!sub.accepted && isDraftSubmissionAccepted(sub)) {
+      markDraftSubmissionAccepted(sub);
+    }
+  }
+
+  function scheduleDraftSubmissionObservation() {
+    if (draftSubmissionPollFrame || typeof requestAnimationFrame !== "function") return;
+    const generation = draftRuntimeGeneration;
+    let remainingFrames = 120;
+    const step = () => {
+      draftSubmissionPollFrame = 0;
+      if (generation !== draftRuntimeGeneration || !isPluginEnabled("composer-draft-cache")) return;
+      let hasUnresolved = false;
+      let newlyAccepted = false;
+      for (const [, sub] of pendingDraftSubmissions) {
+        if (!sub.accepted) {
+          if (isDraftSubmissionAccepted(sub)) {
+            markDraftSubmissionAccepted(sub);
+            newlyAccepted = true;
+          } else {
+            hasUnresolved = true;
+          }
+        }
+      }
+      if (newlyAccepted) {
+        syncNativeComposerDraft(false);
+      }
+      if (hasUnresolved && --remainingFrames > 0) {
+        draftSubmissionPollFrame = requestAnimationFrame(step);
+      }
+    };
+    draftSubmissionPollFrame = requestAnimationFrame(step);
+  }
+
   function persistNativeDraft(ctx) {
     // Before entry recovery is evaluated, an empty native composer is only an
     // unknown transition state. It must never erase its owner's saved draft.
     if (!ctx?.initialized) return;
+    const sub = pendingDraftSubmissions.get(ctx.key);
+    if (sub && !sub.accepted && isDraftSubmissionAccepted(sub)) {
+      markDraftSubmissionAccepted(sub);
+    }
     const snapshot = nativeDraftSnapshot(ctx);
     if (!snapshot) return;
     const submission = composerSubmissionInFlight;
     if (submission?.snapshot && submission.keyRef === ctx.keyRef && submission.owner === ctx.key
       && snapshot.value === submission.text && !submission.accepted) snapshot.value = submission.body;
+    const isEmpty = !snapshot.value && !snapshot.images.length;
+    if (isEmpty) {
+      if (sub && !sub.accepted && sub.keyRef === ctx.keyRef) {
+        markDraftSubmissionAccepted(sub);
+      }
+      removePersistedDraft(ctx.key);
+      ctx.lastSaved = EMPTY_DRAFT_SIGNATURE;
+      return;
+    }
+    // Never write back stale content on a newly remounted instance whose prior
+    // same-session instance already accepted and cleared the submission.
+    if (sub?.accepted && ctx.keyRef !== sub.keyRef) return;
+    if (sub?.accepted && ctx.keyRef === sub.keyRef) {
+      pendingDraftSubmissions.delete(ctx.key);
+      submittedDraftKeys.delete(ctx.key);
+    }
     const signature = JSON.stringify(snapshot);
-    if (signature === ctx.lastSaved) return;
+    if (signature === ctx.lastSaved && getPersistedDraft(ctx.key)) return;
     if (savePersistedDraft(ctx.key, snapshot)) ctx.lastSaved = signature;
   }
 
@@ -27190,45 +27429,61 @@
     const native = readNativeComposerDraft();
     const snapshot = nativeDraftSnapshot(native);
     if (!native || !snapshot || (!snapshot.value && !snapshot.images.length)) return null;
+    if (native.fieldset?.disabled || native.pendingRef?.current > 0) return null;
     const target = event?.target;
     const button = target?.closest?.("button") || (target?.tagName === "BUTTON" ? target : null);
+    const className = String(button?.className || "");
+    if (button && /\bpi-enh-(?:quick-|attachment-remove|format-toggle)/.test(className)) return null;
     const labels = button ? [button.textContent, button.getAttribute?.("aria-label"), button.getAttribute?.("title")]
       .map((label) => String(label || "").trim()).filter(Boolean) : [];
     const clickedSubmission = !!button && native.fieldset?.contains?.(button) && !button.disabled
-      && labels.some((label) => /发送(?:消息)?|引导|后续消息|send(?:\s+message)?|steer|follow[\s-]?up/i.test(label));
-    const keyboardSubmission = event?.type === "keydown" && target === native.textarea
-      && event.key === "Enter" && !event.shiftKey && !event.isComposing;
-    return clickedSubmission || keyboardSubmission ? { native, signature: JSON.stringify(snapshot) } : null;
+      && (button.classList?.contains("pi-enh-cursor-send")
+        || button.classList?.contains("pi-enh-cursor-followup")
+        || button.classList?.contains("pi-enh-cursor-steer")
+        || labels.some((label) => /发送(?:消息)?|引导|后续消息|send(?:\s+message)?|steer|follow[\s-]?up/i.test(label)));
+    const isEditorTarget = target === native.textarea
+      || Boolean(activeFormattedComposer && activeFormattedComposer.__boundTextarea === native.textarea && activeFormattedComposer.contains(target));
+    const mobilePlainEnter = typeof isMobileEnvironment === "function" && isMobileEnvironment() && !event?.ctrlKey && !event?.metaKey;
+    const completionKey = typeof isComposerCompletionKey === "function" && isComposerCompletionKey(event, native.textarea);
+    const keyboardSubmission = event?.type === "keydown" && isEditorTarget
+      && event.key === "Enter" && !event.shiftKey && !event.altKey
+      && !event.isComposing && !isComposingInput && event.keyCode !== 229
+      && !mobilePlainEnter && !completionKey;
+    return clickedSubmission || keyboardSubmission ? { native, snapshot, signature: JSON.stringify(snapshot) } : null;
   }
 
-  function clearDraftForSubmissionIntent(intent) {
-    const { native, signature } = intent;
-    submittedDraftKeys.add(native.key);
-    removePersistedDraft(native.key);
-    const context = nativeDraftContexts.get(native.keyRef) || activeNativeDraft;
-    if (context?.keyRef === native.keyRef && context.key === native.key) context.lastSaved = signature;
-    const generation = draftRuntimeGeneration;
-    // Let the native click/keydown handler commit first. A synchronous rejected
-    // submit restores its refs here; an accepted submit remains empty and stays
-    // deleted. Never inspect history or infer a send from text equality.
-    addManagedTimeout(() => {
-      if (generation !== draftRuntimeGeneration || !isPluginEnabled("composer-draft-cache")) return;
-      const current = readNativeComposerDraft();
-      if (!current || current.keyRef !== native.keyRef || current.key !== native.key) return;
-      const snapshot = nativeDraftSnapshot(current);
-      if (!snapshot) return;
-      const currentContext = nativeDraftContexts.get(current.keyRef);
-      const currentSignature = JSON.stringify(snapshot);
-      if (!snapshot.value && !snapshot.images.length) {
-        removePersistedDraft(current.key);
-        if (currentContext) currentContext.lastSaved = currentSignature;
-        return;
-      }
-      // Native recovery (or a prevented click) is authoritative for the same
-      // owner, so retain it as a draft again rather than losing user input.
-      submittedDraftKeys.delete(current.key);
-      if (savePersistedDraft(current.key, snapshot) && currentContext) currentContext.lastSaved = currentSignature;
-    }, 0);
+  function trackDraftSubmissionIntent(intent) {
+    if (!intent?.native) return;
+    const { native, snapshot, signature } = intent;
+    let ctx = nativeDraftContexts.get(native.keyRef);
+    if (!ctx || ctx.key !== native.key) {
+      ctx = { ...native, initialized: true, lastSaved: null };
+      nativeDraftContexts.set(native.keyRef, ctx);
+    } else {
+      Object.assign(ctx, native);
+      ctx.initialized = true;
+    }
+    // Keep the unsent draft persisted while a delayed rAF or async builtin check
+    // is still in flight; only removePersistedDraft once clearInput is observed.
+    if (snapshot && (snapshot.value || snapshot.images.length) && !getPersistedDraft(native.key)) {
+      if (savePersistedDraft(native.key, snapshot)) ctx.lastSaved = signature;
+    }
+    const sub = {
+      owner: native.key,
+      keyRef: native.keyRef,
+      valueRef: native.valueRef,
+      imagesRef: native.imagesRef,
+      textarea: native.textarea,
+      snapshot,
+      signature,
+      accepted: false,
+    };
+    pendingDraftSubmissions.set(native.key, sub);
+    if (isDraftSubmissionAccepted(sub)) {
+      markDraftSubmissionAccepted(sub);
+    } else {
+      scheduleDraftSubmissionObservation();
+    }
   }
 
   function removeDraftRestoredBadge() {
@@ -27274,13 +27529,19 @@
       const current = readNativeComposerDraft();
       if (!current || current.keyRef !== ctx.keyRef || current.key !== ctx.key) return;
       // DOM is used only for bounded user actions, never as a draft data source.
-      setComposerTextareaValue(ctx.textarea, "");
-      if (activeFormattedComposer) {
-        activeFormattedComposer.innerHTML = "";
-        activeFormattedComposer.__piEnhSyncedValue = "";
-      }
-      for (const img of ctx.fieldset.querySelectorAll("img")) {
-        if (/^(blob:|data:image\/)/.test(img.getAttribute("src") || "")) img.parentElement?.querySelector("button")?.click();
+      const prevClearing = clearingStaleDraftSurface;
+      clearingStaleDraftSurface = true;
+      try {
+        setComposerTextareaValue(ctx.textarea, "");
+        if (activeFormattedComposer) {
+          activeFormattedComposer.innerHTML = "";
+          activeFormattedComposer.__piEnhSyncedValue = "";
+        }
+        for (const img of ctx.fieldset.querySelectorAll("img")) {
+          if (/^(blob:|data:image\/)/.test(img.getAttribute("src") || "")) img.parentElement?.querySelector("button")?.click();
+        }
+      } finally {
+        clearingStaleDraftSurface = prevClearing;
       }
       removePersistedDraft(ctx.key);
       removeDraftRestoredBadge();
@@ -27294,12 +27555,16 @@
     if (!isPluginEnabled("composer-draft-cache")) return false;
     ensureDraftListeners();
     const native = readNativeComposerDraft();
+    reconcilePendingDraftSubmission(native);
     // Old refs retain their immutable owner even after the DOM is unmounted.
     // Native clearInput updates them synchronously before send/remount.
     if (activeNativeDraft) persistNativeDraft(activeNativeDraft);
     if (!native) return false;
     if (lastObservedNativeDraftKey !== native.key) {
-      if (lastObservedNativeDraftKey) submittedDraftKeys.delete(lastObservedNativeDraftKey);
+      if (lastObservedNativeDraftKey) {
+        submittedDraftKeys.delete(lastObservedNativeDraftKey);
+        pendingDraftSubmissions.delete(lastObservedNativeDraftKey);
+      }
       lastObservedNativeDraftKey = native.key;
       requestComposerDraftRestore();
     }
@@ -27310,6 +27575,52 @@
     } else Object.assign(ctx, native);
     if (ctx !== activeNativeDraft) removeDraftRestoredBadge();
     activeNativeDraft = ctx;
+
+    const sub = pendingDraftSubmissions.get(ctx.key);
+    if (sub?.accepted) {
+      if (ctx.keyRef !== sub.keyRef && !ctx.initialized) {
+        // Same-session remount immediately after an accepted send: native in-memory
+        // draft-store Map clearing is asynchronous (useEffect), so the remounted
+        // instance may initialize with stale already-sent text/images.
+        const staleSnapshot = nativeDraftSnapshot(ctx);
+        if (staleSnapshot && (staleSnapshot.value || staleSnapshot.images.length)
+          && JSON.stringify(staleSnapshot) !== sub.signature) {
+          // A different payload on the new instance is a fresh user draft, not
+          // stale native memory; never erase it while repairing the old send.
+          pendingDraftSubmissions.delete(ctx.key);
+          submittedDraftKeys.delete(ctx.key);
+          ctx.initialized = true;
+          draftRestoreRequested = false;
+          persistNativeDraft(ctx);
+          return false;
+        }
+        if (staleSnapshot && (staleSnapshot.value || staleSnapshot.images.length)) {
+          clearStaleRemountedNativeComposer(ctx, ctx.key);
+        } else {
+          removePersistedDraft(ctx.key);
+        }
+        ctx.initialized = true;
+        ctx.lastSaved = EMPTY_DRAFT_SIGNATURE;
+        sub.keyRef = ctx.keyRef;
+        draftRestoreRequested = false;
+        return false;
+      }
+      if (ctx.keyRef === sub.keyRef) {
+        const currentSnapshot = nativeDraftSnapshot(ctx);
+        if (currentSnapshot && !currentSnapshot.value && !currentSnapshot.images.length) {
+          removePersistedDraft(ctx.key);
+          ctx.initialized = true;
+          ctx.lastSaved = EMPTY_DRAFT_SIGNATURE;
+          return false;
+        }
+        if (currentSnapshot && (currentSnapshot.value || currentSnapshot.images.length)) {
+          // Subsequent user typing or restoreSubmission on the already-cleared instance.
+          pendingDraftSubmissions.delete(ctx.key);
+          submittedDraftKeys.delete(ctx.key);
+        }
+      }
+    }
+
     let restored = false;
     if (!ctx.initialized) {
       const snapshot = nativeDraftSnapshot(ctx);
@@ -27333,6 +27644,11 @@
             return false;
           }
         }
+      } else if (!draftRestoreRequested) {
+        ctx.initialized = true;
+      } else if ((snapshot.value || snapshot.images.length) && !getPersistedDraft(ctx.key)) {
+        ctx.initialized = true;
+        draftRestoreRequested = false;
       }
     }
     persistNativeDraft(ctx);
@@ -27353,11 +27669,12 @@
   function ensureDraftListeners() {
     if (draftListeners.length) return;
     const handler = (event) => {
+      if (clearingStaleDraftSurface) return;
       const submissionIntent = getComposerSubmissionIntent(event);
       if (submissionIntent) {
-        // Delete before React can replace this composer. The deferred native-ref
-        // check below restores only an explicitly rejected/prevented submission.
-        clearDraftForSubmissionIntent(submissionIntent);
+        // Track submission intent without deleting persisted draft prematurely.
+        // Draft is cleared only when native clearInput consumes the refs.
+        trackDraftSubmissionIntent(submissionIntent);
         removeDraftRestoredBadge();
         queueNativeDraftSync();
         return;
@@ -27365,12 +27682,27 @@
       const current = activeNativeDraft;
       const target = event?.target;
       const changedText = (event?.type === "input" || event?.type === "change" || event?.type === "paste")
-        && target === current?.textarea;
+        && (target === current?.textarea || Boolean(activeFormattedComposer && activeFormattedComposer.__boundTextarea === current?.textarea && activeFormattedComposer.contains(target)));
       const changedImage = event?.type === "change" && target?.tagName === "INPUT"
         && String(target.type || "").toLowerCase() === "file" && current?.fieldset?.contains?.(target);
-      // Once the user changes the restored payload, this is no longer a useful
-      // recovery status. Keep the toolbar clean without inferring send state.
-      if (changedText || changedImage) removeDraftRestoredBadge();
+      if (changedText || changedImage) {
+        removeDraftRestoredBadge();
+        if (current?.key) {
+          const sub = pendingDraftSubmissions.get(current.key);
+          if (sub && sub.keyRef === current.keyRef) {
+            if (sub.accepted) {
+              pendingDraftSubmissions.delete(current.key);
+              submittedDraftKeys.delete(current.key);
+            } else {
+              const snap = nativeDraftSnapshot(current);
+              if (snap && (snap.value || snap.images.length) && JSON.stringify(snap) !== sub.signature) {
+                pendingDraftSubmissions.delete(current.key);
+                submittedDraftKeys.delete(current.key);
+              }
+            }
+          }
+        }
+      }
       // Observe before React handles send, then again after it has committed.
       // Enter/IME/mobile newline and rejected sends are NOT assumed to be sent.
       syncNativeComposerDraft(false);
@@ -27385,12 +27717,17 @@
   function stopComposerDraftCache() {
     draftRuntimeGeneration++;
     draftSyncQueued = false;
+    if (draftSubmissionPollFrame && typeof cancelAnimationFrame === "function") {
+      cancelAnimationFrame(draftSubmissionPollFrame);
+      draftSubmissionPollFrame = 0;
+    }
     for (const cleanup of draftListeners.splice(0)) cleanup();
     nativeDraftContexts = new WeakMap();
     activeNativeDraft = null;
     draftRestoreRequested = true;
     lastObservedNativeDraftKey = null;
     submittedDraftKeys.clear();
+    pendingDraftSubmissions.clear();
     removeDraftRestoredBadge();
   }
 
@@ -27405,6 +27742,7 @@
   function notifySessionChangedForDraft() { syncNativeComposerDraft(false); }
 
   activeCleanups.push(stopComposerDraftCache);
+  if (isPluginEnabled("composer-draft-cache")) ensureDraftListeners();
   window.__PI_ENH_GET_PERSISTED_DRAFT__ = getPersistedDraft;
   window.__PI_ENH_SAVE_PERSISTED_DRAFT__ = savePersistedDraft;
   window.__PI_ENH_REMOVE_PERSISTED_DRAFT__ = removePersistedDraft;
@@ -32316,6 +32654,11 @@
       style = document.createElement("style");
       style.id = CODEX_COMPOSER_STYLE_ID;
       style.textContent = `
+        /* The settings dialog is modal; keep the fixed composer from covering its content. */
+        body:has(.settings-dialog-backdrop, .settings-dialog-surface, [role="dialog"][aria-modal="true"]) .pi-enh-cursor-composer {
+          display: none !important;
+        }
+
         /* One grid owns editor and toolbar. Native React nodes are never reparented. */
         .pi-enh-cursor-composer,
         fieldset > div[style*="max-width"]:has(textarea, .pi-enh-formatted-composer) {
@@ -32467,14 +32810,49 @@
         }
 
         .pi-enh-cursor-composer .pi-enh-cursor-editor,
-        .pi-enh-cursor-composer .pi-enh-formatted-composer {
+        .pi-enh-cursor-composer textarea.chat-input-textarea,
+        .pi-enh-cursor-composer .pi-enh-formatted-composer,
+        fieldset > div[style*="max-width"] textarea.chat-input-textarea,
+        fieldset > div[style*="max-width"] .pi-enh-formatted-composer {
           grid-area: 2 / 1 / 3 / -1;
           width: 100% !important;
-          padding: 0 2px 6px !important;
-          min-height: 30px !important;
-          box-sizing: border-box;
+          padding: 0 2px 4px !important;
+          min-height: 28px !important;
+          max-height: clamp(68px, 22vh, 160px) !important;
+          overflow-y: auto !important;
+          overscroll-behavior: contain !important;
+          box-sizing: border-box !important;
         }
-        .pi-enh-cursor-composer .pi-enh-cursor-attachments { grid-area: 1 / 1 / 2 / -1; }
+        .pi-enh-cursor-composer:has(.pi-enh-cursor-attachments, div[style*="flex-wrap"] img) .pi-enh-cursor-editor,
+        .pi-enh-cursor-composer:has(.pi-enh-cursor-attachments, div[style*="flex-wrap"] img) textarea.chat-input-textarea,
+        .pi-enh-cursor-composer:has(.pi-enh-cursor-attachments, div[style*="flex-wrap"] img) .pi-enh-formatted-composer,
+        fieldset > div[style*="max-width"]:has(div[style*="flex-wrap"] img) textarea.chat-input-textarea,
+        fieldset > div[style*="max-width"]:has(div[style*="flex-wrap"] img) .pi-enh-formatted-composer {
+          max-height: clamp(52px, calc(18vh - 12px), 124px) !important;
+        }
+        .pi-enh-cursor-composer .pi-enh-cursor-attachments,
+        fieldset > div[style*="max-width"] > div[style*="flex-wrap"]:has(img) {
+          grid-area: 1 / 1 / 2 / -1 !important;
+          display: flex !important;
+          flex-wrap: nowrap !important;
+          align-items: center !important;
+          gap: 6px !important;
+          margin: -2px 0 0 0 !important;
+          padding: 4px 6px 2px 2px !important;
+          max-height: 54px !important;
+          overflow-x: auto !important;
+          overflow-y: hidden !important;
+          box-sizing: border-box !important;
+          min-width: 0 !important;
+        }
+        .pi-enh-cursor-composer .pi-enh-cursor-attachments img,
+        fieldset > div[style*="max-width"] > div[style*="flex-wrap"]:has(img) img {
+          width: 44px !important;
+          height: 44px !important;
+          border-radius: 6px !important;
+          object-fit: cover !important;
+          display: block !important;
+        }
         /* 1. 加号按钮槽位 */
         .pi-enh-cursor-composer .pi-enh-composer-add-btn,
         fieldset > div[style*="max-width"] .pi-enh-composer-add-btn {
@@ -33194,6 +33572,55 @@
             left: 0 !important;
             right: 0 !important;
           }
+          .pi-enh-cursor-composer .pi-enh-cursor-editor,
+          .pi-enh-cursor-composer textarea.chat-input-textarea,
+          .pi-enh-cursor-composer .pi-enh-formatted-composer,
+          fieldset > div[style*="max-width"] textarea.chat-input-textarea,
+          fieldset > div[style*="max-width"] .pi-enh-formatted-composer {
+            max-height: clamp(60px, 19vh, 136px) !important;
+          }
+          .pi-enh-cursor-composer:has(.pi-enh-cursor-attachments, div[style*="flex-wrap"] img) .pi-enh-cursor-editor,
+          .pi-enh-cursor-composer:has(.pi-enh-cursor-attachments, div[style*="flex-wrap"] img) textarea.chat-input-textarea,
+          .pi-enh-cursor-composer:has(.pi-enh-cursor-attachments, div[style*="flex-wrap"] img) .pi-enh-formatted-composer,
+          fieldset > div[style*="max-width"]:has(div[style*="flex-wrap"] img) textarea.chat-input-textarea,
+          fieldset > div[style*="max-width"]:has(div[style*="flex-wrap"] img) .pi-enh-formatted-composer {
+            max-height: clamp(48px, calc(16vh - 10px), 104px) !important;
+          }
+        }
+
+        /* 低高度横屏（如手机横屏/分屏）：收紧卡片、附件条与编辑区最大高度，内部平滑滚动并保留图片条与工具栏 */
+        @media (max-height: 500px) {
+          .pi-enh-cursor-composer,
+          fieldset > div[style*="max-width"]:has(textarea, .pi-enh-formatted-composer) {
+            padding: 6px 10px !important;
+            row-gap: 4px !important;
+          }
+          .pi-enh-cursor-composer .pi-enh-cursor-attachments,
+          fieldset > div[style*="max-width"] > div[style*="flex-wrap"]:has(img) {
+            max-height: 44px !important;
+            padding: 4px 6px 1px 2px !important;
+          }
+          .pi-enh-cursor-composer .pi-enh-cursor-attachments img,
+          fieldset > div[style*="max-width"] > div[style*="flex-wrap"]:has(img) img {
+            width: 36px !important;
+            height: 36px !important;
+          }
+          .pi-enh-cursor-composer .pi-enh-cursor-editor,
+          .pi-enh-cursor-composer textarea.chat-input-textarea,
+          .pi-enh-cursor-composer .pi-enh-formatted-composer,
+          fieldset > div[style*="max-width"] textarea.chat-input-textarea,
+          fieldset > div[style*="max-width"] .pi-enh-formatted-composer {
+            padding: 0 2px 2px !important;
+            min-height: 24px !important;
+            max-height: clamp(42px, calc(28vh - 16px), 84px) !important;
+          }
+          .pi-enh-cursor-composer:has(.pi-enh-cursor-attachments, div[style*="flex-wrap"] img) .pi-enh-cursor-editor,
+          .pi-enh-cursor-composer:has(.pi-enh-cursor-attachments, div[style*="flex-wrap"] img) textarea.chat-input-textarea,
+          .pi-enh-cursor-composer:has(.pi-enh-cursor-attachments, div[style*="flex-wrap"] img) .pi-enh-formatted-composer,
+          fieldset > div[style*="max-width"]:has(div[style*="flex-wrap"] img) textarea.chat-input-textarea,
+          fieldset > div[style*="max-width"]:has(div[style*="flex-wrap"] img) .pi-enh-formatted-composer {
+            max-height: clamp(36px, calc(22vh - 16px), 64px) !important;
+          }
         }
       `;
       document.head.appendChild(style);
@@ -33203,6 +33630,7 @@
     if (!card) return;
     card.classList.add("pi-enh-cursor-composer");
     textarea.classList.add("pi-enh-cursor-editor");
+    syncComposerTextareaAutoHeight(textarea);
     const editor = textarea.parentElement;
     editor.classList.add("pi-enh-cursor-contents");
     if (editor.parentElement !== card) editor.parentElement.classList.add("pi-enh-cursor-contents");
@@ -34976,11 +35404,20 @@
         }
         const button = getAnnotationSendButtons(textarea).find((b) => determineSendKindFromButton(b) === kind);
         if (!button || button.disabled) return;
+        const preDispatchSnapshot = nativeDraftSnapshot(current);
+        if (preDispatchSnapshot) {
+          const outboundSnap = intent.snapshot ? { ...preDispatchSnapshot, value: intent.body || "" } : preDispatchSnapshot;
+          trackDraftSubmissionIntent({
+            native: current,
+            snapshot: outboundSnap,
+            signature: JSON.stringify(outboundSnap),
+          });
+        }
         intent.phase = "dispatched";
         intent.accepted = await invokeNativeComposerButton(button, current,
           intent.snapshot ? () => rollbackAnnotationSubmission(intent) : null);
         if (!intent.accepted) return;
-        const cardAfterDispatch = textarea?.closest?.('.pi-enh-cursor-composer, fieldset > div[style*="max-width"]');
+        const cardAfterDispatch = (readNativeComposerDraft()?.textarea || textarea)?.closest?.('.pi-enh-cursor-composer, fieldset > div[style*="max-width"]');
         if (cardAfterDispatch) {
           cardAfterDispatch.classList.add("pi-enh-has-running-controls");
           for (const b of cardAfterDispatch.querySelectorAll("button")) {
@@ -34988,24 +35425,23 @@
           }
         }
         if (intent.snapshot) consumeAnnotationSnapshot(intent.snapshot, intent.annotationSession);
+        removePersistedDraft(intent.owner);
+        syncNativeComposerDraft(false);
         const committed = readNativeComposerDraft();
-        if (committed && committed.keyRef === intent.keyRef && committed.key === intent.owner
-          && committed.textarea === textarea && getCurrentSessionId() === intent.route
+        if (committed && committed.key === intent.owner && getCurrentSessionId() === intent.route
           && committed.valueRef.current === "" && committed.imagesRef.current.length === 0) {
-          removePersistedDraft(intent.owner);
-          if (!instantlyClearComposerSurface(textarea, intent.owner)) {
+          if (!instantlyClearComposerSurface(committed.textarea, intent.owner)) {
             requestAnimationFrame(() => {
               if (!isPluginEnabled(intent.snapshot ? "quick-quote" : "composer-markdown-format")) return;
               const rafNative = readNativeComposerDraft();
-              if (rafNative && rafNative.keyRef === intent.keyRef && rafNative.key === intent.owner
-                && rafNative.textarea === textarea && getCurrentSessionId() === intent.route
+              if (rafNative && rafNative.key === intent.owner && getCurrentSessionId() === intent.route
                 && rafNative.valueRef.current === "" && rafNative.imagesRef.current.length === 0) {
-                instantlyClearComposerSurface(textarea, intent.owner);
+                instantlyClearComposerSurface(rafNative.textarea, intent.owner);
               }
             });
           }
-          queueNativeDraftSync();
         }
+        queueNativeDraftSync();
       } catch (error) {
         console.warn("[Pi Web] Native composer submission was not completed", error);
         showToast("提交未完成，输入与引用已保留");
@@ -35070,18 +35506,26 @@
       const native = readNativeComposerDraft();
       const capturedOwner = native?.key;
       const capturedKeyRef = native?.keyRef;
+      const capturedValueRef = native?.valueRef;
+      const capturedImagesRef = native?.imagesRef;
       const capturedRoute = getCurrentSessionId();
       const capturedTextarea = native?.textarea || findComposerTextarea();
       if (capturedTextarea && capturedOwner) {
         const attemptClear = () => {
+          const capturedAccepted = capturedKeyRef?.current === capturedOwner
+            && capturedValueRef?.current === ""
+            && Array.isArray(capturedImagesRef?.current) && capturedImagesRef.current.length === 0;
+          if (capturedAccepted) {
+            syncNativeComposerDraft(false);
+          }
           const currentNative = readNativeComposerDraft();
-          // document click 的微任务必须校验捕获的 owner 与 textarea 未切换，不能误清新会话
-          if (!currentNative || currentNative.key !== capturedOwner || currentNative.textarea !== capturedTextarea
-            || currentNative.keyRef !== capturedKeyRef || getCurrentSessionId() !== capturedRoute) return false;
+          // document click 的微任务必须校验捕获的 owner 未切换，若未确认原实例已消费则还需校验 keyRef/textarea
+          if (!currentNative || currentNative.key !== capturedOwner || getCurrentSessionId() !== capturedRoute) return false;
+          if (!capturedAccepted && (currentNative.textarea !== capturedTextarea || currentNative.keyRef !== capturedKeyRef)) return false;
           const val = typeof currentNative.valueRef?.current === "string" ? currentNative.valueRef.current : null;
           const imgs = Array.isArray(currentNative.imagesRef?.current) ? currentNative.imagesRef.current : null;
           if (val === "" && (!imgs || imgs.length === 0)) {
-            return instantlyClearComposerSurface(capturedTextarea, capturedOwner);
+            return instantlyClearComposerSurface(currentNative.textarea, capturedOwner);
           }
           return false;
         };
@@ -35477,8 +35921,9 @@
         .pi-enh-formatted-composer {
           width: 100% !important;
           min-height: 28px !important;
-          max-height: 280px !important;
+          max-height: clamp(68px, 22vh, 160px) !important;
           overflow-y: auto !important;
+          overscroll-behavior: contain !important;
           box-sizing: border-box !important;
           padding: 2px 0 !important;
           outline: none !important;
@@ -35490,6 +35935,26 @@
           cursor: text !important;
           user-select: text !important;
           white-space: pre-wrap !important;
+        }
+        fieldset > div[style*="max-width"]:has(div[style*="flex-wrap"] img) .pi-enh-formatted-composer {
+          max-height: clamp(52px, calc(18vh - 12px), 124px) !important;
+        }
+        @media (max-width: 640px) {
+          .pi-enh-formatted-composer {
+            max-height: clamp(60px, 19vh, 136px) !important;
+          }
+          fieldset > div[style*="max-width"]:has(div[style*="flex-wrap"] img) .pi-enh-formatted-composer {
+            max-height: clamp(48px, calc(16vh - 10px), 104px) !important;
+          }
+        }
+        @media (max-height: 500px) {
+          .pi-enh-formatted-composer {
+            min-height: 24px !important;
+            max-height: clamp(42px, calc(28vh - 16px), 84px) !important;
+          }
+          fieldset > div[style*="max-width"]:has(div[style*="flex-wrap"] img) .pi-enh-formatted-composer {
+            max-height: clamp(36px, calc(22vh - 16px), 64px) !important;
+          }
         }
 
         .pi-enh-formatted-composer:empty::before {
@@ -35840,6 +36305,7 @@
         }
       };
       const onInput = () => {
+        syncComposerTextareaAutoHeight(textarea);
         const card = textarea.closest('fieldset > div[style*="max-width"]');
         updateCardContentState(card, textarea);
       };
@@ -35932,6 +36398,7 @@
       }
       textarea.style.display = "block";
       formattedComposer.style.display = "none";
+      syncComposerTextareaAutoHeight(textarea);
     }
   }
 
@@ -36059,12 +36526,16 @@
     const textarea = findComposerTextarea();
     if (textarea) {
       if (enabled) {
-        if (!textarea.hasAttribute("data-pi-orig-placeholder")) {
-          const raw = textarea.getAttribute("placeholder") || "";
+        const raw = textarea.getAttribute("placeholder") || "";
+        if (raw || !textarea.hasAttribute("data-pi-orig-placeholder")) {
           if (raw) textarea.setAttribute("data-pi-orig-placeholder", raw);
         }
         try {
-          textarea.placeholder = "";
+          if (origTextareaPlaceholderDesc?.set) {
+            origTextareaPlaceholderDesc.set.call(textarea, "");
+          } else {
+            textarea.placeholder = "";
+          }
           textarea.setAttribute("placeholder", "");
         } catch (e) {}
         textarea.classList.add("pi-enh-clean-placeholder");
@@ -36072,7 +36543,11 @@
         const orig = textarea.getAttribute("data-pi-orig-placeholder");
         if (orig !== null) {
           try {
-            textarea.placeholder = orig;
+            if (origTextareaPlaceholderDesc?.set) {
+              origTextareaPlaceholderDesc.set.call(textarea, orig);
+            } else {
+              textarea.placeholder = orig;
+            }
             textarea.setAttribute("placeholder", orig);
           } catch (e) {}
         }
@@ -36083,8 +36558,9 @@
     const formatted = document.querySelector(".pi-enh-formatted-composer");
     if (formatted) {
       if (enabled) {
-        if (!formatted.hasAttribute("data-pi-orig-placeholder")) {
-          formatted.setAttribute("data-pi-orig-placeholder", formatted.getAttribute("data-placeholder") || "");
+        const rawFmt = formatted.getAttribute("data-placeholder") || "";
+        if (rawFmt || !formatted.hasAttribute("data-pi-orig-placeholder")) {
+          formatted.setAttribute("data-pi-orig-placeholder", rawFmt);
         }
         formatted.setAttribute("data-placeholder", "");
         if (formatted.dataset) formatted.dataset.placeholder = "";
@@ -36109,7 +36585,11 @@
       const orig = textarea.getAttribute("data-pi-orig-placeholder");
       if (orig !== null) {
         try {
-          textarea.placeholder = orig;
+          if (origTextareaPlaceholderDesc?.set) {
+            origTextareaPlaceholderDesc.set.call(textarea, orig);
+          } else {
+            textarea.placeholder = orig;
+          }
           textarea.setAttribute("placeholder", orig);
         } catch (e) {}
       }
@@ -36573,15 +37053,17 @@
 
   function updateComposerPlaceholder(textarea, mode) {
     if (textarea) {
-      if (!textarea.hasAttribute("data-original-placeholder")) {
-        textarea.setAttribute("data-original-placeholder", textarea.placeholder || "");
-      }
-      const orig = textarea.getAttribute("data-original-placeholder") || "";
-      if (mode === "plan") {
-        textarea.placeholder = PLACEHOLDER_PLAN;
-      } else if (mode === "goal") {
-        textarea.placeholder = PLACEHOLDER_GOAL;
-      } else {
+      if (mode === "plan" || mode === "goal") {
+        if (!textarea.hasAttribute("data-original-placeholder")) {
+          const currentPh = typeof getComposerEffectivePlaceholder === "function"
+            ? getComposerEffectivePlaceholder(textarea)
+            : (textarea.placeholder || "");
+          textarea.setAttribute("data-original-placeholder", currentPh);
+        }
+        textarea.placeholder = mode === "plan" ? PLACEHOLDER_PLAN : PLACEHOLDER_GOAL;
+      } else if (textarea.hasAttribute("data-original-placeholder")) {
+        const orig = textarea.getAttribute("data-original-placeholder") || "";
+        textarea.removeAttribute("data-original-placeholder");
         textarea.placeholder = orig;
       }
     }
@@ -36589,16 +37071,15 @@
     // 同时同步富文本编辑器 contenteditable 的 placeholder
     const formatted = document.querySelector(".pi-enh-formatted-composer");
     if (formatted) {
-      if (!formatted.hasAttribute("data-original-placeholder")) {
-        const origFmt = formatted.getAttribute("data-placeholder") || formatted.getAttribute("placeholder") || "";
-        formatted.setAttribute("data-original-placeholder", origFmt);
-      }
-      const orig = formatted.getAttribute("data-original-placeholder") || "";
-      if (mode === "plan") {
-        formatted.setAttribute("data-placeholder", PLACEHOLDER_PLAN);
-      } else if (mode === "goal") {
-        formatted.setAttribute("data-placeholder", PLACEHOLDER_GOAL);
-      } else {
+      if (mode === "plan" || mode === "goal") {
+        if (!formatted.hasAttribute("data-original-placeholder")) {
+          const origFmt = formatted.getAttribute("data-placeholder") || formatted.getAttribute("placeholder") || formatted.getAttribute("data-pi-orig-placeholder") || "";
+          formatted.setAttribute("data-original-placeholder", origFmt);
+        }
+        formatted.setAttribute("data-placeholder", mode === "plan" ? PLACEHOLDER_PLAN : PLACEHOLDER_GOAL);
+      } else if (formatted.hasAttribute("data-original-placeholder")) {
+        const orig = formatted.getAttribute("data-original-placeholder") || "";
+        formatted.removeAttribute("data-original-placeholder");
         formatted.setAttribute("data-placeholder", orig);
       }
     }
@@ -38865,6 +39346,16 @@
       ? assembleComposerAttachments(textarea)
       : false;
 
+    const native = readNativeComposerDraft();
+    if (native && !assembledAttachments) {
+      return dispatchComposerNativeSubmission({
+        kind: "send",
+        textarea,
+        expectedOwner: native.key,
+        expectedText: textarea.value || "",
+      });
+    }
+
     const fieldset = textarea.closest("fieldset") || document.querySelector("fieldset");
     if (!fieldset) return false;
 
@@ -38890,16 +39381,6 @@
         sendComposerText(textarea);
         return true;
       }
-    }
-
-    const native = readNativeComposerDraft();
-    if (native) {
-      return dispatchComposerNativeSubmission({
-        kind: "send",
-        textarea,
-        expectedOwner: native.key,
-        expectedText: textarea.value || "",
-      });
     }
     return false;
   }
@@ -42105,12 +42586,75 @@
     cancelHistoryTailFrame(binding);
   }
 
+  function blurComposerForMinimapNavigation() {
+    const active = document.activeElement;
+    if (active?.matches?.('.pi-enh-formatted-composer[contenteditable="true"], textarea.chat-input-textarea')) {
+      active.blur();
+    }
+  }
+
+  let minimapNavigationScrollGuard = null;
+
+  function clearMinimapNavigationScrollGuard() {
+    const guard = minimapNavigationScrollGuard;
+    if (!guard) return;
+    minimapNavigationScrollGuard = null;
+    if (guard.timer !== null) clearManagedTimeout(guard.timer);
+    if (guard.scroll.scrollTo === guard.wrapped) guard.scroll.scrollTo = guard.original;
+  }
+
+  function guardMinimapNavigationFromAutoFollow(scroll) {
+    clearMinimapNavigationScrollGuard();
+    if (!scroll || typeof scroll.scrollTo !== "function") return;
+    const original = scroll.scrollTo;
+    const sessionId = getCurrentSessionId();
+    const wrapped = function (...args) {
+      const options = args[0];
+      const maxTop = Math.max(0, this.scrollHeight - this.clientHeight);
+      if (this === scroll && options?.behavior === "smooth" && Number(options.top) >= maxTop - 30 && maxTop > 120) {
+        clearMinimapNavigationScrollGuard(); // Explicitly returning to the tail should re-enable live follow.
+      }
+      if (this === scroll && sessionId === getCurrentSessionId() && isPluginEnabled("minimap-full-nav") &&
+          options?.behavior === "auto" && Number(options.top) >= maxTop - 30 && maxTop > 120) {
+        return;
+      }
+      return original.apply(this, args);
+    };
+    scroll.scrollTo = wrapped;
+    const guard = { scroll, original, wrapped, timer: null };
+    minimapNavigationScrollGuard = guard;
+    guard.timer = addManagedTimeout(() => {
+      if (minimapNavigationScrollGuard === guard) clearMinimapNavigationScrollGuard();
+    }, 4000);
+  }
+
+  activeCleanups.push(clearMinimapNavigationScrollGuard);
+
   function releaseHistoryTailForMinimapNavigation() {
+    blurComposerForMinimapNavigation();
+    const scroll = getChatScrollContainer();
+    // The native streaming follower keeps its own isNearBottomRef. Unlike a
+    // gesture inside the chat, clicking the sibling minimap never updates it.
+    // Leave the tail and notify its scroll listener before React's navigation
+    // click runs, so queued streaming frames cannot reclaim the viewport.
+    if (scroll) {
+      const maxTop = Math.max(0, scroll.scrollHeight - scroll.clientHeight);
+      const distance = maxTop - scroll.scrollTop;
+      if (maxTop > 120 && distance <= 8) {
+        scroll.scrollTop = maxTop - 24;
+        scroll.dispatchEvent(new Event("scroll"));
+      }
+    }
     const currentSid = typeof getCurrentSessionId === "function" ? getCurrentSessionId() : null;
     if (typeof isSessionScrollRestoring === "function" && isSessionScrollRestoring(currentSid)) {
       cancelActiveScrollRestore("minimap-navigation");
     }
     cancelHistoryScrollRestore();
+    // Stream updates can race the smooth first-turn jump while React still
+    // considers the viewport attached to the tail. Ignore only its automatic
+    // bottom-follow calls for this navigation; explicit smooth bottom clicks
+    // and normal following outside this short window remain untouched.
+    guardMinimapNavigationFromAutoFollow(scroll);
     if (!isPluginEnabled("history-scroll-stability")) return;
     if (!historyScrollBinding || historyScrollBinding.sessionId !== currentSid || historyScrollBinding.scroll !== getChatScrollContainer()) {
       syncHistoryScrollStability(true);
@@ -42485,7 +43029,7 @@
       listen("touchstart", (event) => {
         markHistoryTailGesture(binding);
         cancelHistoryScrollRestore();
-        if (event.touches?.length !== 1 || scroll.scrollTop > 60 ||
+        if (event.touches?.length !== 1 || scroll.scrollTop > 0 ||
             event.target?.closest?.("input, textarea, button, a, select, pre, [contenteditable=true], [data-minimap-preview-box]")) return;
         const touch = event.touches[0];
         binding.pull = { x: touch.clientX, y: touch.clientY, distance: 0 };
@@ -42495,7 +43039,7 @@
         if (!pull) return;
         if (event.touches?.length !== 1) { resetPull(); showHistoryFeedback(binding, binding.pending || binding.requests.size ? "loading" : "idle", "正在加载更早消息…"); return; }
         const touch = event.touches[0], dy = touch.clientY - pull.y, dx = touch.clientX - pull.x;
-        if (Math.abs(dx) > Math.abs(dy) || dy < 0) {
+        if (scroll.scrollTop > 0 || Math.abs(dx) > Math.abs(dy) || dy < 0) {
           resetPull();
           if (["pull", "armed"].includes(binding.phase)) showHistoryFeedback(binding, "idle");
           return;
@@ -44469,6 +45013,10 @@
   const MINIMAP_INITIAL_TURNS_STORAGE_KEY = "pi-enh-minimap-initial-turns";
   const MINIMAP_STEP_TURNS_STORAGE_KEY = "pi-enh-minimap-step-turns";
   const MINIMAP_HISTORY_FETCH_TAIL = 250;
+  // Native ChatMinimap may replay its centering effect after a navigation. Keep
+  // the selected preview card anchored only for that short race window.
+  const MINIMAP_PREVIEW_SCROLL_GUARD_MS = 1800;
+  const MINIMAP_PREVIEW_USER_SCROLL_GRACE_MS = 450;
   minimapHistoryDisplayState = new Map();
   autoLoadEarlierTriggered = false;
   let activeMinimapPreviewBox = null;
@@ -44700,9 +45248,147 @@
     };
   }
 
+  function findMinimapScrollTopDescriptor(target) {
+    let owner = target;
+    while (owner) {
+      const descriptor = Object.getOwnPropertyDescriptor(owner, "scrollTop");
+      if (descriptor) return descriptor;
+      owner = Object.getPrototypeOf(owner);
+    }
+    return null;
+  }
+
+  function restoreMinimapPreviewScrollGuard(bindings) {
+    const guard = bindings?.scrollTopGuard;
+    if (!guard) return;
+    if (guard.expiryTimer !== null) {
+      clearManagedTimeout(guard.expiryTimer);
+      guard.expiryTimer = null;
+    }
+    if (guard.userInteractionTimer !== null) {
+      clearManagedTimeout(guard.userInteractionTimer);
+      guard.userInteractionTimer = null;
+    }
+    try {
+      if (guard.originalOwnDescriptor) {
+        Object.defineProperty(guard.previewBox, "scrollTop", guard.originalOwnDescriptor);
+      } else {
+        delete guard.previewBox.scrollTop;
+      }
+    } catch (e) {}
+    bindings.scrollTopGuard = null;
+  }
+
+  function markMinimapPreviewUserScroll(bindings) {
+    const guard = bindings?.scrollTopGuard;
+    if (!guard) return;
+    guard.userInteractionActive = true;
+    guard.userInteractionUntil = Date.now() + MINIMAP_PREVIEW_USER_SCROLL_GRACE_MS;
+    if (guard.userInteractionTimer !== null) clearManagedTimeout(guard.userInteractionTimer);
+    guard.userInteractionTimer = addManagedTimeout(() => {
+      guard.userInteractionTimer = null;
+      guard.userInteractionActive = false;
+    }, MINIMAP_PREVIEW_USER_SCROLL_GRACE_MS);
+  }
+
+  function getMinimapPreviewAnchorState(previewBox, targetTurnEl, descriptor) {
+    const locatedTurn = targetTurnEl && targetTurnEl.isConnected && previewBox.contains(targetTurnEl)
+      ? targetTurnEl
+      : previewBox.querySelector("[data-located='true'], [data-located=true]");
+    if (!locatedTurn || !locatedTurn.isConnected ||
+        (locatedTurn.getAttribute("data-located") !== "true" && locatedTurn.getAttribute("data-located") !== "")) {
+      return null;
+    }
+    const computed = getComputedStyle(locatedTurn);
+    const turnRect = locatedTurn.getBoundingClientRect();
+    const boxRect = previewBox.getBoundingClientRect();
+    if (computed.display === "none" || computed.visibility === "hidden" ||
+        !locatedTurn.getClientRects().length || turnRect.height <= 0 ||
+        previewBox.clientHeight <= 0 || previewBox.scrollHeight <= previewBox.clientHeight) {
+      return null;
+    }
+
+    const maxScrollTop = Math.max(0, previewBox.scrollHeight - previewBox.clientHeight);
+    const desiredTop = Math.max(
+      0,
+      Math.min(
+        maxScrollTop,
+        Number(locatedTurn.offsetTop) - (previewBox.clientHeight - locatedTurn.offsetHeight) / 2,
+      ),
+    );
+    const currentTop = Number(descriptor.get.call(previewBox)) || 0;
+    return { locatedTurn, turnRect, boxRect, desiredTop, currentTop };
+  }
+
+  function protectMinimapPreviewScrollPosition(previewBox, targetTurnEl, bindings) {
+    if (!previewBox || !targetTurnEl || !bindings) return;
+    restoreMinimapPreviewScrollGuard(bindings);
+
+    const originalOwnDescriptor = Object.getOwnPropertyDescriptor(previewBox, "scrollTop");
+    const descriptor = findMinimapScrollTopDescriptor(previewBox);
+    if (!descriptor || typeof descriptor.get !== "function" || typeof descriptor.set !== "function") return;
+
+    const guard = {
+      previewBox,
+      targetTurnEl,
+      originalOwnDescriptor,
+      descriptor,
+      expiryTimer: null,
+      userInteractionTimer: null,
+      userInteractionActive: false,
+      userInteractionUntil: 0,
+    };
+    const guardedSetter = function (value) {
+      const now = Date.now();
+      if (!isPluginEnabled("minimap-full-nav")) {
+        restoreMinimapPreviewScrollGuard(bindings);
+        descriptor.set.call(this, value);
+        return;
+      }
+      if (now >= guard.expiresAt) {
+        restoreMinimapPreviewScrollGuard(bindings);
+        descriptor.set.call(this, value);
+        return;
+      }
+      if (!guard.userInteractionActive && now >= guard.userInteractionUntil) {
+        const anchor = getMinimapPreviewAnchorState(this, guard.targetTurnEl, descriptor);
+        const nextTop = Number(value);
+        if (anchor && Number.isFinite(nextTop)) {
+          const candidateTop = anchor.turnRect.top + anchor.currentTop - nextTop;
+          const candidateBottom = candidateTop + anchor.turnRect.height;
+          const targetVisible = candidateBottom > anchor.boxRect.top && candidateTop < anchor.boxRect.bottom;
+          if (!targetVisible && Math.abs(nextTop - anchor.desiredTop) >= 1) {
+            descriptor.set.call(this, anchor.desiredTop);
+            return;
+          }
+        }
+      }
+      descriptor.set.call(this, value);
+    };
+
+    try {
+      Object.defineProperty(previewBox, "scrollTop", {
+        configurable: true,
+        enumerable: originalOwnDescriptor?.enumerable ?? false,
+        get() { return descriptor.get.call(this); },
+        set: guardedSetter,
+      });
+    } catch (e) {
+      return;
+    }
+
+    guard.expiresAt = Date.now() + MINIMAP_PREVIEW_SCROLL_GUARD_MS;
+    bindings.scrollTopGuard = guard;
+    guard.expiryTimer = addManagedTimeout(() => {
+      guard.expiryTimer = null;
+      if (bindings.scrollTopGuard === guard) restoreMinimapPreviewScrollGuard(bindings);
+    }, MINIMAP_PREVIEW_SCROLL_GUARD_MS);
+  }
+
   function detachMinimapInteractions(previewBox) {
     const bindings = previewBox?.__piEnhMinimapBindings;
     if (!bindings) return;
+    restoreMinimapPreviewScrollGuard(bindings);
     for (const [type, handler, options] of bindings.listeners) {
       previewBox.removeEventListener(type, handler, options);
     }
@@ -44915,6 +45601,7 @@
       toolbarListeners: [],
       toolbar: null,
       hasInitializedLayout: false,
+      scrollTopGuard: null,
       originalPaddingTop: previewBox.style.paddingTop || "",
       originalBoxSizing: previewBox.style.boxSizing || "",
     };
@@ -44923,6 +45610,7 @@
       bindings.listeners.push([type, handler, options]);
     };
     bindings.handleWheel = (event) => {
+      markMinimapPreviewUserScroll(bindings);
       if ((previewBox.scrollTop || 0) <= 1 && Number(event.deltaY) < 0) {
         if (triggerAutoLoadEarlier("wheel")) event.preventDefault();
       }
@@ -44965,6 +45653,7 @@
     };
 
     bindings.handleTouchStart = (event) => {
+      markMinimapPreviewUserScroll(bindings);
       const touch = event.touches?.[0];
       if (!touch) return;
       touchStartX = touch.clientX;
@@ -44976,6 +45665,7 @@
     };
 
     bindings.handleTouchMove = (event) => {
+      markMinimapPreviewUserScroll(bindings);
       const touch = event.touches?.[0];
       if (!touch || touchStartX === null || touchStartY === null) return;
       const currentX = touch.clientX;
@@ -45018,6 +45708,7 @@
     };
 
     bindings.handleTouchEnd = (event) => {
+      markMinimapPreviewUserScroll(bindings);
       if (gestureIntent === "swipe-right" && currentTranslateX > 0) {
         const elapsed = Math.max(1, Date.now() - touchStartTime);
         const velocityX = currentTranslateX / elapsed;
@@ -45548,6 +46239,10 @@
     // 2. 实时滚动会话导航抽屉（previewBox）到对应轮次
     // 在连续拖拽过程中直接即时定位（0 累积动画延迟），手停或抬起时平滑对齐
     const targetTop = targetTurnEl.offsetTop - (currentBox.clientHeight - targetTurnEl.offsetHeight) / 2;
+    const currentBindings = currentBox.__piEnhMinimapBindings || ensureMinimapInteractions(currentBox);
+    // Native ChatMinimap 的 allNodes/hover effect 可能在此后把 scrollTop 写回 0。
+    // 仅保护真实已布局且未隐藏的 data-located 卡片，避免撑开合法裁剪项。
+    protectMinimapPreviewScrollPosition(currentBox, targetTurnEl, currentBindings);
     currentBox.scrollTo({
       top: Math.max(0, targetTop),
       behavior: isFinal ? "smooth" : "auto",
@@ -45652,6 +46347,7 @@
   function handleScrubStart(event) {
     if (!isPluginEnabled("minimap-full-nav")) return;
     if (event.target?.closest?.("[data-minimap-preview-box], [data-pi-enh-minimap-toolbar]")) return;
+    blurComposerForMinimapNavigation();
     // PointerEvent and compatibility touch/mouse start events can describe the same press.
     if (isRailScrubbing) return;
 
@@ -45942,7 +46638,8 @@
       document.querySelector(".chat-content textarea") ||
       document.querySelector("textarea");
     if (textarea) {
-      return (typeof textarea.closest === "function" ? textarea.closest(".chat-content > div:last-child") : null) ||
+      return (typeof textarea.closest === "function" ? textarea.closest(".pi-enh-cursor-composer") : null) ||
+        (typeof textarea.closest === "function" ? textarea.closest(".chat-content > div:last-child") : null) ||
         (typeof textarea.closest === "function" ? textarea.closest(".relative.shrink-0") : null) ||
         textarea.parentElement?.parentElement ||
         textarea.parentElement;
@@ -46030,22 +46727,27 @@
   function syncScrollBottomPosition() {
     if (!scrollBottomBtn) return;
     const inputArea = getChatInputArea();
-    if (inputArea && inputArea.offsetHeight) {
-      const bottomPx = inputArea.offsetHeight + 14;
+    const parent = scrollBottomBtn.parentElement;
+    const inputRect = inputArea?.getBoundingClientRect?.();
+    const parentRect = parent?.getBoundingClientRect?.();
+    const parentHeight = Number(parent?.clientHeight) || Number(parentRect?.height) || 0;
+
+    if (inputRect && parentRect && parentHeight > 0 && inputRect.width > 0 && inputRect.height > 0) {
+      const parentTop = parentRect.top + (Number(parent.clientTop) || 0);
+      const parentLeft = parentRect.left + (Number(parent.clientLeft) || 0);
+      const composerTop = inputRect.top - parentTop;
+      const bottomPx = Math.max(14, Math.round(parentHeight - composerTop + 14));
       scrollBottomBtn.style.bottom = `${bottomPx}px`;
-      const inputRect = inputArea.getBoundingClientRect();
-      const parent = scrollBottomBtn.parentElement;
-      if (parent && inputRect.width > 0) {
-        const parentRect = parent.getBoundingClientRect();
-        const centerLeft = inputRect.left + inputRect.width / 2 - parentRect.left;
-        scrollBottomBtn.style.left = `${Math.round(centerLeft)}px`;
-      } else {
-        scrollBottomBtn.style.left = "50%";
-      }
+      scrollBottomBtn.style.left = `${Math.round(inputRect.left + inputRect.width / 2 - parentLeft)}px`;
+      return;
+    }
+
+    if (inputArea && inputArea.offsetHeight) {
+      scrollBottomBtn.style.bottom = `${inputArea.offsetHeight + 14}px`;
     } else {
       scrollBottomBtn.style.bottom = "96px";
-      scrollBottomBtn.style.left = "50%";
     }
+    scrollBottomBtn.style.left = "50%";
   }
 
   function onChatContentScroll() {
@@ -48611,46 +49313,61 @@
   }
 
   function isLiveRunning(sessionId) {
-    const sid = sessionId || getCurrentSessionId();
-    if (sid && typeof projectStatusModel !== "undefined" && projectStatusModel?.entry) {
-      const statusEntry = projectStatusModel.entry(sid);
-      if (statusEntry?.execution === "running") {
-        window.__PI_ENH_LAST_RUNNING_REASON__ = "projectStatusModel running";
+    const currentSid = getCurrentSessionId();
+    const sid = sessionId || currentSid;
+    const isCurrent = !sid || !currentSid || sid === currentSid;
+
+    if (isCurrent) {
+      const stopBtn = findActiveStopButton();
+      if (stopBtn) {
+        window.__PI_ENH_LAST_RUNNING_REASON__ = "active stop button: " + (stopBtn.outerHTML || stopBtn.textContent);
         return true;
       }
-      if (["ended", "completed", "idle", "stopped"].includes(statusEntry?.execution) ||
-          ["completed", "idle", "stopped", "interrupted"].includes(statusEntry?.status)) {
-        const hasActiveStop = Boolean(findActiveStopButton());
-        const textarea = findComposerTextarea();
-        const ph = String(textarea?.getAttribute("placeholder") || textarea?.placeholder || "");
-        const hasRunningPlaceholder = ph.includes("引导") || ph.includes("排队") || ph.includes("运行中") || ph.includes("Steer") || ph.includes("running");
-        const hasChatSpin = Array.from(document.querySelectorAll(".animate-spin")).some((el) => Boolean(el.closest?.(".chat-content")));
-        if (!hasActiveStop && !hasRunningPlaceholder && !hasChatSpin) {
+
+      const textarea = findComposerTextarea();
+      if (textarea) {
+        const ph = typeof getComposerEffectivePlaceholder === "function"
+          ? getComposerEffectivePlaceholder(textarea)
+          : String(textarea.getAttribute("placeholder") || textarea.placeholder || textarea.getAttribute("data-pi-orig-placeholder") || "");
+        const hasRunningPh = typeof isRunningPlaceholderText === "function"
+          ? isRunningPlaceholderText(ph)
+          : (ph.includes("引导") || ph.includes("排队") || ph.includes("运行中") || ph.includes("代理正在运行") || ph.includes("Steer") || ph.includes("running"));
+        if (hasRunningPh) {
+          window.__PI_ENH_LAST_RUNNING_REASON__ = "textarea placeholder: " + ph;
+          return true;
+        }
+      }
+
+      if (typeof isComposerIndicatingRunning === "function" && isComposerIndicatingRunning()) {
+        window.__PI_ENH_LAST_RUNNING_REASON__ = "composer running controls";
+        return true;
+      }
+
+      const hasActiveChatSpin = Array.from(document.querySelectorAll(".animate-spin")).some((el) => Boolean(el.closest?.(".chat-content")));
+      if (hasActiveChatSpin) {
+        window.__PI_ENH_LAST_RUNNING_REASON__ = "animate-spin in chat";
+        return true;
+      }
+
+      if (typeof isComposerExplicitlyIdle === "function" && isComposerExplicitlyIdle()) {
+        window.__PI_ENH_LAST_RUNNING_REASON__ = "composer explicitly idle";
+        return false;
+      }
+    }
+
+    if (sid) {
+      if (typeof isServerRunningForSession === "function" && isServerRunningForSession(sid)) {
+        window.__PI_ENH_LAST_RUNNING_REASON__ = "server runningSessionIds / projectStatusModel running";
+        return true;
+      }
+      if (typeof projectStatusModel !== "undefined" && projectStatusModel?.health?.().state === "live" && projectStatusModel?.entry) {
+        const statusEntry = projectStatusModel.entry(sid);
+        if (["ended", "completed", "idle", "stopped"].includes(statusEntry?.execution) ||
+            ["completed", "idle", "stopped", "interrupted"].includes(statusEntry?.status)) {
           window.__PI_ENH_LAST_RUNNING_REASON__ = "projectStatusModel idle/completed";
           return false;
         }
       }
-    }
-
-    const stopBtn = findActiveStopButton();
-    if (stopBtn) {
-      window.__PI_ENH_LAST_RUNNING_REASON__ = "active stop button: " + (stopBtn.outerHTML || stopBtn.textContent);
-      return true;
-    }
-
-    const textarea = findComposerTextarea();
-    if (textarea) {
-      const ph = String(textarea.getAttribute("placeholder") || textarea.placeholder || "");
-      if (ph.includes("引导") || ph.includes("排队") || ph.includes("运行中") || ph.includes("Steer") || ph.includes("running")) {
-        window.__PI_ENH_LAST_RUNNING_REASON__ = "textarea placeholder: " + ph;
-        return true;
-      }
-    }
-
-    const hasActiveChatSpin = Array.from(document.querySelectorAll(".animate-spin")).some((el) => Boolean(el.closest?.(".chat-content")));
-    if (hasActiveChatSpin) {
-      window.__PI_ENH_LAST_RUNNING_REASON__ = "animate-spin in chat";
-      return true;
     }
 
     window.__PI_ENH_LAST_RUNNING_REASON__ = "default false";
@@ -52919,7 +53636,341 @@ window.__PI_ENH_RENDER_USAGE_PANEL__ = renderUsagePanel;
       </div>`;
   }
 
+  const SUBAGENT_PROFILE_SCOPE_PRIORITY = Object.freeze({
+    builtin: 0,
+    global: 1,
+    workspace: 2,
+    project: 3,
+  });
+
+  function normalizeSubagentProfileName(value) {
+    return typeof value === "string" && value.trim() ? value.trim() : "";
+  }
+
+  function normalizeSubagentCwd(value) {
+    const cwd = typeof value === "string" ? value.trim() : "";
+    if (!cwd || cwd.includes("...")) return "";
+    return /^(?:[A-Za-z]:[\\/]|[\\/])/.test(cwd) ? cwd : "";
+  }
+
+  function getActiveSubagentCwd() {
+    let sessionId = "";
+    try {
+      sessionId = typeof getCurrentSessionId === "function"
+        ? (getCurrentSessionId() || "")
+        : new URLSearchParams(window.location.search).get("session") || "";
+      const sessionCwd = normalizeSubagentCwd(window.__PI_CURRENT_SESSION_DATA__?.info?.cwd);
+      if (sessionCwd) return sessionCwd;
+      if (sessionId && typeof knownSessionsMap !== "undefined" && knownSessionsMap?.get) {
+        const knownSession = knownSessionsMap.get(sessionId);
+        const knownCwd = normalizeSubagentCwd(knownSession?.cwd || knownSession?.projectRoot);
+        if (knownCwd) return knownCwd;
+      }
+    } catch (e) {}
+
+    try {
+      if (typeof getEffectiveComposerCwdSyncOrEmpty === "function") {
+        const composerCwd = normalizeSubagentCwd(getEffectiveComposerCwdSyncOrEmpty());
+        if (composerCwd) return composerCwd;
+      }
+    } catch (e) {}
+
+    try {
+      const workspaceEl = document.querySelector("[data-current-cwd]") || document.querySelector(".workspace-picker-button");
+      const candidates = [
+        workspaceEl?.getAttribute("data-current-cwd"),
+        workspaceEl?.getAttribute("title"),
+        workspaceEl?.textContent,
+      ];
+      for (const candidate of candidates) {
+        const cwd = normalizeSubagentCwd(candidate);
+        if (cwd) return cwd;
+      }
+    } catch (e) {}
+    return "";
+  }
+
+  function getEffectiveSubagentProfiles(rawProfiles) {
+    const byName = new Map();
+    for (const source of Array.isArray(rawProfiles) ? rawProfiles : []) {
+      const name = normalizeSubagentProfileName(source?.name);
+      const scope = typeof source?.scope === "string" ? source.scope.trim().toLowerCase() : "";
+      const priority = SUBAGENT_PROFILE_SCOPE_PRIORITY[scope];
+      if (!name || !Number.isInteger(priority)) continue;
+      const key = name.toLocaleLowerCase();
+      const previous = byName.get(key);
+      if (!previous || priority >= previous.priority) {
+        byName.set(key, { profile: { ...source, name, scope }, priority });
+      }
+    }
+    return [...byName.values()]
+      .map(({ profile }) => profile)
+      .filter((profile) => profile.enabled === true)
+      .sort((a, b) => {
+        const aLabel = normalizeSubagentProfileName(a.displayName) || a.name;
+        const bLabel = normalizeSubagentProfileName(b.displayName) || b.name;
+        return aLabel.localeCompare(bLabel, undefined, { sensitivity: "base" }) || a.name.localeCompare(b.name);
+      });
+  }
+
+  async function fetchSubagentJson(url, options = {}) {
+    const { timeoutMs = 8000, ...requestOptions } = options || {};
+    let timeoutController = null;
+    let timeoutId = null;
+    let signal = requestOptions.signal;
+    if (!signal && typeof AbortController === "function") {
+      timeoutController = new AbortController();
+      signal = timeoutController.signal;
+      if (Number(timeoutMs) > 0) {
+        timeoutId = setTimeout(() => timeoutController.abort(), Number(timeoutMs));
+      }
+    }
+    try {
+      const response = await fetch(url, {
+        ...requestOptions,
+        cache: "no-store",
+        ...(signal ? { signal } : {}),
+      });
+      let data = {};
+      try { data = await response.json(); } catch (e) {}
+      if (!response.ok || data?.error) {
+        throw new Error(typeof data?.error === "string" ? data.error : `HTTP ${response.status}`);
+      }
+      return data && typeof data === "object" ? data : {};
+    } finally {
+      if (timeoutId !== null) clearTimeout(timeoutId);
+    }
+  }
+
+  function appendSubagentProfileOption(select, value, label, disabled = false) {
+    const option = document.createElement("option");
+    option.value = String(value ?? "");
+    option.textContent = String(label ?? "");
+    option.disabled = Boolean(disabled);
+    select.appendChild(option);
+    return option;
+  }
+
+  function syncSubagentProfileControlDisabled(control) {
+    if (!control) return;
+    const select = control.querySelector("[data-subagent-profile-select]");
+    if (!select) return;
+    const state = control.__piEnhSubagentProfileState;
+    const featureId = control.getAttribute("data-subagent-profile-feature") || "";
+    const row = control.closest("[data-module-row]");
+    const moduleId = row?.getAttribute("data-module-row") || "";
+    const moduleDisabled = moduleId ? !isModuleEnabled(moduleId) : false;
+    const featureDisabled = featureId ? !isPluginEnabled(featureId) : false;
+    const busy = Boolean(state?.loading || state?.saving) || select.getAttribute("data-subagent-profile-busy") === "true";
+    const unavailable = select.getAttribute("data-subagent-profile-unavailable") === "true";
+    const ready = select.getAttribute("data-subagent-profile-ready") === "true";
+    select.disabled = moduleDisabled || featureDisabled || busy || !ready || unavailable;
+    const reload = control.querySelector("[data-subagent-profile-reload]");
+    if (reload) reload.disabled = moduleDisabled || featureDisabled || busy;
+  }
+
+  function renderSubagentProfileControl(control, state) {
+    if (!control || !state) return;
+    const select = control.querySelector("[data-subagent-profile-select]");
+    if (!select) return;
+    const cwdNode = control.querySelector("[data-subagent-profile-cwd]");
+    const statusNode = control.querySelector("[data-subagent-profile-status]");
+    if (cwdNode) {
+      cwdNode.textContent = state.cwd ? `当前 cwd：${state.cwd}` : "当前 cwd：未检测到有效工作目录";
+      cwdNode.title = state.cwd || "";
+    }
+
+    while (select.firstChild) select.removeChild(select.firstChild);
+    select.setAttribute("data-subagent-profile-ready", "false");
+    select.setAttribute("data-subagent-profile-unavailable", "true");
+    select.setAttribute("data-subagent-profile-busy", state.saving ? "true" : "false");
+
+    if (state.loading) {
+      appendSubagentProfileOption(select, "", "正在读取服务端 profile…", true);
+      if (statusNode) statusNode.textContent = "正在读取当前 cwd 的生效 profile 与服务端默认值…";
+      syncSubagentProfileControlDisabled(control);
+      return;
+    }
+    if (!state.cwd) {
+      appendSubagentProfileOption(select, "", "当前没有可用 cwd", true);
+      if (statusNode) statusNode.textContent = "当前没有有效 cwd，无法读取项目 profile；请先打开一个工作区或会话。";
+      syncSubagentProfileControlDisabled(control);
+      return;
+    }
+    if (state.settingsError || !state.settingsLoaded) {
+      appendSubagentProfileOption(select, "", "服务端默认值读取失败", true);
+      if (statusNode) statusNode.textContent = "无法读取服务端默认 profile，暂不可保存；可点击“重新读取”。";
+      syncSubagentProfileControlDisabled(control);
+      return;
+    }
+    if (state.profilesError || !state.profilesLoaded) {
+      appendSubagentProfileOption(select, "", "当前 cwd 的 profile 读取失败", true);
+      if (statusNode) statusNode.textContent = "无法读取当前 cwd 下的 profile；可点击“重新读取”。";
+      syncSubagentProfileControlDisabled(control);
+      return;
+    }
+
+    const availableProfiles = Array.isArray(state.profiles) ? state.profiles : [];
+    const defaultProfile = normalizeSubagentProfileName(state.defaultProfile) || "general-purpose";
+    const selectedProfile = availableProfiles.find((profile) =>
+      normalizeSubagentProfileName(profile.name).toLocaleLowerCase() === defaultProfile.toLocaleLowerCase()
+    );
+
+    if (availableProfiles.length === 0) {
+      appendSubagentProfileOption(select, "", `当前默认 profile “${defaultProfile}” 在此 cwd 不可用`, true);
+      if (statusNode) statusNode.textContent = "当前 cwd 没有可用且已启用的 profile；服务端默认值在此 cwd 不会生效。";
+      syncSubagentProfileControlDisabled(control);
+      return;
+    }
+    if (!selectedProfile) {
+      appendSubagentProfileOption(select, "", `当前默认 profile “${defaultProfile}” 在此 cwd 不可用，请选择其他 profile`, true);
+    }
+    for (const profile of availableProfiles) {
+      const name = normalizeSubagentProfileName(profile.name);
+      const displayName = normalizeSubagentProfileName(profile.displayName);
+      const label = displayName && displayName !== name ? `${displayName} (${name})` : name;
+      appendSubagentProfileOption(select, name, label);
+    }
+    select.value = selectedProfile ? selectedProfile.name : "";
+    select.setAttribute("data-subagent-profile-ready", "true");
+    select.setAttribute("data-subagent-profile-unavailable", "false");
+    if (statusNode) {
+      statusNode.textContent = selectedProfile
+        ? `服务端当前默认：${selectedProfile.name}`
+        : `当前默认 profile “${defaultProfile}” 不可用；请选择下方已启用 profile。`;
+    }
+    syncSubagentProfileControlDisabled(control);
+  }
+
+  async function loadSubagentProfileControl(control, state) {
+    if (!control || !state) return;
+    try { state.controller?.abort(); } catch (e) {}
+    const token = (state.requestToken || 0) + 1;
+    state.requestToken = token;
+    state.loading = true;
+    state.settingsLoaded = false;
+    state.profilesLoaded = false;
+    state.settingsError = null;
+    state.profilesError = null;
+    state.profiles = [];
+    const controller = typeof AbortController === "function" ? new AbortController() : null;
+    state.controller = controller;
+    renderSubagentProfileControl(control, state);
+    const timeoutId = controller ? setTimeout(() => controller.abort(), 8000) : null;
+    const isCurrent = () => control.isConnected && control.__piEnhSubagentProfileState === state && state.requestToken === token;
+
+    try {
+      const settingsRequest = fetchSubagentJson("/api/subagents/settings", { signal: controller?.signal });
+      const profilesRequest = state.cwd
+        ? fetchSubagentJson(`/api/subagents/profiles?cwd=${encodeURIComponent(state.cwd)}`, { signal: controller?.signal })
+        : Promise.resolve({ profiles: [] });
+      const [settingsResult, profilesResult] = await Promise.allSettled([settingsRequest, profilesRequest]);
+      if (!isCurrent()) return;
+
+      if (settingsResult.status === "fulfilled") {
+        const value = normalizeSubagentProfileName(settingsResult.value?.defaultProfile);
+        state.defaultProfile = value || "general-purpose";
+        state.settingsLoaded = true;
+      } else {
+        state.settingsError = settingsResult.reason;
+      }
+
+      if (!state.cwd) {
+        state.profilesLoaded = true;
+      } else if (profilesResult.status === "fulfilled" && Array.isArray(profilesResult.value?.profiles)) {
+        state.profiles = getEffectiveSubagentProfiles(profilesResult.value.profiles);
+        state.profilesLoaded = true;
+      } else {
+        state.profilesError = profilesResult.status === "rejected" ? profilesResult.reason : new Error("Invalid profiles response");
+      }
+    } catch (error) {
+      if (isCurrent()) state.settingsError = error;
+    } finally {
+      if (timeoutId !== null) clearTimeout(timeoutId);
+      if (!isCurrent()) return;
+      state.loading = false;
+      if (state.controller === controller) state.controller = null;
+      renderSubagentProfileControl(control, state);
+    }
+  }
+
+  async function saveSubagentProfileSelection(control, state, select) {
+    const nextProfile = normalizeSubagentProfileName(select?.value);
+    if (!nextProfile || state.saving || !state.settingsLoaded) return;
+    const previousProfile = state.defaultProfile;
+    state.saving = true;
+    select.setAttribute("data-subagent-profile-busy", "true");
+    const statusNode = control.querySelector("[data-subagent-profile-status]");
+    if (statusNode) statusNode.textContent = "正在保存到服务端…";
+    syncSubagentProfileControlDisabled(control);
+    try {
+      const data = await fetchSubagentJson("/api/subagents/settings", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ defaultProfile: nextProfile }),
+        timeoutMs: 8000,
+      });
+      if (!control.isConnected || control.__piEnhSubagentProfileState !== state) return;
+      state.defaultProfile = normalizeSubagentProfileName(data?.defaultProfile) || nextProfile;
+      state.saving = false;
+      renderSubagentProfileControl(control, state);
+      if (typeof showToast === "function") showToast("默认子 Agent profile 已保存到服务端");
+    } catch (error) {
+      if (!control.isConnected || control.__piEnhSubagentProfileState !== state) return;
+      console.warn("[Pi Web Enhancements] 保存默认子 Agent profile 失败:", error);
+      state.defaultProfile = previousProfile;
+      state.saving = false;
+      renderSubagentProfileControl(control, state);
+      if (typeof showToast === "function") showToast("默认子 Agent profile 保存失败，请重试", null, 5000);
+    }
+  }
+
+  function bindSubagentProfileControls(panel) {
+    for (const control of panel.querySelectorAll("[data-subagent-profile-control]")) {
+      const state = {
+        cwd: getActiveSubagentCwd(),
+        defaultProfile: null,
+        profiles: [],
+        loading: false,
+        saving: false,
+        settingsLoaded: false,
+        profilesLoaded: false,
+        settingsError: null,
+        profilesError: null,
+        requestToken: 0,
+        controller: null,
+      };
+      control.__piEnhSubagentProfileState = state;
+      const select = control.querySelector("[data-subagent-profile-select]");
+      const reload = control.querySelector("[data-subagent-profile-reload]");
+      reload?.addEventListener("click", () => {
+        if (!state.loading && !state.saving) void loadSubagentProfileControl(control, state);
+      });
+      select?.addEventListener("change", () => {
+        void saveSubagentProfileSelection(control, state, select);
+      });
+      void loadSubagentProfileControl(control, state);
+    }
+  }
+
   function renderModuleSettingControl(setting, disabled) {
+    if (setting.kind === "subagent-profile") {
+      const featureId = escapeQuickActionHtml(setting.featureId || "");
+      const label = escapeQuickActionHtml(setting.label || "默认子 Agent profile");
+      const description = escapeQuickActionHtml(setting.description || "仅在调用未显式指定 subagent_type 时生效。");
+      return `<div class="pi-enh-subagent-profile-setting pi-enh-plugin-number-setting" style="width:100%;flex-wrap:wrap;white-space:normal;" data-subagent-profile-control data-subagent-profile-feature="${featureId}">
+        <div class="pi-enh-subagent-profile-copy" style="display:flex;flex:1 1 300px;flex-direction:column;gap:2px;min-width:220px;">
+          <span class="pi-enh-plugin-number-setting-label">${label}</span>
+          <span class="pi-enh-subagent-profile-description">${description}</span>
+          <span class="pi-enh-subagent-profile-cwd" data-subagent-profile-cwd>当前 cwd：读取中…</span>
+        </div>
+        <select data-subagent-profile-select aria-label="${label}" ${disabled ? "disabled" : ""}>
+          <option value="">正在读取服务端状态…</option>
+        </select>
+        <button type="button" class="pi-enh-btn-sm" data-subagent-profile-reload ${disabled ? "disabled" : ""}>重新读取</button>
+        <span class="pi-enh-subagent-profile-status" data-subagent-profile-status role="status" aria-live="polite">正在读取服务端设置…</span>
+      </div>`;
+    }
     if (setting.kind === "action") {
       return `<button type="button" class="pi-enh-btn-sm" data-plugin-action="${setting.action}" ${disabled ? "disabled" : ""}>${setting.label}</button>`;
     }
@@ -53031,6 +54082,9 @@ window.__PI_ENH_RENDER_USAGE_PANEL__ = renderUsagePanel;
         const [featureId, key] = range.getAttribute("data-plugin-setting-range").split(":");
         range.disabled = disabled || !isPluginEnabled(featureId);
         if (document.activeElement !== range) range.value = String(getPluginSetting(featureId, key));
+      }
+      for (const control of row.querySelectorAll("[data-subagent-profile-control]")) {
+        syncSubagentProfileControlDisabled(control);
       }
       for (const action of row.querySelectorAll("[data-plugin-action], [data-attention-sound-preview]")) action.disabled = disabled;
     }
@@ -53604,6 +54658,7 @@ window.__PI_ENH_RENDER_USAGE_PANEL__ = renderUsagePanel;
         }
       });
     }
+    bindSubagentProfileControls(panel);
     syncEnhancementPanelControls();
     const syncCard = panel.querySelector("[data-pi-enh-sync-card]");
     if (syncCard) {

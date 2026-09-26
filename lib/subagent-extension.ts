@@ -11,6 +11,7 @@ import {
   type SubagentRunInfo,
 } from "./subagents";
 import { MAX_SUBAGENT_INPUT_FILES } from "./subagent-input";
+import { DEFAULT_SUBAGENT_PROFILE } from "./subagent-settings";
 
 export const HOST_SUBAGENT_EXTENSION_NAME = "pi-web-subagents";
 const HOST_SUBAGENT_EXTENSION_PATH = `<inline:${HOST_SUBAGENT_EXTENSION_NAME}>`;
@@ -77,6 +78,20 @@ export interface SubagentExtensionRuntime {
 
 export type SubagentProfileProvider = () => readonly SubagentProfile[];
 export type SubagentEnabledProvider = () => boolean;
+export type SubagentDefaultProfileProvider = () => string;
+
+/** Resolve a settings default against the profiles available in the current cwd. */
+export function resolveDefaultSubagentProfile(
+  profiles: readonly SubagentProfile[],
+  defaultProfile: string,
+): string {
+  const enabled = profiles.filter((profile) => profile.enabled);
+  const configured = defaultProfile.trim().toLowerCase();
+  const selected = enabled.find((profile) => profile.name.toLowerCase() === configured)
+    ?? enabled.find((profile) => profile.name.toLowerCase() === DEFAULT_SUBAGENT_PROFILE)
+    ?? enabled[0];
+  return selected?.name ?? DEFAULT_SUBAGENT_PROFILE;
+}
 
 function agentTypeDescription(profiles: readonly SubagentProfile[]): string {
   const available = profiles.filter((profile) => profile.enabled);
@@ -137,6 +152,7 @@ export function createSubagentExtension(
   runtime: SubagentExtensionRuntime,
   getProfiles: SubagentProfileProvider,
   isEnabled: SubagentEnabledProvider = () => true,
+  getDefaultProfile: SubagentDefaultProfileProvider = () => DEFAULT_SUBAGENT_PROFILE,
 ): InlineExtension {
   return {
     name: HOST_SUBAGENT_EXTENSION_NAME,
@@ -158,7 +174,7 @@ export function createSubagentExtension(
         ],
         executionMode: "parallel",
         parameters: Type.Object({
-          subagent_type: Type.Optional(Type.String({ description: `Configured agent profile. Available types: ${availableTypes}. Default: general-purpose.` })),
+          subagent_type: Type.Optional(Type.String({ description: `Configured agent profile. Available types: ${availableTypes}. If omitted, use the current settings default and fall back to an enabled profile when unavailable.` })),
           prompt: Type.String({ description: "The complete task for the subagent." }),
           resume: Type.Optional(Type.String({ description: "Existing subagent session ID to continue instead of creating a new session." })),
           input_files: Type.Optional(Type.Array(Type.String(), {
@@ -193,7 +209,7 @@ export function createSubagentExtension(
               : await runtime.start({
               parentContext: ctx,
               parentToolCallId: toolCallId,
-              profile: params.subagent_type ?? "general-purpose",
+              profile: params.subagent_type ?? resolveDefaultSubagentProfile(getProfiles(), getDefaultProfile()),
               task: params.prompt,
               ...(params.input_files ? { inputFiles: params.input_files } : {}),
               description: params.description,

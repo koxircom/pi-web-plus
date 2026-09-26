@@ -109,7 +109,6 @@
     annotationEditor,
     quoteBar,
     quoteBarInteracting,
-    attentionNotices,
     projectStatusModel,
     projectStatusState,
     projectStatusCatalog,
@@ -8289,7 +8288,6 @@
     { id: "native-error", name: "错误提示", desc: "error 级别的故障提示，建议保持开启。", group: "异常与安全", defaultEnabled: true },
     { id: "security-guard", name: "安全拦截与防护", desc: "WSL、NAS、Pi Web 重启及超时看门狗等高危操作拦截提示。", group: "异常与安全", defaultEnabled: true },
     { id: "enhancement-toast", name: "网页增强操作提示", desc: "复制、归档、缓存、插件切换等网页操作的轻量提示。", group: "网页提醒", defaultEnabled: true },
-    { id: "attention-inpage", name: "后台待处理站内提醒", desc: "需要确认或输入时显示可直达的站内提醒卡片。", group: "后台任务", defaultEnabled: true },
     { id: "attention-sound", name: "审批提示音", desc: "后台任务等待人工处理时播放提示音。", group: "后台任务", defaultEnabled: true },
     { id: "attention-desktop", name: "桌面待处理通知", desc: "后台任务需要处理时发送浏览器/系统桌面通知。", group: "后台任务", defaultEnabled: false },
   ];
@@ -8341,7 +8339,6 @@
   function classifyNotification(message, type = "info", channel = "native") {
     const text = String(message || "");
     if (channel === "toast") return "enhancement-toast";
-    if (channel === "attention-inpage") return "attention-inpage";
     if (channel === "attention-sound") return "attention-sound";
     if (channel === "attention-desktop") return "attention-desktop";
     if (/会话标题(?:已自动提炼|自动提炼)/i.test(text)) return "session-title";

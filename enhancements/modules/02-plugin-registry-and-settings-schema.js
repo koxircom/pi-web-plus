@@ -59,6 +59,13 @@
       defaultEnabled: true,
     },
     {
+      id: "subagent-default-profile",
+      name: "默认子 Agent profile",
+      desc: "从当前工作目录下实际生效且已启用的 profile 中选择服务端默认值；显式指定 subagent_type 的调用不受影响。",
+      category: "偏好记忆",
+      defaultEnabled: true,
+    },
+    {
       id: "history-scroll-stability",
       name: "历史滚动位置稳定",
       desc: "自动加载早期记录并保留阅读位置；打开已完成会话后若已在底部，后续正文、图片与缓存校验加载期间持续贴底，主动上滚立即停止；支持手机阻尼下拉、慢响应和超时重试提示。",
@@ -96,8 +103,8 @@
     },
     {
       id: "model-scope-warning",
-      name: "模型范围警告去重",
-      desc: "对完全相同的模型范围警告卡片进行去重，保留首张真实警告可见；关闭插件后立即恢复全部原生警告。",
+      name: "隐藏模型范围警告",
+      desc: "隐藏输入区的模型范围警告，并在模型菜单对应选项后显示黄色提示图标；关闭插件后恢复原生警告。",
       category: "显示增强",
       defaultEnabled: true,
     },
@@ -203,13 +210,6 @@
       id: "project-status-indicator",
       name: "跨项目会话状态提示",
       desc: "精简标签页标题，移除冗余 Pi Web 标识与跳动的计时秒数。运行中以蓝色小球 🔵 纯净指示，需要确认 🟠、错误 🔴、已完成 🟢 显示状态文字与对应颜色小球；多标签页一目了然。", 
-      category: "运行监控",
-      defaultEnabled: true,
-    },
-    {
-      id: "session-attention-notifications",
-      name: "后台待处理站内提醒",
-      desc: "需要确认或输入时在右下角显示可直达的任务提醒，保留至处理或手动收起；不抢焦点，声音由独立子功能控制。", 
       category: "运行监控",
       defaultEnabled: true,
     },
@@ -537,7 +537,7 @@
     },
   ];
 
-  const ENHANCEMENT_SUITE_VERSION = window.__PI_WEB_STANDALONE_VERSION__ || "1.0.2";
+  const ENHANCEMENT_SUITE_VERSION = window.__PI_WEB_STANDALONE_VERSION__ || "1.0.3";
   const ENHANCEMENT_SETTINGS_SCHEMA_VERSION = 1;
   const ENHANCEMENT_SETTINGS_STORAGE_KEY = "pi-enh-settings-v1";
   const ENHANCEMENT_PLUGIN_SETTINGS = {
@@ -563,11 +563,12 @@
   const ENHANCEMENT_MODULES = [
     { id: "task-insights", name: "任务运行信息", desc: "集中管理任务耗时、速度和回合用量信息。", category: "运行监控", version: "1.0.0", defaultEnabled: true, features: ["model-generation-speed", "turn-duration", "live-stopwatch", "turn-usage-total", "usage-cost-dashboard"] },
     { id: "conversation-navigation", name: "对话阅读与导航", desc: "管理过程折叠、工具卡片布局、滚动稳定、会话导航和回到底部工具。", category: "交互增强", version: "1.0.0", defaultEnabled: true, features: ["task-tool-auto-collapse", "tool-card-layout-stability", "subagent-dispatch-cards", "history-scroll-stability", "session-scroll-restore", "session-virtual-scroll", "compaction-auto-collapse", "chat-scrollbar", "native-message-font", "minimap-full-nav", "scroll-to-bottom", "image-dblclick-preview"] },
+    { id: "subagent-dispatch", name: "子 Agent 调度", desc: "管理未显式指定 subagent_type 时使用的服务端默认 profile；实际调度始终由服务端动态读取。", category: "偏好记忆", version: "1.0.0", defaultEnabled: true, features: ["subagent-default-profile"] },
     { id: "selection-context", name: "划选引用与上下文", desc: "管理文本划选引用、注释与发送上下文。", category: "交互增强", version: "1.0.0", defaultEnabled: true, features: ["quick-quote"] },
     { id: "session-sidebar", name: "会话列表增强", desc: "管理会话列表的快捷菜单、归档、标签、布局、颜色、快捷入口和搜索。", category: "交互增强", version: "1.0.0", defaultEnabled: true, features: ["context-menu", "session-pin-archive", "session-section-headers", "session-model-label", "session-item-compact", "session-color", "session-tags", "session-odoo-addons", "session-dblclick-rename", "session-search-shortcut", "session-search-project-folding", "session-batch-actions", "settings-tab-shortcuts", "mobile-swipe-drawer"] },
     { id: "composer-workflow", name: "输入与附件增强", desc: "管理编辑器快捷操作、草稿、附件和移动端输入保护。", category: "交互增强", version: "1.0.0", defaultEnabled: true, features: ["quick-action-buttons", "empty-send-continue", "composer-draft-cache", "composer-file-paste", "composer-image-zoom", "mobile-enter-newline", "mobile-model-keyboard-guard", "composer-clean-placeholder", "codex-composer-layout", "composer-model-reasoning-pill", "composer-queue-panel", "running-model-switch", "composer-markdown-format", "composer-format-toggle", "composer-compact-button", "composer-tool-preset", "composer-modes", "at-mention-plugins"] },
     { id: "ask-user-experience", name: "ask_user 交互", desc: "管理网页原生问答选择器与批量原型预览。", category: "交互增强", version: "1.1.1", defaultEnabled: true, features: ["ask-user-web-native", "ask-user-batch-prototype"] },
-    { id: "background-attention", name: "后台会话提醒", desc: "管理跨项目状态、站内提醒与桌面通知。", category: "运行监控", version: "1.0.0", defaultEnabled: true, features: ["project-status-indicator", "session-attention-notifications", "session-attention-sound", "session-attention-desktop"] },
+    { id: "background-attention", name: "后台会话提醒", desc: "管理跨项目状态、提示音与桌面通知。", category: "运行监控", version: "1.0.0", defaultEnabled: true, features: ["project-status-indicator", "session-attention-sound", "session-attention-desktop"] },
     { id: "notification-management", name: "通知管理", desc: "管理所有站内通知、网页操作提示、提示音与桌面提醒，并查看通知历史。", category: "偏好记忆", version: "1.0.0", defaultEnabled: true, features: ["notification-center"] },
     { id: "safety-performance", name: "安全与性能保护", desc: "管理误触保护、模型警告可见性和代码块扫描保护。", category: "安全防护", version: "1.0.0", defaultEnabled: true, features: ["model-scope-warning", "esc-guard", "code-block-scan-guard", "streaming-thinking-guard", "client-crash-diagnostics"] },
     { id: "local-workspace", name: "本地工作区工具", desc: "管理本地路径直达和会话缓存。", category: "快捷操作", version: "1.0.0", defaultEnabled: true, features: ["local-path-launcher", "obsidian-markdown-viewer", "session-memory-cache", "session-history-integrity", "session-history-order-guard", "cross-device-session-sync", "session-panel-binding", "file-panel-overlay-guard", "general-settings-dashboard", "workspace-picker-hover", "settings-sidebar-layout"] },
@@ -576,6 +577,9 @@
   const ENHANCEMENT_MODULE_SETTINGS = {
     "safety-performance": [
       { kind: "action", action: "download-crash-diagnostics", label: "导出客户端异常记录（仅本地）" },
+    ],
+    "subagent-dispatch": [
+      { kind: "subagent-profile", featureId: "subagent-default-profile", key: "defaultProfile", label: "默认子 Agent profile", description: "仅在调用未显式指定 subagent_type 时生效；选项来自当前 cwd 下实际生效且已启用的 profile。" },
     ],
     "composer-workflow": [
       { kind: "setting", featureId: "mobile-enter-newline", key: "deviceMode", label: "回车设备模式" },
@@ -1034,9 +1038,6 @@
       setProjectStatusMonitoring(enabled);
       if (!enabled) removeProjectStatusIndicators();
       else syncProjectStatusIndicators();
-    } else if (id === "session-attention-notifications") {
-      if (!enabled) document.querySelector(".pi-enh-attention-notice")?.remove();
-      else { renderAttentionNotices(); void notifyProjectStatusRequests(getDesktopPendingRequests()); }
     } else if (id === "session-attention-sound") {
       if (!enabled) disposeApprovalSound();
       else void unlockApprovalSound();
@@ -1256,11 +1257,14 @@
 
   const MODEL_SCOPE_WARNING_MARKER = "data-pi-enh-model-scope-warning";
   const MODEL_SCOPE_WARNING_ORIGINAL_DISPLAY = "data-pi-enh-model-scope-warning-display";
+  const MODEL_SCOPE_WARNING_ICON_SELECTOR = ".pi-enh-model-scope-warning-icon";
   const MODEL_SCOPE_WARNING_TEXT_MARKERS = [
     "模型范围警告",
     "model scope warning",
     "no models match pattern",
   ];
+  const MODEL_SCOPE_WARNING_PATTERN_RE = /no models match(?:es)? pattern\s+(?:["“'‘]([^"”'’\r\n]+)["”'’]|([^\s,;]+))/gi;
+  const MODEL_SCOPE_WARNING_REASONING_SUFFIX_RE = /:(?:none|off|minimal|low|medium|high|xhigh|max)$/i;
 
   function isModelScopeWarningCard(card) {
     if (!card || card.getAttribute?.("role") !== "alert") return false;
@@ -1277,11 +1281,144 @@
     card.removeAttribute(MODEL_SCOPE_WARNING_ORIGINAL_DISPLAY);
   }
 
+  function removeModelScopeWarningIndicators() {
+    for (const icon of document.querySelectorAll(MODEL_SCOPE_WARNING_ICON_SELECTOR)) {
+      icon.remove();
+    }
+  }
+
   function clearModelScopeWarningVisibility() {
     for (const card of document.querySelectorAll('[role="alert"]')) {
       restoreModelScopeWarningCard(card);
     }
+    removeModelScopeWarningIndicators();
     document.documentElement?.classList?.remove("pi-enh-model-scope-warning-hidden");
+  }
+
+  function normalizeModelScopeIdentity(value) {
+    return String(value || "").toLocaleLowerCase().replace(/[^a-z0-9]/g, "");
+  }
+
+  function collectModelScopeWarningPatterns(cards) {
+    const patternsByModel = new Map();
+    for (const card of cards) {
+      const text = String(card.textContent || "");
+      MODEL_SCOPE_WARNING_PATTERN_RE.lastIndex = 0;
+      let match;
+      while ((match = MODEL_SCOPE_WARNING_PATTERN_RE.exec(text))) {
+        const rawPattern = String(match[1] || match[2] || "").trim().replace(/[.!?]+$/, "");
+        const modelRef = rawPattern.replace(MODEL_SCOPE_WARNING_REASONING_SUFFIX_RE, "").trim();
+        if (!modelRef) continue;
+        const key = modelRef.toLocaleLowerCase();
+        let warning = patternsByModel.get(key);
+        if (!warning) {
+          const parts = modelRef.split("/").filter(Boolean);
+          warning = {
+            modelRef,
+            provider: parts.length > 1 ? parts[0] : "",
+            modelName: parts[parts.length - 1] || modelRef,
+            rawPatterns: new Set(),
+          };
+          patternsByModel.set(key, warning);
+        }
+        warning.rawPatterns.add(rawPattern);
+      }
+    }
+    return Array.from(patternsByModel.values());
+  }
+
+  function getModelScopeOptionProvider(option, listbox) {
+    const group = option?.parentElement;
+    if (!group || group === listbox) return "";
+    for (const child of Array.from(group.children || [])) {
+      if (child === option || child.matches?.('button[role="option"]')) continue;
+      if (child.querySelector?.('button[role="option"]')) continue;
+      const label = String(child.textContent || "").trim();
+      if (label) return label;
+    }
+    return "";
+  }
+
+  function modelScopeWarningMatchesOption(option, listbox, warning) {
+    const modelNameIdentity = normalizeModelScopeIdentity(warning.modelName);
+    const modelRefIdentity = normalizeModelScopeIdentity(warning.modelRef);
+    const explicitModel = option.getAttribute("data-model-id") ||
+      option.getAttribute("data-model") ||
+      option.getAttribute("data-provider-model") ||
+      option.getAttribute("value") || "";
+    if (explicitModel) {
+      const explicitIdentity = normalizeModelScopeIdentity(explicitModel.replace(MODEL_SCOPE_WARNING_REASONING_SUFFIX_RE, ""));
+      if (explicitIdentity === modelRefIdentity || explicitIdentity === modelNameIdentity) {
+        const explicitProvider = option.getAttribute("data-provider") || "";
+        return !warning.provider || !explicitProvider ||
+          normalizeModelScopeIdentity(explicitProvider) === normalizeModelScopeIdentity(warning.provider);
+      }
+    }
+
+    const labelNode = option.querySelector?.("[title]");
+    const label = String(labelNode?.getAttribute("title") || labelNode?.textContent || option.textContent || "").trim();
+    const labelIdentity = normalizeModelScopeIdentity(label);
+    if (!modelNameIdentity || !labelIdentity.includes(modelNameIdentity)) return false;
+
+    const provider = option.getAttribute("data-provider") || getModelScopeOptionProvider(option, listbox);
+    return !warning.provider || !provider ||
+      normalizeModelScopeIdentity(provider) === normalizeModelScopeIdentity(warning.provider);
+  }
+
+  function createModelScopeWarningIcon(warning) {
+    const svgNamespace = "http://www.w3.org/2000/svg";
+    const icon = document.createElementNS(svgNamespace, "svg");
+    icon.classList.add("pi-enh-model-scope-warning-icon");
+    icon.setAttribute("viewBox", "0 0 24 24");
+    icon.setAttribute("width", "15");
+    icon.setAttribute("height", "15");
+    icon.setAttribute("fill", "none");
+    icon.setAttribute("stroke", "#eab308");
+    icon.setAttribute("stroke-width", "2");
+    icon.setAttribute("stroke-linecap", "round");
+    icon.setAttribute("stroke-linejoin", "round");
+    icon.setAttribute("role", "img");
+    icon.style.cssText = "display:block;width:15px;height:15px;flex:0 0 15px;margin-left:6px;color:#eab308";
+
+    const triangle = document.createElementNS(svgNamespace, "path");
+    triangle.setAttribute("d", "M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0Z");
+    const exclamation = document.createElementNS(svgNamespace, "path");
+    exclamation.setAttribute("d", "M12 9v4");
+    const dot = document.createElementNS(svgNamespace, "circle");
+    dot.setAttribute("cx", "12");
+    dot.setAttribute("cy", "17");
+    dot.setAttribute("r", "0.5");
+    dot.setAttribute("fill", "#eab308");
+    dot.setAttribute("stroke", "none");
+    icon.append(triangle, exclamation, dot);
+    return icon;
+  }
+
+  function syncModelScopeWarningIndicators(warnings) {
+    const matchedOptions = new Set();
+    if (warnings.length) {
+      for (const listbox of document.querySelectorAll('.model-selector div[role="listbox"]')) {
+        for (const option of listbox.querySelectorAll('[role="option"]')) {
+          const matchedWarnings = warnings.filter((warning) => modelScopeWarningMatchesOption(option, listbox, warning));
+          if (!matchedWarnings.length) continue;
+          matchedOptions.add(option);
+          let icon = option.querySelector(MODEL_SCOPE_WARNING_ICON_SELECTOR);
+          if (!icon) {
+            icon = createModelScopeWarningIcon(matchedWarnings[0]);
+            option.appendChild(icon);
+          }
+          const tooltip = `模型范围警告：${matchedWarnings.flatMap((warning) =>
+            Array.from(warning.rawPatterns, (pattern) => `No models match pattern "${pattern}"`)
+          ).join("；")}`;
+          if (icon.getAttribute("title") !== tooltip) icon.setAttribute("title", tooltip);
+          if (icon.getAttribute("aria-label") !== tooltip) icon.setAttribute("aria-label", tooltip);
+        }
+      }
+    }
+    for (const icon of document.querySelectorAll(MODEL_SCOPE_WARNING_ICON_SELECTOR)) {
+      if (!matchedOptions.has(icon.parentElement)) icon.remove();
+    }
+    return matchedOptions.size;
   }
 
   function syncModelScopeWarnings() {
@@ -1296,30 +1433,22 @@
 
     if (!isPluginEnabled("model-scope-warning")) {
       for (const card of matchingCards) restoreModelScopeWarningCard(card);
+      removeModelScopeWarningIndicators();
       document.documentElement?.classList?.remove("pi-enh-model-scope-warning-hidden");
       return;
     }
 
-    const seenTexts = new Set();
-    let hiddenDuplicatesCount = 0;
-
     for (const card of matchingCards) {
-      const textKey = String(card.textContent || "").trim();
-      if (!seenTexts.has(textKey)) {
-        // 第一张真实警告卡片始终可见：若此前曾被标记为隐藏，立即恢复原 display
-        seenTexts.add(textKey);
-        restoreModelScopeWarningCard(card);
-      } else {
-        // 完全相同的后续重复卡片：执行去重隐藏并保留原 display
-        if (!card.hasAttribute(MODEL_SCOPE_WARNING_MARKER)) {
-          card.setAttribute(MODEL_SCOPE_WARNING_ORIGINAL_DISPLAY, card.style?.display || "");
-        }
-        card.setAttribute(MODEL_SCOPE_WARNING_MARKER, "true");
-        if (card.style) card.style.display = "none";
-        hiddenDuplicatesCount++;
+      if (!card.hasAttribute(MODEL_SCOPE_WARNING_MARKER)) {
+        card.setAttribute(MODEL_SCOPE_WARNING_ORIGINAL_DISPLAY, card.style?.display || "");
       }
+      card.setAttribute(MODEL_SCOPE_WARNING_MARKER, "true");
+      if (card.style && card.style.display !== "none") card.style.display = "none";
     }
-    document.documentElement?.classList?.toggle("pi-enh-model-scope-warning-hidden", hiddenDuplicatesCount > 0);
+
+    const warningPatterns = collectModelScopeWarningPatterns(matchingCards);
+    syncModelScopeWarningIndicators(warningPatterns);
+    document.documentElement?.classList?.toggle("pi-enh-model-scope-warning-hidden", matchingCards.length > 0);
   }
 
   window.__PI_ENH_SYNC_MODEL_SCOPE_WARNINGS__ = syncModelScopeWarnings;

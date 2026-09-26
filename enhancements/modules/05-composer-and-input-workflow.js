@@ -590,7 +590,7 @@
   function isAgentStopButton(btn) {
     if (!btn || btn.disabled) return false;
     // 排除消息体（用户/助手消息）、代码块、文件预览、工具卡片内部的任何按钮
-    if (typeof btn.closest === "function" && btn.closest('div[data-message-role], pre, code, .pi-enh-tool-card, [data-pi-enh-tool-card]')) {
+    if (typeof btn.closest === "function" && btn.closest('div[data-message-role], pre, code, .pi-enh-tool-card, [data-pi-enh-tool-card], #chat-message-list')) {
       return false;
     }
     const title = String(btn.getAttribute("title") || "").trim();
@@ -602,23 +602,77 @@
       return false;
     }
     if (/\.(py|sh|js|ts|json|md|txt|html|css|yaml|yml|sql|rs|go|c|cpp|h)\b/i.test(title) ||
-        /\.(py|sh|js|ts|json|md|txt|html|css|yaml|yml|sql|rs|go|c|cpp|h)\b/i.test(ariaLabel)) {
+        /\.(py|sh|js|ts|json|md|txt|html|css|yaml|yml|sql|rs|go|c|cpp|h)\b/i.test(ariaLabel) ||
+        /\.(py|sh|js|ts|json|md|txt|html|css|yaml|yml|sql|rs|go|c|cpp|h)\b/i.test(text)) {
       return false;
     }
 
+    if (btn.classList?.contains?.("pi-enh-cursor-stop")) return true;
+    if (typeof btn.querySelector === "function" && btn.querySelector('svg rect[x="1.5"]')) return true;
+
     // 仅匹配明确属于中止/停止 Agent 的交互按钮
-    const stopRegex = /^(停止 Agent|停止|中止|取消|Stop Agent|Stop|Cancel Agent|Cancel)$/i;
+    const stopRegex = /^(停止\s*Agent|停止代理|停止|中止|取消|Stop\s*Agent|Stop|Cancel\s*Agent|Cancel)$/i;
     return stopRegex.test(title) || stopRegex.test(ariaLabel) || stopRegex.test(text);
+  }
+
+  function getComposerSearchScopes(textarea = findComposerTextarea(), fallbackRoot = document) {
+    const scopes = [];
+    const addScope = (node) => {
+      if (node && typeof node.querySelectorAll === "function" && !scopes.includes(node)) {
+        scopes.push(node);
+      }
+    };
+    if (fallbackRoot && fallbackRoot !== document) {
+      addScope(fallbackRoot);
+    }
+    if (textarea) {
+      addScope(textarea.closest?.("fieldset"));
+      addScope(textarea.closest?.(".pi-enh-cursor-composer"));
+      addScope(textarea.closest?.("form"));
+      addScope(textarea.closest?.(".chat-input-container, [data-chat-input-wrap], .relative.shrink-0"));
+      addScope(textarea.closest?.(".chat-content > div"));
+      addScope(textarea.parentElement?.parentElement);
+      addScope(textarea.parentElement);
+    }
+    if (scopes.length === 0) {
+      addScope(fallbackRoot || document);
+    }
+    return scopes;
+  }
+
+  function getComposerEffectivePlaceholder(textarea = findComposerTextarea()) {
+    if (!textarea) return "";
+    const direct = String(textarea.getAttribute?.("placeholder") || textarea.placeholder || "");
+    if (direct) return direct;
+    if (
+      (typeof isPluginEnabled === "function" && isPluginEnabled("composer-clean-placeholder")) ||
+      textarea.classList?.contains?.("pi-enh-clean-placeholder")
+    ) {
+      return String(textarea.getAttribute?.("data-pi-orig-placeholder") || "");
+    }
+    return "";
+  }
+
+  function isRunningPlaceholderText(ph) {
+    const text = String(ph || "");
+    return (
+      text.includes("引导") ||
+      text.includes("排队") ||
+      text.includes("运行中") ||
+      text.includes("代理正在运行") ||
+      text.includes("Steer") ||
+      text.includes("running")
+    );
   }
 
   function findActiveStopButton(root = document) {
     const textarea = findComposerTextarea();
-    const bottomArea = textarea ? (textarea.closest(".chat-content > div:last-child") || textarea.parentElement?.parentElement) : null;
-    const searchScope = bottomArea || (root && typeof root.querySelectorAll === "function" ? root : document);
-    if (!searchScope || typeof searchScope.querySelectorAll !== "function") return null;
-    const buttons = searchScope.querySelectorAll("button");
-    for (const btn of buttons) {
-      if (isAgentStopButton(btn)) return btn;
+    const scopes = getComposerSearchScopes(textarea, root);
+    for (const scope of scopes) {
+      const buttons = scope.querySelectorAll("button");
+      for (const btn of buttons) {
+        if (isAgentStopButton(btn)) return btn;
+      }
     }
     return null;
   }
@@ -628,14 +682,21 @@
 
     const textarea = findComposerTextarea();
     if (textarea) {
-      const ph = String(textarea.getAttribute("placeholder") || textarea.placeholder || "");
-      if (ph.includes("引导") || ph.includes("排队") || ph.includes("运行中") || ph.includes("Steer") || ph.includes("running")) return true;
+      const ph = getComposerEffectivePlaceholder(textarea);
+      if (isRunningPlaceholderText(ph)) return true;
     }
-    const bottomArea = textarea ? (textarea.closest(".chat-content > div:last-child") || textarea.parentElement?.parentElement) : document;
-    if (bottomArea && typeof bottomArea.querySelectorAll === "function") {
-      for (const btn of bottomArea.querySelectorAll("button")) {
+    const scopes = getComposerSearchScopes(textarea, document);
+    for (const scope of scopes) {
+      for (const btn of scope.querySelectorAll("button")) {
         // 排除消息体、工具卡片、以及外部队列面板内部的按钮
-        if (typeof btn.closest === "function" && btn.closest(".pi-enh-queue-panel, div[data-message-role], pre, code, .pi-enh-tool-card")) {
+        if (typeof btn.closest === "function" && btn.closest(".pi-enh-queue-panel, div[data-message-role], pre, code, .pi-enh-tool-card, [data-pi-enh-tool-card], #chat-message-list")) {
+          continue;
+        }
+        if (
+          btn.hasAttribute?.("data-pi-enh-quick-reply") ||
+          btn.getAttribute?.("title")?.includes("快捷回复") ||
+          btn.getAttribute?.("aria-label")?.includes("快捷回复")
+        ) {
           continue;
         }
         if (isAgentStopButton(btn)) return true;
@@ -647,22 +708,75 @@
     return false;
   }
 
-  function isChatSessionRunning(sessionId) {
-    const sid = sessionId || getCurrentSessionId();
-    if (sid && typeof projectStatusModel !== "undefined" && projectStatusModel?.entry) {
+  function isComposerExplicitlyIdle() {
+    const textarea = findComposerTextarea();
+    if (!textarea) return false;
+    if (isComposerIndicatingRunning()) return false;
+    const ph = getComposerEffectivePlaceholder(textarea).trim();
+    if (ph && !isRunningPlaceholderText(ph)) {
+      return true;
+    }
+    return false;
+  }
+
+  function isServerRunningForSession(sid) {
+    if (!sid) return false;
+    const hasRunningIdsList =
+      typeof projectStatusLastPayload !== "undefined" &&
+      Array.isArray(projectStatusLastPayload?.runningSessionIds);
+    const inRunningIds = hasRunningIdsList && projectStatusLastPayload.runningSessionIds.includes(sid);
+
+    if (typeof projectStatusModel !== "undefined" && projectStatusModel?.health?.().state === "live" && projectStatusModel?.entry) {
       const statusEntry = projectStatusModel.entry(sid);
       if (statusEntry?.execution === "running") {
         return true;
       }
-      if (["ended", "completed", "idle", "stopped"].includes(statusEntry?.execution) ||
-          ["completed", "idle", "stopped", "interrupted"].includes(statusEntry?.status)) {
-        if (!isComposerIndicatingRunning()) {
+      if (!inRunningIds && (
+        ["ended", "completed", "idle", "stopped"].includes(statusEntry?.execution) ||
+        ["completed", "idle", "stopped", "interrupted"].includes(statusEntry?.status)
+      )) {
+        return false;
+      }
+    }
+
+    if (inRunningIds) {
+      const healthy = typeof isProjectStatusHealthy === "function" ? isProjectStatusHealthy() : true;
+      if (healthy) {
+        const memEntry = typeof sessionMemoryCache !== "undefined" ? sessionMemoryCache?.get?.(sid) : null;
+        if (!memEntry || memEntry.isRunning !== false) {
+          return true;
+        }
+      }
+    }
+    return false;
+  }
+
+  function isChatSessionRunning(sessionId) {
+    const currentSid = getCurrentSessionId();
+    const sid = sessionId || currentSid;
+    const isCurrent = !sid || !currentSid || sid === currentSid;
+
+    if (isCurrent && isComposerIndicatingRunning()) {
+      return true;
+    }
+
+    if (sid) {
+      if (isCurrent && isComposerExplicitlyIdle()) {
+        return false;
+      }
+      if (isServerRunningForSession(sid)) {
+        return true;
+      }
+      if (typeof projectStatusModel !== "undefined" && projectStatusModel?.health?.().state === "live" && projectStatusModel?.entry) {
+        const statusEntry = projectStatusModel.entry(sid);
+        if (["ended", "completed", "idle", "stopped"].includes(statusEntry?.execution) ||
+            ["completed", "idle", "stopped", "interrupted"].includes(statusEntry?.status)) {
           return false;
         }
       }
     }
 
-    return isComposerIndicatingRunning();
+    return isCurrent ? isComposerIndicatingRunning() : false;
   }
   window.__PI_ENH_IS_CHAT_SESSION_RUNNING__ = isChatSessionRunning;
   window.__PI_ENH_FIND_ACTIVE_STOP_BUTTON__ = findActiveStopButton;
@@ -814,6 +928,21 @@
       document.querySelector("textarea");
   }
 
+  function syncComposerTextareaAutoHeight(textarea) {
+    if (!textarea || textarea.tagName !== "TEXTAREA") return;
+    if (!textarea.hasAttribute("rows")) textarea.setAttribute("rows", "1");
+    if (textarea.style.display === "none") return;
+    if (!textarea.value) {
+      textarea.style.height = "auto";
+      return;
+    }
+    textarea.style.height = "auto";
+    const sh = textarea.scrollHeight || 0;
+    if (sh > 0) {
+      textarea.style.height = `${Math.min(sh, 200)}px`;
+    }
+  }
+
   function setComposerTextareaValue(textarea, value, { focus = true } = {}) {
     if (!textarea) return false;
     try {
@@ -826,6 +955,7 @@
       textarea.value = value;
     }
     textarea.dispatchEvent(new Event("input", { bubbles: true }));
+    syncComposerTextareaAutoHeight(textarea);
     if (focus) {
       textarea.focus();
       if (typeof textarea.setSelectionRange === "function") {
@@ -1097,6 +1227,7 @@
   // Never import them, and never share a fallback key between new sessions.
   const DRAFT_STORAGE_PREFIX = "pi-enh-composer-draft-v3:";
   const MAX_PERSISTED_DRAFTS = 10;
+  const EMPTY_DRAFT_SIGNATURE = JSON.stringify({ value: "", images: [] });
   let nativeDraftContexts = new WeakMap();
   let activeNativeDraft = null;
   let draftListeners = [];
@@ -1107,6 +1238,9 @@
   let draftRestoreRequested = true;
   let lastObservedNativeDraftKey = null;
   const submittedDraftKeys = new Set();
+  const pendingDraftSubmissions = new Map();
+  let draftSubmissionPollFrame = 0;
+  let clearingStaleDraftSurface = false;
 
   function validDraftImages(images) {
     return Array.isArray(images) && images.length <= 10 && images.every((img) =>
@@ -1144,6 +1278,7 @@
         images: draft.images.map(({ data, mimeType }) => ({ data, mimeType })),
         updatedAt: Date.now(),
       }));
+      submittedDraftKeys.delete(key);
       const keys = [];
       for (let i = 0; i < localStorage.length; i++) {
         const storageKey = localStorage.key(i);
@@ -1225,17 +1360,172 @@
       images: ctx.imagesRef.current.map(({ data, mimeType }) => ({ data, mimeType })) };
   }
 
+  function isDraftSubmissionAccepted(sub) {
+    return Boolean(sub && sub.keyRef?.current === sub.owner
+      && sub.valueRef?.current === ""
+      && Array.isArray(sub.imagesRef?.current)
+      && sub.imagesRef.current.length === 0);
+  }
+
+  function clearStaleRemountedNativeComposer(native, owner) {
+    if (!native || native.key !== owner || native.keyRef?.current !== owner) return false;
+    const prevClearing = clearingStaleDraftSurface;
+    clearingStaleDraftSurface = true;
+    try {
+      if (Array.isArray(native.imagesRef?.current) && native.imagesRef.current.length > 0) {
+        const prevImages = native.imagesRef.current;
+        native.imagesRef.current = [];
+        if (native.imageStateHook && typeof native.imageStateHook.queue?.dispatch === "function") {
+          try { native.imageStateHook.queue.dispatch([]); } catch {}
+        } else if (native.fieldset) {
+          for (const img of native.fieldset.querySelectorAll("img")) {
+            if (/^(blob:|data:image\/)/.test(img.getAttribute("src") || "")) {
+              img.parentElement?.querySelector("button")?.click();
+            }
+          }
+        }
+        for (const img of prevImages) {
+          if (typeof img?.previewUrl === "string" && img.previewUrl.startsWith("blob:")
+            && typeof URL?.revokeObjectURL === "function") {
+            try { URL.revokeObjectURL(img.previewUrl); } catch {}
+          }
+        }
+      }
+      if (native.valueRef?.current !== "" || native.textarea?.value !== "") {
+        native.valueRef.current = "";
+        setComposerTextareaValue(native.textarea, "", { focus: false });
+      }
+      instantlyClearComposerSurface(native.textarea, owner);
+      removePersistedDraft(owner);
+      return true;
+    } finally {
+      clearingStaleDraftSurface = prevClearing;
+    }
+  }
+
+  function markDraftSubmissionAccepted(sub) {
+    if (!sub) return false;
+    const firstAccept = !sub.accepted;
+    sub.accepted = true;
+    submittedDraftKeys.add(sub.owner);
+    removePersistedDraft(sub.owner);
+    const oldCtx = nativeDraftContexts.get(sub.keyRef);
+    if (oldCtx && oldCtx.key === sub.owner) {
+      oldCtx.initialized = true;
+      oldCtx.lastSaved = EMPTY_DRAFT_SIGNATURE;
+    }
+    if (firstAccept) {
+      const generation = draftRuntimeGeneration;
+      queueMicrotask(() => {
+        if (generation !== draftRuntimeGeneration || !isPluginEnabled("composer-draft-cache")) return;
+        syncNativeComposerDraft(false);
+      });
+      if (typeof requestAnimationFrame === "function") {
+        requestAnimationFrame(() => {
+          if (generation !== draftRuntimeGeneration || !isPluginEnabled("composer-draft-cache")) return;
+          syncNativeComposerDraft(false);
+        });
+      }
+    }
+    return true;
+  }
+
+  function reconcilePendingDraftSubmission(native) {
+    if (activeNativeDraft && activeNativeDraft.lastSaved
+      && activeNativeDraft.lastSaved !== EMPTY_DRAFT_SIGNATURE
+      && isDraftSubmissionAccepted({
+        owner: activeNativeDraft.key,
+        keyRef: activeNativeDraft.keyRef,
+        valueRef: activeNativeDraft.valueRef,
+        imagesRef: activeNativeDraft.imagesRef,
+      })) {
+      let tracked = pendingDraftSubmissions.get(activeNativeDraft.key);
+      if (!tracked || tracked.keyRef !== activeNativeDraft.keyRef) {
+        tracked = {
+          owner: activeNativeDraft.key,
+          keyRef: activeNativeDraft.keyRef,
+          valueRef: activeNativeDraft.valueRef,
+          imagesRef: activeNativeDraft.imagesRef,
+          signature: activeNativeDraft.lastSaved,
+          accepted: false,
+        };
+        pendingDraftSubmissions.set(activeNativeDraft.key, tracked);
+      }
+      markDraftSubmissionAccepted(tracked);
+    }
+    for (const [, sub] of pendingDraftSubmissions) {
+      if (!sub.accepted && isDraftSubmissionAccepted(sub)) {
+        markDraftSubmissionAccepted(sub);
+      }
+    }
+    if (!native) return;
+    const sub = pendingDraftSubmissions.get(native.key);
+    if (!sub) return;
+    if (!sub.accepted && isDraftSubmissionAccepted(sub)) {
+      markDraftSubmissionAccepted(sub);
+    }
+  }
+
+  function scheduleDraftSubmissionObservation() {
+    if (draftSubmissionPollFrame || typeof requestAnimationFrame !== "function") return;
+    const generation = draftRuntimeGeneration;
+    let remainingFrames = 120;
+    const step = () => {
+      draftSubmissionPollFrame = 0;
+      if (generation !== draftRuntimeGeneration || !isPluginEnabled("composer-draft-cache")) return;
+      let hasUnresolved = false;
+      let newlyAccepted = false;
+      for (const [, sub] of pendingDraftSubmissions) {
+        if (!sub.accepted) {
+          if (isDraftSubmissionAccepted(sub)) {
+            markDraftSubmissionAccepted(sub);
+            newlyAccepted = true;
+          } else {
+            hasUnresolved = true;
+          }
+        }
+      }
+      if (newlyAccepted) {
+        syncNativeComposerDraft(false);
+      }
+      if (hasUnresolved && --remainingFrames > 0) {
+        draftSubmissionPollFrame = requestAnimationFrame(step);
+      }
+    };
+    draftSubmissionPollFrame = requestAnimationFrame(step);
+  }
+
   function persistNativeDraft(ctx) {
     // Before entry recovery is evaluated, an empty native composer is only an
     // unknown transition state. It must never erase its owner's saved draft.
     if (!ctx?.initialized) return;
+    const sub = pendingDraftSubmissions.get(ctx.key);
+    if (sub && !sub.accepted && isDraftSubmissionAccepted(sub)) {
+      markDraftSubmissionAccepted(sub);
+    }
     const snapshot = nativeDraftSnapshot(ctx);
     if (!snapshot) return;
     const submission = composerSubmissionInFlight;
     if (submission?.snapshot && submission.keyRef === ctx.keyRef && submission.owner === ctx.key
       && snapshot.value === submission.text && !submission.accepted) snapshot.value = submission.body;
+    const isEmpty = !snapshot.value && !snapshot.images.length;
+    if (isEmpty) {
+      if (sub && !sub.accepted && sub.keyRef === ctx.keyRef) {
+        markDraftSubmissionAccepted(sub);
+      }
+      removePersistedDraft(ctx.key);
+      ctx.lastSaved = EMPTY_DRAFT_SIGNATURE;
+      return;
+    }
+    // Never write back stale content on a newly remounted instance whose prior
+    // same-session instance already accepted and cleared the submission.
+    if (sub?.accepted && ctx.keyRef !== sub.keyRef) return;
+    if (sub?.accepted && ctx.keyRef === sub.keyRef) {
+      pendingDraftSubmissions.delete(ctx.key);
+      submittedDraftKeys.delete(ctx.key);
+    }
     const signature = JSON.stringify(snapshot);
-    if (signature === ctx.lastSaved) return;
+    if (signature === ctx.lastSaved && getPersistedDraft(ctx.key)) return;
     if (savePersistedDraft(ctx.key, snapshot)) ctx.lastSaved = signature;
   }
 
@@ -1251,45 +1541,61 @@
     const native = readNativeComposerDraft();
     const snapshot = nativeDraftSnapshot(native);
     if (!native || !snapshot || (!snapshot.value && !snapshot.images.length)) return null;
+    if (native.fieldset?.disabled || native.pendingRef?.current > 0) return null;
     const target = event?.target;
     const button = target?.closest?.("button") || (target?.tagName === "BUTTON" ? target : null);
+    const className = String(button?.className || "");
+    if (button && /\bpi-enh-(?:quick-|attachment-remove|format-toggle)/.test(className)) return null;
     const labels = button ? [button.textContent, button.getAttribute?.("aria-label"), button.getAttribute?.("title")]
       .map((label) => String(label || "").trim()).filter(Boolean) : [];
     const clickedSubmission = !!button && native.fieldset?.contains?.(button) && !button.disabled
-      && labels.some((label) => /发送(?:消息)?|引导|后续消息|send(?:\s+message)?|steer|follow[\s-]?up/i.test(label));
-    const keyboardSubmission = event?.type === "keydown" && target === native.textarea
-      && event.key === "Enter" && !event.shiftKey && !event.isComposing;
-    return clickedSubmission || keyboardSubmission ? { native, signature: JSON.stringify(snapshot) } : null;
+      && (button.classList?.contains("pi-enh-cursor-send")
+        || button.classList?.contains("pi-enh-cursor-followup")
+        || button.classList?.contains("pi-enh-cursor-steer")
+        || labels.some((label) => /发送(?:消息)?|引导|后续消息|send(?:\s+message)?|steer|follow[\s-]?up/i.test(label)));
+    const isEditorTarget = target === native.textarea
+      || Boolean(activeFormattedComposer && activeFormattedComposer.__boundTextarea === native.textarea && activeFormattedComposer.contains(target));
+    const mobilePlainEnter = typeof isMobileEnvironment === "function" && isMobileEnvironment() && !event?.ctrlKey && !event?.metaKey;
+    const completionKey = typeof isComposerCompletionKey === "function" && isComposerCompletionKey(event, native.textarea);
+    const keyboardSubmission = event?.type === "keydown" && isEditorTarget
+      && event.key === "Enter" && !event.shiftKey && !event.altKey
+      && !event.isComposing && !isComposingInput && event.keyCode !== 229
+      && !mobilePlainEnter && !completionKey;
+    return clickedSubmission || keyboardSubmission ? { native, snapshot, signature: JSON.stringify(snapshot) } : null;
   }
 
-  function clearDraftForSubmissionIntent(intent) {
-    const { native, signature } = intent;
-    submittedDraftKeys.add(native.key);
-    removePersistedDraft(native.key);
-    const context = nativeDraftContexts.get(native.keyRef) || activeNativeDraft;
-    if (context?.keyRef === native.keyRef && context.key === native.key) context.lastSaved = signature;
-    const generation = draftRuntimeGeneration;
-    // Let the native click/keydown handler commit first. A synchronous rejected
-    // submit restores its refs here; an accepted submit remains empty and stays
-    // deleted. Never inspect history or infer a send from text equality.
-    addManagedTimeout(() => {
-      if (generation !== draftRuntimeGeneration || !isPluginEnabled("composer-draft-cache")) return;
-      const current = readNativeComposerDraft();
-      if (!current || current.keyRef !== native.keyRef || current.key !== native.key) return;
-      const snapshot = nativeDraftSnapshot(current);
-      if (!snapshot) return;
-      const currentContext = nativeDraftContexts.get(current.keyRef);
-      const currentSignature = JSON.stringify(snapshot);
-      if (!snapshot.value && !snapshot.images.length) {
-        removePersistedDraft(current.key);
-        if (currentContext) currentContext.lastSaved = currentSignature;
-        return;
-      }
-      // Native recovery (or a prevented click) is authoritative for the same
-      // owner, so retain it as a draft again rather than losing user input.
-      submittedDraftKeys.delete(current.key);
-      if (savePersistedDraft(current.key, snapshot) && currentContext) currentContext.lastSaved = currentSignature;
-    }, 0);
+  function trackDraftSubmissionIntent(intent) {
+    if (!intent?.native) return;
+    const { native, snapshot, signature } = intent;
+    let ctx = nativeDraftContexts.get(native.keyRef);
+    if (!ctx || ctx.key !== native.key) {
+      ctx = { ...native, initialized: true, lastSaved: null };
+      nativeDraftContexts.set(native.keyRef, ctx);
+    } else {
+      Object.assign(ctx, native);
+      ctx.initialized = true;
+    }
+    // Keep the unsent draft persisted while a delayed rAF or async builtin check
+    // is still in flight; only removePersistedDraft once clearInput is observed.
+    if (snapshot && (snapshot.value || snapshot.images.length) && !getPersistedDraft(native.key)) {
+      if (savePersistedDraft(native.key, snapshot)) ctx.lastSaved = signature;
+    }
+    const sub = {
+      owner: native.key,
+      keyRef: native.keyRef,
+      valueRef: native.valueRef,
+      imagesRef: native.imagesRef,
+      textarea: native.textarea,
+      snapshot,
+      signature,
+      accepted: false,
+    };
+    pendingDraftSubmissions.set(native.key, sub);
+    if (isDraftSubmissionAccepted(sub)) {
+      markDraftSubmissionAccepted(sub);
+    } else {
+      scheduleDraftSubmissionObservation();
+    }
   }
 
   function removeDraftRestoredBadge() {
@@ -1335,13 +1641,19 @@
       const current = readNativeComposerDraft();
       if (!current || current.keyRef !== ctx.keyRef || current.key !== ctx.key) return;
       // DOM is used only for bounded user actions, never as a draft data source.
-      setComposerTextareaValue(ctx.textarea, "");
-      if (activeFormattedComposer) {
-        activeFormattedComposer.innerHTML = "";
-        activeFormattedComposer.__piEnhSyncedValue = "";
-      }
-      for (const img of ctx.fieldset.querySelectorAll("img")) {
-        if (/^(blob:|data:image\/)/.test(img.getAttribute("src") || "")) img.parentElement?.querySelector("button")?.click();
+      const prevClearing = clearingStaleDraftSurface;
+      clearingStaleDraftSurface = true;
+      try {
+        setComposerTextareaValue(ctx.textarea, "");
+        if (activeFormattedComposer) {
+          activeFormattedComposer.innerHTML = "";
+          activeFormattedComposer.__piEnhSyncedValue = "";
+        }
+        for (const img of ctx.fieldset.querySelectorAll("img")) {
+          if (/^(blob:|data:image\/)/.test(img.getAttribute("src") || "")) img.parentElement?.querySelector("button")?.click();
+        }
+      } finally {
+        clearingStaleDraftSurface = prevClearing;
       }
       removePersistedDraft(ctx.key);
       removeDraftRestoredBadge();
@@ -1355,12 +1667,16 @@
     if (!isPluginEnabled("composer-draft-cache")) return false;
     ensureDraftListeners();
     const native = readNativeComposerDraft();
+    reconcilePendingDraftSubmission(native);
     // Old refs retain their immutable owner even after the DOM is unmounted.
     // Native clearInput updates them synchronously before send/remount.
     if (activeNativeDraft) persistNativeDraft(activeNativeDraft);
     if (!native) return false;
     if (lastObservedNativeDraftKey !== native.key) {
-      if (lastObservedNativeDraftKey) submittedDraftKeys.delete(lastObservedNativeDraftKey);
+      if (lastObservedNativeDraftKey) {
+        submittedDraftKeys.delete(lastObservedNativeDraftKey);
+        pendingDraftSubmissions.delete(lastObservedNativeDraftKey);
+      }
       lastObservedNativeDraftKey = native.key;
       requestComposerDraftRestore();
     }
@@ -1371,6 +1687,52 @@
     } else Object.assign(ctx, native);
     if (ctx !== activeNativeDraft) removeDraftRestoredBadge();
     activeNativeDraft = ctx;
+
+    const sub = pendingDraftSubmissions.get(ctx.key);
+    if (sub?.accepted) {
+      if (ctx.keyRef !== sub.keyRef && !ctx.initialized) {
+        // Same-session remount immediately after an accepted send: native in-memory
+        // draft-store Map clearing is asynchronous (useEffect), so the remounted
+        // instance may initialize with stale already-sent text/images.
+        const staleSnapshot = nativeDraftSnapshot(ctx);
+        if (staleSnapshot && (staleSnapshot.value || staleSnapshot.images.length)
+          && JSON.stringify(staleSnapshot) !== sub.signature) {
+          // A different payload on the new instance is a fresh user draft, not
+          // stale native memory; never erase it while repairing the old send.
+          pendingDraftSubmissions.delete(ctx.key);
+          submittedDraftKeys.delete(ctx.key);
+          ctx.initialized = true;
+          draftRestoreRequested = false;
+          persistNativeDraft(ctx);
+          return false;
+        }
+        if (staleSnapshot && (staleSnapshot.value || staleSnapshot.images.length)) {
+          clearStaleRemountedNativeComposer(ctx, ctx.key);
+        } else {
+          removePersistedDraft(ctx.key);
+        }
+        ctx.initialized = true;
+        ctx.lastSaved = EMPTY_DRAFT_SIGNATURE;
+        sub.keyRef = ctx.keyRef;
+        draftRestoreRequested = false;
+        return false;
+      }
+      if (ctx.keyRef === sub.keyRef) {
+        const currentSnapshot = nativeDraftSnapshot(ctx);
+        if (currentSnapshot && !currentSnapshot.value && !currentSnapshot.images.length) {
+          removePersistedDraft(ctx.key);
+          ctx.initialized = true;
+          ctx.lastSaved = EMPTY_DRAFT_SIGNATURE;
+          return false;
+        }
+        if (currentSnapshot && (currentSnapshot.value || currentSnapshot.images.length)) {
+          // Subsequent user typing or restoreSubmission on the already-cleared instance.
+          pendingDraftSubmissions.delete(ctx.key);
+          submittedDraftKeys.delete(ctx.key);
+        }
+      }
+    }
+
     let restored = false;
     if (!ctx.initialized) {
       const snapshot = nativeDraftSnapshot(ctx);
@@ -1394,6 +1756,11 @@
             return false;
           }
         }
+      } else if (!draftRestoreRequested) {
+        ctx.initialized = true;
+      } else if ((snapshot.value || snapshot.images.length) && !getPersistedDraft(ctx.key)) {
+        ctx.initialized = true;
+        draftRestoreRequested = false;
       }
     }
     persistNativeDraft(ctx);
@@ -1414,11 +1781,12 @@
   function ensureDraftListeners() {
     if (draftListeners.length) return;
     const handler = (event) => {
+      if (clearingStaleDraftSurface) return;
       const submissionIntent = getComposerSubmissionIntent(event);
       if (submissionIntent) {
-        // Delete before React can replace this composer. The deferred native-ref
-        // check below restores only an explicitly rejected/prevented submission.
-        clearDraftForSubmissionIntent(submissionIntent);
+        // Track submission intent without deleting persisted draft prematurely.
+        // Draft is cleared only when native clearInput consumes the refs.
+        trackDraftSubmissionIntent(submissionIntent);
         removeDraftRestoredBadge();
         queueNativeDraftSync();
         return;
@@ -1426,12 +1794,27 @@
       const current = activeNativeDraft;
       const target = event?.target;
       const changedText = (event?.type === "input" || event?.type === "change" || event?.type === "paste")
-        && target === current?.textarea;
+        && (target === current?.textarea || Boolean(activeFormattedComposer && activeFormattedComposer.__boundTextarea === current?.textarea && activeFormattedComposer.contains(target)));
       const changedImage = event?.type === "change" && target?.tagName === "INPUT"
         && String(target.type || "").toLowerCase() === "file" && current?.fieldset?.contains?.(target);
-      // Once the user changes the restored payload, this is no longer a useful
-      // recovery status. Keep the toolbar clean without inferring send state.
-      if (changedText || changedImage) removeDraftRestoredBadge();
+      if (changedText || changedImage) {
+        removeDraftRestoredBadge();
+        if (current?.key) {
+          const sub = pendingDraftSubmissions.get(current.key);
+          if (sub && sub.keyRef === current.keyRef) {
+            if (sub.accepted) {
+              pendingDraftSubmissions.delete(current.key);
+              submittedDraftKeys.delete(current.key);
+            } else {
+              const snap = nativeDraftSnapshot(current);
+              if (snap && (snap.value || snap.images.length) && JSON.stringify(snap) !== sub.signature) {
+                pendingDraftSubmissions.delete(current.key);
+                submittedDraftKeys.delete(current.key);
+              }
+            }
+          }
+        }
+      }
       // Observe before React handles send, then again after it has committed.
       // Enter/IME/mobile newline and rejected sends are NOT assumed to be sent.
       syncNativeComposerDraft(false);
@@ -1446,12 +1829,17 @@
   function stopComposerDraftCache() {
     draftRuntimeGeneration++;
     draftSyncQueued = false;
+    if (draftSubmissionPollFrame && typeof cancelAnimationFrame === "function") {
+      cancelAnimationFrame(draftSubmissionPollFrame);
+      draftSubmissionPollFrame = 0;
+    }
     for (const cleanup of draftListeners.splice(0)) cleanup();
     nativeDraftContexts = new WeakMap();
     activeNativeDraft = null;
     draftRestoreRequested = true;
     lastObservedNativeDraftKey = null;
     submittedDraftKeys.clear();
+    pendingDraftSubmissions.clear();
     removeDraftRestoredBadge();
   }
 
@@ -1466,6 +1854,7 @@
   function notifySessionChangedForDraft() { syncNativeComposerDraft(false); }
 
   activeCleanups.push(stopComposerDraftCache);
+  if (isPluginEnabled("composer-draft-cache")) ensureDraftListeners();
   window.__PI_ENH_GET_PERSISTED_DRAFT__ = getPersistedDraft;
   window.__PI_ENH_SAVE_PERSISTED_DRAFT__ = savePersistedDraft;
   window.__PI_ENH_REMOVE_PERSISTED_DRAFT__ = removePersistedDraft;
@@ -6377,6 +6766,11 @@
       style = document.createElement("style");
       style.id = CODEX_COMPOSER_STYLE_ID;
       style.textContent = `
+        /* The settings dialog is modal; keep the fixed composer from covering its content. */
+        body:has(.settings-dialog-backdrop, .settings-dialog-surface, [role="dialog"][aria-modal="true"]) .pi-enh-cursor-composer {
+          display: none !important;
+        }
+
         /* One grid owns editor and toolbar. Native React nodes are never reparented. */
         .pi-enh-cursor-composer,
         fieldset > div[style*="max-width"]:has(textarea, .pi-enh-formatted-composer) {
@@ -6528,14 +6922,49 @@
         }
 
         .pi-enh-cursor-composer .pi-enh-cursor-editor,
-        .pi-enh-cursor-composer .pi-enh-formatted-composer {
+        .pi-enh-cursor-composer textarea.chat-input-textarea,
+        .pi-enh-cursor-composer .pi-enh-formatted-composer,
+        fieldset > div[style*="max-width"] textarea.chat-input-textarea,
+        fieldset > div[style*="max-width"] .pi-enh-formatted-composer {
           grid-area: 2 / 1 / 3 / -1;
           width: 100% !important;
-          padding: 0 2px 6px !important;
-          min-height: 30px !important;
-          box-sizing: border-box;
+          padding: 0 2px 4px !important;
+          min-height: 28px !important;
+          max-height: clamp(68px, 22vh, 160px) !important;
+          overflow-y: auto !important;
+          overscroll-behavior: contain !important;
+          box-sizing: border-box !important;
         }
-        .pi-enh-cursor-composer .pi-enh-cursor-attachments { grid-area: 1 / 1 / 2 / -1; }
+        .pi-enh-cursor-composer:has(.pi-enh-cursor-attachments, div[style*="flex-wrap"] img) .pi-enh-cursor-editor,
+        .pi-enh-cursor-composer:has(.pi-enh-cursor-attachments, div[style*="flex-wrap"] img) textarea.chat-input-textarea,
+        .pi-enh-cursor-composer:has(.pi-enh-cursor-attachments, div[style*="flex-wrap"] img) .pi-enh-formatted-composer,
+        fieldset > div[style*="max-width"]:has(div[style*="flex-wrap"] img) textarea.chat-input-textarea,
+        fieldset > div[style*="max-width"]:has(div[style*="flex-wrap"] img) .pi-enh-formatted-composer {
+          max-height: clamp(52px, calc(18vh - 12px), 124px) !important;
+        }
+        .pi-enh-cursor-composer .pi-enh-cursor-attachments,
+        fieldset > div[style*="max-width"] > div[style*="flex-wrap"]:has(img) {
+          grid-area: 1 / 1 / 2 / -1 !important;
+          display: flex !important;
+          flex-wrap: nowrap !important;
+          align-items: center !important;
+          gap: 6px !important;
+          margin: -2px 0 0 0 !important;
+          padding: 4px 6px 2px 2px !important;
+          max-height: 54px !important;
+          overflow-x: auto !important;
+          overflow-y: hidden !important;
+          box-sizing: border-box !important;
+          min-width: 0 !important;
+        }
+        .pi-enh-cursor-composer .pi-enh-cursor-attachments img,
+        fieldset > div[style*="max-width"] > div[style*="flex-wrap"]:has(img) img {
+          width: 44px !important;
+          height: 44px !important;
+          border-radius: 6px !important;
+          object-fit: cover !important;
+          display: block !important;
+        }
         /* 1. 加号按钮槽位 */
         .pi-enh-cursor-composer .pi-enh-composer-add-btn,
         fieldset > div[style*="max-width"] .pi-enh-composer-add-btn {
@@ -7255,6 +7684,55 @@
             left: 0 !important;
             right: 0 !important;
           }
+          .pi-enh-cursor-composer .pi-enh-cursor-editor,
+          .pi-enh-cursor-composer textarea.chat-input-textarea,
+          .pi-enh-cursor-composer .pi-enh-formatted-composer,
+          fieldset > div[style*="max-width"] textarea.chat-input-textarea,
+          fieldset > div[style*="max-width"] .pi-enh-formatted-composer {
+            max-height: clamp(60px, 19vh, 136px) !important;
+          }
+          .pi-enh-cursor-composer:has(.pi-enh-cursor-attachments, div[style*="flex-wrap"] img) .pi-enh-cursor-editor,
+          .pi-enh-cursor-composer:has(.pi-enh-cursor-attachments, div[style*="flex-wrap"] img) textarea.chat-input-textarea,
+          .pi-enh-cursor-composer:has(.pi-enh-cursor-attachments, div[style*="flex-wrap"] img) .pi-enh-formatted-composer,
+          fieldset > div[style*="max-width"]:has(div[style*="flex-wrap"] img) textarea.chat-input-textarea,
+          fieldset > div[style*="max-width"]:has(div[style*="flex-wrap"] img) .pi-enh-formatted-composer {
+            max-height: clamp(48px, calc(16vh - 10px), 104px) !important;
+          }
+        }
+
+        /* 低高度横屏（如手机横屏/分屏）：收紧卡片、附件条与编辑区最大高度，内部平滑滚动并保留图片条与工具栏 */
+        @media (max-height: 500px) {
+          .pi-enh-cursor-composer,
+          fieldset > div[style*="max-width"]:has(textarea, .pi-enh-formatted-composer) {
+            padding: 6px 10px !important;
+            row-gap: 4px !important;
+          }
+          .pi-enh-cursor-composer .pi-enh-cursor-attachments,
+          fieldset > div[style*="max-width"] > div[style*="flex-wrap"]:has(img) {
+            max-height: 44px !important;
+            padding: 4px 6px 1px 2px !important;
+          }
+          .pi-enh-cursor-composer .pi-enh-cursor-attachments img,
+          fieldset > div[style*="max-width"] > div[style*="flex-wrap"]:has(img) img {
+            width: 36px !important;
+            height: 36px !important;
+          }
+          .pi-enh-cursor-composer .pi-enh-cursor-editor,
+          .pi-enh-cursor-composer textarea.chat-input-textarea,
+          .pi-enh-cursor-composer .pi-enh-formatted-composer,
+          fieldset > div[style*="max-width"] textarea.chat-input-textarea,
+          fieldset > div[style*="max-width"] .pi-enh-formatted-composer {
+            padding: 0 2px 2px !important;
+            min-height: 24px !important;
+            max-height: clamp(42px, calc(28vh - 16px), 84px) !important;
+          }
+          .pi-enh-cursor-composer:has(.pi-enh-cursor-attachments, div[style*="flex-wrap"] img) .pi-enh-cursor-editor,
+          .pi-enh-cursor-composer:has(.pi-enh-cursor-attachments, div[style*="flex-wrap"] img) textarea.chat-input-textarea,
+          .pi-enh-cursor-composer:has(.pi-enh-cursor-attachments, div[style*="flex-wrap"] img) .pi-enh-formatted-composer,
+          fieldset > div[style*="max-width"]:has(div[style*="flex-wrap"] img) textarea.chat-input-textarea,
+          fieldset > div[style*="max-width"]:has(div[style*="flex-wrap"] img) .pi-enh-formatted-composer {
+            max-height: clamp(36px, calc(22vh - 16px), 64px) !important;
+          }
         }
       `;
       document.head.appendChild(style);
@@ -7264,6 +7742,7 @@
     if (!card) return;
     card.classList.add("pi-enh-cursor-composer");
     textarea.classList.add("pi-enh-cursor-editor");
+    syncComposerTextareaAutoHeight(textarea);
     const editor = textarea.parentElement;
     editor.classList.add("pi-enh-cursor-contents");
     if (editor.parentElement !== card) editor.parentElement.classList.add("pi-enh-cursor-contents");
@@ -9037,11 +9516,20 @@
         }
         const button = getAnnotationSendButtons(textarea).find((b) => determineSendKindFromButton(b) === kind);
         if (!button || button.disabled) return;
+        const preDispatchSnapshot = nativeDraftSnapshot(current);
+        if (preDispatchSnapshot) {
+          const outboundSnap = intent.snapshot ? { ...preDispatchSnapshot, value: intent.body || "" } : preDispatchSnapshot;
+          trackDraftSubmissionIntent({
+            native: current,
+            snapshot: outboundSnap,
+            signature: JSON.stringify(outboundSnap),
+          });
+        }
         intent.phase = "dispatched";
         intent.accepted = await invokeNativeComposerButton(button, current,
           intent.snapshot ? () => rollbackAnnotationSubmission(intent) : null);
         if (!intent.accepted) return;
-        const cardAfterDispatch = textarea?.closest?.('.pi-enh-cursor-composer, fieldset > div[style*="max-width"]');
+        const cardAfterDispatch = (readNativeComposerDraft()?.textarea || textarea)?.closest?.('.pi-enh-cursor-composer, fieldset > div[style*="max-width"]');
         if (cardAfterDispatch) {
           cardAfterDispatch.classList.add("pi-enh-has-running-controls");
           for (const b of cardAfterDispatch.querySelectorAll("button")) {
@@ -9049,24 +9537,23 @@
           }
         }
         if (intent.snapshot) consumeAnnotationSnapshot(intent.snapshot, intent.annotationSession);
+        removePersistedDraft(intent.owner);
+        syncNativeComposerDraft(false);
         const committed = readNativeComposerDraft();
-        if (committed && committed.keyRef === intent.keyRef && committed.key === intent.owner
-          && committed.textarea === textarea && getCurrentSessionId() === intent.route
+        if (committed && committed.key === intent.owner && getCurrentSessionId() === intent.route
           && committed.valueRef.current === "" && committed.imagesRef.current.length === 0) {
-          removePersistedDraft(intent.owner);
-          if (!instantlyClearComposerSurface(textarea, intent.owner)) {
+          if (!instantlyClearComposerSurface(committed.textarea, intent.owner)) {
             requestAnimationFrame(() => {
               if (!isPluginEnabled(intent.snapshot ? "quick-quote" : "composer-markdown-format")) return;
               const rafNative = readNativeComposerDraft();
-              if (rafNative && rafNative.keyRef === intent.keyRef && rafNative.key === intent.owner
-                && rafNative.textarea === textarea && getCurrentSessionId() === intent.route
+              if (rafNative && rafNative.key === intent.owner && getCurrentSessionId() === intent.route
                 && rafNative.valueRef.current === "" && rafNative.imagesRef.current.length === 0) {
-                instantlyClearComposerSurface(textarea, intent.owner);
+                instantlyClearComposerSurface(rafNative.textarea, intent.owner);
               }
             });
           }
-          queueNativeDraftSync();
         }
+        queueNativeDraftSync();
       } catch (error) {
         console.warn("[Pi Web] Native composer submission was not completed", error);
         showToast("提交未完成，输入与引用已保留");
@@ -9131,18 +9618,26 @@
       const native = readNativeComposerDraft();
       const capturedOwner = native?.key;
       const capturedKeyRef = native?.keyRef;
+      const capturedValueRef = native?.valueRef;
+      const capturedImagesRef = native?.imagesRef;
       const capturedRoute = getCurrentSessionId();
       const capturedTextarea = native?.textarea || findComposerTextarea();
       if (capturedTextarea && capturedOwner) {
         const attemptClear = () => {
+          const capturedAccepted = capturedKeyRef?.current === capturedOwner
+            && capturedValueRef?.current === ""
+            && Array.isArray(capturedImagesRef?.current) && capturedImagesRef.current.length === 0;
+          if (capturedAccepted) {
+            syncNativeComposerDraft(false);
+          }
           const currentNative = readNativeComposerDraft();
-          // document click 的微任务必须校验捕获的 owner 与 textarea 未切换，不能误清新会话
-          if (!currentNative || currentNative.key !== capturedOwner || currentNative.textarea !== capturedTextarea
-            || currentNative.keyRef !== capturedKeyRef || getCurrentSessionId() !== capturedRoute) return false;
+          // document click 的微任务必须校验捕获的 owner 未切换，若未确认原实例已消费则还需校验 keyRef/textarea
+          if (!currentNative || currentNative.key !== capturedOwner || getCurrentSessionId() !== capturedRoute) return false;
+          if (!capturedAccepted && (currentNative.textarea !== capturedTextarea || currentNative.keyRef !== capturedKeyRef)) return false;
           const val = typeof currentNative.valueRef?.current === "string" ? currentNative.valueRef.current : null;
           const imgs = Array.isArray(currentNative.imagesRef?.current) ? currentNative.imagesRef.current : null;
           if (val === "" && (!imgs || imgs.length === 0)) {
-            return instantlyClearComposerSurface(capturedTextarea, capturedOwner);
+            return instantlyClearComposerSurface(currentNative.textarea, capturedOwner);
           }
           return false;
         };
@@ -9538,8 +10033,9 @@
         .pi-enh-formatted-composer {
           width: 100% !important;
           min-height: 28px !important;
-          max-height: 280px !important;
+          max-height: clamp(68px, 22vh, 160px) !important;
           overflow-y: auto !important;
+          overscroll-behavior: contain !important;
           box-sizing: border-box !important;
           padding: 2px 0 !important;
           outline: none !important;
@@ -9551,6 +10047,26 @@
           cursor: text !important;
           user-select: text !important;
           white-space: pre-wrap !important;
+        }
+        fieldset > div[style*="max-width"]:has(div[style*="flex-wrap"] img) .pi-enh-formatted-composer {
+          max-height: clamp(52px, calc(18vh - 12px), 124px) !important;
+        }
+        @media (max-width: 640px) {
+          .pi-enh-formatted-composer {
+            max-height: clamp(60px, 19vh, 136px) !important;
+          }
+          fieldset > div[style*="max-width"]:has(div[style*="flex-wrap"] img) .pi-enh-formatted-composer {
+            max-height: clamp(48px, calc(16vh - 10px), 104px) !important;
+          }
+        }
+        @media (max-height: 500px) {
+          .pi-enh-formatted-composer {
+            min-height: 24px !important;
+            max-height: clamp(42px, calc(28vh - 16px), 84px) !important;
+          }
+          fieldset > div[style*="max-width"]:has(div[style*="flex-wrap"] img) .pi-enh-formatted-composer {
+            max-height: clamp(36px, calc(22vh - 16px), 64px) !important;
+          }
         }
 
         .pi-enh-formatted-composer:empty::before {
@@ -9901,6 +10417,7 @@
         }
       };
       const onInput = () => {
+        syncComposerTextareaAutoHeight(textarea);
         const card = textarea.closest('fieldset > div[style*="max-width"]');
         updateCardContentState(card, textarea);
       };
@@ -9993,6 +10510,7 @@
       }
       textarea.style.display = "block";
       formattedComposer.style.display = "none";
+      syncComposerTextareaAutoHeight(textarea);
     }
   }
 
@@ -10120,12 +10638,16 @@
     const textarea = findComposerTextarea();
     if (textarea) {
       if (enabled) {
-        if (!textarea.hasAttribute("data-pi-orig-placeholder")) {
-          const raw = textarea.getAttribute("placeholder") || "";
+        const raw = textarea.getAttribute("placeholder") || "";
+        if (raw || !textarea.hasAttribute("data-pi-orig-placeholder")) {
           if (raw) textarea.setAttribute("data-pi-orig-placeholder", raw);
         }
         try {
-          textarea.placeholder = "";
+          if (origTextareaPlaceholderDesc?.set) {
+            origTextareaPlaceholderDesc.set.call(textarea, "");
+          } else {
+            textarea.placeholder = "";
+          }
           textarea.setAttribute("placeholder", "");
         } catch (e) {}
         textarea.classList.add("pi-enh-clean-placeholder");
@@ -10133,7 +10655,11 @@
         const orig = textarea.getAttribute("data-pi-orig-placeholder");
         if (orig !== null) {
           try {
-            textarea.placeholder = orig;
+            if (origTextareaPlaceholderDesc?.set) {
+              origTextareaPlaceholderDesc.set.call(textarea, orig);
+            } else {
+              textarea.placeholder = orig;
+            }
             textarea.setAttribute("placeholder", orig);
           } catch (e) {}
         }
@@ -10144,8 +10670,9 @@
     const formatted = document.querySelector(".pi-enh-formatted-composer");
     if (formatted) {
       if (enabled) {
-        if (!formatted.hasAttribute("data-pi-orig-placeholder")) {
-          formatted.setAttribute("data-pi-orig-placeholder", formatted.getAttribute("data-placeholder") || "");
+        const rawFmt = formatted.getAttribute("data-placeholder") || "";
+        if (rawFmt || !formatted.hasAttribute("data-pi-orig-placeholder")) {
+          formatted.setAttribute("data-pi-orig-placeholder", rawFmt);
         }
         formatted.setAttribute("data-placeholder", "");
         if (formatted.dataset) formatted.dataset.placeholder = "";
@@ -10170,7 +10697,11 @@
       const orig = textarea.getAttribute("data-pi-orig-placeholder");
       if (orig !== null) {
         try {
-          textarea.placeholder = orig;
+          if (origTextareaPlaceholderDesc?.set) {
+            origTextareaPlaceholderDesc.set.call(textarea, orig);
+          } else {
+            textarea.placeholder = orig;
+          }
           textarea.setAttribute("placeholder", orig);
         } catch (e) {}
       }
@@ -10634,15 +11165,17 @@
 
   function updateComposerPlaceholder(textarea, mode) {
     if (textarea) {
-      if (!textarea.hasAttribute("data-original-placeholder")) {
-        textarea.setAttribute("data-original-placeholder", textarea.placeholder || "");
-      }
-      const orig = textarea.getAttribute("data-original-placeholder") || "";
-      if (mode === "plan") {
-        textarea.placeholder = PLACEHOLDER_PLAN;
-      } else if (mode === "goal") {
-        textarea.placeholder = PLACEHOLDER_GOAL;
-      } else {
+      if (mode === "plan" || mode === "goal") {
+        if (!textarea.hasAttribute("data-original-placeholder")) {
+          const currentPh = typeof getComposerEffectivePlaceholder === "function"
+            ? getComposerEffectivePlaceholder(textarea)
+            : (textarea.placeholder || "");
+          textarea.setAttribute("data-original-placeholder", currentPh);
+        }
+        textarea.placeholder = mode === "plan" ? PLACEHOLDER_PLAN : PLACEHOLDER_GOAL;
+      } else if (textarea.hasAttribute("data-original-placeholder")) {
+        const orig = textarea.getAttribute("data-original-placeholder") || "";
+        textarea.removeAttribute("data-original-placeholder");
         textarea.placeholder = orig;
       }
     }
@@ -10650,16 +11183,15 @@
     // 同时同步富文本编辑器 contenteditable 的 placeholder
     const formatted = document.querySelector(".pi-enh-formatted-composer");
     if (formatted) {
-      if (!formatted.hasAttribute("data-original-placeholder")) {
-        const origFmt = formatted.getAttribute("data-placeholder") || formatted.getAttribute("placeholder") || "";
-        formatted.setAttribute("data-original-placeholder", origFmt);
-      }
-      const orig = formatted.getAttribute("data-original-placeholder") || "";
-      if (mode === "plan") {
-        formatted.setAttribute("data-placeholder", PLACEHOLDER_PLAN);
-      } else if (mode === "goal") {
-        formatted.setAttribute("data-placeholder", PLACEHOLDER_GOAL);
-      } else {
+      if (mode === "plan" || mode === "goal") {
+        if (!formatted.hasAttribute("data-original-placeholder")) {
+          const origFmt = formatted.getAttribute("data-placeholder") || formatted.getAttribute("placeholder") || formatted.getAttribute("data-pi-orig-placeholder") || "";
+          formatted.setAttribute("data-original-placeholder", origFmt);
+        }
+        formatted.setAttribute("data-placeholder", mode === "plan" ? PLACEHOLDER_PLAN : PLACEHOLDER_GOAL);
+      } else if (formatted.hasAttribute("data-original-placeholder")) {
+        const orig = formatted.getAttribute("data-original-placeholder") || "";
+        formatted.removeAttribute("data-original-placeholder");
         formatted.setAttribute("data-placeholder", orig);
       }
     }
@@ -12926,6 +13458,16 @@
       ? assembleComposerAttachments(textarea)
       : false;
 
+    const native = readNativeComposerDraft();
+    if (native && !assembledAttachments) {
+      return dispatchComposerNativeSubmission({
+        kind: "send",
+        textarea,
+        expectedOwner: native.key,
+        expectedText: textarea.value || "",
+      });
+    }
+
     const fieldset = textarea.closest("fieldset") || document.querySelector("fieldset");
     if (!fieldset) return false;
 
@@ -12951,16 +13493,6 @@
         sendComposerText(textarea);
         return true;
       }
-    }
-
-    const native = readNativeComposerDraft();
-    if (native) {
-      return dispatchComposerNativeSubmission({
-        kind: "send",
-        textarea,
-        expectedOwner: native.key,
-        expectedText: textarea.value || "",
-      });
     }
     return false;
   }

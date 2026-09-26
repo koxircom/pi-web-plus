@@ -39,7 +39,7 @@ import {
   SUBAGENT_CONTROL_TOOL_NAMES,
 } from "./subagents";
 import { createSubagentController } from "./subagent-runtime";
-import { isBuiltInSubagentsEnabled } from "./subagent-settings";
+import { isBuiltInSubagentsEnabled, readSubagentSettings } from "./subagent-settings";
 import { resolveShellTools } from "./powershell-settings";
 import { CHAT_ONLY_RESOURCE_LOADER_OPTIONS, contextFilesSystemPrompt } from "./chat-only";
 import { createExactSystemPromptExtension } from "./exact-system-prompt";
@@ -2061,6 +2061,7 @@ export async function startRpcSession(
                 SUBAGENT_CONTROLLER.extensionRuntime,
                 () => listSubagentProfiles(sessionCwd),
                 isBuiltInSubagentsEnabled,
+                () => readSubagentSettings().defaultProfile,
               ),
             ],
             extensionsOverride: (base) => preferUserBashExtension(preferPiWebSubagentExtension(base)),

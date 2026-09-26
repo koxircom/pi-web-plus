@@ -8,6 +8,7 @@ export interface SubagentSettings {
   /** Built-in profiles switched off, in the spelling the file uses. */
   disabledBuiltIns: string[];
   maxConcurrent: number;
+  defaultProfile: string;
 }
 
 type StoredSubagentSettings = Record<string, unknown> & {
@@ -15,10 +16,12 @@ type StoredSubagentSettings = Record<string, unknown> & {
   builtInEnabled?: unknown;
   disabledBuiltIns?: unknown;
   maxConcurrent?: unknown;
+  defaultProfile?: unknown;
 };
 
 export const DEFAULT_SUBAGENT_MAX_CONCURRENT = 10;
 export const MAX_SUBAGENT_MAX_CONCURRENT = 32;
+export const DEFAULT_SUBAGENT_PROFILE = "general-purpose";
 
 function readMaxConcurrent(value: unknown): number {
   return typeof value === "number" && Number.isInteger(value) && value >= 1 && value <= MAX_SUBAGENT_MAX_CONCURRENT
@@ -47,13 +50,25 @@ function readDisabledBuiltIns(value: unknown): string[] {
   return names;
 }
 
+function readDefaultProfile(value: unknown): string {
+  if (typeof value !== "string") return DEFAULT_SUBAGENT_PROFILE;
+  const profile = value.trim();
+  return profile || DEFAULT_SUBAGENT_PROFILE;
+}
+
 function settingsValue(
   builtInEnabled: boolean,
   maxConcurrent: number,
   disabledBuiltIns: string[],
+  defaultProfile: string,
 ): SubagentSettings {
-  return Object.defineProperty({ builtInEnabled, disabledBuiltIns }, "maxConcurrent", {
+  const settings = Object.defineProperty({ builtInEnabled, disabledBuiltIns }, "maxConcurrent", {
     value: maxConcurrent,
+    enumerable: false,
+    configurable: true,
+  });
+  return Object.defineProperty(settings, "defaultProfile", {
+    value: defaultProfile,
     enumerable: false,
     configurable: true,
   }) as SubagentSettings;
@@ -80,6 +95,7 @@ export function readSubagentSettings(
     stored.builtInEnabled === true,
     readMaxConcurrent(stored.maxConcurrent),
     readDisabledBuiltIns(stored.disabledBuiltIns),
+    readDefaultProfile(stored.defaultProfile),
   );
 }
 
@@ -163,6 +179,22 @@ export function writeSubagentMaxConcurrent(
     ...stored,
     version: 1,
     maxConcurrent,
+  }, null, 2));
+  return readSubagentSettings(settingsPath);
+}
+
+export function writeSubagentDefaultProfile(
+  defaultProfile: string,
+  settingsPath = getSubagentSettingsPath(),
+): SubagentSettings {
+  const normalized = defaultProfile.trim();
+  if (!normalized) throw new Error("defaultProfile must be a non-empty string");
+  const stored = readStoredSettings(settingsPath);
+  mkdirSync(dirname(settingsPath), { recursive: true });
+  writePrivateFileAtomicSync(settingsPath, JSON.stringify({
+    ...stored,
+    version: 1,
+    defaultProfile: normalized,
   }, null, 2));
   return readSubagentSettings(settingsPath);
 }

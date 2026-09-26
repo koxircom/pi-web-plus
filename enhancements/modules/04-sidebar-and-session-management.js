@@ -4868,9 +4868,7 @@
   }
   // END APPROVAL SOUND
 
-  let approvalSound = null, approvalSoundNotifier = null, siteAttentionNotifier = null;
-  attentionNotices = new Map();
-  let attentionNoticeSignature = "";
+  let approvalSound = null, approvalSoundNotifier = null;
   let projectStatusLastLegacyResponseAt = 0;
   function isProjectStatusHealthy() {
     if (projectStatusDisposed) return false;
@@ -4927,132 +4925,9 @@
   addManagedListener(document, "click", event => { if (event.target?.closest?.("[data-attention-sound-preview]")) void unlockApprovalSound(true); });
   activeCleanups.push(disposeApprovalSound);
 
-  let currentAttentionQueueIndex = 0;
-
-  function getRequestsSignature(pendingRequests) {
-    if (!Array.isArray(pendingRequests) || !pendingRequests.length) return "";
-    return pendingRequests.map(r => `${r.id || ""}:${r.method || ""}`).sort().join("|");
-  }
-  const sessionAttentionRequestSignatures = new Map();
-  const dismissedAttentionSessions = new Set();
-  const dismissedAttentionSignatures = new Map();
-
   function renderAttentionNotices() {
-    const old = document.querySelector(".pi-enh-attention-notice");
-    if (projectStatusDisposed || !isPluginEnabled("project-status-indicator") || !isPluginEnabled("session-attention-notifications")) { old?.remove(); attentionNoticeSignature = ""; return; }
-    const currentKey = getCurrentProjectStatusKey();
-    const activeAttentionIds = (typeof projectStatusModel !== "undefined" ? projectStatusModel.list() : [])
-      .filter(item => getEffectiveProjectStatusEntry(item.id)?.status === "attention")
-      .map(item => item.id);
-    const allCandidateIds = [...new Set([...attentionNotices.values(), ...activeAttentionIds])];
-    const allIds = allCandidateIds.filter(id => {
-      if (!dismissedAttentionSessions.has(id)) return true;
-      const entry = projectStatusModel.entry(id);
-      const currentSig = getRequestsSignature(entry?.pendingRequests);
-      const dismissedSig = dismissedAttentionSignatures.get(id);
-      // 仅当 request 签名变更时才解禁重显；相同签名保持收起
-      if (dismissedSig && currentSig && dismissedSig !== currentSig) {
-        dismissedAttentionSessions.delete(id);
-        dismissedAttentionSignatures.delete(id);
-        return true;
-      }
-      return false;
-    });
-    // 严格按当前标签页所属项目过滤：只在所属项目标签页中展示待办卡片，避免跨项目冒领与误判
-    const ids = currentKey
-      ? allIds.filter(id => {
-          const entry = projectStatusModel.entry(id);
-          return !entry.projectKey || entry.projectKey === currentKey;
-        })
-      : allIds;
-    if (!ids.length) { old?.remove(); attentionNoticeSignature = ""; return; }
-    if (currentAttentionQueueIndex >= ids.length) currentAttentionQueueIndex = 0;
-    const signature = JSON.stringify({
-      index: currentAttentionQueueIndex,
-      total: ids.length,
-      items: ids.map(id => { const entry = projectStatusModel.entry(id); return [id, entry.title, entry.pendingRequests]; }),
-    });
-    if (old && attentionNoticeSignature === signature) return;
-    attentionNoticeSignature = signature;
-    const summary = ids.map(id => projectStatusModel.entry(id)?.title || "后台任务").join("、");
-    const enabled = recordNotificationEvent(`待你处理：${summary}`, "warning", "attention-inpage", "attention-inpage");
-    if (!isNotificationEnabled("attention-inpage") || !enabled) { old?.remove(); return; }
-    old?.remove();
-
-    const notice = document.createElement("aside");
-    notice.className = "pi-enh-attention-notice pi-enh-approval-queue-card";
-    notice.setAttribute("role", "status");
-    notice.setAttribute("aria-live", "polite");
-
-    const dismiss = id => {
-      for (const [key, value] of attentionNotices) if (value === id) attentionNotices.delete(key);
-      const entry = projectStatusModel.entry(id);
-      const sig = getRequestsSignature(entry?.pendingRequests);
-      dismissedAttentionSessions.add(id);
-      dismissedAttentionSignatures.set(id, sig);
-      if (currentAttentionQueueIndex > 0 && currentAttentionQueueIndex >= ids.length - 1) {
-        currentAttentionQueueIndex = Math.max(0, ids.length - 2);
-      }
-      renderAttentionNotices();
-    };
-
-    if (ids.length > 1) {
-      const queueHeader = document.createElement("div");
-      queueHeader.className = "pi-enh-queue-header";
-      queueHeader.innerHTML = `
-        <div class="pi-enh-queue-title">
-          <span class="pi-enh-queue-badge">待审批队列</span>
-          <span>${currentAttentionQueueIndex + 1} / ${ids.length}</span>
-        </div>
-        <div class="pi-enh-queue-nav">
-          <button type="button" class="pi-enh-queue-nav-btn prev-btn" title="上一个待办">◀</button>
-          <button type="button" class="pi-enh-queue-nav-btn next-btn" title="下一个待办">▶</button>
-        </div>
-      `;
-      queueHeader.querySelector(".prev-btn").onclick = (e) => {
-        e.stopPropagation();
-        currentAttentionQueueIndex = (currentAttentionQueueIndex - 1 + ids.length) % ids.length;
-        renderAttentionNotices();
-      };
-      queueHeader.querySelector(".next-btn").onclick = (e) => {
-        e.stopPropagation();
-        currentAttentionQueueIndex = (currentAttentionQueueIndex + 1) % ids.length;
-        renderAttentionNotices();
-      };
-      notice.appendChild(queueHeader);
-    } else {
-      const heading = document.createElement("strong");
-      heading.textContent = "待你处理与确认";
-      notice.appendChild(heading);
-    }
-
-    const activeId = ids[currentAttentionQueueIndex] || ids[0];
-    const entry = projectStatusModel.entry(activeId);
-    const row = document.createElement("div");
-    row.className = "pi-enh-attention-notice-item pi-enh-approval-active-item";
-
-    const go = document.createElement("button");
-    go.type = "button";
-    go.setAttribute("data-attention-notice-session", activeId);
-    const title = document.createElement("span");
-    title.className = "pi-enh-attention-notice-title";
-    title.textContent = entry.title;
-    const kind = document.createElement("span");
-    kind.className = "pi-enh-attention-notice-kind";
-    kind.textContent = `${getPendingInteractionLabel(entry)} · ${entry.pendingRequests.length} 项等待确认 · 点击直达`;
-    go.title = entry.title;
-    go.append(title, kind);
-    go.onclick = () => { openProjectStatusSession(activeId); dismiss(activeId); };
-
-    const hide = document.createElement("button");
-    hide.type = "button";
-    hide.textContent = ids.length > 1 ? "跳过/稍后" : "收起提醒";
-    hide.onclick = () => dismiss(activeId);
-
-    row.append(go, hide);
-    notice.appendChild(row);
-
-    document.body.appendChild(notice);
+    // Keep the cleanup hook for existing call sites, but do not recreate the removed in-page card.
+    document.querySelector(".pi-enh-attention-notice")?.remove();
   }
 
   let desktopAttentionNotifier = null;
@@ -5142,7 +5017,6 @@
   // A ChatWindow session-load failure is local transport state, not an Agent
   // execution outcome. Keep it outside the authoritative cross-tab model.
   const localSessionLoadErrors = new Map();
-  const PROJECT_STATUS_STORAGE_KEY = "pi-enh-status-notified-v2";
   const PROJECT_STATUS_STORAGE_KEY_V1 = "pi-enh-project-status-v1";
   const PROJECT_STATUS_META = {
     attention: { color: "#f59e0b", label: "待你处理", title: "待处理" },
@@ -5221,15 +5095,6 @@
       ? options.pendingRequests
       : existing.pendingRequests?.length ? existing.pendingRequests : [{ id: "local-ask", method: "select" }];
 
-    const newSig = getRequestsSignature(pendingRequests);
-    const dismissedSig = dismissedAttentionSignatures.get(sessionId);
-    // 仅当 request 签名变更才重置已收起状态；相同请求签名绝不重弹
-    if (dismissedSig && newSig && dismissedSig !== newSig) {
-      dismissedAttentionSessions.delete(sessionId);
-      dismissedAttentionSignatures.delete(sessionId);
-    }
-    sessionAttentionRequestSignatures.set(sessionId, newSig);
-
     projectStatusState.sessions[sessionId] = {
       ...existing,
       id: sessionId,
@@ -5244,7 +5109,6 @@
     syncProjectStatusIndicators();
     // 绝不盲目强行更新当前标签页标题为 attention！必须完全由 syncProjectStatusIndicators 根据当前标签页所在项目的真实有效状态统一计算判定，杜绝跨项目污染与闪烁
     if (options.notify !== false) {
-      void notifyProjectStatusRequests(getDesktopPendingRequests());
       syncApprovalSound();
       syncDesktopAttention();
     }
@@ -5688,8 +5552,6 @@
   window.__PI_ENH_GET_CURRENT_PROJECT_STATUS_KEY__ = getCurrentProjectStatusKey;
   window.__PI_ENH_GET_CURRENT_EFFECTIVE_STATUS__ = getCurrentEffectiveStatus;
   window.__PI_ENH_GET_PROJECT_STATUS_FOR_SUMMARY__ = getProjectStatusForSummary;
-  window.__PI_ENH_RENDER_ATTENTION_NOTICES__ = renderAttentionNotices;
-  window.__PI_ENH_ATTENTION_NOTICES__ = attentionNotices;
 
   let attentionTitleAlertTick = 0;
   let attentionTitleAlertTimer = null;
@@ -5812,8 +5674,6 @@
   function removeProjectStatusIndicators() {
     disposeDesktopAttention();
     disposeApprovalSound();
-    siteAttentionNotifier?.dispose(); siteAttentionNotifier = null;
-    attentionNotices.clear(); attentionNoticeSignature = "";
     document.documentElement.removeAttribute("data-pi-enh-interaction-sync");
     for (const node of document.querySelectorAll(".pi-enh-project-status-summary, .pi-enh-status-popover, .pi-enh-attention-notice")) node.remove();
     for (const row of getSessionStatusRows()) restoreStatusRow(row);
@@ -5823,9 +5683,6 @@
 
   function clearSessionAttention(sessionId, nextStatus = null) {
     if (!sessionId) return;
-    dismissedAttentionSessions.delete(sessionId);
-    dismissedAttentionSignatures.delete(sessionId);
-    sessionAttentionRequestSignatures.delete(sessionId);
     projectStatusModel.clearAttention(sessionId, nextStatus);
     if (projectStatusState.sessions[sessionId]) {
       const current = projectStatusState.sessions[sessionId];
@@ -5835,9 +5692,6 @@
         pendingRequests: [],
       };
     }
-    for (const [tag, sId] of Array.from(attentionNotices.entries())) {
-      if (sId === sessionId) attentionNotices.delete(tag);
-    }
     renderAttentionNotices();
     persistProjectStatusState();
     syncProjectStatusIndicators();
@@ -5846,7 +5700,6 @@
     const requests = getDesktopPendingRequests();
     desktopAttentionNotifier?.reconcile(requests);
     approvalSoundNotifier?.reconcile(requests);
-    siteAttentionNotifier?.reconcile(requests);
   }
 
   function resolveCurrentAskUserStatus(sessionId = getSessionIdFromCurrentUrl()) {
@@ -5907,7 +5760,6 @@
       projectStatusModel.setCompletedRead(readCompletedTokens());
       if (typeof reconcileUnreadSessions === "function") reconcileUnreadSessions();
       persistProjectStatusState();
-      void notifyProjectStatusRequests(getDesktopPendingRequests());
       syncApprovalSound();
       syncDesktopAttention();
     }
@@ -5923,7 +5775,6 @@
         projectStatusModel.setCompletedRead(readCompletedTokens());
         if (typeof reconcileUnreadSessions === "function") reconcileUnreadSessions();
         persistProjectStatusState();
-        void notifyProjectStatusRequests(getDesktopPendingRequests());
         syncApprovalSound();
         syncDesktopAttention();
       }
@@ -6078,22 +5929,6 @@
     // are intentionally removed to keep the project header uncluttered.
     document.querySelector(".pi-enh-project-status-summary")?.remove();
     document.querySelector(".pi-enh-status-popover")?.remove();
-  }
-
-  async function notifyProjectStatusRequests(requests) {
-    if (!siteAttentionNotifier) siteAttentionNotifier = createDesktopAttentionNotifier({
-      canNotify: () => isProjectStatusHealthy() && isPluginEnabled("project-status-indicator") && isPluginEnabled("session-attention-notifications") && !document.hidden,
-      isPending: isAttentionRequestPending,
-      readSeen: () => readNoticeSeen(PROJECT_STATUS_STORAGE_KEY), writeSeen: value => writeNoticeSeen(PROJECT_STATUS_STORAGE_KEY, value),
-      withLock: work => withAttentionDeliveryLock("pi-web-status-notice-v2", work),
-      deliver: async payload => {
-        attentionNotices.set(payload.tag, payload.sessionId); renderAttentionNotices();
-        return () => { attentionNotices.delete(payload.tag); renderAttentionNotices(); };
-      },
-    });
-    siteAttentionNotifier.reconcile(requests);
-    await siteAttentionNotifier.notify(requests);
-    renderAttentionNotices();
   }
 
   function readUnreadSessionIds() {
@@ -6312,9 +6147,6 @@
   window.__PI_ENH_PROJECT_STATUS_MODEL__ = projectStatusModel;
   window.__PI_ENH_IS_PROJECT_STATUS_HEALTHY__ = isProjectStatusHealthy;
   window.__PI_ENH_RECEIVE_PROJECT_STATUS__ = receiveProjectStatus;
-  window.__PI_ENH_DISMISSED_ATTENTION_SIGNATURES__ = dismissedAttentionSignatures;
-  window.__PI_ENH_DISMISSED_ATTENTION_SESSIONS__ = dismissedAttentionSessions;
-  window.__PI_ENH_REQUEST_SIGNATURES__ = sessionAttentionRequestSignatures;
   window.__PI_ENH_RENDER_NOTIFICATION_PANEL__ = renderNotificationPanel;
   window.__PI_ENH_SHOW_NOTIFICATION_PANEL__ = showNotificationPanel;
   window.__PI_ENH_DEBUG_NOTIF_CONDITIONS__ = () => ({

@@ -3810,7 +3810,341 @@ window.__PI_ENH_RENDER_USAGE_PANEL__ = renderUsagePanel;
       </div>`;
   }
 
+  const SUBAGENT_PROFILE_SCOPE_PRIORITY = Object.freeze({
+    builtin: 0,
+    global: 1,
+    workspace: 2,
+    project: 3,
+  });
+
+  function normalizeSubagentProfileName(value) {
+    return typeof value === "string" && value.trim() ? value.trim() : "";
+  }
+
+  function normalizeSubagentCwd(value) {
+    const cwd = typeof value === "string" ? value.trim() : "";
+    if (!cwd || cwd.includes("...")) return "";
+    return /^(?:[A-Za-z]:[\\/]|[\\/])/.test(cwd) ? cwd : "";
+  }
+
+  function getActiveSubagentCwd() {
+    let sessionId = "";
+    try {
+      sessionId = typeof getCurrentSessionId === "function"
+        ? (getCurrentSessionId() || "")
+        : new URLSearchParams(window.location.search).get("session") || "";
+      const sessionCwd = normalizeSubagentCwd(window.__PI_CURRENT_SESSION_DATA__?.info?.cwd);
+      if (sessionCwd) return sessionCwd;
+      if (sessionId && typeof knownSessionsMap !== "undefined" && knownSessionsMap?.get) {
+        const knownSession = knownSessionsMap.get(sessionId);
+        const knownCwd = normalizeSubagentCwd(knownSession?.cwd || knownSession?.projectRoot);
+        if (knownCwd) return knownCwd;
+      }
+    } catch (e) {}
+
+    try {
+      if (typeof getEffectiveComposerCwdSyncOrEmpty === "function") {
+        const composerCwd = normalizeSubagentCwd(getEffectiveComposerCwdSyncOrEmpty());
+        if (composerCwd) return composerCwd;
+      }
+    } catch (e) {}
+
+    try {
+      const workspaceEl = document.querySelector("[data-current-cwd]") || document.querySelector(".workspace-picker-button");
+      const candidates = [
+        workspaceEl?.getAttribute("data-current-cwd"),
+        workspaceEl?.getAttribute("title"),
+        workspaceEl?.textContent,
+      ];
+      for (const candidate of candidates) {
+        const cwd = normalizeSubagentCwd(candidate);
+        if (cwd) return cwd;
+      }
+    } catch (e) {}
+    return "";
+  }
+
+  function getEffectiveSubagentProfiles(rawProfiles) {
+    const byName = new Map();
+    for (const source of Array.isArray(rawProfiles) ? rawProfiles : []) {
+      const name = normalizeSubagentProfileName(source?.name);
+      const scope = typeof source?.scope === "string" ? source.scope.trim().toLowerCase() : "";
+      const priority = SUBAGENT_PROFILE_SCOPE_PRIORITY[scope];
+      if (!name || !Number.isInteger(priority)) continue;
+      const key = name.toLocaleLowerCase();
+      const previous = byName.get(key);
+      if (!previous || priority >= previous.priority) {
+        byName.set(key, { profile: { ...source, name, scope }, priority });
+      }
+    }
+    return [...byName.values()]
+      .map(({ profile }) => profile)
+      .filter((profile) => profile.enabled === true)
+      .sort((a, b) => {
+        const aLabel = normalizeSubagentProfileName(a.displayName) || a.name;
+        const bLabel = normalizeSubagentProfileName(b.displayName) || b.name;
+        return aLabel.localeCompare(bLabel, undefined, { sensitivity: "base" }) || a.name.localeCompare(b.name);
+      });
+  }
+
+  async function fetchSubagentJson(url, options = {}) {
+    const { timeoutMs = 8000, ...requestOptions } = options || {};
+    let timeoutController = null;
+    let timeoutId = null;
+    let signal = requestOptions.signal;
+    if (!signal && typeof AbortController === "function") {
+      timeoutController = new AbortController();
+      signal = timeoutController.signal;
+      if (Number(timeoutMs) > 0) {
+        timeoutId = setTimeout(() => timeoutController.abort(), Number(timeoutMs));
+      }
+    }
+    try {
+      const response = await fetch(url, {
+        ...requestOptions,
+        cache: "no-store",
+        ...(signal ? { signal } : {}),
+      });
+      let data = {};
+      try { data = await response.json(); } catch (e) {}
+      if (!response.ok || data?.error) {
+        throw new Error(typeof data?.error === "string" ? data.error : `HTTP ${response.status}`);
+      }
+      return data && typeof data === "object" ? data : {};
+    } finally {
+      if (timeoutId !== null) clearTimeout(timeoutId);
+    }
+  }
+
+  function appendSubagentProfileOption(select, value, label, disabled = false) {
+    const option = document.createElement("option");
+    option.value = String(value ?? "");
+    option.textContent = String(label ?? "");
+    option.disabled = Boolean(disabled);
+    select.appendChild(option);
+    return option;
+  }
+
+  function syncSubagentProfileControlDisabled(control) {
+    if (!control) return;
+    const select = control.querySelector("[data-subagent-profile-select]");
+    if (!select) return;
+    const state = control.__piEnhSubagentProfileState;
+    const featureId = control.getAttribute("data-subagent-profile-feature") || "";
+    const row = control.closest("[data-module-row]");
+    const moduleId = row?.getAttribute("data-module-row") || "";
+    const moduleDisabled = moduleId ? !isModuleEnabled(moduleId) : false;
+    const featureDisabled = featureId ? !isPluginEnabled(featureId) : false;
+    const busy = Boolean(state?.loading || state?.saving) || select.getAttribute("data-subagent-profile-busy") === "true";
+    const unavailable = select.getAttribute("data-subagent-profile-unavailable") === "true";
+    const ready = select.getAttribute("data-subagent-profile-ready") === "true";
+    select.disabled = moduleDisabled || featureDisabled || busy || !ready || unavailable;
+    const reload = control.querySelector("[data-subagent-profile-reload]");
+    if (reload) reload.disabled = moduleDisabled || featureDisabled || busy;
+  }
+
+  function renderSubagentProfileControl(control, state) {
+    if (!control || !state) return;
+    const select = control.querySelector("[data-subagent-profile-select]");
+    if (!select) return;
+    const cwdNode = control.querySelector("[data-subagent-profile-cwd]");
+    const statusNode = control.querySelector("[data-subagent-profile-status]");
+    if (cwdNode) {
+      cwdNode.textContent = state.cwd ? `当前 cwd：${state.cwd}` : "当前 cwd：未检测到有效工作目录";
+      cwdNode.title = state.cwd || "";
+    }
+
+    while (select.firstChild) select.removeChild(select.firstChild);
+    select.setAttribute("data-subagent-profile-ready", "false");
+    select.setAttribute("data-subagent-profile-unavailable", "true");
+    select.setAttribute("data-subagent-profile-busy", state.saving ? "true" : "false");
+
+    if (state.loading) {
+      appendSubagentProfileOption(select, "", "正在读取服务端 profile…", true);
+      if (statusNode) statusNode.textContent = "正在读取当前 cwd 的生效 profile 与服务端默认值…";
+      syncSubagentProfileControlDisabled(control);
+      return;
+    }
+    if (!state.cwd) {
+      appendSubagentProfileOption(select, "", "当前没有可用 cwd", true);
+      if (statusNode) statusNode.textContent = "当前没有有效 cwd，无法读取项目 profile；请先打开一个工作区或会话。";
+      syncSubagentProfileControlDisabled(control);
+      return;
+    }
+    if (state.settingsError || !state.settingsLoaded) {
+      appendSubagentProfileOption(select, "", "服务端默认值读取失败", true);
+      if (statusNode) statusNode.textContent = "无法读取服务端默认 profile，暂不可保存；可点击“重新读取”。";
+      syncSubagentProfileControlDisabled(control);
+      return;
+    }
+    if (state.profilesError || !state.profilesLoaded) {
+      appendSubagentProfileOption(select, "", "当前 cwd 的 profile 读取失败", true);
+      if (statusNode) statusNode.textContent = "无法读取当前 cwd 下的 profile；可点击“重新读取”。";
+      syncSubagentProfileControlDisabled(control);
+      return;
+    }
+
+    const availableProfiles = Array.isArray(state.profiles) ? state.profiles : [];
+    const defaultProfile = normalizeSubagentProfileName(state.defaultProfile) || "general-purpose";
+    const selectedProfile = availableProfiles.find((profile) =>
+      normalizeSubagentProfileName(profile.name).toLocaleLowerCase() === defaultProfile.toLocaleLowerCase()
+    );
+
+    if (availableProfiles.length === 0) {
+      appendSubagentProfileOption(select, "", `当前默认 profile “${defaultProfile}” 在此 cwd 不可用`, true);
+      if (statusNode) statusNode.textContent = "当前 cwd 没有可用且已启用的 profile；服务端默认值在此 cwd 不会生效。";
+      syncSubagentProfileControlDisabled(control);
+      return;
+    }
+    if (!selectedProfile) {
+      appendSubagentProfileOption(select, "", `当前默认 profile “${defaultProfile}” 在此 cwd 不可用，请选择其他 profile`, true);
+    }
+    for (const profile of availableProfiles) {
+      const name = normalizeSubagentProfileName(profile.name);
+      const displayName = normalizeSubagentProfileName(profile.displayName);
+      const label = displayName && displayName !== name ? `${displayName} (${name})` : name;
+      appendSubagentProfileOption(select, name, label);
+    }
+    select.value = selectedProfile ? selectedProfile.name : "";
+    select.setAttribute("data-subagent-profile-ready", "true");
+    select.setAttribute("data-subagent-profile-unavailable", "false");
+    if (statusNode) {
+      statusNode.textContent = selectedProfile
+        ? `服务端当前默认：${selectedProfile.name}`
+        : `当前默认 profile “${defaultProfile}” 不可用；请选择下方已启用 profile。`;
+    }
+    syncSubagentProfileControlDisabled(control);
+  }
+
+  async function loadSubagentProfileControl(control, state) {
+    if (!control || !state) return;
+    try { state.controller?.abort(); } catch (e) {}
+    const token = (state.requestToken || 0) + 1;
+    state.requestToken = token;
+    state.loading = true;
+    state.settingsLoaded = false;
+    state.profilesLoaded = false;
+    state.settingsError = null;
+    state.profilesError = null;
+    state.profiles = [];
+    const controller = typeof AbortController === "function" ? new AbortController() : null;
+    state.controller = controller;
+    renderSubagentProfileControl(control, state);
+    const timeoutId = controller ? setTimeout(() => controller.abort(), 8000) : null;
+    const isCurrent = () => control.isConnected && control.__piEnhSubagentProfileState === state && state.requestToken === token;
+
+    try {
+      const settingsRequest = fetchSubagentJson("/api/subagents/settings", { signal: controller?.signal });
+      const profilesRequest = state.cwd
+        ? fetchSubagentJson(`/api/subagents/profiles?cwd=${encodeURIComponent(state.cwd)}`, { signal: controller?.signal })
+        : Promise.resolve({ profiles: [] });
+      const [settingsResult, profilesResult] = await Promise.allSettled([settingsRequest, profilesRequest]);
+      if (!isCurrent()) return;
+
+      if (settingsResult.status === "fulfilled") {
+        const value = normalizeSubagentProfileName(settingsResult.value?.defaultProfile);
+        state.defaultProfile = value || "general-purpose";
+        state.settingsLoaded = true;
+      } else {
+        state.settingsError = settingsResult.reason;
+      }
+
+      if (!state.cwd) {
+        state.profilesLoaded = true;
+      } else if (profilesResult.status === "fulfilled" && Array.isArray(profilesResult.value?.profiles)) {
+        state.profiles = getEffectiveSubagentProfiles(profilesResult.value.profiles);
+        state.profilesLoaded = true;
+      } else {
+        state.profilesError = profilesResult.status === "rejected" ? profilesResult.reason : new Error("Invalid profiles response");
+      }
+    } catch (error) {
+      if (isCurrent()) state.settingsError = error;
+    } finally {
+      if (timeoutId !== null) clearTimeout(timeoutId);
+      if (!isCurrent()) return;
+      state.loading = false;
+      if (state.controller === controller) state.controller = null;
+      renderSubagentProfileControl(control, state);
+    }
+  }
+
+  async function saveSubagentProfileSelection(control, state, select) {
+    const nextProfile = normalizeSubagentProfileName(select?.value);
+    if (!nextProfile || state.saving || !state.settingsLoaded) return;
+    const previousProfile = state.defaultProfile;
+    state.saving = true;
+    select.setAttribute("data-subagent-profile-busy", "true");
+    const statusNode = control.querySelector("[data-subagent-profile-status]");
+    if (statusNode) statusNode.textContent = "正在保存到服务端…";
+    syncSubagentProfileControlDisabled(control);
+    try {
+      const data = await fetchSubagentJson("/api/subagents/settings", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ defaultProfile: nextProfile }),
+        timeoutMs: 8000,
+      });
+      if (!control.isConnected || control.__piEnhSubagentProfileState !== state) return;
+      state.defaultProfile = normalizeSubagentProfileName(data?.defaultProfile) || nextProfile;
+      state.saving = false;
+      renderSubagentProfileControl(control, state);
+      if (typeof showToast === "function") showToast("默认子 Agent profile 已保存到服务端");
+    } catch (error) {
+      if (!control.isConnected || control.__piEnhSubagentProfileState !== state) return;
+      console.warn("[Pi Web Enhancements] 保存默认子 Agent profile 失败:", error);
+      state.defaultProfile = previousProfile;
+      state.saving = false;
+      renderSubagentProfileControl(control, state);
+      if (typeof showToast === "function") showToast("默认子 Agent profile 保存失败，请重试", null, 5000);
+    }
+  }
+
+  function bindSubagentProfileControls(panel) {
+    for (const control of panel.querySelectorAll("[data-subagent-profile-control]")) {
+      const state = {
+        cwd: getActiveSubagentCwd(),
+        defaultProfile: null,
+        profiles: [],
+        loading: false,
+        saving: false,
+        settingsLoaded: false,
+        profilesLoaded: false,
+        settingsError: null,
+        profilesError: null,
+        requestToken: 0,
+        controller: null,
+      };
+      control.__piEnhSubagentProfileState = state;
+      const select = control.querySelector("[data-subagent-profile-select]");
+      const reload = control.querySelector("[data-subagent-profile-reload]");
+      reload?.addEventListener("click", () => {
+        if (!state.loading && !state.saving) void loadSubagentProfileControl(control, state);
+      });
+      select?.addEventListener("change", () => {
+        void saveSubagentProfileSelection(control, state, select);
+      });
+      void loadSubagentProfileControl(control, state);
+    }
+  }
+
   function renderModuleSettingControl(setting, disabled) {
+    if (setting.kind === "subagent-profile") {
+      const featureId = escapeQuickActionHtml(setting.featureId || "");
+      const label = escapeQuickActionHtml(setting.label || "默认子 Agent profile");
+      const description = escapeQuickActionHtml(setting.description || "仅在调用未显式指定 subagent_type 时生效。");
+      return `<div class="pi-enh-subagent-profile-setting pi-enh-plugin-number-setting" style="width:100%;flex-wrap:wrap;white-space:normal;" data-subagent-profile-control data-subagent-profile-feature="${featureId}">
+        <div class="pi-enh-subagent-profile-copy" style="display:flex;flex:1 1 300px;flex-direction:column;gap:2px;min-width:220px;">
+          <span class="pi-enh-plugin-number-setting-label">${label}</span>
+          <span class="pi-enh-subagent-profile-description">${description}</span>
+          <span class="pi-enh-subagent-profile-cwd" data-subagent-profile-cwd>当前 cwd：读取中…</span>
+        </div>
+        <select data-subagent-profile-select aria-label="${label}" ${disabled ? "disabled" : ""}>
+          <option value="">正在读取服务端状态…</option>
+        </select>
+        <button type="button" class="pi-enh-btn-sm" data-subagent-profile-reload ${disabled ? "disabled" : ""}>重新读取</button>
+        <span class="pi-enh-subagent-profile-status" data-subagent-profile-status role="status" aria-live="polite">正在读取服务端设置…</span>
+      </div>`;
+    }
     if (setting.kind === "action") {
       return `<button type="button" class="pi-enh-btn-sm" data-plugin-action="${setting.action}" ${disabled ? "disabled" : ""}>${setting.label}</button>`;
     }
@@ -3922,6 +4256,9 @@ window.__PI_ENH_RENDER_USAGE_PANEL__ = renderUsagePanel;
         const [featureId, key] = range.getAttribute("data-plugin-setting-range").split(":");
         range.disabled = disabled || !isPluginEnabled(featureId);
         if (document.activeElement !== range) range.value = String(getPluginSetting(featureId, key));
+      }
+      for (const control of row.querySelectorAll("[data-subagent-profile-control]")) {
+        syncSubagentProfileControlDisabled(control);
       }
       for (const action of row.querySelectorAll("[data-plugin-action], [data-attention-sound-preview]")) action.disabled = disabled;
     }
@@ -4495,6 +4832,7 @@ window.__PI_ENH_RENDER_USAGE_PANEL__ = renderUsagePanel;
         }
       });
     }
+    bindSubagentProfileControls(panel);
     syncEnhancementPanelControls();
     const syncCard = panel.querySelector("[data-pi-enh-sync-card]");
     if (syncCard) {

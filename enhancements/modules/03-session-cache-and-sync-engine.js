@@ -806,9 +806,6 @@
       if (typeof projectStatusState !== "undefined" && projectStatusState?.sessions?.[sessionId]?.status === "attention") {
         return true;
       }
-      if (typeof attentionNotices !== "undefined" && Array.from(attentionNotices.values()).includes(sessionId)) {
-        return true;
-      }
     } catch (e) {}
     return false;
   }
@@ -1273,10 +1270,18 @@
       if (detail.sessionId !== sessionId || !(typeof detail.leafId === "string" || detail.leafId === null)) {
         throw new Error("无法取得原生会话末条记录，已阻止删除");
       }
-      return { ...meta, leafId: detail.leafId };
+      return {
+        ...meta,
+        leafId: detail.leafId,
+        usageDeleteGuard: typeof detail.usageDeleteGuard === "number" ? detail.usageDeleteGuard : 0,
+      };
     };
     try {
       let meta = await freshMeta();
+      if (meta.usageDeleteGuard >= 1) {
+        knownSessionsMap.set(sessionId, meta);
+        return true;
+      }
       if (!isSessionIngested(sessionId, meta)) {
         const refreshHost = (typeof window !== "undefined" && window.location?.hostname) ? window.location.hostname : "127.0.0.1";
         let result;
@@ -1294,21 +1299,7 @@
         await window.PiUsagePanel.fetchSnapshotOnce(controller.signal);
         meta = await freshMeta();
         if (!isSessionIngested(sessionId, meta)) {
-          const currentSeal = window.__PI_ENH_USAGE_LEDGER__?.sessions?.[sessionId]?.ingestion;
-          // 若最新快照已覆盖至当前会话末条记录 (lastEntryId 一致)，仅因历史悬挂工具或快照非关键标志未对齐：
-          // 后端路由 DELETE 挂载有 sealAndDeleteSync 事务作为最终防线，会在物理删除前强制完成封存。
-          // 此时安全放行删除，避免阻断用户正常删除。
-          const isAtSameWatermark = Boolean(
-            currentSeal &&
-            currentSeal.lastEntryId &&
-            meta.leafId &&
-            currentSeal.lastEntryId === meta.leafId
-          );
-          if (isAtSameWatermark) {
-            console.warn(`[usage-delete] Session ${sessionId} at latest watermark (${meta.leafId}) but incomplete seal, delegating to backend sealAndDeleteSync.`);
-          } else {
-            throw new Error("会话仍有未入账用量、未结束工具或版本变化，已阻止删除");
-          }
+          throw new Error("会话仍有未入账用量、未结束工具或版本变化，已阻止删除");
         }
       }
       knownSessionsMap.set(sessionId, meta);

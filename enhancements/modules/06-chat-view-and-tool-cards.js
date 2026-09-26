@@ -1372,12 +1372,75 @@
     cancelHistoryTailFrame(binding);
   }
 
+  function blurComposerForMinimapNavigation() {
+    const active = document.activeElement;
+    if (active?.matches?.('.pi-enh-formatted-composer[contenteditable="true"], textarea.chat-input-textarea')) {
+      active.blur();
+    }
+  }
+
+  let minimapNavigationScrollGuard = null;
+
+  function clearMinimapNavigationScrollGuard() {
+    const guard = minimapNavigationScrollGuard;
+    if (!guard) return;
+    minimapNavigationScrollGuard = null;
+    if (guard.timer !== null) clearManagedTimeout(guard.timer);
+    if (guard.scroll.scrollTo === guard.wrapped) guard.scroll.scrollTo = guard.original;
+  }
+
+  function guardMinimapNavigationFromAutoFollow(scroll) {
+    clearMinimapNavigationScrollGuard();
+    if (!scroll || typeof scroll.scrollTo !== "function") return;
+    const original = scroll.scrollTo;
+    const sessionId = getCurrentSessionId();
+    const wrapped = function (...args) {
+      const options = args[0];
+      const maxTop = Math.max(0, this.scrollHeight - this.clientHeight);
+      if (this === scroll && options?.behavior === "smooth" && Number(options.top) >= maxTop - 30 && maxTop > 120) {
+        clearMinimapNavigationScrollGuard(); // Explicitly returning to the tail should re-enable live follow.
+      }
+      if (this === scroll && sessionId === getCurrentSessionId() && isPluginEnabled("minimap-full-nav") &&
+          options?.behavior === "auto" && Number(options.top) >= maxTop - 30 && maxTop > 120) {
+        return;
+      }
+      return original.apply(this, args);
+    };
+    scroll.scrollTo = wrapped;
+    const guard = { scroll, original, wrapped, timer: null };
+    minimapNavigationScrollGuard = guard;
+    guard.timer = addManagedTimeout(() => {
+      if (minimapNavigationScrollGuard === guard) clearMinimapNavigationScrollGuard();
+    }, 4000);
+  }
+
+  activeCleanups.push(clearMinimapNavigationScrollGuard);
+
   function releaseHistoryTailForMinimapNavigation() {
+    blurComposerForMinimapNavigation();
+    const scroll = getChatScrollContainer();
+    // The native streaming follower keeps its own isNearBottomRef. Unlike a
+    // gesture inside the chat, clicking the sibling minimap never updates it.
+    // Leave the tail and notify its scroll listener before React's navigation
+    // click runs, so queued streaming frames cannot reclaim the viewport.
+    if (scroll) {
+      const maxTop = Math.max(0, scroll.scrollHeight - scroll.clientHeight);
+      const distance = maxTop - scroll.scrollTop;
+      if (maxTop > 120 && distance <= 8) {
+        scroll.scrollTop = maxTop - 24;
+        scroll.dispatchEvent(new Event("scroll"));
+      }
+    }
     const currentSid = typeof getCurrentSessionId === "function" ? getCurrentSessionId() : null;
     if (typeof isSessionScrollRestoring === "function" && isSessionScrollRestoring(currentSid)) {
       cancelActiveScrollRestore("minimap-navigation");
     }
     cancelHistoryScrollRestore();
+    // Stream updates can race the smooth first-turn jump while React still
+    // considers the viewport attached to the tail. Ignore only its automatic
+    // bottom-follow calls for this navigation; explicit smooth bottom clicks
+    // and normal following outside this short window remain untouched.
+    guardMinimapNavigationFromAutoFollow(scroll);
     if (!isPluginEnabled("history-scroll-stability")) return;
     if (!historyScrollBinding || historyScrollBinding.sessionId !== currentSid || historyScrollBinding.scroll !== getChatScrollContainer()) {
       syncHistoryScrollStability(true);
@@ -1752,7 +1815,7 @@
       listen("touchstart", (event) => {
         markHistoryTailGesture(binding);
         cancelHistoryScrollRestore();
-        if (event.touches?.length !== 1 || scroll.scrollTop > 60 ||
+        if (event.touches?.length !== 1 || scroll.scrollTop > 0 ||
             event.target?.closest?.("input, textarea, button, a, select, pre, [contenteditable=true], [data-minimap-preview-box]")) return;
         const touch = event.touches[0];
         binding.pull = { x: touch.clientX, y: touch.clientY, distance: 0 };
@@ -1762,7 +1825,7 @@
         if (!pull) return;
         if (event.touches?.length !== 1) { resetPull(); showHistoryFeedback(binding, binding.pending || binding.requests.size ? "loading" : "idle", "正在加载更早消息…"); return; }
         const touch = event.touches[0], dy = touch.clientY - pull.y, dx = touch.clientX - pull.x;
-        if (Math.abs(dx) > Math.abs(dy) || dy < 0) {
+        if (scroll.scrollTop > 0 || Math.abs(dx) > Math.abs(dy) || dy < 0) {
           resetPull();
           if (["pull", "armed"].includes(binding.phase)) showHistoryFeedback(binding, "idle");
           return;
@@ -3736,6 +3799,10 @@
   const MINIMAP_INITIAL_TURNS_STORAGE_KEY = "pi-enh-minimap-initial-turns";
   const MINIMAP_STEP_TURNS_STORAGE_KEY = "pi-enh-minimap-step-turns";
   const MINIMAP_HISTORY_FETCH_TAIL = 250;
+  // Native ChatMinimap may replay its centering effect after a navigation. Keep
+  // the selected preview card anchored only for that short race window.
+  const MINIMAP_PREVIEW_SCROLL_GUARD_MS = 1800;
+  const MINIMAP_PREVIEW_USER_SCROLL_GRACE_MS = 450;
   minimapHistoryDisplayState = new Map();
   autoLoadEarlierTriggered = false;
   let activeMinimapPreviewBox = null;
@@ -3967,9 +4034,147 @@
     };
   }
 
+  function findMinimapScrollTopDescriptor(target) {
+    let owner = target;
+    while (owner) {
+      const descriptor = Object.getOwnPropertyDescriptor(owner, "scrollTop");
+      if (descriptor) return descriptor;
+      owner = Object.getPrototypeOf(owner);
+    }
+    return null;
+  }
+
+  function restoreMinimapPreviewScrollGuard(bindings) {
+    const guard = bindings?.scrollTopGuard;
+    if (!guard) return;
+    if (guard.expiryTimer !== null) {
+      clearManagedTimeout(guard.expiryTimer);
+      guard.expiryTimer = null;
+    }
+    if (guard.userInteractionTimer !== null) {
+      clearManagedTimeout(guard.userInteractionTimer);
+      guard.userInteractionTimer = null;
+    }
+    try {
+      if (guard.originalOwnDescriptor) {
+        Object.defineProperty(guard.previewBox, "scrollTop", guard.originalOwnDescriptor);
+      } else {
+        delete guard.previewBox.scrollTop;
+      }
+    } catch (e) {}
+    bindings.scrollTopGuard = null;
+  }
+
+  function markMinimapPreviewUserScroll(bindings) {
+    const guard = bindings?.scrollTopGuard;
+    if (!guard) return;
+    guard.userInteractionActive = true;
+    guard.userInteractionUntil = Date.now() + MINIMAP_PREVIEW_USER_SCROLL_GRACE_MS;
+    if (guard.userInteractionTimer !== null) clearManagedTimeout(guard.userInteractionTimer);
+    guard.userInteractionTimer = addManagedTimeout(() => {
+      guard.userInteractionTimer = null;
+      guard.userInteractionActive = false;
+    }, MINIMAP_PREVIEW_USER_SCROLL_GRACE_MS);
+  }
+
+  function getMinimapPreviewAnchorState(previewBox, targetTurnEl, descriptor) {
+    const locatedTurn = targetTurnEl && targetTurnEl.isConnected && previewBox.contains(targetTurnEl)
+      ? targetTurnEl
+      : previewBox.querySelector("[data-located='true'], [data-located=true]");
+    if (!locatedTurn || !locatedTurn.isConnected ||
+        (locatedTurn.getAttribute("data-located") !== "true" && locatedTurn.getAttribute("data-located") !== "")) {
+      return null;
+    }
+    const computed = getComputedStyle(locatedTurn);
+    const turnRect = locatedTurn.getBoundingClientRect();
+    const boxRect = previewBox.getBoundingClientRect();
+    if (computed.display === "none" || computed.visibility === "hidden" ||
+        !locatedTurn.getClientRects().length || turnRect.height <= 0 ||
+        previewBox.clientHeight <= 0 || previewBox.scrollHeight <= previewBox.clientHeight) {
+      return null;
+    }
+
+    const maxScrollTop = Math.max(0, previewBox.scrollHeight - previewBox.clientHeight);
+    const desiredTop = Math.max(
+      0,
+      Math.min(
+        maxScrollTop,
+        Number(locatedTurn.offsetTop) - (previewBox.clientHeight - locatedTurn.offsetHeight) / 2,
+      ),
+    );
+    const currentTop = Number(descriptor.get.call(previewBox)) || 0;
+    return { locatedTurn, turnRect, boxRect, desiredTop, currentTop };
+  }
+
+  function protectMinimapPreviewScrollPosition(previewBox, targetTurnEl, bindings) {
+    if (!previewBox || !targetTurnEl || !bindings) return;
+    restoreMinimapPreviewScrollGuard(bindings);
+
+    const originalOwnDescriptor = Object.getOwnPropertyDescriptor(previewBox, "scrollTop");
+    const descriptor = findMinimapScrollTopDescriptor(previewBox);
+    if (!descriptor || typeof descriptor.get !== "function" || typeof descriptor.set !== "function") return;
+
+    const guard = {
+      previewBox,
+      targetTurnEl,
+      originalOwnDescriptor,
+      descriptor,
+      expiryTimer: null,
+      userInteractionTimer: null,
+      userInteractionActive: false,
+      userInteractionUntil: 0,
+    };
+    const guardedSetter = function (value) {
+      const now = Date.now();
+      if (!isPluginEnabled("minimap-full-nav")) {
+        restoreMinimapPreviewScrollGuard(bindings);
+        descriptor.set.call(this, value);
+        return;
+      }
+      if (now >= guard.expiresAt) {
+        restoreMinimapPreviewScrollGuard(bindings);
+        descriptor.set.call(this, value);
+        return;
+      }
+      if (!guard.userInteractionActive && now >= guard.userInteractionUntil) {
+        const anchor = getMinimapPreviewAnchorState(this, guard.targetTurnEl, descriptor);
+        const nextTop = Number(value);
+        if (anchor && Number.isFinite(nextTop)) {
+          const candidateTop = anchor.turnRect.top + anchor.currentTop - nextTop;
+          const candidateBottom = candidateTop + anchor.turnRect.height;
+          const targetVisible = candidateBottom > anchor.boxRect.top && candidateTop < anchor.boxRect.bottom;
+          if (!targetVisible && Math.abs(nextTop - anchor.desiredTop) >= 1) {
+            descriptor.set.call(this, anchor.desiredTop);
+            return;
+          }
+        }
+      }
+      descriptor.set.call(this, value);
+    };
+
+    try {
+      Object.defineProperty(previewBox, "scrollTop", {
+        configurable: true,
+        enumerable: originalOwnDescriptor?.enumerable ?? false,
+        get() { return descriptor.get.call(this); },
+        set: guardedSetter,
+      });
+    } catch (e) {
+      return;
+    }
+
+    guard.expiresAt = Date.now() + MINIMAP_PREVIEW_SCROLL_GUARD_MS;
+    bindings.scrollTopGuard = guard;
+    guard.expiryTimer = addManagedTimeout(() => {
+      guard.expiryTimer = null;
+      if (bindings.scrollTopGuard === guard) restoreMinimapPreviewScrollGuard(bindings);
+    }, MINIMAP_PREVIEW_SCROLL_GUARD_MS);
+  }
+
   function detachMinimapInteractions(previewBox) {
     const bindings = previewBox?.__piEnhMinimapBindings;
     if (!bindings) return;
+    restoreMinimapPreviewScrollGuard(bindings);
     for (const [type, handler, options] of bindings.listeners) {
       previewBox.removeEventListener(type, handler, options);
     }
@@ -4182,6 +4387,7 @@
       toolbarListeners: [],
       toolbar: null,
       hasInitializedLayout: false,
+      scrollTopGuard: null,
       originalPaddingTop: previewBox.style.paddingTop || "",
       originalBoxSizing: previewBox.style.boxSizing || "",
     };
@@ -4190,6 +4396,7 @@
       bindings.listeners.push([type, handler, options]);
     };
     bindings.handleWheel = (event) => {
+      markMinimapPreviewUserScroll(bindings);
       if ((previewBox.scrollTop || 0) <= 1 && Number(event.deltaY) < 0) {
         if (triggerAutoLoadEarlier("wheel")) event.preventDefault();
       }
@@ -4232,6 +4439,7 @@
     };
 
     bindings.handleTouchStart = (event) => {
+      markMinimapPreviewUserScroll(bindings);
       const touch = event.touches?.[0];
       if (!touch) return;
       touchStartX = touch.clientX;
@@ -4243,6 +4451,7 @@
     };
 
     bindings.handleTouchMove = (event) => {
+      markMinimapPreviewUserScroll(bindings);
       const touch = event.touches?.[0];
       if (!touch || touchStartX === null || touchStartY === null) return;
       const currentX = touch.clientX;
@@ -4285,6 +4494,7 @@
     };
 
     bindings.handleTouchEnd = (event) => {
+      markMinimapPreviewUserScroll(bindings);
       if (gestureIntent === "swipe-right" && currentTranslateX > 0) {
         const elapsed = Math.max(1, Date.now() - touchStartTime);
         const velocityX = currentTranslateX / elapsed;
@@ -4815,6 +5025,10 @@
     // 2. 实时滚动会话导航抽屉（previewBox）到对应轮次
     // 在连续拖拽过程中直接即时定位（0 累积动画延迟），手停或抬起时平滑对齐
     const targetTop = targetTurnEl.offsetTop - (currentBox.clientHeight - targetTurnEl.offsetHeight) / 2;
+    const currentBindings = currentBox.__piEnhMinimapBindings || ensureMinimapInteractions(currentBox);
+    // Native ChatMinimap 的 allNodes/hover effect 可能在此后把 scrollTop 写回 0。
+    // 仅保护真实已布局且未隐藏的 data-located 卡片，避免撑开合法裁剪项。
+    protectMinimapPreviewScrollPosition(currentBox, targetTurnEl, currentBindings);
     currentBox.scrollTo({
       top: Math.max(0, targetTop),
       behavior: isFinal ? "smooth" : "auto",
@@ -4919,6 +5133,7 @@
   function handleScrubStart(event) {
     if (!isPluginEnabled("minimap-full-nav")) return;
     if (event.target?.closest?.("[data-minimap-preview-box], [data-pi-enh-minimap-toolbar]")) return;
+    blurComposerForMinimapNavigation();
     // PointerEvent and compatibility touch/mouse start events can describe the same press.
     if (isRailScrubbing) return;
 
@@ -5209,7 +5424,8 @@
       document.querySelector(".chat-content textarea") ||
       document.querySelector("textarea");
     if (textarea) {
-      return (typeof textarea.closest === "function" ? textarea.closest(".chat-content > div:last-child") : null) ||
+      return (typeof textarea.closest === "function" ? textarea.closest(".pi-enh-cursor-composer") : null) ||
+        (typeof textarea.closest === "function" ? textarea.closest(".chat-content > div:last-child") : null) ||
         (typeof textarea.closest === "function" ? textarea.closest(".relative.shrink-0") : null) ||
         textarea.parentElement?.parentElement ||
         textarea.parentElement;
@@ -5297,22 +5513,27 @@
   function syncScrollBottomPosition() {
     if (!scrollBottomBtn) return;
     const inputArea = getChatInputArea();
-    if (inputArea && inputArea.offsetHeight) {
-      const bottomPx = inputArea.offsetHeight + 14;
+    const parent = scrollBottomBtn.parentElement;
+    const inputRect = inputArea?.getBoundingClientRect?.();
+    const parentRect = parent?.getBoundingClientRect?.();
+    const parentHeight = Number(parent?.clientHeight) || Number(parentRect?.height) || 0;
+
+    if (inputRect && parentRect && parentHeight > 0 && inputRect.width > 0 && inputRect.height > 0) {
+      const parentTop = parentRect.top + (Number(parent.clientTop) || 0);
+      const parentLeft = parentRect.left + (Number(parent.clientLeft) || 0);
+      const composerTop = inputRect.top - parentTop;
+      const bottomPx = Math.max(14, Math.round(parentHeight - composerTop + 14));
       scrollBottomBtn.style.bottom = `${bottomPx}px`;
-      const inputRect = inputArea.getBoundingClientRect();
-      const parent = scrollBottomBtn.parentElement;
-      if (parent && inputRect.width > 0) {
-        const parentRect = parent.getBoundingClientRect();
-        const centerLeft = inputRect.left + inputRect.width / 2 - parentRect.left;
-        scrollBottomBtn.style.left = `${Math.round(centerLeft)}px`;
-      } else {
-        scrollBottomBtn.style.left = "50%";
-      }
+      scrollBottomBtn.style.left = `${Math.round(inputRect.left + inputRect.width / 2 - parentLeft)}px`;
+      return;
+    }
+
+    if (inputArea && inputArea.offsetHeight) {
+      scrollBottomBtn.style.bottom = `${inputArea.offsetHeight + 14}px`;
     } else {
       scrollBottomBtn.style.bottom = "96px";
-      scrollBottomBtn.style.left = "50%";
     }
+    scrollBottomBtn.style.left = "50%";
   }
 
   function onChatContentScroll() {

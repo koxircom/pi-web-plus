@@ -836,46 +836,61 @@
   }
 
   function isLiveRunning(sessionId) {
-    const sid = sessionId || getCurrentSessionId();
-    if (sid && typeof projectStatusModel !== "undefined" && projectStatusModel?.entry) {
-      const statusEntry = projectStatusModel.entry(sid);
-      if (statusEntry?.execution === "running") {
-        window.__PI_ENH_LAST_RUNNING_REASON__ = "projectStatusModel running";
+    const currentSid = getCurrentSessionId();
+    const sid = sessionId || currentSid;
+    const isCurrent = !sid || !currentSid || sid === currentSid;
+
+    if (isCurrent) {
+      const stopBtn = findActiveStopButton();
+      if (stopBtn) {
+        window.__PI_ENH_LAST_RUNNING_REASON__ = "active stop button: " + (stopBtn.outerHTML || stopBtn.textContent);
         return true;
       }
-      if (["ended", "completed", "idle", "stopped"].includes(statusEntry?.execution) ||
-          ["completed", "idle", "stopped", "interrupted"].includes(statusEntry?.status)) {
-        const hasActiveStop = Boolean(findActiveStopButton());
-        const textarea = findComposerTextarea();
-        const ph = String(textarea?.getAttribute("placeholder") || textarea?.placeholder || "");
-        const hasRunningPlaceholder = ph.includes("引导") || ph.includes("排队") || ph.includes("运行中") || ph.includes("Steer") || ph.includes("running");
-        const hasChatSpin = Array.from(document.querySelectorAll(".animate-spin")).some((el) => Boolean(el.closest?.(".chat-content")));
-        if (!hasActiveStop && !hasRunningPlaceholder && !hasChatSpin) {
+
+      const textarea = findComposerTextarea();
+      if (textarea) {
+        const ph = typeof getComposerEffectivePlaceholder === "function"
+          ? getComposerEffectivePlaceholder(textarea)
+          : String(textarea.getAttribute("placeholder") || textarea.placeholder || textarea.getAttribute("data-pi-orig-placeholder") || "");
+        const hasRunningPh = typeof isRunningPlaceholderText === "function"
+          ? isRunningPlaceholderText(ph)
+          : (ph.includes("引导") || ph.includes("排队") || ph.includes("运行中") || ph.includes("代理正在运行") || ph.includes("Steer") || ph.includes("running"));
+        if (hasRunningPh) {
+          window.__PI_ENH_LAST_RUNNING_REASON__ = "textarea placeholder: " + ph;
+          return true;
+        }
+      }
+
+      if (typeof isComposerIndicatingRunning === "function" && isComposerIndicatingRunning()) {
+        window.__PI_ENH_LAST_RUNNING_REASON__ = "composer running controls";
+        return true;
+      }
+
+      const hasActiveChatSpin = Array.from(document.querySelectorAll(".animate-spin")).some((el) => Boolean(el.closest?.(".chat-content")));
+      if (hasActiveChatSpin) {
+        window.__PI_ENH_LAST_RUNNING_REASON__ = "animate-spin in chat";
+        return true;
+      }
+
+      if (typeof isComposerExplicitlyIdle === "function" && isComposerExplicitlyIdle()) {
+        window.__PI_ENH_LAST_RUNNING_REASON__ = "composer explicitly idle";
+        return false;
+      }
+    }
+
+    if (sid) {
+      if (typeof isServerRunningForSession === "function" && isServerRunningForSession(sid)) {
+        window.__PI_ENH_LAST_RUNNING_REASON__ = "server runningSessionIds / projectStatusModel running";
+        return true;
+      }
+      if (typeof projectStatusModel !== "undefined" && projectStatusModel?.health?.().state === "live" && projectStatusModel?.entry) {
+        const statusEntry = projectStatusModel.entry(sid);
+        if (["ended", "completed", "idle", "stopped"].includes(statusEntry?.execution) ||
+            ["completed", "idle", "stopped", "interrupted"].includes(statusEntry?.status)) {
           window.__PI_ENH_LAST_RUNNING_REASON__ = "projectStatusModel idle/completed";
           return false;
         }
       }
-    }
-
-    const stopBtn = findActiveStopButton();
-    if (stopBtn) {
-      window.__PI_ENH_LAST_RUNNING_REASON__ = "active stop button: " + (stopBtn.outerHTML || stopBtn.textContent);
-      return true;
-    }
-
-    const textarea = findComposerTextarea();
-    if (textarea) {
-      const ph = String(textarea.getAttribute("placeholder") || textarea.placeholder || "");
-      if (ph.includes("引导") || ph.includes("排队") || ph.includes("运行中") || ph.includes("Steer") || ph.includes("running")) {
-        window.__PI_ENH_LAST_RUNNING_REASON__ = "textarea placeholder: " + ph;
-        return true;
-      }
-    }
-
-    const hasActiveChatSpin = Array.from(document.querySelectorAll(".animate-spin")).some((el) => Boolean(el.closest?.(".chat-content")));
-    if (hasActiveChatSpin) {
-      window.__PI_ENH_LAST_RUNNING_REASON__ = "animate-spin in chat";
-      return true;
     }
 
     window.__PI_ENH_LAST_RUNNING_REASON__ = "default false";

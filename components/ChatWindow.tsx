@@ -26,12 +26,14 @@ import type { ToolEntry } from "@/lib/tool-presets";
 import { findChatScrollAnchor, type ChatScrollPosition } from "@/lib/chat-scroll-position";
 import {
   captureScrollDistance,
+  getNextVisibleCount,
   getPromptAnchorSpacerHeight,
   getVisibleRenderWindow,
   isScrollAtTail,
   restoreScrollTop,
   VISIBLE_PAGE_SIZE,
 } from "@/lib/chat-lazy-load";
+import { getHistoryLoadAction } from "@/lib/chat-history-pagination";
 
 interface Props {
   session: SessionInfo | null;
@@ -470,7 +472,16 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
   // Only render the last N messages initially. When the user scrolls to the
   // top, load another page while keeping the scroll position stable.
   const [visibleCount, setVisibleCount] = useState(VISIBLE_PAGE_SIZE);
-  const sentinelRef = useRef<HTMLDivElement>(null);
+  const sentinelRef = useRef<HTMLButtonElement>(null);
+  const [sentinelNode, setSentinelNode] = useState<HTMLButtonElement | null>(null);
+  const setSentinelElement = useCallback((node: HTMLButtonElement | null) => {
+    sentinelRef.current = node;
+    setSentinelNode(node);
+  }, []);
+  const visibleStartIndexRef = useRef(0);
+  const visibleCountRef = useRef(visibleCount);
+  visibleCountRef.current = visibleCount;
+  const pendingHistoryVisibleCountRef = useRef<number | null>(null);
   const messageContentRef = useRef<HTMLDivElement | null>(null);
   const prevScrollDistanceRef = useRef<number | null>(null);
   const loadingOlderRef = useRef(false);
@@ -632,51 +643,92 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
     onSearchTargetHandled?.(pendingSearchScroll);
   }, [pendingSearchScroll, searchTarget, searchMessage, scrollContainerRef, scrollToMessage, onSearchTargetHandled]);
 
+  const revealNextVisiblePage = useCallback(() => {
+    const nextVisibleCount = getNextVisibleCount(visibleCountRef.current);
+    pendingHistoryVisibleCountRef.current = nextVisibleCount;
+    setVisibleCount((current) => Math.max(current, nextVisibleCount));
+  }, []);
+
+  const loadOlderHistory = useCallback(() => {
+    const container = scrollContainerRef.current;
+    if (!container || loadingOlderRef.current) return;
+
+    const action = getHistoryLoadAction(visibleStartIndexRef.current, hasEarlierMessages);
+    if (action === "reveal-local") {
+      loadingOlderRef.current = true;
+      prevScrollDistanceRef.current = captureScrollDistance(container.scrollHeight, container.scrollTop);
+      revealNextVisiblePage();
+      return;
+    }
+    if (action !== "load-remote") {
+      if (!hasEarlierMessages) return;
+      return;
+    }
+
+    const oldestId = historyCursor;
+    if (!oldestId) return;
+    const sid = session?.id ?? sessionIdRef.current;
+    if (!sid) return;
+    loadingOlderRef.current = true;
+    prevScrollDistanceRef.current = captureScrollDistance(container.scrollHeight, container.scrollTop);
+    void loadContext(sid, activeLeafId, oldestId)
+      .then((context) => {
+        if (context) {
+          // The server page is measured in source messages, while the render
+          // window is measured in nodes. Reveal one render page at a time.
+          revealNextVisiblePage();
+        } else {
+          prevScrollDistanceRef.current = null;
+          pendingHistoryVisibleCountRef.current = null;
+        }
+      })
+      .catch(() => {
+        // A failed page request must not leave the sentinel permanently blocked.
+        prevScrollDistanceRef.current = null;
+        pendingHistoryVisibleCountRef.current = null;
+      })
+      .finally(() => {
+        // Keep the guard until the layout effect has restored the anchor after
+        // the requested render page is mounted.
+        if (prevScrollDistanceRef.current == null) loadingOlderRef.current = false;
+      });
+  }, [activeLeafId, hasEarlierMessages, historyCursor, loadContext, revealNextVisiblePage, scrollContainerRef, session?.id, sessionIdRef]);
+
   // IntersectionObserver on the sentinel div at the top of the message list.
-  // When it becomes visible, load the next page of older messages.
+  // The callback ref/state pair also registers a sentinel that appears after
+  // the first effect ran (for example when grouping changes the render count).
   useEffect(() => {
-    const sentinel = sentinelRef.current;
+    const sentinel = sentinelNode;
     const container = scrollContainerRef.current;
     if (!sentinel || !container) return;
     const observer = new IntersectionObserver(
       (entries) => {
         if (!entries[0]?.isIntersecting) return;
-        // No older history loaded yet: fetch the previous page from the server
-        // and prepend it (loadContext handles prepend + scroll anchoring).
-        // Skip while a page is already loading or nothing older exists.
-        if (loadingOlderRef.current) return;
-        if (!hasEarlierMessages) return;
-        const oldestId = historyCursor;
-        if (!oldestId) return;
-        const sid = session?.id ?? sessionIdRef.current;
-        if (!sid) return;
-        loadingOlderRef.current = true;
-        prevScrollDistanceRef.current = captureScrollDistance(container.scrollHeight, container.scrollTop);
-        void loadContext(sid, activeLeafId, oldestId).finally(() => {
-          loadingOlderRef.current = false;
-        });
+        void loadOlderHistory();
       },
       { root: container, threshold: 0 }
     );
     observer.observe(sentinel);
     return () => observer.disconnect();
-  }, [historyCursor, hasEarlierMessages, session, activeLeafId, loadContext, sessionIdRef, scrollContainerRef]);
+  }, [loadOlderHistory, scrollContainerRef, sentinelNode]);
 
-  // Keep the rendered window at least as large as what's loaded, so prepended
-  // (older) pages stay visible instead of being sliced off the top.
-  useEffect(() => {
-    setVisibleCount((current) => Math.max(current, messages.length));
-  }, [messages.length]);
+  // visibleCount is a render-node budget, not a source-message count. Keep
+  // older pages clipped and reveal them one page at a time.
 
-  // After visibleCount increases (more messages prepended), restore the
-  // scroll position so the viewport doesn't jump.
-  useEffect(() => {
+  // Restore the viewport after either a local render page or a prepended
+  // server page becomes visible. Wait for the requested render page so a
+  // source-message update cannot consume the anchor before the page expands.
+  useLayoutEffect(() => {
     if (prevScrollDistanceRef.current == null) return;
+    const pendingVisibleCount = pendingHistoryVisibleCountRef.current;
+    if (pendingVisibleCount !== null && visibleCount < pendingVisibleCount) return;
     const container = scrollContainerRef.current;
     if (!container) return;
     container.scrollTop = restoreScrollTop(container.scrollHeight, prevScrollDistanceRef.current);
     prevScrollDistanceRef.current = null;
-  }, [visibleCount, scrollContainerRef]);
+    pendingHistoryVisibleCountRef.current = null;
+    loadingOlderRef.current = false;
+  }, [messages.length, scrollContainerRef, visibleCount]);
   // Push session stats up to AppShell for the top bar.
   // Compare scalar fields to avoid loops from new object identity each render.
   const statsKey = sessionStats
@@ -1186,13 +1238,19 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
                 idx = endIdx;
               }
               const { startIndex } = getVisibleRenderWindow(rendered.length, visibleCount);
+              visibleStartIndexRef.current = startIndex;
               const hasMore = startIndex > 0 || hasEarlierMessages;
               return (
                 <>
                   {hasMore && (
-                     <div ref={sentinelRef} className="py-3 text-center text-xs text-text-muted">
-                       {t("chat.loadEarlier")}
-                    </div>
+                    <button
+                      type="button"
+                      ref={setSentinelElement}
+                      onClick={loadOlderHistory}
+                      className="block w-full border-0 bg-transparent py-3 text-center text-xs text-text-muted"
+                    >
+                      {t("chat.loadEarlier")}
+                    </button>
                   )}
                   {rendered.slice(startIndex)}
                 </>
