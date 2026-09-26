@@ -2,12 +2,23 @@
 
 import { useEffect } from "react";
 
+const STANDALONE_VERSION = process.env.NEXT_PUBLIC_APP_VERSION ?? "0.0.0";
+
+type EnhancementsWindow = Window & {
+  __PI_WEB_LOADER_INJECTED__?: boolean;
+  __PI_WEB_STANDALONE_EDITION__?: string;
+  __PI_WEB_STANDALONE_VERSION__?: string;
+  __PI_WEB_ENHANCEMENTS_LOADED__?: boolean;
+  __PI_ENH_ASSET_BUILD__?: string;
+  __PI_ENH_RELOAD__?: (forceBust?: boolean) => void;
+};
+
 function ensureEnhancementsRuntime(): void {
   if (typeof window === "undefined") return;
-  const win = window as any;
+  const win = window as EnhancementsWindow;
   win.__PI_WEB_LOADER_INJECTED__ = true;
-  win.__PI_WEB_STANDALONE_EDITION__ = "koxir-standalone-1.0.0";
-  win.__PI_WEB_STANDALONE_VERSION__ = "1.0.0";
+  win.__PI_WEB_STANDALONE_EDITION__ = `koxir-standalone-${STANDALONE_VERSION}`;
+  win.__PI_WEB_STANDALONE_VERSION__ = STANDALONE_VERSION;
 
   let retryCount = 0;
   const maxRetries = 3;
@@ -18,7 +29,7 @@ function ensureEnhancementsRuntime(): void {
     if (existing) existing.remove();
     const script = document.createElement("script");
     script.id = "pi-web-enhancements-script";
-    const assetBuild = win.__PI_ENH_ASSET_BUILD__ || "koxir-1.0.0";
+    const assetBuild = win.__PI_ENH_ASSET_BUILD__ || `koxir-${STANDALONE_VERSION}`;
     script.src = `/pi-web-enhancements.js?v=${encodeURIComponent(assetBuild)}${forceBust ? `&t=${Date.now()}` : ""}`;
     script.async = true;
     script.onerror = () => {
@@ -47,8 +58,9 @@ export function PiWebEnhancementsRuntime() {
   useEffect(() => {
     ensureEnhancementsRuntime();
     const onVisibilityChange = () => {
-      if (document.visibilityState === "visible" && !(window as any).__PI_WEB_ENHANCEMENTS_LOADED__) {
-        (window as any).__PI_ENH_RELOAD__?.();
+      const win = window as EnhancementsWindow;
+      if (document.visibilityState === "visible" && !win.__PI_WEB_ENHANCEMENTS_LOADED__) {
+        win.__PI_ENH_RELOAD__?.();
       }
     };
     document.addEventListener("visibilitychange", onVisibilityChange);

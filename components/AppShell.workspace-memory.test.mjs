@@ -91,6 +91,7 @@ test("New restores the draft after session navigation and workspace auto-restore
         branchLeafChangeFnRef: { current: null },
         liveFollowFrameRef: { current: null },
         bashRecoveryIdRef: { current: 0 },
+        isSessionMemoryCacheEnabled: () => false,
         cancelEventStreamGrace() {},
         closeEvents() {},
         isMobile: false,

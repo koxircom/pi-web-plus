@@ -1,14 +1,12 @@
-# Pi Web
+# Pi Web Standalone Edition
 
 [English](./README.md) | [日本語](./README.ja.md) | [Русский](./README.ru.md)
 
-[pi 编程智能体](https://github.com/earendil-works/pi)的本地浏览器界面。Pi Web 与 pi 共用本机配置和会话文件，可在浏览器中查找和继续对话、运行智能体、配置模型与资源，并查看项目文件。
+面向 [pi 编程智能体](https://github.com/earendil-works/pi)（`@earendil-works/pi-coding-agent`）的独立版（Standalone Edition）本地浏览器界面。Pi Web Standalone Edition 与 pi 共用本机配置和会话文件，可在浏览器中查找和继续对话、运行智能体、配置模型与资源，并查看项目文件。
 
-**[在线体验演示 →](https://agegr.github.io/pi-web/)**：真实的 Pi Web 界面直接在浏览器里运行，带有示例会话、文件和模型。无需安装；回复都是预设内容，不会调用任何模型。
+> **说明**：外部上游静态演示站仅展示旧版上游基础界面，不代表 **Pi Web Standalone Edition**（独立发行版内置完整前端增强套件，并通过 [`koxircom/pi-web-standalone`](https://github.com/koxircom/pi-web-standalone) 独立发布）。
 
-中文微信群：请查看 [GitHub Discussions 帖子](https://github.com/agegr/pi-web/discussions/271)。
-
-![Pi Web 展示包含结构化 Markdown、工具调用和项目导航的 pi 会话](https://raw.githubusercontent.com/agegr/pi-web/main/docs/screenshot2.png)
+![Pi Web 展示包含结构化 Markdown、工具调用和项目导航的 pi 会话](docs/screenshot2.png)
 
 ## 功能
 
@@ -22,24 +20,26 @@
 
 ## 快速开始
 
-Pi Web 要求 Node.js 22.19.0 或更高版本。先用 `node --version` 检查版本，然后运行：
+Pi Web Standalone 要求 Node.js 22.19.0 或更高版本（`node >=22.19`）。先用 `node --version` 检查版本，然后从 [`koxircom/pi-web-standalone` GitHub Releases](https://github.com/koxircom/pi-web-standalone/releases) 全局安装官方预构建 `.tgz` 发行包并启动 `pi-web`：
 
 ```bash
-npx @agegr/pi-web@latest
+npm install -g https://github.com/koxircom/pi-web-standalone/releases/download/v1.0.2/pi-web-standalone-1.0.2.tgz
+pi-web
 ```
+
+> **重要说明**：内部 `package.json` 的包名仍保留为 `@agegr/pi-web` 以维持运行时兼容，但 Pi Web Standalone 仅通过 [`koxircom/pi-web-standalone` GitHub Releases](https://github.com/koxircom/pi-web-standalone/releases) 的 `.tgz` 资产分发。**切勿从公共 npm 源拉取或安装 `@agegr/pi-web`**，否则会误装外部旧版上游包。
 
 服务就绪后，命令行会尝试自动打开浏览器。如果没有打开，请访问 [http://127.0.0.1:30141](http://127.0.0.1:30141)。Pi Web 默认仅监听 `127.0.0.1`。
 
 如果尚未配置模型 Provider，请打开**模型（Models）**面板登录或添加 API Key。
 
-如需全局安装 `pi-web` 命令：
+上例以计划版本 `v1.0.2` 资产（`pi-web-standalone-1.0.2.tgz`）为格式示例。安装指定版本或升级新版本时，请先用 `Ctrl+C` 停止正在运行的进程，将链接中的 `v1.0.2` 和 `1.0.2` 替换为 [GitHub Releases](https://github.com/koxircom/pi-web-standalone/releases) 中对应的目标版本号 `<version>` 后重新执行安装命令：
 
 ```bash
-npm install -g @agegr/pi-web@latest
-pi-web
+npm install -g https://github.com/koxircom/pi-web-standalone/releases/download/v<version>/pi-web-standalone-<version>.tgz
 ```
 
-更新前先用 `Ctrl+C` 停止正在运行的进程，再次执行同一条安装命令。卸载时运行 `npm uninstall -g @agegr/pi-web`。
+卸载时运行 `npm uninstall -g @agegr/pi-web`。
 
 ## 配置
 
@@ -75,22 +75,24 @@ PI_WEB_PASSWORD='足够长的随机密码' pi-web --hostname 0.0.0.0
 
 服务端的模型和 API 请求会读取标准的 `HTTP_PROXY`、`HTTPS_PROXY` 和 `NO_PROXY` 环境变量。
 
-macOS 或 Linux：
+macOS 或 Linux（通过 [GitHub Release `.tgz` 安装包](https://github.com/koxircom/pi-web-standalone/releases/download/v1.0.2/pi-web-standalone-1.0.2.tgz)安装并启动）：
 
 ```bash
+npm install -g https://github.com/koxircom/pi-web-standalone/releases/download/v1.0.2/pi-web-standalone-1.0.2.tgz
 HTTP_PROXY=http://127.0.0.1:7890 \
 HTTPS_PROXY=http://127.0.0.1:7890 \
 NO_PROXY=localhost,127.0.0.1 \
-npx @agegr/pi-web@latest
+pi-web
 ```
 
 Windows PowerShell：
 
 ```powershell
+npm install -g https://github.com/koxircom/pi-web-standalone/releases/download/v1.0.2/pi-web-standalone-1.0.2.tgz
 $env:HTTP_PROXY = "http://127.0.0.1:7890"
 $env:HTTPS_PROXY = "http://127.0.0.1:7890"
 $env:NO_PROXY = "localhost,127.0.0.1"
-npx @agegr/pi-web@latest
+pi-web
 ```
 
 ## 注意事项

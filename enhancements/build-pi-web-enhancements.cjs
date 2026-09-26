@@ -10,6 +10,7 @@ const PRIMARY_BUNDLE_PATH = path.join(__dirname, "pi-web-enhancements.js");
 const MIRROR_BUNDLE_PATH = path.join(__dirname, "..", "public", "pi-web-enhancements.js");
 const MODULES_DIR = path.join(__dirname, "modules");
 const MANIFEST_PATH = path.join(MODULES_DIR, "manifest.json");
+const PACKAGE_VERSION = require(path.join(__dirname, "..", "package.json")).version;
 
 const MODULE_SPECS = [
   {
@@ -209,10 +210,10 @@ function runSplit() {
 
   const manifest = {
     schemaVersion: 1,
-    edition: "koxir-standalone-1.0.0",
-    version: "1.0.0",
-    targetFile: PRIMARY_BUNDLE_PATH,
-    mirrorFile: MIRROR_BUNDLE_PATH,
+    edition: `koxir-standalone-${PACKAGE_VERSION}`,
+    version: PACKAGE_VERSION,
+    targetFile: "enhancements/pi-web-enhancements.js",
+    mirrorFile: "public/pi-web-enhancements.js",
     totalLines: lineChunks.length,
     totalBytes: rawBuffer.length,
     bundleSha256: sha256Hex(rawBuffer),
@@ -271,10 +272,10 @@ function runBuild() {
 
   const manifest = {
     schemaVersion: 1,
-    edition: "koxir-standalone-1.0.0",
-    version: "1.0.0",
-    targetFile: PRIMARY_BUNDLE_PATH,
-    mirrorFile: MIRROR_BUNDLE_PATH,
+    edition: `koxir-standalone-${PACKAGE_VERSION}`,
+    version: PACKAGE_VERSION,
+    targetFile: "enhancements/pi-web-enhancements.js",
+    mirrorFile: "public/pi-web-enhancements.js",
     totalLines: currentLine - 1,
     totalBytes: combinedBuffer.length,
     bundleSha256: sha256Hex(combinedBuffer),

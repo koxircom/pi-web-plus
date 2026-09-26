@@ -1,12 +1,12 @@
-# Pi Web
+# Pi Web Standalone Edition
 
 [中文文档](./README.zh-CN.md) | [日本語](./README.ja.md) | [Русский](./README.ru.md)
 
-Local browser UI for the [pi coding agent](https://github.com/earendil-works/pi). Pi Web uses the same local configuration and session files as pi, so you can browse and resume conversations, run agent turns, configure models and resources, and inspect project files from a browser.
+Standalone local browser UI for the [pi coding agent](https://github.com/earendil-works/pi) (`@earendil-works/pi-coding-agent`). Pi Web Standalone Edition shares the same local configuration and session files as pi, so you can browse and resume conversations, run agent turns, configure models and resources, and inspect project files from a browser.
 
-**[Try the interactive demo →](https://agegr.github.io/pi-web/)** The real Pi Web UI runs entirely in your browser, with sample sessions, files and models. There is nothing to install; replies are pre-written and no model is called.
+> **Note**: Any third-party upstream static demo reflects the legacy upstream baseline rather than **Pi Web Standalone Edition** (which includes built-in enhancement plugins and standalone release distribution via [`koxircom/pi-web-standalone`](https://github.com/koxircom/pi-web-standalone)).
 
-![Pi Web displaying a pi session with structured Markdown, tool calls, and project navigation](https://raw.githubusercontent.com/agegr/pi-web/main/docs/screenshot2.png)
+![Pi Web displaying a pi session with structured Markdown, tool calls, and project navigation](docs/screenshot2.png)
 
 ## Features
 
@@ -20,24 +20,26 @@ Local browser UI for the [pi coding agent](https://github.com/earendil-works/pi)
 
 ## Quick Start
 
-Pi Web requires Node.js 22.19.0 or newer. Check your version with `node --version`, then run:
+Pi Web Standalone requires Node.js 22.19.0 or newer (`node >=22.19`). Check your version with `node --version`, then install the prebuilt release tarball from [`koxircom/pi-web-standalone` GitHub Releases](https://github.com/koxircom/pi-web-standalone/releases) and start `pi-web`:
 
 ```bash
-npx @agegr/pi-web@latest
+npm install -g https://github.com/koxircom/pi-web-standalone/releases/download/v1.0.2/pi-web-standalone-1.0.2.tgz
+pi-web
 ```
+
+> **Important**: The package name in `package.json` remains `@agegr/pi-web` for compatibility, but Pi Web Standalone is distributed exclusively through [`koxircom/pi-web-standalone` GitHub Releases](https://github.com/koxircom/pi-web-standalone/releases). Do **not** pull or install `@agegr/pi-web` from the public npm registry, as that would install the legacy upstream package instead of the Standalone Edition.
 
 The CLI opens a browser after the server is ready. If it does not, open [http://127.0.0.1:30141](http://127.0.0.1:30141). Pi Web listens only on `127.0.0.1` by default.
 
 If no model provider is configured yet, open the **Models** panel to sign in or add an API key.
 
-To install the `pi-web` command globally:
+The command above uses the planned `v1.0.2` release asset (`pi-web-standalone-1.0.2.tgz`) as the target format. To install or upgrade to a specific release, stop the running process with `Ctrl+C`, replace both `v1.0.2` and `1.0.2` in the URL with the target `<version>` from [GitHub Releases](https://github.com/koxircom/pi-web-standalone/releases), and run the install command again:
 
 ```bash
-npm install -g @agegr/pi-web@latest
-pi-web
+npm install -g https://github.com/koxircom/pi-web-standalone/releases/download/v<version>/pi-web-standalone-<version>.tgz
 ```
 
-To update, stop the running process with `Ctrl+C` and run the same install command again. To uninstall, run `npm uninstall -g @agegr/pi-web`.
+To uninstall, run `npm uninstall -g @agegr/pi-web`.
 
 ## Configuration
 
@@ -75,22 +77,24 @@ Password authentication does not encrypt the connection. Do not expose Pi Web ov
 
 Server-side model and API requests honor the standard `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY` environment variables.
 
-On macOS or Linux:
+On macOS or Linux (after installing the [GitHub Release tarball](https://github.com/koxircom/pi-web-standalone/releases/download/v1.0.2/pi-web-standalone-1.0.2.tgz)):
 
 ```bash
+npm install -g https://github.com/koxircom/pi-web-standalone/releases/download/v1.0.2/pi-web-standalone-1.0.2.tgz
 HTTP_PROXY=http://127.0.0.1:7890 \
 HTTPS_PROXY=http://127.0.0.1:7890 \
 NO_PROXY=localhost,127.0.0.1 \
-npx @agegr/pi-web@latest
+pi-web
 ```
 
 On Windows PowerShell:
 
 ```powershell
+npm install -g https://github.com/koxircom/pi-web-standalone/releases/download/v1.0.2/pi-web-standalone-1.0.2.tgz
 $env:HTTP_PROXY = "http://127.0.0.1:7890"
 $env:HTTPS_PROXY = "http://127.0.0.1:7890"
 $env:NO_PROXY = "localhost,127.0.0.1"
-npx @agegr/pi-web@latest
+pi-web
 ```
 
 ## Notes

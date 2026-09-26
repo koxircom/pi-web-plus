@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
-import { existsSync, readdirSync, readFileSync, statSync, unlinkSync, writeFileSync } from "fs";
-import { dirname, join } from "path";
+import { existsSync, lstatSync, readdirSync, readFileSync, statSync, writeFileSync } from "fs";
+import { dirname, join, resolve as resolvePath } from "path";
 import {
   attachSessionProjectInfo,
   listAllSessions,
@@ -27,6 +27,14 @@ import { readSubagentRun, readSubagentSessionResources, SUBAGENT_META_TYPE } fro
 import { readSessionToolSelection } from "@/lib/session-tool-selection";
 import { jsonResponse } from "@/lib/json-response";
 import { negotiateSessionSync, type SessionSyncScope } from "@/lib/session-sync-server";
+import {
+  GUARD_VERSION,
+  deletedPaths as tombstoneDeletedPaths,
+  ensureSessionWriteGuardInstalled,
+  sealAndDeleteSync,
+} from "@/lib/usage-delete-guard";
+
+ensureSessionWriteGuardInstalled();
 
 export async function GET(
   req: Request,
@@ -142,6 +150,7 @@ export async function GET(
         info,
         leafId,
         tree,
+        usageDeleteGuard: GUARD_VERSION,
         ...(summaryTree ? { treeFormat: "summary" as const } : {}),
         snapshotRevision,
         context,
@@ -372,12 +381,30 @@ export async function DELETE(
     }
     try { await abortSubagent(id); } catch { /* ordinary session */ }
     await getRpcSession(id)?.shutdown();
+    ensureSessionWriteGuardInstalled();
+    const persistedDeletedPaths = new Map<string, string>();
+    const unpersistedDeletedPaths = new Map<string, string>();
     for (const [deletedId, deletedPath] of deletedPaths) {
       try {
-        unlinkSync(deletedPath);
+        lstatSync(deletedPath);
+        persistedDeletedPaths.set(deletedId, deletedPath);
       } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+          unpersistedDeletedPaths.set(deletedId, deletedPath);
+        } else {
+          persistedDeletedPaths.set(deletedId, deletedPath);
+        }
       }
+    }
+    sealAndDeleteSync(persistedDeletedPaths, (deletedId, fallbackPath) => {
+      const deletedPath = deletedPaths.get(deletedId) ?? fallbackPath;
+      invalidateSessionPathCache(deletedId);
+      if (deletedPath) {
+        invalidateSessionManagerCache(deletedPath);
+      }
+    });
+    for (const [deletedId, deletedPath] of unpersistedDeletedPaths) {
+      tombstoneDeletedPaths.add(resolvePath(deletedPath));
       invalidateSessionPathCache(deletedId);
       invalidateSessionManagerCache(deletedPath);
     }

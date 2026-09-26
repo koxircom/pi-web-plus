@@ -7828,17 +7828,11 @@
     const style = document.createElement("style");
     style.id = MOBILE_MODEL_GUARD_STYLE_ID;
     style.textContent = `
-      /* 移动端/触屏环境下模型下拉列表视口与边界安全保护 */
-      div[role="listbox"] {
+      /* 模型下拉列表层叠保护（仅作用于 .model-selector 内部 listbox） */
+      .model-selector > div[role="listbox"],
+      .model-selector div[role="listbox"] {
         z-index: 1200 !important;
-      }
-      .pi-enh-mobile div[role="listbox"]:not([data-pi-modal] *),
-      @media (max-width: 1024px), (pointer: coarse) {
-        div[role="listbox"]:not([data-pi-modal] *) {
-          max-height: min(72vh, calc(100dvh - 84px)) !important;
-          overflow-y: auto !important;
-          -webkit-overflow-scrolling: touch !important;
-        }
+        box-sizing: border-box;
       }
     `;
     document.head.appendChild(style);
@@ -7846,7 +7840,6 @@
 
   function handleModelSelectorClick(e) {
     if (!isPluginEnabled("mobile-model-keyboard-guard")) return;
-    if (typeof isMobileEnvironment === "function" && !isMobileEnvironment()) return;
     const target = e?.target;
     if (!target) return;
     const el = target.nodeType === 1 ? target : target.parentElement;
@@ -7868,6 +7861,10 @@
     // 若点击已在展开的菜单内部列表项，不干扰
     if (el.closest('div[role="listbox"], [role="option"]')) return;
 
+    addManagedTimeout(syncOpenModelListboxes, 0);
+
+    if (typeof isMobileEnvironment === "function" && !isMobileEnvironment()) return;
+
     // 捕获当前编辑框，但必须等本轮 click/React 处理完并打开菜单后再 blur。
     // pointerdown/touchstart 时立刻收起软键盘会触发视口重排，使手机后续 click 落到已移动的对话输入框。
     const active = document.activeElement;
@@ -7883,30 +7880,73 @@
         try {
           active.blur();
         } catch (err) {}
+        syncOpenModelListboxes();
       }, 0);
     }
   }
 
   function inspectAndProtectModelListbox(listbox) {
-    if (!listbox || typeof listbox.closest !== "function") return;
+    if (!listbox || listbox.nodeType !== 1 || typeof listbox.closest !== "function") return;
     if (listbox.closest('dialog, .settings-modal, [data-modal]')) return;
+    const selectorParent = listbox.closest('.model-selector');
+    if (!selectorParent || !listbox.matches('div[role="listbox"]')) return;
     if (!isPluginEnabled("mobile-model-keyboard-guard")) return;
 
     const isMobile = typeof isMobileEnvironment === "function" && isMobileEnvironment();
 
-    // 1. 视口顶部溢出保护：如果因 bottom 定位向上生长导致顶部超出屏幕（top < 8）
+    if (!listbox.__piModelGuardOrig) {
+      listbox.__piModelGuardOrig = {
+        zIndex: listbox.style.zIndex,
+        maxHeight: listbox.style.maxHeight,
+        top: listbox.style.top,
+        bottom: listbox.style.bottom,
+        left: listbox.style.left,
+        right: listbox.style.right,
+        maxWidth: listbox.style.maxWidth,
+      };
+    }
+
+    // 1. 视口高度与边界安全保护（visualViewport、安全边距 8px / 触发器间距 6px）
     listbox.style.zIndex = "1200";
-    const selectorParent = listbox.closest('.model-selector');
-    if (selectorParent) selectorParent.style.zIndex = "1200";
     const composerParent = listbox.closest('.pi-enh-cursor-composer');
-    if (composerParent) composerParent.style.zIndex = "1200";
+    for (const parent of [selectorParent, composerParent]) {
+      if (!parent) continue;
+      if (parent.__piModelGuardZIndex === undefined) parent.__piModelGuardZIndex = parent.style.zIndex;
+      parent.style.zIndex = "1200";
+    }
+
+    const viewport = window.visualViewport;
+    const viewportTop = viewport?.offsetTop || 0;
+    const viewportBottom = viewportTop + (viewport?.height || window.innerHeight);
+    const triggerBtn = selectorParent.querySelector('button[aria-haspopup="listbox"], button');
+    if (triggerBtn && viewportBottom > viewportTop) {
+      const r = triggerBtn.getBoundingClientRect();
+      const availAbove = Math.floor(r.top - 6 - viewportTop - 8);
+      const availBelow = Math.floor(viewportBottom - r.bottom - 6 - 8);
+      if (availAbove >= 120 || availAbove >= availBelow) {
+        listbox.style.top = "";
+        listbox.style.bottom = `${Math.max(8, Math.round(window.innerHeight - r.top + 6))}px`;
+        listbox.style.maxHeight = `${Math.max(60, availAbove)}px`;
+      } else {
+        listbox.style.bottom = "";
+        listbox.style.top = `${Math.max(viewportTop + 8, Math.round(r.bottom + 6))}px`;
+        listbox.style.maxHeight = `${Math.max(60, availBelow)}px`;
+      }
+    }
 
     const rect = listbox.getBoundingClientRect();
-    if (rect.top < 8) {
-      listbox.style.top = "8px";
+    if (rect.top < viewportTop + 8 && viewportBottom > viewportTop) {
+      listbox.style.top = `${Math.round(viewportTop + 8)}px`;
       listbox.style.bottom = "auto";
-      const maxHeight = Math.max(120, window.innerHeight - 90);
-      listbox.style.maxHeight = `${maxHeight}px`;
+      listbox.style.maxHeight = `${Math.max(60, Math.floor(viewportBottom - viewportTop - 16))}px`;
+    }
+    const safeLeft = (viewport?.offsetLeft || 0) + 8;
+    const safeRight = (viewport?.offsetLeft || 0) + (viewport?.width || window.innerWidth) - 8;
+    if (rect.left < safeLeft || rect.right > safeRight) {
+      const width = Math.min(rect.width, Math.max(1, safeRight - safeLeft));
+      listbox.style.right = "auto";
+      listbox.style.left = `${Math.round(Math.max(safeLeft, Math.min(triggerBtn?.getBoundingClientRect().left ?? rect.left, safeRight - width)))}px`;
+      listbox.style.maxWidth = `${Math.floor(Math.max(1, safeRight - safeLeft))}px`;
     }
 
     // 2. 移动端/触屏环境下，拦截搜索框自动聚焦调起虚拟键盘
@@ -7933,7 +7973,8 @@
           }, { passive: true, capture: true });
 
           // 拦截被动聚焦事件
-          filterInput.addEventListener("focus", (ev) => {
+          filterInput.addEventListener("focus", () => {
+            if (!isPluginEnabled("mobile-model-keyboard-guard")) return;
             if (!filterInput.__piUserExplicitClicked && (typeof isMobileEnvironment === "function" && isMobileEnvironment())) {
               try {
                 filterInput.blur();
@@ -7945,28 +7986,62 @@
     }
   }
 
+  function syncOpenModelListboxes() {
+    if (!isPluginEnabled("mobile-model-keyboard-guard")) return;
+    const listboxes = document.querySelectorAll('.model-selector > div[role="listbox"], .model-selector div[role="listbox"]');
+    for (const lb of listboxes) {
+      inspectAndProtectModelListbox(lb);
+    }
+  }
+
   function syncMobileModelKeyboardGuard() {
     if (!isPluginEnabled("mobile-model-keyboard-guard")) {
       removeMobileModelKeyboardGuard();
       return;
     }
     ensureMobileModelGuardStyle();
-    // 立即扫描页面上已存在的 listbox
-    const listboxes = document.querySelectorAll('div[role="listbox"]');
-    for (const lb of listboxes) {
-      inspectAndProtectModelListbox(lb);
-    }
+    syncOpenModelListboxes();
   }
 
   function removeMobileModelKeyboardGuard() {
     const style = document.getElementById(MOBILE_MODEL_GUARD_STYLE_ID);
     if (style) style.remove();
+    for (const lb of document.querySelectorAll('.model-selector > div[role="listbox"], .model-selector div[role="listbox"]')) {
+      const orig = lb.__piModelGuardOrig;
+      if (orig) {
+        lb.style.zIndex = orig.zIndex;
+        lb.style.maxHeight = orig.maxHeight;
+        lb.style.top = orig.top;
+        lb.style.bottom = orig.bottom;
+        lb.style.left = orig.left;
+        lb.style.right = orig.right;
+        lb.style.maxWidth = orig.maxWidth;
+        delete lb.__piModelGuardOrig;
+      }
+    }
+    for (const el of document.querySelectorAll('.model-selector, .pi-enh-cursor-composer')) {
+      if (el.__piModelGuardZIndex === undefined) continue;
+      el.style.zIndex = el.__piModelGuardZIndex;
+      delete el.__piModelGuardZIndex;
+    }
   }
 
   // 仅在 click 阶段安排延迟 blur；绝不在 pointerdown/touchstart 改变视口与点击目标。
   addManagedListener(document, "click", handleModelSelectorClick, true);
+  addManagedListener(document, "input", (e) => {
+    if (!isPluginEnabled("mobile-model-keyboard-guard")) return;
+    const lb = e?.target?.closest?.('.model-selector div[role="listbox"]');
+    if (lb) inspectAndProtectModelListbox(lb);
+  }, false);
+  if (typeof window !== "undefined") {
+    addManagedListener(window, "resize", syncOpenModelListboxes, { passive: true });
+    if (window.visualViewport) {
+      addManagedListener(window.visualViewport, "resize", syncOpenModelListboxes, { passive: true });
+      addManagedListener(window.visualViewport, "scroll", syncOpenModelListboxes, { passive: true });
+    }
+  }
 
-  // 观察 DOM 中 listbox 的动态挂载
+  // 观察 DOM 中模型选择器 listbox 的动态挂载
   if (typeof MutationObserver !== "undefined") {
     const listboxObserver = new MutationObserver((mutations) => {
       if (!isPluginEnabled("mobile-model-keyboard-guard")) return;
@@ -7974,10 +8049,10 @@
         if (mut.addedNodes?.length) {
           for (const node of mut.addedNodes) {
             if (node.nodeType === 1) {
-              if (node.matches?.('div[role="listbox"]')) {
+              if (node.matches?.('.model-selector > div[role="listbox"], .model-selector div[role="listbox"]')) {
                 inspectAndProtectModelListbox(node);
               } else if (typeof node.querySelector === "function") {
-                const lb = node.querySelector('div[role="listbox"]');
+                const lb = node.querySelector('.model-selector > div[role="listbox"], .model-selector div[role="listbox"]');
                 if (lb) inspectAndProtectModelListbox(lb);
               }
             }

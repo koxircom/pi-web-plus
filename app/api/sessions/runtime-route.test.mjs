@@ -29,12 +29,20 @@ const { SessionManager } = await jiti.import("@earendil-works/pi-coding-agent");
 test("list versions expose idle session creation, rename and deletion to other windows", async (t) => {
   const dir = await mkdtemp(join(tmpdir(), "pi-web-list-sync-"));
   const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+  const previousSessionsDir = process.env.PI_SESSIONS_DIR;
+  const previousUsageDataDir = process.env.PI_USAGE_DATA_DIR;
   process.env.PI_CODING_AGENT_DIR = dir;
+  process.env.PI_SESSIONS_DIR = dir;
+  delete process.env.PI_USAGE_DATA_DIR;
   invalidateSessionListCache();
   let sessionId;
   t.after(async () => {
     if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
     else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+    if (previousSessionsDir === undefined) delete process.env.PI_SESSIONS_DIR;
+    else process.env.PI_SESSIONS_DIR = previousSessionsDir;
+    if (previousUsageDataDir === undefined) delete process.env.PI_USAGE_DATA_DIR;
+    else process.env.PI_USAGE_DATA_DIR = previousUsageDataDir;
     if (sessionId) invalidateSessionPathCache(sessionId);
     invalidateSessionListCache();
     await rm(dir, { recursive: true, force: true });
@@ -107,10 +115,22 @@ test("session listing returns a gzip-compressed response when the client accepts
 
 test("deleting an unpersisted session shuts down its runtime and invalidates caches", async (t) => {
   const dir = await mkdtemp(join(tmpdir(), "pi-web-delete-empty-"));
+  const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+  const previousSessionsDir = process.env.PI_SESSIONS_DIR;
+  const previousUsageDataDir = process.env.PI_USAGE_DATA_DIR;
+  process.env.PI_CODING_AGENT_DIR = dir;
+  process.env.PI_SESSIONS_DIR = dir;
+  delete process.env.PI_USAGE_DATA_DIR;
   const previousRegistry = globalThis.__piSessions;
   const ids = [];
   globalThis.__piSessions = new Map();
   t.after(async () => {
+    if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+    if (previousSessionsDir === undefined) delete process.env.PI_SESSIONS_DIR;
+    else process.env.PI_SESSIONS_DIR = previousSessionsDir;
+    if (previousUsageDataDir === undefined) delete process.env.PI_USAGE_DATA_DIR;
+    else process.env.PI_USAGE_DATA_DIR = previousUsageDataDir;
     globalThis.__piSessions = previousRegistry;
     for (const id of ids) invalidateSessionPathCache(id);
     invalidateSessionListCache();
@@ -188,6 +208,13 @@ test("live agent state is available before the session file is persisted", () =>
 
 test("deleting a session removes all persisted subagent descendants", async (t) => {
   const dir = await mkdtemp(join(tmpdir(), "pi-web-delete-reparent-"));
+  const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+  const previousSessionsDir = process.env.PI_SESSIONS_DIR;
+  const previousUsageDataDir = process.env.PI_USAGE_DATA_DIR;
+  process.env.PI_CODING_AGENT_DIR = dir;
+  process.env.PI_SESSIONS_DIR = dir;
+  delete process.env.PI_USAGE_DATA_DIR;
+  invalidateSessionListCache();
   const grandparentPath = join(dir, "grandparent.jsonl");
   const parentPath = join(dir, "parent.jsonl");
   const childPath = join(dir, "child.jsonl");
@@ -243,7 +270,14 @@ test("deleting a session removes all persisted subagent descendants", async (t) 
   ].join("\n"));
   cacheSessionPath(parentId, parentPath);
   t.after(async () => {
+    if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+    if (previousSessionsDir === undefined) delete process.env.PI_SESSIONS_DIR;
+    else process.env.PI_SESSIONS_DIR = previousSessionsDir;
+    if (previousUsageDataDir === undefined) delete process.env.PI_USAGE_DATA_DIR;
+    else process.env.PI_USAGE_DATA_DIR = previousUsageDataDir;
     invalidateSessionPathCache(parentId);
+    invalidateSessionListCache();
     await rm(dir, { recursive: true, force: true });
   });
 

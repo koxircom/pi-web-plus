@@ -1,177 +1,128 @@
 # Release Checklist
 
-This repo publishes two artifacts for each release:
+Pi Web Standalone Edition releases are distributed exclusively through [`koxircom/pi-web-standalone` GitHub Releases](https://github.com/koxircom/pi-web-standalone/releases):
 
-- npm package: `@agegr/pi-web`
-- GitHub Release: `agegr/pi-web`
+- GitHub Release tag: `v<version>` in `koxircom/pi-web-standalone` (for example, planned release `v1.0.2`)
+- Release tarball asset: `pi-web-standalone-<version>.tgz` (for example, `pi-web-standalone-1.0.2.tgz`)
+- Official install command (replace `<version>` when targeting another release):
+  ```bash
+  npm install -g https://github.com/koxircom/pi-web-standalone/releases/download/v1.0.2/pi-web-standalone-1.0.2.tgz
+  ```
 
-Use this checklist from a clean `main` checkout.
+> **Release Invariants**:
+> - `package.json` keeps `"name": "@agegr/pi-web"` (alongside `"piWebEdition": "koxir-standalone"` and `"standalone": true`) for internal runtime compatibility, but **never publish to or pull from the public npm registry**.
+> - **Pushing `main` alone is not a release**: every release must complete all 5 steps below — preflight & version preparation, offline build + `npm pack` + tarball verification, clean install verification, GitHub Release asset upload + `Latest` verification, and running-instance synchronization.
 
-## 1. Preflight
+Use this 5-step checklist from a clean `main` checkout with Node.js `>=22.19.0`.
+
+## 1. Preflight & Version Preparation
+
+Verify Node.js (`node >=22.19`), repository state, GitHub CLI authentication, package metadata, and quality checks:
 
 ```bash
+node --version
 git status --short --branch
 git log --oneline --decorate -5
 gh auth status
-npm whoami
-node -e "const p=require('./package.json'); console.log(p.version)"
+node -e "const p=require('./package.json'); console.log(p.name, p.version, p.piWebEdition, p.standalone)"
+npm test
+node_modules/.bin/tsc --noEmit
+npm run lint
 ```
 
 Expected:
 
-- `git status` is clean, or only contains changes you intentionally plan to release.
-- GitHub is authenticated as an account that can push and create releases.
-- npm is authenticated as an account that can publish `@agegr/pi-web`.
+- Node.js is `22.19.0` or newer (`>=22.19.0`).
+- `git status` is clean, or only contains the intentional version bump (`package.json` and `package-lock.json`, e.g. `1.0.2`).
+- `package.json` retains `"name": "@agegr/pi-web"`, `"piWebEdition": "koxir-standalone"`, and `"standalone": true`.
+- GitHub CLI is authenticated with write/release access to `koxircom/pi-web-standalone`.
 
-## 2. Publish to npm
+## 2. Offline Build, `npm pack`, and Tarball Verification
 
-```bash
-npm run release
-```
-
-The release script runs:
+Run the production build and pack the standalone tarball locally. Do not run `next build` during normal development; release packaging is the exception.
 
 ```bash
-npm version patch --no-git-tag-version && npm run build && npm publish --access public
+VERSION=$(node -p "require('./package.json').version")
+npm run build
+PACK_FILE=$(npm pack)
+mv "$PACK_FILE" "pi-web-standalone-${VERSION}.tgz"
+ls -lh "pi-web-standalone-${VERSION}.tgz"
 ```
 
-Notes:
-
-- This bumps `package.json` and `package-lock.json`.
-- It intentionally runs a production build. Do not run `next build` during normal development; release work is the exception.
-- If `npm view @agegr/pi-web version` briefly shows the previous version, check the exact version instead:
+Inspect the archive to verify that required runtime files are included and development/cache artifacts are excluded:
 
 ```bash
-npm view @agegr/pi-web@<version> version --registry https://registry.npmjs.org/
-npm view @agegr/pi-web versions --json --registry https://registry.npmjs.org/
+tar -ztvf "pi-web-standalone-${VERSION}.tgz" | head -n 40
+tar -ztf "pi-web-standalone-${VERSION}.tgz" | rg "^package/(bin/pi-web\.js|package\.json|\.next/BUILD_ID|public/)"
+! tar -ztf "pi-web-standalone-${VERSION}.tgz" | rg "^package/\.next/(cache|dev)/|\.js\.map$"
 ```
 
-## 3. Commit the Version Bump
+## 3. Clean Install Verification
 
-Replace `<version>` with the new package version, for example `0.7.5`.
+Before tagging or uploading the release asset, verify that `pi-web-standalone-${VERSION}.tgz` installs cleanly into an isolated prefix and that the `pi-web` CLI entrypoint works:
+
+```bash
+TMP_PREFIX=$(mktemp -d)
+npm install -g --prefix "$TMP_PREFIX" "./pi-web-standalone-${VERSION}.tgz"
+"$TMP_PREFIX/bin/pi-web" --help
+rm -rf "$TMP_PREFIX"
+```
+
+## 4. Commit, Tag, Upload GitHub Release Asset, and Verify `Latest`
+
+Commit the version bump (if not already committed), create the annotated `v<version>` tag, and push `main` and tags to `koxircom/pi-web-standalone`:
 
 ```bash
 git diff -- package.json package-lock.json
 git add package.json package-lock.json
-git commit -m "Release v<version>"
-```
-
-## 4. Tag and Push
-
-```bash
-git tag -a v<version> -m "v<version>"
+git commit -m "Release v${VERSION}"
+git tag -a "v${VERSION}" -m "v${VERSION}"
 git push origin main --tags
 ```
 
-Confirm the tag does not already exist before creating it when unsure:
+Prepare bilingual (Chinese and English) release notes from the commit range `v<previous>..v${VERSION}`:
 
 ```bash
-git ls-remote --tags origin v<version>
-gh release view v<version> --repo agegr/pi-web
+git log --oneline --decorate "v<previous>..v${VERSION}"
+git diff --stat "v<previous>..v${VERSION}"
 ```
 
-## 5. Generate Release Notes from Commits
-
-Use the previous release tag as the base.
+Create the GitHub Release on `koxircom/pi-web-standalone`, attach `pi-web-standalone-${VERSION}.tgz`, and mark it as `Latest` (required because `/api/app-update` checks `releases/latest`):
 
 ```bash
-git log --oneline --decorate v<previous>..v<version>
-git log --format='%h%x09%s%n%b' v<previous>..v<version>
-git diff --stat v<previous>..v<version>
-```
-
-Write the release notes from those commits, not from memory. Include both Chinese and English sections. Keep commit hashes next to each item when useful.
-
-Suggested structure:
-
-```markdown
-## 中文
-
-基于 `v<previous>..v<version>` 的提交整理。
-
-### 新增
-
-- ...
-
-### 修复
-
-- ...
-
-### 改进
-
-- ...
-
-### 内部调整
-
-- 发布 npm 包 `@agegr/pi-web@<version>`。
-
-## English
-
-Prepared from commits in `v<previous>..v<version>`.
-
-### Added
-
-- ...
-
-### Fixed
-
-- ...
-
-### Improved
-
-- ...
-
-### Internal
-
-- Published npm package `@agegr/pi-web@<version>`.
-```
-
-## 6. Create or Update the GitHub Release
-
-Create a new release:
-
-```bash
-gh release create v<version> \
-  --repo agegr/pi-web \
+gh release create "v${VERSION}" \
+  "./pi-web-standalone-${VERSION}.tgz#pi-web-standalone-${VERSION}.tgz" \
+  --repo koxircom/pi-web-standalone \
   --verify-tag \
-  --title "v<version>" \
+  --latest \
+  --title "v${VERSION}" \
   --notes-file release-notes.md
 ```
 
-If the release already exists and only the notes need updating:
+Verify the published release metadata, asset URL, and `isLatest: true` status:
 
 ```bash
-gh release edit v<version> \
-  --repo agegr/pi-web \
-  --notes-file release-notes.md
-```
-
-You can avoid a temporary file by passing notes through stdin:
-
-```bash
-gh release edit v<version> --repo agegr/pi-web --notes-file - <<'EOF'
-## 中文
-
-...
-
-## English
-
-...
-EOF
-```
-
-## 7. Final Verification
-
-```bash
-gh release view v<version> --repo agegr/pi-web
-npm view @agegr/pi-web@<version> version --registry https://registry.npmjs.org/
-git status --short --branch
-git log --oneline --decorate -3
+gh release view "v${VERSION}" \
+  --repo koxircom/pi-web-standalone \
+  --json tagName,isDraft,assets,url
+gh api repos/koxircom/pi-web-standalone/releases/latest --jq '.tag_name'
 ```
 
 Expected:
 
-- GitHub Release exists and is not a draft unless intentionally published as one.
-- npm exact version resolves.
-- `main` is aligned with `origin/main`.
-- `HEAD` points at the release commit and `v<version>` tag.
+- `isDraft` is `false`, and the `/releases/latest` API returns `v${VERSION}`.
+- `assets` contains `pi-web-standalone-${VERSION}.tgz` with download URL `https://github.com/koxircom/pi-web-standalone/releases/download/v${VERSION}/pi-web-standalone-${VERSION}.tgz`.
+
+## 5. Synchronize Running Instances
+
+Pushing `main` or publishing a GitHub Release does **not** automatically update running Pi Web environments. After verifying the release asset and `Latest` status, upgrade target running instances from the official GitHub Release tarball (for example, `v1.0.2`):
+
+```bash
+npm install -g "https://github.com/koxircom/pi-web-standalone/releases/download/v${VERSION}/pi-web-standalone-${VERSION}.tgz"
+```
+
+After installation:
+
+- Verify the installed `package.json` reports `"version": "${VERSION}"`, `"piWebEdition": "koxir-standalone"`, and `"standalone": true`.
+- Restart or reload the target service following the environment's maintenance protocol and confirm `/login` (HTTP 200) and version status.
+- Remove the local temporary `pi-web-standalone-${VERSION}.tgz` artifact from the working tree so `git status` remains clean.

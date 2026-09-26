@@ -1372,15 +1372,47 @@
     cancelHistoryTailFrame(binding);
   }
 
+  function releaseHistoryTailForMinimapNavigation() {
+    const currentSid = typeof getCurrentSessionId === "function" ? getCurrentSessionId() : null;
+    if (typeof isSessionScrollRestoring === "function" && isSessionScrollRestoring(currentSid)) {
+      cancelActiveScrollRestore("minimap-navigation");
+    }
+    cancelHistoryScrollRestore();
+    if (!isPluginEnabled("history-scroll-stability")) return;
+    if (!historyScrollBinding || historyScrollBinding.sessionId !== currentSid || historyScrollBinding.scroll !== getChatScrollContainer()) {
+      syncHistoryScrollStability(true);
+    }
+    const binding = historyScrollBinding;
+    if (!binding || (currentSid && binding.sessionId !== currentSid)) return;
+    const now = Date.now();
+    const alreadyNavigating = now <= (binding.tailMinimapNavUntil || 0);
+    binding.tailPinned = false;
+    binding.tailGestureUntil = now + 1400;
+    binding.tailMinimapNavUntil = now + 1400;
+    if (!alreadyNavigating) {
+      binding.tailMinimapNavLeftBottom = getHistoryTailDistance(binding.scroll) > 2;
+    } else if (getHistoryTailDistance(binding.scroll) > 2) {
+      binding.tailMinimapNavLeftBottom = true;
+    }
+    binding.tailLastTop = binding.scroll?.scrollTop || 0;
+    cancelHistoryTailFrame(binding);
+  }
+
   function updateHistoryTailAttachment(binding) {
     if (binding !== historyScrollBinding) return;
     const scroll = binding.scroll;
     const top = scroll.scrollTop || 0;
     const distance = getHistoryTailDistance(scroll);
-    const movingUpByGesture = Date.now() <= binding.tailGestureUntil && top < binding.tailLastTop - 1;
+    const inMinimapNav = Date.now() <= (binding.tailMinimapNavUntil || 0);
+    if (inMinimapNav && distance > 2) {
+      binding.tailMinimapNavLeftBottom = true;
+    }
+    const movingUpByGesture = (Date.now() <= binding.tailGestureUntil && top < binding.tailLastTop - 1)
+      || (inMinimapNav && top < binding.tailLastTop);
+    const earlyMinimapTailScroll = inMinimapNav && (!binding.tailMinimapNavLeftBottom || top <= binding.tailLastTop + 1);
     if (movingUpByGesture) {
       binding.tailPinned = false;
-    } else if (!binding.tailPinned && distance <= 2) {
+    } else if (!binding.tailPinned && distance <= 2 && !earlyMinimapTailScroll) {
       if (typeof isScrollRestoreProtectedForSession === "function" && isScrollRestoreProtectedForSession(binding.sessionId)) {
         binding.tailPinned = false;
       } else {
@@ -1410,6 +1442,8 @@
     const isSparse = (scroll.scrollHeight || 0) <= (scroll.clientHeight || 0) + 40;
     binding.tailPinned = !isProtected && !isSparse && (getHistoryTailDistance(scroll) <= HISTORY_TAIL_ATTACH_PX);
     binding.tailGestureUntil = 0;
+    binding.tailMinimapNavUntil = 0;
+    binding.tailMinimapNavLeftBottom = false;
     binding.tailLastTop = scroll.scrollTop || 0;
     binding.tailLastHeight = scroll.scrollHeight || 0;
     const Resize = window.ResizeObserver;
@@ -1628,7 +1662,7 @@
         retryTimer: null, hideTimer: null, blockAuto: false,
         autoPageKey: null, autoAttemptKey: null, autoAttempts: 0, retryAfter: 0, lastGestureAt: 0,
         tailObserver: null, tailContent: null, tailFrame: null, tailFrameKind: null,
-        tailPinned: false, tailGestureUntil: 0, tailLastTop: 0, tailLastHeight: 0,
+        tailPinned: false, tailGestureUntil: 0, tailMinimapNavUntil: 0, tailMinimapNavLeftBottom: false, tailLastTop: 0, tailLastHeight: 0,
       };
       historyScrollBinding = binding;
       scroll.classList?.add("pi-enh-history-scroll-container");
@@ -4294,13 +4328,16 @@
         // 自动帮用户触发该轮次的用户提问按钮，实现精准跳转并联动关闭
         const userBtn = turnEl.querySelector("[data-minimap-preview-user], button");
         if (userBtn && typeof userBtn.click === "function") {
+          releaseHistoryTailForMinimapNavigation();
           userBtn.click();
           return;
         }
+        return;
       }
 
       // 4. 用户点击了跳转项（用户提问 / 助手大纲 / 助手跳跃 A 等按钮）
       // 执行平滑向右滑出关闭会话导航抽屉
+      releaseHistoryTailForMinimapNavigation();
       animateCloseMinimapPreview();
     };
 
@@ -4791,6 +4828,7 @@
       // 3. 最终落定：章节联动跳转（平滑滚动主视口）
       const userBtn = targetTurnEl.querySelector("[data-minimap-preview-user], button");
       if (userBtn && typeof userBtn.click === "function") {
+        releaseHistoryTailForMinimapNavigation();
         isRailDotNavigating = true;
         try {
           userBtn.click();
@@ -5111,13 +5149,16 @@
         // 自动帮用户触发该轮次的用户提问按钮，实现精准跳转并联动关闭
         const userBtn = turnEl.querySelector("[data-minimap-preview-user], button");
         if (userBtn && typeof userBtn.click === "function") {
+          releaseHistoryTailForMinimapNavigation();
           userBtn.click();
           return;
         }
+        return;
       }
 
       // 4. 用户点击了跳转内容项（用户提问 / 助手大纲标题 / 助手跳跃 A / 段落等）
       // 执行平滑向右滑出关闭会话导航抽屉
+      releaseHistoryTailForMinimapNavigation();
       animateCloseMinimapPreview();
     };
     document.addEventListener("click", minimapGlobalClickListener, { capture: true, passive: true });

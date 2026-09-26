@@ -5072,13 +5072,13 @@ window.__PI_ENH_RENDER_USAGE_PANEL__ = renderUsagePanel;
   window.__PI_ENH_IS_PLUGIN_ENABLED__ = isPluginEnabled;
 
   const kernelHealth = window.__PI_ENH_KERNEL_HEALTH__ || {
-    edition: "koxir-standalone-1.0.0",
-    version: "1.0.0",
+    edition: `koxir-standalone-${ENHANCEMENT_SUITE_VERSION}`,
+    version: ENHANCEMENT_SUITE_VERSION,
     bootedAt: Date.now(),
     initialSyncCompleted: false,
     isolatedErrors: [],
   };
-  kernelHealth.edition = "koxir-standalone-1.0.0";
+  kernelHealth.edition = `koxir-standalone-${ENHANCEMENT_SUITE_VERSION}`;
   kernelHealth.version = ENHANCEMENT_SUITE_VERSION;
   window.__PI_ENH_KERNEL_HEALTH__ = kernelHealth;
   window.__PI_WEB_STANDALONE_VERSION__ = ENHANCEMENT_SUITE_VERSION;
