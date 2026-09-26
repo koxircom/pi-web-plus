@@ -1,0 +1,5121 @@
+  // ==========================================
+  // 设置对话框可调节尺寸与侧边栏可调节宽度 (Settings Dialog & Sidebar Resizable)
+  // ==========================================
+  const SETTINGS_SIDEBAR_WIDTH_KEY = "pi-enh-settings-sidebar-width";
+  const SETTINGS_DIALOG_SIZE_KEY = "pi-enh-settings-dialog-size";
+
+  function applySavedSettingsDialogDimensions(surface) {
+    if (!surface) return;
+    // 保护守卫：若正在拖拽调整中，严禁从存储中覆写正在调整的临时尺寸，防止拉扯回弹
+    if (surface.classList.contains("is-resizing") || (document.documentElement && document.documentElement.classList.contains("pi-enh-settings-resizing"))) {
+      return;
+    }
+    // 1. 恢复侧边栏宽度
+    try {
+      const savedSidebarWidth = readEnhancementStorage(SETTINGS_SIDEBAR_WIDTH_KEY);
+      if (savedSidebarWidth && !isNaN(Number(savedSidebarWidth))) {
+        const w = Math.max(160, Math.min(500, Math.round(Number(savedSidebarWidth))));
+        surface.style.setProperty("--settings-sidebar-width", `${w}px`);
+      }
+    } catch (e) {}
+
+    // 2. 恢复弹窗尺寸
+    try {
+      const savedDialogSize = readEnhancementStorage(SETTINGS_DIALOG_SIZE_KEY);
+      if (savedDialogSize) {
+        const parsed = typeof savedDialogSize === "string" ? JSON.parse(savedDialogSize) : savedDialogSize;
+        if (parsed && typeof parsed.width === "number" && typeof parsed.height === "number") {
+          const maxW = Math.max(760, (window.innerWidth || 1440) - 32);
+          const maxH = Math.max(480, (window.innerHeight || 900) - 32);
+          const w = Math.max(760, Math.min(maxW, Math.round(parsed.width)));
+          const h = Math.max(480, Math.min(maxH, Math.round(parsed.height)));
+          surface.style.setProperty("--settings-dialog-width", `${w}px`);
+          surface.style.setProperty("--settings-dialog-height", `${h}px`);
+        }
+      }
+    } catch (e) {}
+  }
+
+  function bindSettingsDialogResizable(surface) {
+    if (!surface) return;
+    // 防重复绑定与防反复重置：同一 surface 仅在首次挂载时恢复一次存储尺寸并绑定事件，防止后续 DOM Mutation 触发时将拖动中的尺寸覆盖
+    if (surface.__piEnhResizableBound) return;
+    surface.__piEnhResizableBound = true;
+
+    applySavedSettingsDialogDimensions(surface);
+
+    // 1. 侧边栏可调节手柄 (Sidebar Splitter Resizer) - 防拉扯防回弹抗抖动架构
+    let splitter = surface.querySelector(".pi-enh-sidebar-resizer");
+    if (!splitter) {
+      splitter = document.createElement("div");
+      splitter.className = "pi-enh-sidebar-resizer";
+      splitter.setAttribute("title", "左右拖拽调整侧边栏宽度 (双击恢复默认)");
+      splitter.innerHTML = `<div class="pi-enh-sidebar-resizer-line"></div>`;
+      surface.appendChild(splitter);
+
+      let isDraggingSplitter = false;
+      let startX = 0;
+      let startWidth = 200;
+      let minSidebarW = 160;
+      let maxSidebarW = 450;
+      let activePointerId = null;
+      let hasMovedDuringDrag = false;
+      let lastDragEndTime = 0;
+      let rafId = null;
+      let latestTargetWidth = 200;
+
+      const applyWidthStyle = () => {
+        rafId = null;
+        if (!isDraggingSplitter) return;
+        surface.style.setProperty("--settings-sidebar-width", `${latestTargetWidth}px`);
+      };
+
+      const onSplitterMove = (e) => {
+        if (!isDraggingSplitter) return;
+        if (activePointerId !== null && e.pointerId !== undefined && e.pointerId !== activePointerId) return;
+
+        const deltaX = e.clientX - startX;
+        if (Math.abs(deltaX) > 2) {
+          hasMovedDuringDrag = true;
+        }
+
+        const newWidth = Math.max(minSidebarW, Math.min(maxSidebarW, Math.round(startWidth + deltaX)));
+        latestTargetWidth = newWidth;
+
+        // 使用 requestAnimationFrame 单帧节流视觉写入，杜绝事件堆积与强制同步重排掉帧
+        if (!rafId) {
+          rafId = requestAnimationFrame(applyWidthStyle);
+        }
+      };
+
+      const onSplitterEnd = (e) => {
+        if (!isDraggingSplitter) return;
+        if (activePointerId !== null && e && e.pointerId !== undefined && e.pointerId !== activePointerId) return;
+
+        isDraggingSplitter = false;
+        if (rafId) {
+          cancelAnimationFrame(rafId);
+          rafId = null;
+        }
+
+        if (hasMovedDuringDrag) {
+          lastDragEndTime = Date.now();
+        }
+
+        const finalWidth = latestTargetWidth || startWidth;
+        surface.style.setProperty("--settings-sidebar-width", `${finalWidth}px`);
+
+        // 清理拖拽状态
+        surface.classList.remove("is-resizing");
+        splitter.classList.remove("is-dragging");
+        if (document.documentElement) {
+          document.documentElement.classList.remove("pi-enh-settings-resizing");
+        }
+        document.body.style.removeProperty("cursor");
+        document.body.style.removeProperty("user-select");
+
+        // 释放 Pointer Capture
+        if (activePointerId !== null && typeof splitter.releasePointerCapture === "function") {
+          try {
+            splitter.releasePointerCapture(activePointerId);
+          } catch (err) {}
+        }
+        activePointerId = null;
+
+        window.removeEventListener("pointermove", onSplitterMove, true);
+        window.removeEventListener("pointerup", onSplitterEnd, true);
+        window.removeEventListener("pointercancel", onSplitterEnd, true);
+        window.removeEventListener("mousemove", onSplitterMove, true);
+        window.removeEventListener("mouseup", onSplitterEnd, true);
+
+        // 立即持久化存储最新宽度，保证后续任何状态恢复均以本次调整为准
+        try {
+          localStorage.setItem(SETTINGS_SIDEBAR_WIDTH_KEY, String(finalWidth));
+        } catch (err) {}
+      };
+
+      const onSplitterStart = (e) => {
+        if (e.button !== 0) return;
+        e.preventDefault();
+        e.stopPropagation();
+
+        isDraggingSplitter = true;
+        hasMovedDuringDrag = false;
+        startX = e.clientX;
+
+        // 清除任何选区，防止文本选中导致指针行为畸变
+        try {
+          const sel = window.getSelection();
+          if (sel && sel.removeAllRanges) sel.removeAllRanges();
+        } catch (err) {}
+
+        // 精确获取当前基准宽度：优先读取受控 CSS 逻辑变量，杜绝 transition 补间动画或 subpixel 造成的中间值跌落
+        let curW = 200;
+        const styleW = surface.style.getPropertyValue("--settings-sidebar-width");
+        if (styleW) {
+          const parsed = parseInt(styleW, 10);
+          if (!isNaN(parsed) && parsed > 0) curW = parsed;
+        } else {
+          const header = surface.querySelector(".settings-dialog-header");
+          if (header) {
+            const rect = header.getBoundingClientRect();
+            if (rect.width > 0) curW = Math.round(rect.width);
+          }
+        }
+        startWidth = curW;
+        latestTargetWidth = curW;
+
+        // 在拖拽起点一次性获取容器宽度，避免在高频 move 中重复读取 getBoundingClientRect 引发布局颠簸 (Layout Thrashing)
+        const currentSurfaceW = surface.getBoundingClientRect().width || 1220;
+        minSidebarW = 160;
+        // 确保右侧内容区至少保留 360px，上限 500px，不挤压主面板
+        maxSidebarW = Math.max(minSidebarW, Math.min(500, Math.floor(currentSurfaceW - 360), Math.floor(currentSurfaceW * 0.45)));
+
+        surface.classList.add("is-resizing");
+        splitter.classList.add("is-dragging");
+        if (document.documentElement) {
+          document.documentElement.classList.add("pi-enh-settings-resizing");
+        }
+        document.body.style.setProperty("cursor", "col-resize", "important");
+        document.body.style.setProperty("user-select", "none", "important");
+
+        // 优先使用 setPointerCapture 锁定指针，确保快速拖拽或滑出窗口边界时不丢失事件
+        if (e.pointerId !== undefined && typeof splitter.setPointerCapture === "function") {
+          activePointerId = e.pointerId;
+          try {
+            splitter.setPointerCapture(e.pointerId);
+          } catch (err) {}
+        } else {
+          activePointerId = null;
+        }
+
+        window.addEventListener("pointermove", onSplitterMove, true);
+        window.addEventListener("pointerup", onSplitterEnd, true);
+        window.addEventListener("pointercancel", onSplitterEnd, true);
+        window.addEventListener("mousemove", onSplitterMove, true);
+        window.addEventListener("mouseup", onSplitterEnd, true);
+      };
+
+      if (window.PointerEvent) {
+        splitter.addEventListener("pointerdown", onSplitterStart);
+      } else {
+        splitter.addEventListener("mousedown", onSplitterStart);
+      }
+
+      // 双击恢复默认侧边栏宽度 200px (具备严格的防误触阻断：拖拽移动过或拖拽结束后 500ms 内禁止重置)
+      splitter.addEventListener("dblclick", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+
+        if (hasMovedDuringDrag || (Date.now() - lastDragEndTime < 500)) {
+          return;
+        }
+
+        latestTargetWidth = 200;
+        startWidth = 200;
+        surface.style.setProperty("--settings-sidebar-width", "200px");
+        try {
+          localStorage.removeItem(SETTINGS_SIDEBAR_WIDTH_KEY);
+        } catch (err) {}
+        if (typeof showToast === "function") {
+          showToast("已恢复默认侧边栏宽度 (200px)");
+        }
+      });
+    }
+
+    // 2. 弹窗四周与右下角缩放手柄 (Dialog Edge & Corner Resizers)
+    const resizerConfigs = [
+      { type: "east", className: "pi-enh-dialog-resizer-east", cursor: "ew-resize", title: "左右拖拽调整弹窗宽度" },
+      { type: "south", className: "pi-enh-dialog-resizer-south", cursor: "ns-resize", title: "上下拖拽调整弹窗高度" },
+      { type: "se", className: "pi-enh-dialog-resizer-se", cursor: "nwse-resize", title: "拖拽调整弹窗大小 (双击恢复默认)" },
+    ];
+
+    resizerConfigs.forEach(({ type, className, cursor, title }) => {
+      let handle = surface.querySelector(`.${className}`);
+      if (!handle) {
+        handle = document.createElement("div");
+        handle.className = `pi-enh-dialog-resizer ${className}`;
+        handle.setAttribute("title", title);
+        if (type === "se") {
+          handle.innerHTML = `
+            <svg width="10" height="10" viewBox="0 0 10 10" fill="currentColor" class="pi-enh-dialog-resizer-grip" aria-hidden="true">
+              <circle cx="8" cy="8" r="1.2"></circle>
+              <circle cx="4" cy="8" r="1.2"></circle>
+              <circle cx="8" cy="4" r="1.2"></circle>
+              <circle cx="8" cy="0" r="1.2"></circle>
+              <circle cx="0" cy="8" r="1.2"></circle>
+              <circle cx="4" cy="4" r="1.2"></circle>
+            </svg>
+          `;
+        }
+        surface.appendChild(handle);
+
+        let isResizingDialog = false;
+        let startX = 0;
+        let startY = 0;
+        let startWidth = 1220;
+        let startHeight = 650;
+
+        const onDialogMouseMove = (e) => {
+          if (!isResizingDialog) return;
+          e.preventDefault();
+
+          const maxW = Math.max(760, (window.innerWidth || 1440) - 32);
+          const maxH = Math.max(480, (window.innerHeight || 900) - 32);
+
+          if (type === "east" || type === "se") {
+            const deltaX = (e.clientX - startX) * 2;
+            const newW = Math.max(760, Math.min(maxW, Math.round(startWidth + deltaX)));
+            surface.style.setProperty("--settings-dialog-width", `${newW}px`);
+          }
+
+          if (type === "south" || type === "se") {
+            const deltaY = (e.clientY - startY) * 2;
+            const newH = Math.max(480, Math.min(maxH, Math.round(startHeight + deltaY)));
+            surface.style.setProperty("--settings-dialog-height", `${newH}px`);
+          }
+        };
+
+        const onDialogMouseUp = (e) => {
+          if (!isResizingDialog) return;
+          isResizingDialog = false;
+          surface.classList.remove("is-resizing");
+          handle.classList.remove("is-dragging");
+          document.body.style.removeProperty("cursor");
+          document.body.style.removeProperty("user-select");
+          window.removeEventListener("mousemove", onDialogMouseMove, true);
+          window.removeEventListener("mouseup", onDialogMouseUp, true);
+
+          try {
+            const rect = surface.getBoundingClientRect();
+            const w = Math.round(rect.width);
+            const h = Math.round(rect.height);
+            localStorage.setItem(SETTINGS_DIALOG_SIZE_KEY, JSON.stringify({ width: w, height: h }));
+          } catch (err) {}
+        };
+
+        handle.addEventListener("mousedown", (e) => {
+          if (e.button !== 0) return;
+          e.preventDefault();
+          isResizingDialog = true;
+          startX = e.clientX;
+          startY = e.clientY;
+
+          const rect = surface.getBoundingClientRect();
+          startWidth = rect.width;
+          startHeight = rect.height;
+
+          surface.classList.add("is-resizing");
+          handle.classList.add("is-dragging");
+          document.body.style.setProperty("cursor", cursor, "important");
+          document.body.style.setProperty("user-select", "none", "important");
+
+          window.addEventListener("mousemove", onDialogMouseMove, true);
+          window.addEventListener("mouseup", onDialogMouseUp, true);
+        });
+
+        if (type === "se") {
+          handle.addEventListener("dblclick", (e) => {
+            e.preventDefault();
+            surface.style.removeProperty("--settings-dialog-width");
+            surface.style.removeProperty("--settings-dialog-height");
+            try {
+              localStorage.removeItem(SETTINGS_DIALOG_SIZE_KEY);
+            } catch (err) {}
+            showToast("已恢复默认弹窗尺寸 (1220px × 86vh)");
+          });
+        }
+      }
+    });
+  }
+
+  SHORTCUT_TIP_STORAGE_KEY = "pi-enh-settings-shortcut-tip-dismissed";
+
+  function syncSidebarShortcutTip(header) {
+    if (!header) return;
+    if (typeof window !== "undefined" && window.innerWidth < 641) return;
+    let isDismissed = false;
+    try {
+      isDismissed = readEnhancementStorage(SHORTCUT_TIP_STORAGE_KEY) === "true";
+    } catch (e) {}
+
+    let tip = header.querySelector(".pi-enh-sidebar-shortcut-tip");
+    if (isDismissed) {
+      if (tip) tip.remove();
+      return;
+    }
+
+    if (!tip) {
+      tip = document.createElement("div");
+      tip.className = "pi-enh-sidebar-shortcut-tip";
+      tip.innerHTML = `
+        <div class="pi-enh-sidebar-tip-main">
+          <svg class="pi-enh-sidebar-tip-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <path d="M12 2v1M12 21v1M4.22 4.22l.71.71M18.36 18.36l.71.71M2 12h1M21 12h1M4.22 19.78l.71-.71M18.36 5.64l.71-.71M9 18h6M10 22h4M12 15a4 4 0 1 0-4-4c0 1.5.8 2.3 1.5 3 .6.6.5 1 .5 1z"/>
+          </svg>
+          <div class="pi-enh-sidebar-tip-text">
+            <div class="pi-enh-sidebar-tip-title">双击可添加至快捷入口</div>
+            <div class="pi-enh-sidebar-tip-sub">再次双击可取消固定</div>
+          </div>
+        </div>
+        <button type="button" class="pi-enh-sidebar-tip-close" title="不再提示" aria-label="不再提示">×</button>
+      `;
+
+      const closeBtn = tip.querySelector(".pi-enh-sidebar-tip-close");
+      if (closeBtn) {
+        closeBtn.addEventListener("click", (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          tip.style.opacity = "0";
+          tip.style.transform = "translateY(4px)";
+          try {
+            localStorage.setItem(SHORTCUT_TIP_STORAGE_KEY, "true");
+          } catch (err) {}
+          addManagedTimeout(() => {
+            tip.remove();
+          }, 200);
+          showToast("已关闭提示");
+        });
+      }
+
+      header.appendChild(tip);
+    }
+  }
+
+  // ==========================================
+  // 设置侧边栏折叠/展开控制器 (Settings Sidebar Collapse / Mini Mode)
+  // ==========================================
+  const SETTINGS_SIDEBAR_COLLAPSED_KEY = "pi-enh-settings-sidebar-collapsed";
+
+  function isSettingsSidebarCollapsed() {
+    try {
+      return readEnhancementStorage(SETTINGS_SIDEBAR_COLLAPSED_KEY) === "true";
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function setSettingsSidebarCollapsed(collapsed) {
+    try {
+      localStorage.setItem(SETTINGS_SIDEBAR_COLLAPSED_KEY, collapsed ? "true" : "false");
+    } catch (e) {}
+  }
+
+  function applySettingsSidebarCollapsedState(header, isCollapsed) {
+    if (document.documentElement) {
+      document.documentElement.classList.toggle("pi-enh-settings-sidebar-collapsed", Boolean(isCollapsed));
+    }
+    const collapseBtn = header ? header.querySelector(".pi-enh-sidebar-collapse-btn") : document.querySelector(".pi-enh-sidebar-collapse-btn");
+    if (collapseBtn) {
+      collapseBtn.setAttribute("title", isCollapsed ? "展开标签栏" : "折叠标签栏 (只显示图标)");
+      collapseBtn.setAttribute("aria-label", isCollapsed ? "展开标签栏" : "折叠标签栏");
+      collapseBtn.innerHTML = `<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <rect width="18" height="18" x="3" y="3" rx="2.5"></rect>
+          <path d="M9 3v18"></path>
+        </svg>`;
+    }
+  }
+
+  function isMobileSettingsView(header) {
+    if (typeof window === "undefined") return false;
+    // 严格以 640px 为界区分手机直屏 (<= 640px) 与折叠屏展开/平板/桌面 (>= 641px)
+    // 注意：select.settings-mobile-section-picker 在 React DOM 中常驻，绝不可用 querySelector 存在性判断！
+    if (typeof window.innerWidth === "number" && window.innerWidth > 0) {
+      return window.innerWidth <= 640;
+    }
+    if (window.matchMedia && window.matchMedia("(max-width: 640px)").matches) return true;
+    return false;
+  }
+
+  function syncSettingsSidebarCollapse(header) {
+    if (!header || typeof header.querySelector !== "function") return;
+
+    // 直屏手机 / 移动端视图：彻底清除并严禁创建折叠按钮，退出折叠状态
+    if (isMobileSettingsView(header)) {
+      const existingBtn = header.querySelector(".pi-enh-sidebar-collapse-btn");
+      if (existingBtn) existingBtn.remove();
+      const existingTip = header.querySelector(".pi-enh-sidebar-shortcut-tip");
+      if (existingTip) existingTip.remove();
+      if (document.documentElement) {
+        document.documentElement.classList.remove("pi-enh-settings-sidebar-collapsed");
+      }
+      return;
+    }
+
+    const titleEl = header.querySelector(".settings-dialog-title");
+    if (!titleEl) return;
+
+    let textSpan = titleEl.querySelector(".pi-enh-sidebar-title-text");
+    if (!textSpan) {
+      const childNodes = Array.from(titleEl.childNodes || []);
+      const textNodes = childNodes.filter((n) => n && (n.nodeType === 3 || n.nodeType === "text"));
+      const rawText = textNodes.map((n) => (n.textContent || "").trim()).filter(Boolean).join("") || (titleEl.textContent || "").trim() || "设置";
+      textNodes.forEach((n) => {
+        if (typeof n.remove === "function") n.remove();
+      });
+      if (typeof document.createElement === "function") {
+        textSpan = document.createElement("span");
+        textSpan.className = "pi-enh-sidebar-title-text";
+        textSpan.textContent = rawText;
+        if (typeof titleEl.prepend === "function") {
+          titleEl.prepend(textSpan);
+        } else if (typeof titleEl.insertBefore === "function") {
+          titleEl.insertBefore(textSpan, titleEl.firstChild);
+        } else if (typeof titleEl.appendChild === "function") {
+          titleEl.appendChild(textSpan);
+        }
+      }
+    }
+
+    let collapseBtn = titleEl.querySelector(".pi-enh-sidebar-collapse-btn");
+    if (!collapseBtn && typeof document.createElement === "function") {
+      collapseBtn = document.createElement("button");
+      collapseBtn.type = "button";
+      collapseBtn.className = "pi-enh-sidebar-collapse-btn";
+      titleEl.appendChild(collapseBtn);
+
+      if (typeof collapseBtn.addEventListener === "function") {
+        collapseBtn.addEventListener("click", (e) => {
+          if (e && typeof e.preventDefault === "function") e.preventDefault();
+          if (e && typeof e.stopPropagation === "function") e.stopPropagation();
+          const nextCollapsed = !isSettingsSidebarCollapsed();
+          setSettingsSidebarCollapsed(nextCollapsed);
+          applySettingsSidebarCollapsedState(header, nextCollapsed);
+          if (typeof showToast === "function") {
+            showToast(nextCollapsed ? "已折叠侧边栏" : "已展开侧边栏");
+          }
+        });
+      }
+    }
+
+    applySettingsSidebarCollapsedState(header, isSettingsSidebarCollapsed());
+  }
+
+  // ==========================================
+  // 6. Settings Dialog Enhancements & Archived Tabs (设置对话框增强与归档管理)
+  // ==========================================
+  function syncSettingsDialogEnhancements() {
+    const isSidebarActive = isPluginEnabled("settings-sidebar-layout");
+    const nav = document.querySelector(".settings-section-tabs");
+    const header = (nav?.closest && nav.closest(".settings-dialog-header")) || (nav?.parentElement ? nav.parentElement : null) || document.querySelector(".settings-dialog-header");
+    const isMobile = isMobileSettingsView(header);
+
+    if (document.documentElement) {
+      document.documentElement.classList.toggle("pi-enh-settings-sidebar-active", isSidebarActive && !isMobile);
+      if (isSidebarActive && !isMobile) {
+        document.documentElement.classList.toggle("pi-enh-settings-sidebar-collapsed", isSettingsSidebarCollapsed());
+      } else {
+        document.documentElement.classList.remove("pi-enh-settings-sidebar-collapsed");
+      }
+    }
+    if (header) {
+      syncSettingsSidebarCollapse(header);
+    }
+    if (!nav) return;
+
+    const surface = nav.closest(".settings-dialog-surface") || document.querySelector(".settings-dialog-surface");
+    if (surface && isSidebarActive && !isMobile) {
+      bindSettingsDialogResizable(surface);
+    }
+    if (header && isSidebarActive && !isMobile) {
+      syncSidebarShortcutTip(header);
+    }
+
+    // 1. 增强插件 Tab
+    let enhTab = nav.querySelector("[data-pi-enh-tab='plugins']");
+    if (!enhTab) {
+      enhTab = document.createElement("button");
+      enhTab.type = "button";
+      enhTab.className = "settings-section-tab";
+      enhTab.setAttribute("data-pi-enh-tab", "plugins");
+      enhTab.setAttribute("title", "增强插件");
+      enhTab.innerHTML = `
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" class="settings-section-icon">
+          <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"></path>
+        </svg>
+        <span>增强插件</span>
+      `;
+      nav.appendChild(enhTab);
+
+      enhTab.addEventListener("click", () => {
+        showEnhancementsPanel(nav, enhTab);
+      });
+    }
+
+    // 2. 通知管理 Tab
+    let notificationTab = nav.querySelector("[data-pi-enh-tab='notifications']");
+    if (isPluginEnabled("notification-center")) {
+      if (!notificationTab) {
+        notificationTab = document.createElement("button");
+        notificationTab.type = "button";
+        notificationTab.className = "settings-section-tab";
+        notificationTab.setAttribute("data-pi-enh-tab", "notifications");
+        notificationTab.setAttribute("title", "通知管理");
+        notificationTab.innerHTML = `
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" class="settings-section-icon">
+            <path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9"></path><path d="M10 21h4"></path>
+          </svg>
+          <span>通知管理</span>
+        `;
+        nav.appendChild(notificationTab);
+        notificationTab.addEventListener("click", () => {
+          showNotificationPanel(nav, notificationTab);
+        });
+      }
+    } else if (notificationTab) {
+      notificationTab.remove();
+      hideNotificationPanel(nav);
+    }
+
+    // 3. 已归档会话 Tab (对齐 Codex Desktop: Settings -> Archived chats)
+    let archivedTab = nav.querySelector("[data-pi-enh-tab='archived']");
+    if (isPluginEnabled("session-pin-archive")) {
+      if (!archivedTab) {
+        archivedTab = document.createElement("button");
+        archivedTab.type = "button";
+        archivedTab.className = "settings-section-tab";
+        archivedTab.setAttribute("data-pi-enh-tab", "archived");
+        archivedTab.setAttribute("title", "已归档");
+        archivedTab.innerHTML = `
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" class="settings-section-icon">
+            <path d="M21 8v13H3V8"></path><path d="M1 3h22v5H1z"></path><path d="M10 12h4"></path>
+          </svg>
+          <span>已归档</span>
+        `;
+        nav.appendChild(archivedTab);
+
+        archivedTab.addEventListener("click", () => {
+          showArchivedPanel(nav, archivedTab);
+        });
+      }
+    } else if (archivedTab) {
+      archivedTab.remove();
+      hideArchivedPanel(nav);
+    }
+
+    // 4. 用量与成本大盘 Tab
+    let usageTab = nav.querySelector("[data-pi-enh-tab='usage']");
+    if (isPluginEnabled("usage-cost-dashboard")) {
+      if (!usageTab) {
+        usageTab = document.createElement("button");
+        usageTab.type = "button";
+        usageTab.className = "settings-section-tab";
+        usageTab.setAttribute("data-pi-enh-tab", "usage");
+        usageTab.setAttribute("title", "Usage");
+        usageTab.innerHTML = `
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" class="settings-section-icon">
+            <line x1="18" y1="20" x2="18" y2="10"></line><line x1="12" y1="20" x2="12" y2="4"></line><line x1="6" y1="20" x2="6" y2="14"></line>
+          </svg>
+          <span>Usage</span>
+        `;
+        nav.appendChild(usageTab);
+
+        usageTab.addEventListener("click", () => {
+          showUsagePanel(nav, usageTab);
+        });
+      }
+    } else if (usageTab) {
+      usageTab.remove();
+      hideUsagePanel(nav);
+      document.querySelectorAll(".settings-dialog-main.pi-enh-usage-panel").forEach((el) => el.remove());
+    }
+
+    // 5. 会话标签 Tab
+    let tagsTab = nav.querySelector("[data-pi-enh-tab='tags']");
+    if (isPluginEnabled("session-tags")) {
+      if (!tagsTab) {
+        tagsTab = document.createElement("button");
+        tagsTab.type = "button";
+        tagsTab.className = "settings-section-tab";
+        tagsTab.setAttribute("data-pi-enh-tab", "tags");
+        tagsTab.setAttribute("title", "会话标签");
+        tagsTab.innerHTML = `
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" class="settings-section-icon">
+            <path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"></path>
+            <line x1="7" y1="7" x2="7.01" y2="7"></line>
+          </svg>
+          <span>会话标签</span>
+        `;
+        nav.appendChild(tagsTab);
+
+        tagsTab.addEventListener("click", () => {
+          showTagsPanel(nav, tagsTab);
+        });
+      }
+    } else if (tagsTab) {
+      tagsTab.remove();
+      hideTagsPanel(nav);
+      document.querySelectorAll(".settings-dialog-main.pi-enh-tags-panel").forEach((el) => el.remove());
+    }
+
+    // 6. 监听所有页签点击，统一协调各面板的显隐
+    if (!nav.__piEnhTabsBound) {
+      nav.__piEnhTabsBound = true;
+      nav.addEventListener("click", (e) => {
+        const clickedTab = e.target && e.target.closest ? e.target.closest(".settings-section-tab") : null;
+        if (!clickedTab) return;
+        const currentEnhTab = nav.querySelector("[data-pi-enh-tab='plugins']");
+        const currentNotificationTab = nav.querySelector("[data-pi-enh-tab='notifications']");
+        const currentArchivedTab = nav.querySelector("[data-pi-enh-tab='archived']");
+        const currentUsageTab = nav.querySelector("[data-pi-enh-tab='usage']");
+        const currentTagsTab = nav.querySelector("[data-pi-enh-tab='tags']");
+
+        if (clickedTab !== currentEnhTab) {
+          hideEnhancementsPanel(nav);
+        }
+        if (clickedTab !== currentNotificationTab) {
+          hideNotificationPanel(nav);
+        }
+        if (clickedTab !== currentArchivedTab) {
+          hideArchivedPanel(nav);
+        }
+        if (clickedTab !== currentUsageTab) {
+          hideUsagePanel(nav);
+        }
+        if (clickedTab !== currentTagsTab) {
+          hideTagsPanel(nav);
+        }
+      });
+    }
+
+    // Mobile select picker sync
+    const mobilePicker = header ? header.querySelector("select.settings-mobile-section-picker") : null;
+    if (mobilePicker) {
+      if (!mobilePicker.querySelector("option[value='enhancements']")) {
+        const opt = document.createElement("option");
+        opt.value = "enhancements";
+        opt.textContent = "增强插件";
+        mobilePicker.appendChild(opt);
+      }
+      if (isPluginEnabled("session-pin-archive") && !mobilePicker.querySelector("option[value='archived']")) {
+        const optArch = document.createElement("option");
+        optArch.value = "archived";
+        optArch.textContent = "已归档";
+        mobilePicker.appendChild(optArch);
+      }
+      if (isPluginEnabled("notification-center") && !mobilePicker.querySelector("option[value='notifications']")) {
+        const optNotifications = document.createElement("option");
+        optNotifications.value = "notifications";
+        optNotifications.textContent = "通知管理";
+        mobilePicker.appendChild(optNotifications);
+      }
+      if (isPluginEnabled("usage-cost-dashboard") && !mobilePicker.querySelector("option[value='usage']")) {
+        const optUsage = document.createElement("option");
+        optUsage.value = "usage";
+        optUsage.textContent = "Usage";
+        mobilePicker.appendChild(optUsage);
+      }
+      if (isPluginEnabled("session-tags") && !mobilePicker.querySelector("option[value='tags']")) {
+        const optTags = document.createElement("option");
+        optTags.value = "tags";
+        optTags.textContent = "会话标签";
+        mobilePicker.appendChild(optTags);
+      }
+      if (!mobilePicker.__piEnhBound) {
+        mobilePicker.__piEnhBound = true;
+        mobilePicker.addEventListener("change", () => {
+          if (mobilePicker.value === "enhancements") {
+            enhTab?.click();
+          } else if (mobilePicker.value === "archived") {
+            nav.querySelector("[data-pi-enh-tab='archived']")?.click();
+          } else if (mobilePicker.value === "notifications") {
+            nav.querySelector("[data-pi-enh-tab='notifications']")?.click();
+          } else if (mobilePicker.value === "usage") {
+            nav.querySelector("[data-pi-enh-tab='usage']")?.click();
+          } else if (mobilePicker.value === "tags") {
+            nav.querySelector("[data-pi-enh-tab='tags']")?.click();
+          } else {
+            hideEnhancementsPanel(nav);
+            hideNotificationPanel(nav);
+            hideArchivedPanel(nav);
+            hideUsagePanel(nav);
+            hideTagsPanel(nav);
+          }
+        });
+      }
+    }
+
+    // 4. 在通用 (General) 设置面板构建自平衡双列仪表盘与运维卡片
+    const generalPanel = document.querySelector(".settings-general");
+    if (generalPanel) {
+      if (isPluginEnabled("general-settings-dashboard")) {
+        generalPanel.classList.add("pi-enh-general-dashboard");
+
+        // 确保“页面维护与服务管理”卡片已存在
+        let cacheSection = generalPanel.querySelector(".pi-enh-cache-section");
+        if (!cacheSection) {
+          cacheSection = document.createElement("section");
+          cacheSection.className = "settings-general-section pi-enh-cache-section";
+          cacheSection.setAttribute("data-pi-enh-section", "maintenance");
+
+          const heading = document.createElement("h3");
+          heading.className = "settings-general-heading";
+          heading.innerHTML = `
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color: #f59e0b;">
+              <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>
+            </svg>
+            <span>页面维护与服务管理</span>
+          `;
+
+          const desc = document.createElement("div");
+          desc.className = "settings-general-description";
+          desc.textContent = "遇到手机端显示旧版本、界面未更新或 Service Worker 缓存异常时可清理缓存；如需重启 Pi Web 服务，可在此手动一键重启。";
+
+          const actionsRow = document.createElement("div");
+          actionsRow.className = "pi-enh-service-actions-row";
+
+          // 按钮 1：强制清除缓存刷新
+          const btnReload = document.createElement("button");
+          btnReload.type = "button";
+          btnReload.className = "pi-enh-btn-sm pi-enh-force-reload-btn";
+          btnReload.title = "穿透 HTTP 强缓存并更新前端静态资源与网页";
+          btnReload.innerHTML = `
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2"/>
+            </svg>
+            <span>⚡ 强制清除缓存并刷新网页</span>
+          `;
+          btnReload.addEventListener("click", forceHardReloadApp);
+
+          // 按钮 2：一键重启 Pi Web（红框位置！）
+          const btnRestart = document.createElement("button");
+          btnRestart.type = "button";
+          btnRestart.className = "pi-enh-btn-sm pi-enh-restart-service-btn";
+          btnRestart.title = "手动重启 Pi Web 后台服务并在恢复后自动重新连接";
+          btnRestart.innerHTML = `
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M3 12a9 9 0 0 1 15-6.7L21 8"/>
+              <path d="M21 3v5h-5"/>
+              <path d="M21 12a9 9 0 0 1-15 6.7L3 16"/>
+              <path d="M3 21v-5h5"/>
+            </svg>
+            <span>⚡ 一键重启 Pi Web</span>
+          `;
+          btnRestart.addEventListener("click", triggerManualRestartPiWebModal);
+
+          actionsRow.appendChild(btnReload);
+          actionsRow.appendChild(btnRestart);
+
+          cacheSection.appendChild(heading);
+          cacheSection.appendChild(desc);
+          cacheSection.appendChild(actionsRow);
+          generalPanel.appendChild(cacheSection);
+        }
+
+        // 确保双列外壳容器存在
+        let shell = generalPanel.querySelector(".pi-enh-dashboard-shell");
+        if (!shell) {
+          shell = document.createElement("div");
+          shell.className = "pi-enh-dashboard-shell";
+          const grid = document.createElement("div");
+          grid.className = "pi-enh-dashboard-grid";
+          const cl = document.createElement("div");
+          cl.className = "pi-enh-dashboard-col pi-enh-col-left";
+          const cr = document.createElement("div");
+          cr.className = "pi-enh-dashboard-col pi-enh-col-right";
+          grid.appendChild(cl);
+          grid.appendChild(cr);
+          const ft = document.createElement("div");
+          ft.className = "pi-enh-dashboard-footer";
+          shell.appendChild(grid);
+          shell.appendChild(ft);
+          generalPanel.appendChild(shell);
+        }
+
+        const colLeft = shell.querySelector(".pi-enh-col-left") || shell;
+        const colRight = shell.querySelector(".pi-enh-col-right") || shell;
+        const footer = shell.querySelector(".pi-enh-dashboard-footer") || shell;
+
+        // 将所有直接位于 generalPanel 根级的 section 归类分配到对应列中
+        const directSections = Array.from(generalPanel.children).filter(
+          (c) => c && c.classList && c.classList.contains("settings-general-section")
+        );
+
+        for (const sec of directSections) {
+          if (sec.querySelector('input[name="theme"]')) {
+            sec.setAttribute("data-pi-enh-section", "appearance");
+            colLeft.appendChild(sec);
+          } else if (sec.querySelector('.settings-shell-option')) {
+            sec.setAttribute("data-pi-enh-section", "push");
+            colLeft.appendChild(sec);
+          } else if (sec.classList.contains("pi-enh-cache-section")) {
+            sec.setAttribute("data-pi-enh-section", "maintenance");
+            colLeft.appendChild(sec);
+          } else if (sec.querySelector('#settings-chat-content-width') || sec.querySelector('.settings-chat-options')) {
+            sec.setAttribute("data-pi-enh-section", "chat");
+            colRight.appendChild(sec);
+          } else if (sec.querySelector('button[role="radio"]') || sec.querySelector('.settings-language-options')) {
+            sec.setAttribute("data-pi-enh-section", "language");
+            colRight.appendChild(sec);
+          } else if (sec.textContent && sec.textContent.includes("退出登录")) {
+            sec.setAttribute("data-pi-enh-section", "signout");
+            footer.appendChild(sec);
+          }
+        }
+      } else {
+        generalPanel.classList.remove("pi-enh-general-dashboard");
+        const shell = generalPanel.querySelector(".pi-enh-dashboard-shell");
+        if (shell) {
+          const allSections = Array.from(shell.querySelectorAll(".settings-general-section"));
+          for (const sec of allSections) {
+            sec.removeAttribute("data-pi-enh-section");
+            generalPanel.appendChild(sec);
+          }
+          shell.remove();
+        }
+      }
+    }
+
+    // 5. 设置选项卡双击快速添加到左下角快捷入口
+    syncTabShortcutsInSettings(nav);
+
+    // 6. 如果存在挂起的快捷入口直达目标，立即无缝激活对应选项卡与面板
+    const targetId = pendingShortcutNavigation || window.__PI_PENDING_SHORTCUT_TARGET__;
+    if (targetId) {
+      const success = activateSettingsTab(nav, targetId);
+      if (success) {
+        pendingShortcutNavigation = null;
+        window.__PI_PENDING_SHORTCUT_TARGET__ = null;
+        if (document.documentElement) {
+          document.documentElement.removeAttribute("data-pi-opening-tab");
+        }
+      }
+    }
+  }
+
+  pendingShortcutNavigation = null;
+  settingsDialogObserver = null;
+
+  // ==========================================
+  // 6.1 Settings Tab Shortcuts & Bottom Bar (设置选项卡双击快捷入口与跨设备同步)
+  // ==========================================
+  const SHORTCUTS_STORAGE_KEY = "pi-web-quick-shortcuts";
+  const SHORTCUTS_REVISION_STORAGE_KEY = "pi-web-quick-shortcuts-revision";
+  const DEFAULT_SHORTCUTS = [
+    { id: "enhancements", label: "增强插件" },
+    { id: "archived", label: "已归档" },
+    { id: "usage", label: "Usage" },
+    { id: "settings", label: "设置" },
+  ];
+
+  function getLocalShortcutsRevision() {
+    try {
+      return Number(localStorage.getItem(SHORTCUTS_REVISION_STORAGE_KEY)) || 0;
+    } catch (e) {
+      return 0;
+    }
+  }
+
+  function setLocalShortcutsRevision(rev) {
+    try {
+      localStorage.setItem(SHORTCUTS_REVISION_STORAGE_KEY, String(rev));
+    } catch (e) {}
+  }
+
+  isPersistingShortcutsToServer = false;
+  pendingPersistShortcutsTimer = null;
+
+  async function persistQuickShortcutsToServer(list) {
+    if (pendingPersistShortcutsTimer) {
+      clearTimeout(pendingPersistShortcutsTimer);
+      pendingPersistShortcutsTimer = null;
+    }
+    const revision = Date.now();
+    setLocalShortcutsRevision(revision);
+
+    // 1. 同设备跨标签页广播
+    try {
+      crossDeviceSyncChannel?.postMessage({
+        type: "quick_shortcuts_updated",
+        shortcuts: list,
+        revision: revision,
+        at: Date.now()
+      });
+    } catch (e) {}
+
+    // 2. 防抖向服务端 models.json 持久化
+    return new Promise((resolve) => {
+      pendingPersistShortcutsTimer = setTimeout(async () => {
+        if (isPersistingShortcutsToServer) return resolve(false);
+        isPersistingShortcutsToServer = true;
+        try {
+          const activeFetch = typeof window !== "undefined" && window.fetch ? window.fetch : (typeof fetch === "function" ? fetch : null);
+          if (!activeFetch) return resolve(false);
+
+          let currentConfig = { providers: {} };
+          try {
+            const getResp = await activeFetch("/api/models-config", { cache: "no-store" });
+            if (getResp?.ok) {
+              const data = await getResp.json();
+              if (data && typeof data === "object") currentConfig = data;
+            }
+          } catch (e) {}
+
+          const putPayload = {
+            ...currentConfig,
+            quickShortcuts: list,
+            shortcutsRevision: revision
+          };
+
+          const putResp = await activeFetch("/api/models-config", {
+            method: "PUT",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(putPayload)
+          });
+
+          if (putResp?.ok) {
+            window.__PI_ENH_SHORTCUTS_MANIFEST__ = list;
+            resolve(true);
+          } else {
+            resolve(false);
+          }
+        } catch (err) {
+          resolve(false);
+        } finally {
+          isPersistingShortcutsToServer = false;
+        }
+      }, 150);
+    });
+  }
+
+  var activeShortcutsSyncPromise = null;
+  async function syncManifestQuickShortcuts(force = false) {
+    if (activeShortcutsSyncPromise) return activeShortcutsSyncPromise;
+    activeShortcutsSyncPromise = (async () => {
+      try {
+        const activeFetch = typeof window !== "undefined" && window.fetch ? window.fetch : (typeof fetch === "function" ? fetch : null);
+        if (!activeFetch) return;
+
+        let remoteList = null;
+        let remoteRevision = 0;
+
+        // 1. 优先从权威服务端配置 /api/models-config 拉取
+        try {
+          const resp = await activeFetch("/api/models-config", { cache: "no-store" });
+          if (resp?.ok) {
+            const data = await resp.json();
+            if (Array.isArray(data?.quickShortcuts) && data.quickShortcuts.length > 0) {
+              remoteList = data.quickShortcuts;
+              remoteRevision = Number(data?.shortcutsRevision) || 0;
+            }
+          }
+        } catch (e) {}
+
+        // 2. 回退从静态资产清单 /pi-shortcuts-manifest.json 读取
+        if (!remoteList || remoteList.length === 0) {
+          try {
+            const res = await activeFetch("/pi-shortcuts-manifest.json?v=" + Date.now(), { cache: "no-store" });
+            if (res?.ok) {
+              const json = await res.json();
+              if (Array.isArray(json) && json.length > 0) {
+                remoteList = json;
+              }
+            }
+          } catch (e) {}
+        }
+
+        // 3. 兜底内置清单
+        if (!remoteList || remoteList.length === 0) {
+          if (Array.isArray(window.__PI_ENH_SHORTCUTS_MANIFEST__) && window.__PI_ENH_SHORTCUTS_MANIFEST__.length > 0) {
+            remoteList = window.__PI_ENH_SHORTCUTS_MANIFEST__;
+          }
+        }
+
+        if (!remoteList || remoteList.length === 0) return;
+
+        // 规范化 label（确保“已归档会话”自动纠正为“已归档”）
+        remoteList = remoteList.map(item =>
+          item.id === "archived" && item.label === "已归档会话" ? { ...item, label: "已归档" } : item
+        );
+
+        const localRev = getLocalShortcutsRevision();
+        const currentStored = getStoredQuickShortcuts();
+        const isLocalEmpty = !localStorage.getItem(SHORTCUTS_STORAGE_KEY);
+
+        // 检查本地与远端项是否完全相同
+        const isListEqual = Array.isArray(currentStored) &&
+          currentStored.length === remoteList.length &&
+          currentStored.every((item, idx) => item.id === remoteList[idx].id && item.label === remoteList[idx].label);
+
+        // 判定是否应当覆盖本地状态：
+        // 1) 显式强制刷新
+        // 2) 手机端或新浏览器首次访问（本地尚无快捷入口）
+        // 3) 远端 revision 存在且严格大于本地 revision
+        // 4) 本地无 revision 且内容与远端不一致
+        const shouldApply = force || isLocalEmpty || (remoteRevision > 0 && remoteRevision > localRev) || (!localRev && !isListEqual);
+
+        if (shouldApply) {
+          if (!isListEqual) {
+            setStoredQuickShortcuts(remoteList, false);
+            if (remoteRevision > 0) setLocalShortcutsRevision(remoteRevision);
+            window.__PI_ENH_SHORTCUTS_MANIFEST__ = remoteList;
+            syncBottomShortcutsBar(true);
+            const nav = document.querySelector(".settings-section-tabs");
+            if (nav) syncTabShortcutsInSettings(nav);
+          } else if (remoteRevision > 0 && remoteRevision > localRev) {
+            setLocalShortcutsRevision(remoteRevision);
+          }
+        }
+      } catch (e) {
+      } finally {
+        activeShortcutsSyncPromise = null;
+      }
+    })();
+    return activeShortcutsSyncPromise;
+  }
+  window.__PI_ENH_SYNC_MANIFEST_SHORTCUTS__ = syncManifestQuickShortcuts;
+
+  const SHORTCUT_ICONS = {
+    general: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 7h-9M14 17H5"></path><circle cx="7" cy="7" r="3"></circle><circle cx="17" cy="17" r="3"></circle></svg>`,
+    settings: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20 7h-9M14 17H5"></path><circle cx="7" cy="7" r="3"></circle><circle cx="17" cy="17" r="3"></circle></svg>`,
+    models: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="2"></rect><rect x="9" y="9" width="6" height="6"></rect><path d="M9 1v3M15 1v3M9 20v3M15 20v3M20 9h3M20 15h3M1 9h3M1 15h3"></path></svg>`,
+    skills: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m12 2-10 5 10 5 10-5-10-5Z"></path><path d="m2 12 10 5 10-5M2 17l10 5 10-5"></path></svg>`,
+    agents: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="5" y="7" width="14" height="11" rx="2"></rect><path d="M9 11h.01M15 11h.01M9 15h6M12 7V4M10 4h4"></path></svg>`,
+    plugins: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9 7V2M15 7V2M6 13V8a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v5a6 6 0 0 1-12 0ZM12 19v3"></path></svg>`,
+    enhancements: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"></path></svg>`,
+    archived: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 8v13H3V8"></path><path d="M1 3h22v5H1z"></path><path d="M10 12h4"></path></svg>`,
+    notifications: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9"></path><path d="M10 21h4"></path></svg>`,
+    tags: `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"></path><line x1="7" y1="7" x2="7.01" y2="7"></line></svg>`
+  };
+
+  function getStoredQuickShortcuts() {
+    try {
+      const raw = localStorage.getItem(SHORTCUTS_STORAGE_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          // 检查是否为老旧默认格局 [models, skills, settings]
+          const isLegacyDefault = parsed.length === 3 &&
+            parsed.some((s) => s.id === "models") &&
+            parsed.some((s) => s.id === "skills") &&
+            parsed.some((s) => s.id === "settings") &&
+            !parsed.some((s) => s.id === "enhancements" || s.id === "archived");
+          if (!isLegacyDefault) {
+            let modified = false;
+            for (const item of parsed) {
+              if (item.id === "archived" && item.label === "已归档会话") {
+                item.label = "已归档";
+                modified = true;
+              }
+            }
+            if (modified) {
+              try { localStorage.setItem(SHORTCUTS_STORAGE_KEY, JSON.stringify(parsed)); } catch (e) {}
+            }
+            return parsed;
+          }
+        }
+      }
+    } catch (e) {}
+
+    // 跨设备清单同步：优先使用服务端固化的清单
+    if (Array.isArray(window.__PI_ENH_SHORTCUTS_MANIFEST__) && window.__PI_ENH_SHORTCUTS_MANIFEST__.length > 0) {
+      const normalizedManifest = window.__PI_ENH_SHORTCUTS_MANIFEST__.map(item =>
+        item.id === "archived" && item.label === "已归档会话" ? { ...item, label: "已归档" } : item
+      );
+      try {
+        localStorage.setItem(SHORTCUTS_STORAGE_KEY, JSON.stringify(normalizedManifest));
+      } catch (e) {}
+      return [...normalizedManifest];
+    }
+
+    return [...DEFAULT_SHORTCUTS];
+  }
+
+  function setStoredQuickShortcuts(list, shouldPersist = true) {
+    try {
+      if (!Array.isArray(list) || list.length === 0) {
+        list = [{ id: "settings", label: "设置" }];
+      }
+      localStorage.setItem(SHORTCUTS_STORAGE_KEY, JSON.stringify(list));
+      if (shouldPersist) {
+        void persistQuickShortcutsToServer(list);
+      }
+    } catch (e) {}
+  }
+
+  function extractTabMetadata(tab) {
+    if (!tab) return null;
+    const dataTab = tab.getAttribute("data-pi-enh-tab");
+    const rawText = (tab.textContent || "").trim();
+    const cleanText = rawText.replace(/📌/g, "").trim();
+    const svg = tab.querySelector("svg");
+    let iconHtml = svg ? svg.outerHTML : "";
+
+    let id = "";
+    let label = cleanText;
+
+    if (dataTab === "plugins") {
+      id = "enhancements";
+      label = label || "增强插件";
+    } else if (dataTab === "archived") {
+      id = "archived";
+      label = label || "已归档";
+    } else if (dataTab === "usage") {
+      id = "usage";
+      label = label || "Usage";
+    } else if (dataTab === "notifications") {
+      id = "notifications";
+      label = label || "通知管理";
+    } else if (cleanText === "常规" || cleanText === "General") {
+      id = "general";
+      label = "常规";
+    } else if (cleanText === "模型" || cleanText === "Models") {
+      id = "models";
+      label = "模型";
+    } else if (cleanText === "技能" || cleanText === "Skills") {
+      id = "skills";
+      label = "技能";
+    } else if (cleanText === "子代理" || cleanText === "Agents") {
+      id = "agents";
+      label = "子代理";
+    } else if (cleanText === "插件" || cleanText === "Plugins") {
+      id = "plugins";
+      label = "插件";
+    } else {
+      id = dataTab || cleanText.toLowerCase().replace(/\s+/g, "-");
+    }
+
+    if (!iconHtml && SHORTCUT_ICONS[id]) {
+      iconHtml = SHORTCUT_ICONS[id];
+    }
+
+    return { id, label, iconHtml };
+  }
+
+  function isShortcutActive(shortcutList, tabId) {
+    return shortcutList.some((item) => {
+      if (item.id === tabId) return true;
+      if (tabId === "general" && item.id === "settings") return true;
+      if (tabId === "settings" && item.id === "general") return true;
+      return false;
+    });
+  }
+
+  function syncTabShortcutsInSettings(nav) {
+    if (!nav) return;
+    const tabs = Array.from(nav.querySelectorAll(".settings-section-tab"));
+    const shortcuts = getStoredQuickShortcuts();
+
+    for (const tab of tabs) {
+      const meta = extractTabMetadata(tab);
+      if (!meta || !meta.id) continue;
+
+      const active = isShortcutActive(shortcuts, meta.id);
+
+      if (active) {
+        tab.setAttribute("title", `${meta.label} (已添加到左下角快捷入口，双击可取消)`);
+        tab.classList.add("pi-enh-tab-pinned");
+      } else {
+        tab.setAttribute("title", `${meta.label} (双击快速添加到左下角快捷入口)`);
+        tab.classList.remove("pi-enh-tab-pinned");
+      }
+
+      let pinBadge = tab.querySelector(".pi-enh-tab-pin-indicator");
+      if (active) {
+        if (!pinBadge) {
+          pinBadge = document.createElement("span");
+          pinBadge.className = "pi-enh-tab-pin-indicator";
+          pinBadge.setAttribute("aria-hidden", "true");
+          pinBadge.innerHTML = `<svg width="6" height="6" viewBox="0 0 24 24" fill="currentColor" stroke="none"><circle cx="12" cy="12" r="10"></circle></svg>`;
+          tab.appendChild(pinBadge);
+        }
+      } else if (pinBadge) {
+        pinBadge.remove();
+      }
+
+      if (!tab.__piEnhShortcutDblBound) {
+        tab.__piEnhShortcutDblBound = true;
+        tab.style.userSelect = "none";
+        tab.style.webkitUserSelect = "none";
+
+        tab.addEventListener("dblclick", (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          window.getSelection()?.removeAllRanges();
+
+          handleToggleTabShortcut(tab);
+        });
+      }
+    }
+  }
+
+  function handleToggleTabShortcut(tab) {
+    const meta = extractTabMetadata(tab);
+    if (!meta || !meta.id) return;
+
+    const shortcuts = getStoredQuickShortcuts();
+    const existingIndex = shortcuts.findIndex((item) => {
+      if (item.id === meta.id) return true;
+      if (meta.id === "general" && item.id === "settings") return true;
+      if (meta.id === "settings" && item.id === "general") return true;
+      return false;
+    });
+
+    const actionIcon = meta.iconHtml || SHORTCUT_ICONS[meta.id] || SHORTCUT_ICONS.settings;
+
+    if (existingIndex >= 0) {
+      shortcuts.splice(existingIndex, 1);
+      setStoredQuickShortcuts(shortcuts);
+      showToast(`已从快捷入口移除「${meta.label}」`, actionIcon, 2000);
+    } else {
+      const newItem = {
+        id: meta.id,
+        label: meta.label,
+        iconHtml: meta.iconHtml || SHORTCUT_ICONS[meta.id] || ""
+      };
+      const settingsIdx = shortcuts.findIndex((s) => s.id === "settings" || s.id === "general");
+      if (settingsIdx >= 0) {
+        shortcuts.splice(settingsIdx, 0, newItem);
+      } else {
+        shortcuts.push(newItem);
+      }
+      setStoredQuickShortcuts(shortcuts);
+      showToast(`已添加「${meta.label}」到左下角快捷入口`, actionIcon, 2000);
+    }
+
+    const nav = tab.closest(".settings-section-tabs");
+    if (nav) {
+      syncTabShortcutsInSettings(nav);
+    }
+
+    syncBottomShortcutsBar(true);
+  }
+
+  function locateShortcutsContainer() {
+    const existing = document.querySelector("[data-pi-enh-shortcuts-host='true']");
+    if (existing && existing.isConnected) return existing;
+
+    const buttons = Array.from(document.querySelectorAll("button")).filter((btn) => {
+      if (btn.closest(".settings-dialog-surface, .settings-dialog-backdrop, dialog, .pi-enh-menu, .pi-enh-quote-bar, main, .chat-window, .message-view")) {
+        return false;
+      }
+      const text = (btn.textContent || "").trim();
+      const aria = btn.getAttribute("aria-label") || btn.getAttribute("title") || "";
+      return text === "设置" || text === "Settings" || aria === "设置" || aria === "Settings";
+    });
+
+    for (const btn of buttons) {
+      const parent = btn.parentElement;
+      if (!parent) continue;
+      const nativeButtons = Array.from(parent.querySelectorAll("button:not(.pi-enh-shortcut-btn)"));
+      const hasModelOrSkill = nativeButtons.some((b) => {
+        const t = (b.textContent || "").trim();
+        return t === "模型" || t === "Models" || t === "技能" || t === "Skills";
+      });
+      if (hasModelOrSkill || nativeButtons.length >= 2) {
+        parent.setAttribute("data-pi-enh-shortcuts-host", "true");
+        return parent;
+      }
+    }
+
+    return null;
+  }
+
+  initialShortcutsSyncAttempted = false;
+  function syncBottomShortcutsBar(force = false) {
+    if (!isPluginEnabled("settings-tab-shortcuts")) {
+      removeBottomShortcutsBar();
+      return;
+    }
+
+    if (!initialShortcutsSyncAttempted) {
+      initialShortcutsSyncAttempted = true;
+      void syncManifestQuickShortcuts();
+    }
+
+    const host = locateShortcutsContainer();
+    if (!host) return;
+    host.removeAttribute("data-pi-enh-shortcuts-disabled");
+
+    let bar = host.querySelector(".pi-enh-shortcuts-bar");
+    const shortcuts = getStoredQuickShortcuts();
+    const shortcutsSignature = JSON.stringify(shortcuts);
+
+    if (bar && !force && bar.getAttribute("data-signature") === shortcutsSignature) {
+      bindShortcutButtonsEvents(bar);
+      return;
+    }
+
+    if (!bar) {
+      bar = document.createElement("div");
+      bar.className = "pi-enh-shortcuts-bar";
+      host.appendChild(bar);
+    }
+
+    bar.setAttribute("data-signature", shortcutsSignature);
+    bar.setAttribute("data-count", String(shortcuts.length));
+
+    bar.innerHTML = shortcuts.map((shortcut) => {
+      const icon = shortcut.iconHtml || SHORTCUT_ICONS[shortcut.id] || SHORTCUT_ICONS.settings;
+      return `
+        <button type="button" class="pi-enh-shortcut-btn" data-shortcut-id="${shortcut.id}" title="${shortcut.label} (点击直达，双击可移除)">
+          ${icon}
+          <span>${shortcut.label}</span>
+        </button>
+      `;
+    }).join("");
+
+    bindShortcutButtonsEvents(bar);
+  }
+
+  function bindShortcutButtonsEvents(bar) {
+    if (!bar || bar.__piEnhEventsBound) return;
+    bar.__piEnhEventsBound = true;
+
+    const renderedButtons = Array.from(bar.querySelectorAll(".pi-enh-shortcut-btn"));
+    for (const btn of renderedButtons) {
+      const id = btn.getAttribute("data-shortcut-id");
+
+      btn.addEventListener("click", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        try { btn.blur(); } catch (_) {}
+        triggerShortcutNavigation(id);
+      });
+
+      btn.addEventListener("focus", () => {
+        try { btn.blur(); } catch (_) {}
+      });
+
+      btn.addEventListener("dblclick", (e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        window.getSelection()?.removeAllRanges();
+
+        const currentShortcuts = getStoredQuickShortcuts();
+        const nextShortcuts = currentShortcuts.filter((item) => item.id !== id);
+        const removed = currentShortcuts.find((item) => item.id === id);
+        setStoredQuickShortcuts(nextShortcuts);
+
+        const icon = removed?.iconHtml || SHORTCUT_ICONS[id] || SHORTCUT_ICONS.settings;
+        showToast(`已从快捷入口移除「${removed ? removed.label : id}」`, icon, 2000);
+
+        bar.__piEnhEventsBound = false;
+        syncBottomShortcutsBar(true);
+
+        const nav = document.querySelector(".settings-section-tabs");
+        if (nav) syncTabShortcutsInSettings(nav);
+      });
+    }
+  }
+
+  function triggerShortcutNavigation(shortcutId) {
+    const existingNav = document.querySelector(".settings-section-tabs");
+    if (existingNav) {
+      activateSettingsTab(existingNav, shortcutId);
+      return;
+    }
+
+    // 1. 标记挂起直达目标，并在 html 上打标激活物理级 CSS 守卫（瞬间屏蔽常规设置在第一帧的绘制）
+    pendingShortcutNavigation = shortcutId;
+    window.__PI_PENDING_SHORTCUT_TARGET__ = shortcutId;
+    if (document.documentElement) {
+      document.documentElement.setAttribute("data-pi-opening-tab", shortcutId);
+    }
+
+    // 2. 优先通过 React 原生 setter 直达目标 section（彻底消除通过 click 模拟点击触发 general 的中间脏态）
+    const targetSection = shortcutId === "settings" ? "general" : shortcutId;
+    if (typeof window.__PI_OPEN_SETTINGS__ === "function") {
+      try {
+        window.__PI_OPEN_SETTINGS__(targetSection);
+        fastCheckSettingsModal(shortcutId);
+        return;
+      } catch (e) {}
+    }
+
+    // 3. 回退机制：原生按钮触发
+    const host = locateShortcutsContainer();
+    if (host) {
+      const nativeButtons = Array.from(host.querySelectorAll("button:not(.pi-enh-shortcut-btn)"));
+
+      if (shortcutId === "models") {
+        const nativeModelBtn = nativeButtons.find((b) => (b.textContent || "").includes("模型") || (b.textContent || "").includes("Models"));
+        if (nativeModelBtn) {
+          nativeModelBtn.click();
+          fastCheckSettingsModal(shortcutId);
+          return;
+        }
+      } else if (shortcutId === "skills") {
+        const nativeSkillsBtn = nativeButtons.find((b) => (b.textContent || "").includes("技能") || (b.textContent || "").includes("Skills"));
+        if (nativeSkillsBtn) {
+          nativeSkillsBtn.click();
+          fastCheckSettingsModal(shortcutId);
+          return;
+        }
+      }
+
+      const nativeSettingsBtn = nativeButtons.find((b) => {
+        const txt = (b.textContent || "").trim();
+        const ttl = b.getAttribute("title") || b.getAttribute("aria-label") || "";
+        return txt === "设置" || txt === "Settings" || ttl === "设置" || ttl === "Settings";
+      }) || nativeButtons[nativeButtons.length - 1];
+
+      if (nativeSettingsBtn) {
+        nativeSettingsBtn.click();
+      }
+    }
+
+    fastCheckSettingsModal(shortcutId);
+  }
+  window.__PI_ENH_TRIGGER_SHORTCUT__ = triggerShortcutNavigation;
+
+  function fastCheckSettingsModal(shortcutId) {
+    let attempts = 0;
+    const maxAttempts = 60; // 60 * 15ms = 900ms
+    const pollTimer = setInterval(() => {
+      attempts += 1;
+      const nav = document.querySelector(".settings-section-tabs");
+      if (nav) {
+        const ok = activateSettingsTab(nav, shortcutId);
+        if (ok || attempts >= maxAttempts) {
+          clearInterval(pollTimer);
+          if (ok) {
+            pendingShortcutNavigation = null;
+            window.__PI_PENDING_SHORTCUT_TARGET__ = null;
+          }
+          if (document.documentElement) {
+            document.documentElement.removeAttribute("data-pi-opening-tab");
+          }
+        }
+      } else if (attempts >= maxAttempts) {
+        clearInterval(pollTimer);
+        if (document.documentElement) {
+          document.documentElement.removeAttribute("data-pi-opening-tab");
+        }
+      }
+    }, 15);
+  }
+
+  function syncMobilePickerOption(nav, val) {
+    if (!nav) return;
+    try {
+      const header = (nav.closest && nav.closest(".settings-dialog-header")) || (nav.parentElement ? nav.parentElement : null);
+      const mobilePicker = header ? header.querySelector("select.settings-mobile-section-picker") : null;
+      if (mobilePicker && val) {
+        mobilePicker.value = val;
+      }
+    } catch (e) {}
+  }
+
+  function activateSettingsTab(nav, shortcutId) {
+    if (!nav) return false;
+
+    let enhTab = nav.querySelector("[data-pi-enh-tab='plugins']");
+    let archTab = nav.querySelector("[data-pi-enh-tab='archived']");
+    let notificationTab = nav.querySelector("[data-pi-enh-tab='notifications']");
+    let usageTab = nav.querySelector("[data-pi-enh-tab='usage']");
+
+    if (shortcutId === "usage") {
+      if (!usageTab) {
+        syncSettingsDialogEnhancements();
+        usageTab = nav.querySelector("[data-pi-enh-tab='usage']");
+      }
+      if (usageTab) {
+        showUsagePanel(nav, usageTab);
+        syncMobilePickerOption(nav, "usage");
+        return true;
+      }
+      return false;
+    }
+
+    if (shortcutId === "notifications") {
+      if (!notificationTab) {
+        syncSettingsDialogEnhancements();
+        notificationTab = nav.querySelector("[data-pi-enh-tab='notifications']");
+      }
+      if (notificationTab) {
+        showNotificationPanel(nav, notificationTab);
+        syncMobilePickerOption(nav, "notifications");
+        return true;
+      }
+      return false;
+    }
+
+    if (shortcutId === "enhancements") {
+      if (!enhTab) {
+        syncSettingsDialogEnhancements();
+        enhTab = nav.querySelector("[data-pi-enh-tab='plugins']");
+      }
+      if (enhTab) {
+        showEnhancementsPanel(nav, enhTab);
+        syncMobilePickerOption(nav, "enhancements");
+        return true;
+      }
+      return false;
+    }
+
+    if (shortcutId === "archived") {
+      if (!archTab) {
+        syncSettingsDialogEnhancements();
+        archTab = nav.querySelector("[data-pi-enh-tab='archived']");
+      }
+      if (archTab) {
+        showArchivedPanel(nav, archTab);
+        syncMobilePickerOption(nav, "archived");
+        return true;
+      }
+      return false;
+    }
+
+    if (shortcutId === "tags") {
+      let tagsTab = nav.querySelector("[data-pi-enh-tab='tags']");
+      if (!tagsTab) {
+        syncSettingsDialogEnhancements();
+        tagsTab = nav.querySelector("[data-pi-enh-tab='tags']");
+      }
+      if (tagsTab) {
+        showTagsPanel(nav, tagsTab);
+        syncMobilePickerOption(nav, "tags");
+        return true;
+      }
+      return false;
+    }
+
+    hideEnhancementsPanel(nav);
+    hideNotificationPanel(nav);
+    hideArchivedPanel(nav);
+    hideUsagePanel(nav);
+    hideTagsPanel(nav);
+
+    const tabs = Array.from(nav.querySelectorAll(".settings-section-tab"));
+    let matched = null;
+    if (shortcutId === "general" || shortcutId === "settings") {
+      matched = tabs.find((t) => (t.textContent || "").includes("常规") || (t.textContent || "").includes("General")) || tabs[0];
+      syncMobilePickerOption(nav, "general");
+    } else if (shortcutId === "models") {
+      matched = tabs.find((t) => (t.textContent || "").includes("模型") || (t.textContent || "").includes("Models"));
+      syncMobilePickerOption(nav, "models");
+    } else if (shortcutId === "skills") {
+      matched = tabs.find((t) => (t.textContent || "").includes("技能") || (t.textContent || "").includes("Skills"));
+      syncMobilePickerOption(nav, "skills");
+    } else if (shortcutId === "agents") {
+      matched = tabs.find((t) => (t.textContent || "").includes("子代理") || (t.textContent || "").includes("Agents"));
+      syncMobilePickerOption(nav, "agents");
+    } else if (shortcutId === "plugins") {
+      matched = tabs.find((t) => !t.hasAttribute("data-pi-enh-tab") && ((t.textContent || "").includes("插件") || (t.textContent || "").includes("Plugins")));
+      syncMobilePickerOption(nav, "plugins");
+    } else {
+      matched = tabs.find((t) => (t.textContent || "").trim() === shortcutId);
+      syncMobilePickerOption(nav, shortcutId);
+    }
+
+    if (matched) {
+      matched.click();
+      return true;
+    }
+    return false;
+  }
+
+  function initSettingsDialogObserver() {
+    if (settingsDialogObserver || typeof MutationObserver !== "function") return;
+    try {
+      settingsDialogObserver = new MutationObserver((mutations) => {
+        if (isMutatingInternally) return;
+        let shouldSync = false;
+        for (const m of mutations) {
+          if (m.type === "childList" && m.addedNodes && m.addedNodes.length > 0) {
+            for (const node of m.addedNodes) {
+              if (node.nodeType !== 1) continue;
+              scanNativeNotices(node);
+              if (
+                node.matches?.(".file-viewer-shell, [role='tablist'], [role='tab']") ||
+                node.querySelector?.(".file-viewer-shell, [role='tablist'], [role='tab']")
+              ) {
+                scheduleDomSync();
+              }
+              if (
+                node.matches?.(".settings-dialog-backdrop, .settings-dialog-surface, .settings-section-tabs, .directory-picker-backdrop, .directory-picker-panel, [role='dialog']") ||
+                node.querySelector?.(".settings-section-tabs, .settings-dialog-backdrop, .directory-picker-panel, [role='dialog']")
+              ) {
+                shouldSync = true;
+              }
+            }
+          }
+          if (shouldSync) break;
+        }
+        if (shouldSync) {
+          syncSettingsDialogEnhancements();
+          syncWorkspacePickerHover();
+        }
+      });
+
+      const targetRoot = document.body || document.documentElement;
+      if (targetRoot) {
+        settingsDialogObserver.observe(targetRoot, { childList: true, subtree: true });
+      }
+    } catch (e) {
+      console.warn("[Pi Web Enhancements] settingsDialogObserver warning:", e);
+    }
+  }
+
+  initSettingsDialogObserver();
+  syncSettingsDialogEnhancements();
+  activeCleanups.push(() => {
+    if (settingsDialogObserver) {
+      settingsDialogObserver.disconnect();
+      settingsDialogObserver = null;
+    }
+  });
+
+  addManagedListener(document, "click", (e) => {
+    const target = e.target;
+    if (!target) return;
+    const btn = target.closest && target.closest("button");
+    if (!btn) return;
+    const isTrigger = btn.classList.contains("pi-enh-shortcut-btn") ||
+      (btn.textContent || "").includes("设置") ||
+      (btn.textContent || "").includes("Settings") ||
+      (btn.getAttribute("aria-label") || "").includes("设置") ||
+      (btn.getAttribute("aria-label") || "").includes("Settings") ||
+      (btn.getAttribute("title") || "").includes("设置") ||
+      (btn.getAttribute("title") || "").includes("Settings");
+
+    if (isTrigger) {
+      if (typeof queueMicrotask === "function") {
+        queueMicrotask(syncSettingsDialogEnhancements);
+      }
+      if (typeof requestAnimationFrame === "function") {
+        requestAnimationFrame(syncSettingsDialogEnhancements);
+      }
+      addManagedTimeout(syncSettingsDialogEnhancements, 20);
+      addManagedTimeout(syncSettingsDialogEnhancements, 60);
+      addManagedTimeout(syncSettingsDialogEnhancements, 120);
+    }
+  }, { capture: true });
+
+  function removeBottomShortcutsBar() {
+    const host = document.querySelector("[data-pi-enh-shortcuts-host='true']") ||
+      (function() {
+        const sidebar = document.querySelector(".sidebar-container");
+        return sidebar?.lastElementChild?.querySelector("button") ? sidebar.lastElementChild : null;
+      })();
+    if (host) {
+      host.removeAttribute("data-pi-enh-shortcuts-host");
+      host.setAttribute("data-pi-enh-shortcuts-disabled", "true");
+      const bar = host.querySelector(".pi-enh-shortcuts-bar");
+      if (bar) bar.remove();
+    }
+    for (const pin of document.querySelectorAll(".pi-enh-tab-pin-indicator")) {
+      pin.remove();
+    }
+  }
+
+  isForceReloading = false;
+  async function forceHardReloadApp() {
+    if (isForceReloading) return false;
+    isForceReloading = true;
+
+    // 始终建立状态对象（不要求外部预填）
+    window.__PI_ENH_FORCE_RELOAD_STATE__ = { status: "loading", error: null };
+
+    function updateReloadProgressToast(text) {
+      const activeTextEl = document.querySelector(".pi-enh-toast[data-toast-level='loading'] [data-pi-enh-toast-text]");
+      if (activeTextEl) {
+        activeTextEl.textContent = text;
+        return;
+      }
+      if (typeof showToast === "function") {
+        showToast(text);
+      }
+    }
+
+    if (typeof showToast === "function") {
+      showToast("正在下载最新页面资源…");
+    }
+
+    let preservedScrollMemory = null;
+    try {
+      if (typeof saveCurrentSessionScrollForReload === "function") {
+        preservedScrollMemory = saveCurrentSessionScrollForReload();
+      }
+    } catch (e) {}
+
+    // 有进展不误杀 (Progress-aware Sliding Budget)：
+    // 单步无进展超时保持 20s，若持续有下载进展则自动续期（总上限 65s），兼顾弱网/VPN 与真死锁检测
+    const STALL_TIMEOUT_MS = 20000;
+    const MAX_TOTAL_BUDGET_MS = 65000;
+    const reloadStartTs = Date.now();
+    const controller = new AbortController();
+    let budgetTimer = null;
+
+    function touchProgress() {
+      if (controller.signal.aborted) return;
+      if (budgetTimer) clearTimeout(budgetTimer);
+      const elapsed = Date.now() - reloadStartTs;
+      const remainingCap = Math.max(2000, MAX_TOTAL_BUDGET_MS - elapsed);
+      const nextTimeout = Math.min(STALL_TIMEOUT_MS, remainingCap);
+      budgetTimer = setTimeout(() => {
+        controller.abort(new Error("资源下载超时（超过20秒预算）"));
+      }, nextTimeout);
+    }
+
+    touchProgress();
+
+    // Browser storage/SW promises do not accept AbortSignal. Bound them to
+    // the same deadline and remove each abort listener after settlement.
+    function withinBudget(promise, softStepLimitMs) {
+      return new Promise((resolve, reject) => {
+        const onAbort = () => reject(controller.signal.reason || new Error("资源下载超时"));
+        if (controller.signal.aborted) return onAbort();
+        let stepTimer = null;
+        if (Number.isFinite(softStepLimitMs) && softStepLimitMs > 0) {
+          stepTimer = setTimeout(() => {
+            controller.signal.removeEventListener("abort", onAbort);
+            reject(new Error("STEP_SOFT_TIMEOUT"));
+          }, softStepLimitMs);
+        }
+        controller.signal.addEventListener("abort", onAbort, { once: true });
+        Promise.resolve(promise).then(resolve, reject).finally(() => {
+          if (stepTimer) clearTimeout(stepTimer);
+          controller.signal.removeEventListener("abort", onAbort);
+        });
+      });
+    }
+
+    let htmlFetchedOk = false;
+    let completedAssetsCount = 0;
+    let totalAssetsCount = 0;
+
+    try {
+      // 1. Service Worker 更新采用 4.5s 软限时保护：在手机 VPN 下若 SW 预缓存慢，不阻塞主页面刷新
+      try {
+        const swContainer = navigator.serviceWorker;
+        if (swContainer?.controller) {
+          const swUrl = new URL(swContainer.controller.scriptURL);
+          if (swUrl.origin === window.location.origin && swUrl.pathname === "/sw.js") {
+            const reg = await withinBudget(swContainer.getRegistration(window.location.href), 3500);
+            if (reg && reg.scope === new URL("/", window.location.origin).href) {
+              await withinBudget(reg.update(), 4000);
+              touchProgress();
+              const pendingWorker = reg.installing || reg.waiting;
+              if (pendingWorker && pendingWorker.state !== "activated") {
+                await withinBudget(new Promise((resolve, reject) => {
+                  const finish = (error) => {
+                    pendingWorker.removeEventListener("statechange", onState);
+                    controller.signal.removeEventListener("abort", onAbort);
+                    error ? reject(error) : resolve();
+                  };
+                  const onAbort = () => finish(controller.signal.reason || new Error("离线缓存更新超时"));
+                  const onState = () => {
+                    if (pendingWorker.state === "activated") finish();
+                    else if (pendingWorker.state === "redundant") finish(new Error("离线缓存更新失败"));
+                  };
+                  pendingWorker.addEventListener("statechange", onState);
+                  controller.signal.addEventListener("abort", onAbort, { once: true });
+                  controller.signal.aborted ? onAbort() : onState();
+                }), 4000);
+              }
+            }
+          }
+        }
+      } catch (swErr) {
+        if (controller.signal.aborted) throw swErr;
+        console.warn("[Pi Enh] SW update soft-skipped to prioritize main reload:", swErr?.message || swErr);
+      }
+
+      touchProgress();
+
+      // 2. 清理 Pi 离线缓存（带 3.5s 软限时）
+      try {
+        if (window.caches && typeof window.caches.keys === "function") {
+          const names = await withinBudget(window.caches.keys(), 3500);
+          await withinBudget(Promise.all(names.filter((name) => name.startsWith("pi-web-"))
+            .map((name) => window.caches.delete(name))), 3500);
+          touchProgress();
+        }
+      } catch (cacheErr) {
+        if (controller.signal.aborted) throw cacheErr;
+      }
+
+      // 3. 保留 SessionStorage / LocalStorage / IndexedDB / Cookies，不调用 clear()，确保用户草稿与状态不丢失
+      if (preservedScrollMemory && typeof SESSION_SCROLL_STORAGE_KEY !== "undefined") {
+        try {
+          window.sessionStorage.setItem(SESSION_SCROLL_STORAGE_KEY, preservedScrollMemory);
+        } catch (_) {}
+      }
+
+      // 4. 获取最新 HTML 文档文本 (带 _bust，no-store 避免命中 HTML 本地缓存)
+      const currentUrl = new URL(window.location.href);
+      currentUrl.searchParams.set("_bust", Date.now().toString());
+      const htmlRes = await fetch(currentUrl.href, {
+        method: "GET",
+        cache: "no-store",
+        signal: controller.signal,
+        headers: {
+          "Cache-Control": "no-cache, no-store, must-revalidate",
+          "Pragma": "no-cache",
+          "Expires": "0"
+        }
+      });
+      touchProgress();
+      if (!htmlRes.ok) {
+        throw new Error(`获取最新页面失败: HTTP ${htmlRes.status}`);
+      }
+
+      const htmlContentType = (htmlRes.headers.get("content-type") || "").toLowerCase();
+      if (!htmlContentType.includes("text/html")) {
+        throw new Error(`最新页面类型不匹配(${htmlContentType || "未知"})，非有效HTML`);
+      }
+
+      if (htmlRes.redirected && htmlRes.url) {
+        const redirectedUrl = new URL(htmlRes.url);
+        if (redirectedUrl.pathname.includes("/login") || redirectedUrl.pathname.includes("/signin")) {
+          throw new Error("页面已重定向至登录页，请重新登录");
+        }
+      }
+
+      const htmlText = await htmlRes.text();
+      touchProgress();
+
+      // 4.2 收集最新 HTML 中的同源 /_next/static/ JS 与 CSS 资源及增强脚本 URL
+      const docBaseUrl = window.location.href;
+      const origin = window.location.origin;
+
+      function parseNextStaticUrl(urlStr) {
+        if (!urlStr || typeof urlStr !== "string") return null;
+        try {
+          const parsed = new URL(urlStr, docBaseUrl);
+          if (parsed.origin !== origin) return null;
+          if (!parsed.pathname.startsWith("/_next/static/")) return null;
+          const isJs = parsed.pathname.endsWith(".js");
+          const isCss = parsed.pathname.endsWith(".css");
+          if (!isJs && !isCss) return null;
+          parsed.hash = ""; // 保留 parsed.search，只去 hash
+          return parsed.href;
+        } catch (_) {
+          return null;
+        }
+      }
+
+      function parseEnhancementScriptUrl(urlStr) {
+        if (!urlStr || typeof urlStr !== "string") return null;
+        try {
+          const parsed = new URL(urlStr, docBaseUrl);
+          if (parsed.origin !== origin) return null;
+          if (parsed.pathname !== "/pi-web-enhancements.js") return null;
+          parsed.hash = "";
+          return parsed.href;
+        } catch (_) {
+          return null;
+        }
+      }
+
+      const latestHtmlUrls = new Set();
+      let latestEnhancementUrl = null;
+      try {
+        const doc = new DOMParser().parseFromString(htmlText, "text/html");
+        doc.querySelectorAll("script[src]").forEach((s) => {
+          const srcAttr = s.getAttribute("src");
+          const u = parseNextStaticUrl(srcAttr);
+          if (u) latestHtmlUrls.add(u);
+          const enhU = parseEnhancementScriptUrl(srcAttr);
+          if (enhU) latestEnhancementUrl = enhU;
+        });
+        doc.querySelectorAll('link[rel="stylesheet"]').forEach((l) => {
+          const u = parseNextStaticUrl(l.getAttribute("href"));
+          if (u) latestHtmlUrls.add(u);
+        });
+        doc.querySelectorAll('link[rel="preload"]').forEach((l) => {
+          const as = l.getAttribute("as");
+          if (as === "script" || as === "style") {
+            const u = parseNextStaticUrl(l.getAttribute("href"));
+            if (u) latestHtmlUrls.add(u);
+          }
+        });
+      } catch (parseErr) {
+        console.warn("[Pi Enh] DOMParser parse html failed:", parseErr);
+      }
+
+      // 关键：最新HTML至少必须包含1个Next js/css资源，当前文档合并不能掩盖最新HTML缺资源
+      if (latestHtmlUrls.size === 0) {
+        throw new Error("最新HTML未检测到有效Next.js静态资源，取消刷新以防白屏");
+      }
+      htmlFetchedOk = true;
+
+      // 记录当前页面已经成功加载过的静态资源集合（用于区分未变的巨型哈希 vendor chunk）
+      const alreadyLoadedUrls = new Set();
+      document.querySelectorAll("script[src]").forEach((s) => {
+        const u = parseNextStaticUrl(s.getAttribute("src"));
+        if (u) alreadyLoadedUrls.add(u);
+      });
+      document.querySelectorAll('link[rel="stylesheet"]').forEach((l) => {
+        const u = parseNextStaticUrl(l.getAttribute("href"));
+        if (u) alreadyLoadedUrls.add(u);
+      });
+      if (typeof performance !== "undefined" && typeof performance.getEntriesByType === "function") {
+        performance.getEntriesByType("resource").forEach((entry) => {
+          if (entry.name && (entry.initiatorType === "script" || entry.initiatorType === "link" || entry.initiatorType === "css")) {
+            const u = parseNextStaticUrl(entry.name);
+            if (u) alreadyLoadedUrls.add(u);
+          }
+        });
+      }
+
+      // 仅以最新 HTML 所需的首屏静态资源 + 当前文档核心样式/app入口为刷新目标，
+      // 剔除历史会话期间按需懒加载的数 MB 非首屏 chunk，防止手机 VPN 下重复全量拉取超时
+      const staticUrls = new Set(latestHtmlUrls);
+      alreadyLoadedUrls.forEach((u) => {
+        try {
+          const p = new URL(u).pathname;
+          if (p.endsWith(".css") || p.includes("/chunks/app/") || p.includes("/chunks/pages/")) {
+            staticUrls.add(u);
+          }
+        } catch (_) {}
+      });
+      if (latestEnhancementUrl) {
+        staticUrls.add(latestEnhancementUrl);
+      }
+
+      // 判断资源是否需要 cache: "reload" 强制穿透，还是走 cache: "no-cache" (ETag 304 协商免下载不变的 MB 级 vendor 包)
+      const isSmallAssetSet = latestHtmlUrls.size <= 6;
+      function shouldForceReloadAsset(assetUrl) {
+        if (isSmallAssetSet) return true;
+        try {
+          const parsed = new URL(assetUrl);
+          const p = parsed.pathname;
+          // 增强脚本走 no-cache (若 ?v= 或 ETag 没变直接 304 省下 2.3MB；若变了自动 200 拉取最新)
+          if (p === "/pi-web-enhancements.js") return false;
+          // 所有 CSS、App 路由入口 chunk、main/webpack 引导脚本，或最新 HTML 新增的资源强制 reload
+          if (p.endsWith(".css")) return true;
+          if (p.includes("/chunks/app/") || p.includes("/chunks/pages/") || p.includes("/webpack-") || p.includes("/main-")) return true;
+          if (!alreadyLoadedUrls.has(assetUrl)) return true;
+          // 其余已在当前页面加载过的带 16 位 content-hash 的大型第三方 vendor chunk 走 no-cache 条件校验
+          return false;
+        } catch (_) {
+          return true;
+        }
+      }
+
+      // 4.3 限制并发 (6) 拉取/校验并实时刷新进度与续期预算
+      const urlList = Array.from(staticUrls);
+      totalAssetsCount = urlList.length;
+      let nextIdx = 0;
+      const concurrency = Math.min(6, Math.max(1, urlList.length));
+
+      async function worker() {
+        while (nextIdx < urlList.length) {
+          if (controller.signal.aborted) {
+            throw new Error("刷新操作已中断或超时");
+          }
+          const idx = nextIdx++;
+          const assetUrl = urlList[idx];
+          const cacheMode = shouldForceReloadAsset(assetUrl) ? "reload" : "no-cache";
+          const res = await fetch(assetUrl, {
+            method: "GET",
+            cache: cacheMode,
+            signal: controller.signal
+          });
+          touchProgress();
+          if (!res.ok) {
+            throw new Error(`静态资源拉取失败(${res.status}): ${assetUrl}`);
+          }
+          const ct = (res.headers.get("content-type") || "").toLowerCase();
+          const parsedAsset = new URL(assetUrl);
+          const isCss = parsedAsset.pathname.endsWith(".css");
+          const isJs = parsedAsset.pathname.endsWith(".js");
+          if (isCss && !ct.includes("text/css")) {
+            throw new Error(`CSS资源类型不匹配(${ct}): ${assetUrl}`);
+          }
+          if (isJs && !ct.includes("javascript") && !ct.includes("ecmascript")) {
+            throw new Error(`JS资源类型不匹配(${ct}): ${assetUrl}`);
+          }
+          // 完整消费 response 数据流以触发浏览器网络栈落盘更新
+          await res.text();
+          completedAssetsCount++;
+          touchProgress();
+          if (totalAssetsCount > 3) {
+            updateReloadProgressToast(`正在更新页面资源 (${completedAssetsCount}/${totalAssetsCount})…`);
+          }
+        }
+      }
+
+      if (urlList.length > 0) {
+        await Promise.all(Array.from({ length: concurrency }, () => worker()));
+      }
+
+      clearTimeout(budgetTimer);
+
+      // 5. 完整成功后：构建目标 URL，保留已有业务 query/hash，新增 _reload 时间戳
+      let targetHref = window.location.href;
+      try {
+        const targetUrl = new URL(window.location.href);
+        targetUrl.searchParams.delete("_bust");
+        targetUrl.searchParams.set("_reload", Date.now().toString());
+        targetHref = targetUrl.href;
+      } catch (_) {}
+
+      if (typeof showToast === "function") {
+        showToast("资源下载完成，正在刷新…");
+      }
+      window.__PI_ENH_FORCE_RELOAD_STATE__ = { status: "success", error: null };
+
+      // 6. 不移除 beforeunload，有界延迟后正常执行 replace 导航
+      setTimeout(() => {
+        try {
+          window.location.replace(targetHref);
+        } catch (_) {
+          window.location.href = targetHref;
+        }
+      }, 100);
+
+    } catch (err) {
+      controller.abort(); // 关键：取消同轮所有在途请求，防止继续下载与重试冲突
+      clearTimeout(budgetTimer);
+
+      // 弱网优雅降级：若最新 HTML 已验证通过且已有部分静态资源下载成功（非 500 故障、非 0 进展死锁），
+      // 则直接带 _reload 导航让浏览器利用已预热缓存完成剩余加载，避免移动 VPN 弱网下死循环报错
+      const isTimeoutLike = /超时|中断|aborted/i.test(String(err?.message || ""));
+      if (isTimeoutLike && htmlFetchedOk && completedAssetsCount > 0) {
+        let fallbackHref = window.location.href;
+        try {
+          const fallbackUrl = new URL(window.location.href);
+          fallbackUrl.searchParams.delete("_bust");
+          fallbackUrl.searchParams.set("_reload", Date.now().toString());
+          fallbackHref = fallbackUrl.href;
+        } catch (_) {}
+        if (typeof showToast === "function") {
+          showToast("核心资源已就绪，正在刷新页面…");
+        }
+        window.__PI_ENH_FORCE_RELOAD_STATE__ = { status: "success", error: null, degradedFallback: true };
+        setTimeout(() => {
+          try {
+            window.location.replace(fallbackHref);
+          } catch (_) {
+            window.location.href = fallbackHref;
+          }
+        }, 100);
+        return;
+      }
+
+      isForceReloading = false; // 释放锁，允许重试
+      window.__PI_ENH_FORCE_RELOAD_STATE__ = { status: "failed", error: err.message };
+      console.error("[Pi Enh] 强刷失败:", err);
+      if (typeof showToast === "function") {
+        showToast(`更新失败: ${err.message || "资源下载异常"}，请重试`);
+      }
+    }
+  }
+
+  window.__PI_ENH_SYNC_SETTINGS_DIALOG__ = syncSettingsDialogEnhancements;
+  window.__PI_ENH_FORCE_HARD_RELOAD__ = forceHardReloadApp;
+
+  function resolveCurrentPiInstanceInfo() {
+    const loc = typeof window !== "undefined" ? window.location : null;
+    const hostname = String(loc?.hostname || "").toLowerCase();
+    const port = String(loc?.port || "30141");
+    const platform = String(typeof navigator !== "undefined" ? (navigator.platform || navigator.userAgent || "") : "").toLowerCase();
+
+    // 1. 同事端容器 (30142)：无论访问来自内网 IP、域名或手机，端口为 30142 即确定为群晖同事端容器
+    if (port === "30142") {
+      const bridgeHost = (hostname && !["localhost", "127.0.0.1"].includes(hostname)) ? hostname : "127.0.0.1";
+      return {
+        id: "synology-30142",
+        type: "container",
+        isSynology: true,
+        displayName: "群晖同事端 Pi Web (30142)",
+        containerName: "pi-agent-colleague",
+        targetParam: "30142",
+        port: 30142,
+        bridgeCandidateUrls: [
+          `http://${bridgeHost}:30149`,
+          "http://127.0.0.1:30149"
+        ],
+        restartApi: "/restart-container",
+        statusApi: "/container-status?target=30142",
+        probePath: "/login",
+        manualScriptPath: "/volume1/docker/pi-agent-colleague/restart-container-30142.sh",
+        manualCommand: 'ssh root@127.0.0.1 -p 2222 "/volume1/docker/pi-agent-colleague/restart-container-30142.sh"',
+      };
+    }
+
+    // 2. Windows 本地端：主机名为 127.0.0.1，或在 Windows 系统下的 localhost / 127.0.0.1
+    const isWindowsHost = hostname === "127.0.0.1";
+    const isWindowsLocal = (hostname === "localhost" || hostname === "127.0.0.1") && platform.includes("win");
+    if (isWindowsHost || isWindowsLocal) {
+      const host = isWindowsHost ? "127.0.0.1" : "127.0.0.1";
+      return {
+        id: "windows-30141",
+        type: "process",
+        isSynology: false,
+        displayName: "Windows 本地 Pi Web (30141)",
+        containerName: null,
+        targetParam: "windows",
+        port: 30141,
+        bridgeCandidateUrls: [
+          `http://${host}:30149`,
+          "http://127.0.0.1:30149",
+          "http://localhost:30149",
+          "http://127.0.0.1:30149"
+        ],
+        restartApi: "/restart-pi-web",
+        statusApi: "/pi-web-status",
+        probePath: "/login",
+        manualScriptPath: "~\\.pi\\agent\\scripts\\restart-pi-web-v1.0.js",
+        manualCommand: "node ~\\.pi\\agent\\scripts\\restart-pi-web-v1.0.js",
+      };
+    }
+
+    // 3. MacBook 本地端：主机名为 127.0.0.1，或在 Mac 下的 localhost / 127.0.0.1
+    if (hostname === "127.0.0.1" || ((hostname === "localhost" || hostname === "127.0.0.1") && platform.includes("mac"))) {
+      return {
+        id: "mac-30141",
+        type: "process",
+        isSynology: false,
+        displayName: "MacBook 本地 Pi Web (30141)",
+        containerName: null,
+        targetParam: "mac",
+        port: 30141,
+        bridgeCandidateUrls: [
+          "http://127.0.0.1:30149",
+          "http://localhost:30149",
+          "http://127.0.0.1:30149"
+        ],
+        restartApi: "/restart-pi-web",
+        statusApi: "/pi-web-status",
+        probePath: "/login",
+        manualScriptPath: "/Users/palhan/.pi/agent/scripts/restart-pi-web.sh",
+        manualCommand: "bash /Users/palhan/.pi/agent/scripts/restart-pi-web.sh",
+      };
+    }
+
+    // 4. 群晖主开发端容器 (30141 / pi-agent)：默认全覆盖（127.0.0.1、手机/平板客户端访问、OpenVPN 127.0.0.1、外网域名）
+    const bridgeHost = (hostname && !["localhost", "127.0.0.1"].includes(hostname)) ? hostname : "127.0.0.1";
+    return {
+      id: "synology-30141",
+      type: "container",
+      isSynology: true,
+      displayName: "群晖 NAS Pi Web (30141)",
+      containerName: "pi-agent",
+      targetParam: "30141",
+      port: 30141,
+      bridgeCandidateUrls: [
+        `http://${bridgeHost}:30149`,
+        "http://127.0.0.1:30149"
+      ],
+      restartApi: "/restart-container",
+      statusApi: "/container-status?target=30141",
+      probePath: "/login",
+      manualScriptPath: "/volume1/docker/pi-agent/restart-container-30141.sh",
+      manualCommand: 'ssh root@127.0.0.1 -p 2222 "/volume1/docker/pi-agent/restart-container-30141.sh"',
+    };
+  }
+
+  async function resolveTargetPiBridge(instanceInfo) {
+    const candidates = instanceInfo?.bridgeCandidateUrls || [];
+    for (const cand of candidates) {
+      try {
+        const response = await fetch(`${cand}/ping?_t=${Date.now()}`, {
+          cache: "no-store",
+          signal: AbortSignal.timeout(1500),
+        });
+        const identity = await response.json().catch(() => null);
+        if (response.ok && identity?.ok === true) {
+          if (instanceInfo.isSynology) {
+            if (identity.service === "syno-enhancement-sync" || identity.isSynology === true) {
+              return cand;
+            }
+          } else {
+            if (identity.service === "pi-local-bridge" || identity.service === "syno-enhancement-sync") {
+              return cand;
+            }
+          }
+        }
+      } catch (e) {}
+    }
+    throw new Error(`未连接到 ${instanceInfo?.displayName || "目标实例"} 对应的管理桥接服务 (${candidates[0] || "30149"})`);
+  }
+
+  function triggerManualRestartPiWebModal() {
+    const instanceInfo = resolveCurrentPiInstanceInfo();
+    const existing = document.querySelector(".pi-enh-restart-backdrop");
+    if (existing) existing.remove();
+
+    const backdrop = document.createElement("div");
+    backdrop.className = "pi-enh-restart-backdrop";
+
+    const modal = document.createElement("div");
+    modal.className = "pi-enh-restart-modal";
+    modal.innerHTML = `
+      <div class="pi-enh-restart-modal-header">
+        <div class="pi-enh-restart-modal-icon">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/>
+            <line x1="12" y1="9" x2="12" y2="13"/>
+            <line x1="12" y1="17" x2="12.01" y2="17"/>
+          </svg>
+        </div>
+        <h3 class="pi-enh-restart-modal-title">确认重启 ${instanceInfo.displayName}？</h3>
+      </div>
+      <div class="pi-enh-restart-modal-body">
+        您即将手动重启 <strong>${instanceInfo.displayName}</strong>${instanceInfo.containerName ? ` (容器: <code>${instanceInfo.containerName}</code>)` : ""}。
+        <div class="pi-enh-restart-modal-tips">
+          • 重启由您手动发起，当前进行中的会话连接将短暂中断约 3~8 秒；<br>
+          • ${instanceInfo.type === "container" ? `宿主机管理服务将安全重启容器 <code>${instanceInfo.containerName}</code> 并拉起服务；` : "后台服务重新拉起后，页面将自动进行健康探活并无缝重新加载；"}<br>
+          • 服务恢复就绪后，页面将自动无缝刷新，无需手动干预。
+        </div>
+      </div>
+      <div class="pi-enh-restart-modal-actions">
+        <button type="button" class="pi-enh-restart-btn-cancel">取消</button>
+        <button type="button" class="pi-enh-restart-btn-confirm">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M3 12a9 9 0 0 1 15-6.7L21 8"/>
+            <path d="M21 3v5h-5"/>
+            <path d="M21 12a9 9 0 0 1-15 6.7L3 16"/>
+            <path d="M3 21v-5h5"/>
+          </svg>
+          <span>立即重启</span>
+        </button>
+      </div>
+    `;
+
+    backdrop.appendChild(modal);
+    document.body.appendChild(backdrop);
+
+    const btnCancel = modal.querySelector(".pi-enh-restart-btn-cancel");
+    const btnConfirm = modal.querySelector(".pi-enh-restart-btn-confirm");
+
+    btnCancel.addEventListener("click", () => backdrop.remove());
+    backdrop.addEventListener("click", (e) => {
+      if (e.target === backdrop) backdrop.remove();
+    });
+
+    btnConfirm.addEventListener("click", () => {
+      executePiWebRestartWithProbe(backdrop, modal);
+    });
+  }
+
+  async function executePiWebRestartWithProbe(backdrop, modal) {
+    const instanceInfo = resolveCurrentPiInstanceInfo();
+    modal.className = "pi-enh-restart-modal pi-enh-probe-card";
+    modal.innerHTML = `
+      <div class="pi-enh-probe-spinner"></div>
+      <h3 class="pi-enh-probe-title">${instanceInfo.displayName} 重启中…</h3>
+      <p class="pi-enh-probe-desc">${instanceInfo.type === "container"
+        ? `正在通过群晖宿主机管理服务重启容器 ${instanceInfo.containerName}。确认容器服务恢复后才会更新状态。`
+        : `正在通过此电脑的本地桥接服务重启 Windows Pi Web。确认本机服务恢复后才会更新状态。`}</p>
+      <div class="pi-enh-probe-status">📡 正在向管理桥接服务发送重启信号…</div>
+      <div class="pi-enh-probe-actions" style="margin-top: 10px; display: flex; gap: 8px;">
+        <button type="button" class="pi-enh-restart-btn-cancel pi-enh-probe-close-btn" style="font-size: 11px; padding: 5px 12px;">关闭遮罩</button>
+        <button type="button" class="pi-enh-restart-btn-cancel pi-enh-probe-reload-btn" style="font-size: 11px; padding: 5px 12px; color: #38bdf8; border-color: rgba(56, 189, 248, 0.3);">立即手动刷新</button>
+      </div>
+    `;
+
+    const statusEl = modal.querySelector(".pi-enh-probe-status");
+    const titleEl = modal.querySelector(".pi-enh-probe-title");
+    let probeInterval = null;
+    let probeStopped = false;
+    modal.querySelector(".pi-enh-probe-close-btn")?.addEventListener("click", () => {
+      probeStopped = true;
+      if (probeInterval) clearInterval(probeInterval);
+      backdrop.remove();
+    });
+    modal.querySelector(".pi-enh-probe-reload-btn")?.addEventListener("click", () => {
+      probeStopped = true;
+      if (probeInterval) clearInterval(probeInterval);
+      window.location.reload();
+    });
+
+    function copyTextToClipboard(text) {
+      if (!text) return;
+      if (navigator.clipboard?.writeText) {
+        navigator.clipboard.writeText(text).catch(() => {
+          fallbackExecCopy(text);
+        });
+      } else {
+        fallbackExecCopy(text);
+      }
+      function fallbackExecCopy(str) {
+        try {
+          const ta = document.createElement("textarea");
+          ta.value = str;
+          ta.style.position = "fixed";
+          ta.style.left = "-9999px";
+          ta.style.top = "-9999px";
+          document.body.appendChild(ta);
+          ta.focus();
+          ta.select();
+          document.execCommand("copy");
+          document.body.removeChild(ta);
+        } catch (_) {}
+      }
+    }
+
+    function addManualRestartFallback() {
+      if (modal.querySelector(".pi-enh-probe-fallback")) return;
+      const fallbackBox = document.createElement("div");
+      fallbackBox.className = "pi-enh-probe-fallback";
+      fallbackBox.innerHTML = `
+        <div class="pi-enh-probe-fallback-title">提示：如需在终端手动执行匹配脚本</div>
+        <div style="font-family: monospace; font-size: 11px; background: rgba(0,0,0,0.35); padding: 6px 8px; border-radius: 4px; overflow-x: auto; white-space: nowrap; margin-bottom: 6px;">
+          ${instanceInfo.manualCommand}
+        </div>
+        <button type="button" class="pi-enh-btn-sm pi-enh-probe-copy-btn">
+          📋 复制重启命令
+        </button>
+      `;
+      fallbackBox.querySelector("button")?.addEventListener("click", (event) => {
+        const button = event.currentTarget;
+        try {
+          copyTextToClipboard(instanceInfo.manualCommand);
+        } catch (e) {}
+        button.textContent = "已复制 √";
+        setTimeout(() => { if (button.isConnected) button.textContent = "📋 复制重启命令"; }, 2000);
+      });
+      modal.insertBefore(fallbackBox, modal.querySelector(".pi-enh-probe-actions"));
+    }
+
+    let bridgeUrl = null;
+    let initialPiWebRunning = false;
+    let bridgeSuccess = false;
+
+    if (instanceInfo.isSynology) {
+      try {
+        bridgeUrl = await resolveTargetPiBridge(instanceInfo);
+        if (probeStopped) return;
+        const beforeResponse = await fetch(`${bridgeUrl}${instanceInfo.statusApi}`, {
+          cache: "no-store",
+          signal: AbortSignal.timeout(2000),
+        });
+        const beforeStatus = await beforeResponse.json().catch(() => null);
+        initialPiWebRunning = beforeStatus?.running === true;
+
+        const res = await fetch(`${bridgeUrl}${instanceInfo.restartApi}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ target: instanceInfo.targetParam }),
+          signal: AbortSignal.timeout(3500),
+        });
+        const result = await res.json().catch(() => null);
+        if (!res.ok || result?.ok !== true) {
+          throw new Error(result?.error || result?.message || `重启请求失败 (HTTP ${res.status})`);
+        }
+        bridgeSuccess = true;
+        if (statusEl) statusEl.textContent = `⚡ 宿主机重启指令已送达，正在等待容器 ${instanceInfo.containerName} 重启…`;
+      } catch (err) {
+        console.warn("[Pi Enh] Synology Pi Web restart bridge failed:", err);
+        if (titleEl) titleEl.textContent = "重启未执行";
+        if (statusEl) {
+          statusEl.style.color = "var(--pi-enh-probe-error-color, #b91c1c)";
+          statusEl.style.background = "rgba(239, 68, 68, 0.1)";
+          statusEl.style.borderColor = "rgba(239, 68, 68, 0.3)";
+          statusEl.textContent = `⚠️ 未连接到宿主机管理服务；本次没有执行重启。${err?.message ? ` (${err.message})` : ""}`;
+        }
+      }
+    } else {
+      try {
+        bridgeUrl = await resolveWindowsPiBridgeUrl();
+        if (probeStopped) return;
+        const beforeResponse = await fetch(`${bridgeUrl}/pi-web-status`, {
+          cache: "no-store",
+          signal: AbortSignal.timeout(1500),
+        });
+        const beforeStatus = await beforeResponse.json();
+        if (!beforeResponse.ok || beforeStatus?.service !== "pi-local-bridge" || typeof beforeStatus.running !== "boolean") {
+          throw new Error("Windows 桥接服务未返回有效的 Pi Web 状态");
+        }
+        initialPiWebRunning = beforeStatus.running;
+
+        const res = await fetch(`${bridgeUrl}/restart-pi-web`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          signal: AbortSignal.timeout(3000),
+        });
+        const result = await res.json().catch(() => null);
+        if (!res.ok || result?.ok !== true) {
+          throw new Error(result?.error || `重启请求失败 (HTTP ${res.status})`);
+        }
+        bridgeSuccess = true;
+        if (statusEl) statusEl.textContent = "⚡ Windows 重启指令已送达，正在检查本机 30141…";
+      } catch (err) {
+        console.warn("[Pi Enh] Windows Pi Web restart bridge failed:", err);
+        if (titleEl) titleEl.textContent = "重启未执行";
+        if (statusEl) {
+          statusEl.style.color = "var(--pi-enh-probe-error-color, #b91c1c)";
+          statusEl.textContent = `❌ 未连接到 Windows 本地桥接；本次没有执行重启。${err?.message ? ` (${err.message})` : ""}`;
+        }
+      }
+    }
+
+    if (!bridgeSuccess) {
+      addManualRestartFallback();
+      return;
+    }
+
+    let attempts = 0;
+    const maxAttempts = 60;
+    let sawServerDown = !initialPiWebRunning;
+    let probeInFlight = false;
+    probeInterval = setInterval(async () => {
+      if (probeStopped || probeInFlight) return;
+      probeInFlight = true;
+      attempts++;
+
+      try {
+        if (instanceInfo.isSynology) {
+          // 双重探活：优先向宿主机桥接查容器真实状态，同时直探当前页面 /login
+          let containerRunning = false;
+          let webResponding = false;
+          try {
+            const checkRes = await fetch(`${bridgeUrl}${instanceInfo.statusApi}&_t=${Date.now()}`, {
+              cache: "no-store",
+              signal: AbortSignal.timeout(1200),
+            });
+            const checkData = await checkRes.json().catch(() => null);
+            if (checkRes.ok && checkData?.running === true) {
+              containerRunning = true;
+            }
+          } catch (_) {}
+
+          try {
+            const webRes = await fetch(`${instanceInfo.probePath}?_t=${Date.now()}`, {
+              cache: "no-store",
+              signal: AbortSignal.timeout(1200),
+            });
+            if (webRes.status === 200 || webRes.status === 302 || webRes.status === 307 || webRes.status === 308) {
+              webResponding = true;
+            }
+          } catch (_) {}
+
+          if (!containerRunning && !webResponding) {
+            sawServerDown = true;
+            if (statusEl) statusEl.textContent = `📡 容器 ${instanceInfo.containerName} 已停止，等待重新拉起 (${attempts}/${maxAttempts})…`;
+          } else if (webResponding && (sawServerDown || attempts >= 3)) {
+            probeStopped = true;
+            clearInterval(probeInterval);
+            if (titleEl) titleEl.textContent = `${instanceInfo.displayName} 已恢复`;
+            if (statusEl) {
+              statusEl.style.color = "var(--pi-enh-probe-success-color, #15803d)";
+              statusEl.style.borderColor = "rgba(74, 222, 128, 0.3)";
+              statusEl.style.background = "rgba(74, 222, 128, 0.1)";
+              statusEl.textContent = `🎉 ${instanceInfo.displayName} 已恢复！正在重新加载…`;
+            }
+            const spinner = modal.querySelector(".pi-enh-probe-spinner");
+            if (spinner) spinner.style.borderTopColor = "var(--pi-enh-probe-success-color, #15803d)";
+            setTimeout(() => {
+              window.location.reload();
+            }, 800);
+            return;
+          } else if (statusEl) {
+            statusEl.textContent = `⏳ 重启指令已送达，正在探活 ${instanceInfo.displayName} (${attempts}/${maxAttempts})…`;
+          }
+        } else {
+          // Windows 探测分支
+          const checkRes = await fetch(`${bridgeUrl}/pi-web-status?_t=${Date.now()}`, {
+            cache: "no-store",
+            signal: AbortSignal.timeout(1000),
+          });
+          const checkStatus = await checkRes.json();
+          if (!checkRes.ok || checkStatus?.service !== "pi-local-bridge" || typeof checkStatus.running !== "boolean") {
+            throw new Error("Windows 本机服务状态响应无效");
+          }
+
+          if (!checkStatus.running) {
+            sawServerDown = true;
+            if (statusEl) statusEl.textContent = `📡 Windows Pi Web 已停止，等待重新启动 (${attempts}/${maxAttempts})…`;
+          } else if (sawServerDown) {
+            probeStopped = true;
+            clearInterval(probeInterval);
+            if (titleEl) titleEl.textContent = "Windows Pi Web 已恢复";
+            if (statusEl) {
+              statusEl.style.color = "var(--pi-enh-probe-success-color, #15803d)";
+              statusEl.style.borderColor = "rgba(74, 222, 128, 0.3)";
+              statusEl.style.background = "rgba(74, 222, 128, 0.1)";
+              statusEl.textContent = "🎉 Windows Pi Web 已恢复！正在打开本机服务…";
+            }
+            const spinner = modal.querySelector(".pi-enh-probe-spinner");
+            if (spinner) spinner.style.borderTopColor = "var(--pi-enh-probe-success-color, #15803d)";
+            const currentHost = String(window.location.hostname || "").toLowerCase();
+            const alreadyOnWindowsPiWeb = ["127.0.0.1", "localhost", "127.0.0.1"].includes(currentHost);
+            setTimeout(() => {
+              if (alreadyOnWindowsPiWeb) window.location.reload();
+              else window.location.assign("http://127.0.0.1:30141/");
+            }, 800);
+            return;
+          } else if (attempts >= 20) {
+            probeStopped = true;
+            clearInterval(probeInterval);
+            if (titleEl) titleEl.textContent = "重启未能确认";
+            if (statusEl) {
+              statusEl.style.color = "var(--pi-enh-probe-error-color, #b91c1c)";
+              statusEl.textContent = "❌ 已收到重启请求，但 Windows 30141 服务始终未中断；未能确认重启，请检查 Windows 端日志。";
+            }
+            addManualRestartFallback();
+            return;
+          } else if (statusEl) {
+            statusEl.textContent = `⏳ 重启指令已送达，等待 Windows 30141 停止 (${attempts}/20)…`;
+          }
+        }
+      } catch (err) {
+        if (statusEl) statusEl.textContent = `📡 正在探测 ${instanceInfo.displayName} 运行状态 (${attempts}/${maxAttempts})…`;
+      } finally {
+        probeInFlight = false;
+      }
+
+      if (attempts >= maxAttempts) {
+        probeStopped = true;
+        clearInterval(probeInterval);
+        if (titleEl) titleEl.textContent = "等待服务恢复超时";
+        if (statusEl) {
+          statusEl.style.color = "var(--pi-enh-probe-error-color, #b91c1c)";
+          statusEl.textContent = `⚠️ 等待 ${instanceInfo.displayName} 恢复超时；请检查重启脚本与日志。`;
+        }
+        addManualRestartFallback();
+      }
+    }, 500);
+  }
+
+  window.__PI_ENH_MANUAL_RESTART_PI_WEB__ = triggerManualRestartPiWebModal;
+
+  function hideEnhancementsPanel(nav) {
+    const enhTab = nav?.querySelector?.("[data-pi-enh-tab='plugins']");
+    if (enhTab) enhTab.removeAttribute("aria-current");
+
+    const dialog = (nav?.closest && (nav.closest(".settings-dialog-backdrop") || nav.closest("[role='dialog']"))) || (nav?.parentElement && nav.parentElement.parentElement) || document.body;
+    const panel = dialog.querySelector(".pi-enh-plugins-panel");
+    if (panel) panel.style.display = "none";
+
+    const archivedTab = nav?.querySelector?.("[data-pi-enh-tab='archived']");
+    const notificationTab = nav?.querySelector?.("[data-pi-enh-tab='notifications']");
+    const usageTab = nav?.querySelector?.("[data-pi-enh-tab='usage']");
+    const isArchivedActive = archivedTab && archivedTab.getAttribute("aria-current") === "page";
+    const isNotificationActive = notificationTab && notificationTab.getAttribute("aria-current") === "page";
+    const isUsageActive = usageTab && usageTab.getAttribute("aria-current") === "page";
+    const tagsTab = nav?.querySelector?.("[data-pi-enh-tab='tags']");
+    const isTagsActive = tagsTab && tagsTab.getAttribute("aria-current") === "page";
+    if (!isArchivedActive && !isNotificationActive && !isUsageActive && !isTagsActive) {
+      const originalMains = dialog.querySelectorAll("main.settings-dialog-main:not(.pi-enh-plugins-panel):not(.pi-enh-archived-panel):not(.pi-enh-notifications-panel):not(.pi-enh-usage-panel):not(.pi-enh-tags-panel)");
+      for (const m of originalMains) {
+        m.style.display = "";
+      }
+    }
+  }
+
+  function hideArchivedPanel(nav) {
+    const archivedTab = nav?.querySelector?.("[data-pi-enh-tab='archived']");
+    if (archivedTab) archivedTab.removeAttribute("aria-current");
+
+    const dialog = (nav?.closest && (nav.closest(".settings-dialog-backdrop") || nav.closest("[role='dialog']"))) || (nav?.parentElement && nav.parentElement.parentElement) || document.body;
+    const panel = dialog.querySelector(".pi-enh-archived-panel");
+    if (panel) panel.style.display = "none";
+
+    const enhTab = nav?.querySelector?.("[data-pi-enh-tab='plugins']");
+    const notificationTab = nav?.querySelector?.("[data-pi-enh-tab='notifications']");
+    const usageTab = nav?.querySelector?.("[data-pi-enh-tab='usage']");
+    const isEnhActive = enhTab && enhTab.getAttribute("aria-current") === "page";
+    const isNotificationActive = notificationTab && notificationTab.getAttribute("aria-current") === "page";
+    const isUsageActive = usageTab && usageTab.getAttribute("aria-current") === "page";
+    const tagsTab = nav?.querySelector?.("[data-pi-enh-tab='tags']");
+    const isTagsActive = tagsTab && tagsTab.getAttribute("aria-current") === "page";
+    if (!isEnhActive && !isNotificationActive && !isUsageActive && !isTagsActive) {
+      const originalMains = dialog.querySelectorAll("main.settings-dialog-main:not(.pi-enh-plugins-panel):not(.pi-enh-archived-panel):not(.pi-enh-notifications-panel):not(.pi-enh-usage-panel):not(.pi-enh-tags-panel)");
+      for (const m of originalMains) {
+        m.style.display = "";
+      }
+    }
+  }
+
+  function hideNotificationPanel(nav) {
+    const notificationTab = nav?.querySelector?.("[data-pi-enh-tab='notifications']");
+    if (notificationTab) notificationTab.removeAttribute("aria-current");
+
+    const dialog = (nav?.closest && (nav.closest(".settings-dialog-backdrop") || nav.closest("[role='dialog']"))) || (nav?.parentElement && nav.parentElement.parentElement) || document.body;
+    const panel = dialog.querySelector(".pi-enh-notifications-panel");
+    if (panel) panel.style.display = "none";
+
+    const enhTab = nav?.querySelector?.("[data-pi-enh-tab='plugins']");
+    const archivedTab = nav?.querySelector?.("[data-pi-enh-tab='archived']");
+    const usageTab = nav?.querySelector?.("[data-pi-enh-tab='usage']");
+    const isEnhActive = enhTab && enhTab.getAttribute("aria-current") === "page";
+    const isArchivedActive = archivedTab && archivedTab.getAttribute("aria-current") === "page";
+    const isUsageActive = usageTab && usageTab.getAttribute("aria-current") === "page";
+    const tagsTab = nav?.querySelector?.("[data-pi-enh-tab='tags']");
+    const isTagsActive = tagsTab && tagsTab.getAttribute("aria-current") === "page";
+    if (!isEnhActive && !isArchivedActive && !isUsageActive && !isTagsActive) {
+      const originalMains = dialog.querySelectorAll("main.settings-dialog-main:not(.pi-enh-plugins-panel):not(.pi-enh-archived-panel):not(.pi-enh-notifications-panel):not(.pi-enh-usage-panel):not(.pi-enh-tags-panel)");
+      for (const m of originalMains) m.style.display = "";
+    }
+  }
+
+  function showNotificationPanel(nav, notificationTab) {
+    for (const t of nav.querySelectorAll(".settings-section-tab")) t.removeAttribute("aria-current");
+    notificationTab.setAttribute("aria-current", "page");
+
+    const dialog = (nav.closest && (nav.closest(".settings-dialog-backdrop") || nav.closest("[role='dialog']"))) || (nav.parentElement && nav.parentElement.parentElement) || document.body;
+    const allMains = dialog.querySelectorAll("main.settings-dialog-main");
+    for (const m of allMains) m.style.display = "none";
+
+    let panel = dialog.querySelector(".pi-enh-notifications-panel");
+    if (!panel) {
+      panel = document.createElement("main");
+      panel.className = "settings-dialog-main pi-enh-notifications-panel";
+      const parent = (allMains[0] && allMains[0].parentElement) || dialog;
+      parent.appendChild(panel);
+    }
+    panel.style.display = "";
+    syncMobilePickerOption(nav, "notifications");
+    renderNotificationPanel(panel, nav);
+  }
+
+  function showEnhancementsPanel(nav, enhTab) {
+    for (const t of nav.querySelectorAll(".settings-section-tab")) {
+      t.removeAttribute("aria-current");
+    }
+    enhTab.setAttribute("aria-current", "page");
+
+    const dialog = (nav.closest && (nav.closest(".settings-dialog-backdrop") || nav.closest("[role='dialog']"))) || (nav.parentElement && nav.parentElement.parentElement) || document.body;
+    const allMains = dialog.querySelectorAll("main.settings-dialog-main");
+    for (const m of allMains) {
+      m.style.display = "none";
+    }
+
+    let panel = dialog.querySelector(".pi-enh-plugins-panel");
+    if (!panel) {
+      panel = document.createElement("main");
+      panel.className = "settings-dialog-main pi-enh-plugins-panel";
+      const parent = (allMains[0] && allMains[0].parentElement) || dialog;
+      parent.appendChild(panel);
+    }
+    panel.style.display = "";
+    syncMobilePickerOption(nav, "enhancements");
+    renderEnhancementsPanel(panel, nav);
+  }
+
+  function showArchivedPanel(nav, archivedTab) {
+    for (const t of nav.querySelectorAll(".settings-section-tab")) {
+      t.removeAttribute("aria-current");
+    }
+    archivedTab.setAttribute("aria-current", "page");
+
+    const dialog = (nav.closest && (nav.closest(".settings-dialog-backdrop") || nav.closest("[role='dialog']"))) || (nav.parentElement && nav.parentElement.parentElement) || document.body;
+    const allMains = dialog.querySelectorAll("main.settings-dialog-main");
+    for (const m of allMains) {
+      m.style.display = "none";
+    }
+
+    let panel = dialog.querySelector(".pi-enh-archived-panel");
+    if (!panel) {
+      panel = document.createElement("main");
+      panel.className = "settings-dialog-main pi-enh-archived-panel";
+      panel.setAttribute("data-archived-session-list", "true");
+      const parent = (allMains[0] && allMains[0].parentElement) || dialog;
+      parent.appendChild(panel);
+    }
+    panel.style.display = "";
+    syncMobilePickerOption(nav, "archived");
+    renderArchivedPanel(panel, nav);
+    if (typeof syncManifestArchivedEntries === "function") {
+      void syncManifestArchivedEntries(false);
+    }
+  }
+
+// ==========================================
+// 全局用量与成本大盘 (Usage & Cost Dashboard)
+// ==========================================
+
+function formatTokenNumber(num) {
+  if (typeof num !== "number" || isNaN(num) || num <= 0) return "0";
+  if (num >= 1000000) return (num / 1000000).toFixed(2) + "M";
+  if (num >= 1000) return (num / 1000).toFixed(1) + "k";
+  return num.toLocaleString();
+}
+
+function renderUsagePanel(panel, nav) {
+  if (!panel) return;
+  if (typeof window !== "undefined" && window.PiUsagePanel && typeof window.PiUsagePanel.render === "function") {
+    try {
+      window.PiUsagePanel.render(panel, nav, {
+        enabled: () => isPluginEnabled("usage-cost-dashboard"),
+        openSession: (sid, meta) => {
+          if (!knownSessionsMap.has(sid)) {
+            showToast("该会话属于其他实例或已删除；用量仍保留", null, 3500);
+            return;
+          }
+          if (sid) {
+            const closeBtn = panel.closest(".settings-dialog-backdrop, [role='dialog']")?.querySelector(".settings-dialog-close, button.config-close-button");
+            if (closeBtn) closeBtn.click();
+            const targetItem = document.querySelector(`[data-pi-enh-session-id="${sid}"], [data-session-id="${sid}"], a[href*="session=${sid}"]`);
+            if (targetItem) {
+              targetItem.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true }));
+            } else {
+              try { window.location.href = `/?session=${encodeURIComponent(sid)}`; } catch (e) {}
+            }
+          }
+        },
+      });
+    } catch (err) {
+      console.error("[UsagePanel] 顶层调用 render 发生异常:", err);
+      panel.innerHTML = `<div class="pi-enh-usage-panel-content" style="padding:24px 0;max-width:900px;margin:0 auto;color:#f4f4f5;">
+        <div style="background:#27272a;border:1px solid rgba(239,68,68,0.4);border-radius:8px;padding:20px;">
+          <div style="color:#f87171;font-weight:600;margin-bottom:8px;">⚠️ 用量大盘渲染失败</div>
+          <div style="color:#a1a1aa;font-size:12px;font-family:monospace;">${String(err?.message || err)}</div>
+        </div>
+      </div>`;
+    }
+  } else {
+    // 若尚未就绪，展示 Loading 占位，并延迟 150ms 尝试重新渲染一次
+    panel.innerHTML = `<div class="pi-enh-usage-panel-content" style="padding:60px 0;text-align:center;color:#a1a1aa;">
+      <div class="pi-enh-history-spinner" style="width:24px;height:24px;border-width:2px;margin:0 auto 12px;"></div>
+      <div style="font-size:14px;color:#d4d4d8;">正在载入 Usage 大盘组件...</div>
+    </div>`;
+    setTimeout(() => {
+      if (panel.isConnected && typeof window !== "undefined" && window.PiUsagePanel && typeof window.PiUsagePanel.render === "function") {
+        renderUsagePanel(panel, nav);
+      }
+    }, 150);
+  }
+}
+
+function showUsagePanel(nav, usageTab) {
+  if (!isPluginEnabled("usage-cost-dashboard")) return;
+
+  for (const t of nav.querySelectorAll(".settings-section-tab")) t.removeAttribute("aria-current");
+  usageTab.setAttribute("aria-current", "page");
+
+  const dialog = (nav.closest && (nav.closest(".settings-dialog-backdrop") || nav.closest("[role='dialog']"))) || (nav.parentElement && nav.parentElement.parentElement) || document.body;
+  const allMains = dialog.querySelectorAll("main.settings-dialog-main");
+  for (const m of allMains) m.style.display = "none";
+
+  hideEnhancementsPanel(nav);
+  hideArchivedPanel(nav);
+  hideNotificationPanel(nav);
+
+  let panel = dialog.querySelector(".pi-enh-usage-panel");
+  if (!panel) {
+    panel = document.createElement("main");
+    panel.className = "settings-dialog-main pi-enh-usage-panel";
+    panel.setAttribute("tabindex", "-1");
+    const parent = (allMains[0] && allMains[0].parentElement) || dialog;
+    parent.appendChild(panel);
+  }
+  panel.style.display = "block";
+  renderUsagePanel(panel, nav);
+}
+
+function hideUsagePanel(nav) {
+  const usageTab = nav?.querySelector?.("[data-pi-enh-tab='usage']");
+  if (usageTab) usageTab.removeAttribute("aria-current");
+
+  const dialog = (nav?.closest && (nav.closest(".settings-dialog-backdrop") || nav.closest("[role='dialog']"))) || (nav?.parentElement && nav.parentElement.parentElement) || document.body;
+  const panel = dialog.querySelector(".pi-enh-usage-panel");
+  if (panel) {
+    if (!isPluginEnabled("usage-cost-dashboard")) {
+      panel.remove();
+    } else {
+      panel.style.display = "none";
+    }
+  }
+
+  const enhTab = nav?.querySelector?.("[data-pi-enh-tab='plugins']");
+  const archivedTab = nav?.querySelector?.("[data-pi-enh-tab='archived']");
+  const notificationTab = nav?.querySelector?.("[data-pi-enh-tab='notifications']");
+  const isEnhActive = enhTab && enhTab.getAttribute("aria-current") === "page";
+  const isArchivedActive = archivedTab && archivedTab.getAttribute("aria-current") === "page";
+  const isNotificationActive = notificationTab && notificationTab.getAttribute("aria-current") === "page";
+  const tagsTab = nav?.querySelector?.("[data-pi-enh-tab='tags']");
+  const isTagsActive = tagsTab && tagsTab.getAttribute("aria-current") === "page";
+  if (!isEnhActive && !isArchivedActive && !isNotificationActive && !isTagsActive) {
+    const originalMains = dialog.querySelectorAll("main.settings-dialog-main:not(.pi-enh-plugins-panel):not(.pi-enh-archived-panel):not(.pi-enh-notifications-panel):not(.pi-enh-usage-panel):not(.pi-enh-tags-panel)");
+    for (const m of originalMains) m.style.display = "";
+  }
+}
+
+function openUsageDashboard() {
+  triggerShortcutNavigation("usage");
+}
+
+function toggleUsageDashboard() {
+  const existingNav = document.querySelector(".settings-section-tabs");
+  const usageTab = existingNav?.querySelector?.("[data-pi-enh-tab='usage']");
+  if (usageTab && usageTab.getAttribute("aria-current") === "page") {
+    const closeBtn = document.querySelector(".settings-dialog-close, button.config-close-button");
+    if (closeBtn) closeBtn.click();
+  } else {
+    triggerShortcutNavigation("usage");
+  }
+}
+
+window.__PI_ENH_OPEN_USAGE_DASHBOARD__ = openUsageDashboard;
+window.__PI_ENH_TOGGLE_USAGE_DASHBOARD__ = toggleUsageDashboard;
+window.__PI_ENH_RENDER_USAGE_PANEL__ = renderUsagePanel;
+
+
+  function renderNotificationPanel(panel, nav) {
+    const settings = readNotificationSettings();
+    const enabledCount = NOTIFICATION_CHANNELS.filter((item) => settings[item.id] !== false).length;
+    const grouped = [...new Set(NOTIFICATION_CHANNELS.map((item) => item.group))];
+    const history = readNotificationHistory().slice(0, 60);
+    const sourceLabels = { native: "Agent", toast: "网页增强", "attention-inpage": "站内提醒", "attention-sound": "提示音", "attention-desktop": "桌面通知" };
+    const getDesktopDiagnostic = () => {
+      if (typeof window === "undefined" || typeof Notification === "undefined") return "不支持";
+      if (!window.isSecureContext) return "HTTP不支持";
+      if (Notification.permission === "denied") return "拒绝";
+      if (Notification.permission === "default") return "未授权";
+      if (Notification.permission === "granted") return "可用";
+      return "未知";
+    };
+    const formatTime = (timestamp) => {
+      try { return new Date(timestamp).toLocaleString([], { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit" }); } catch (e) { return ""; }
+    };
+    const escape = (value) => String(value ?? "")
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/\"/g, "&quot;")
+      .replace(/'/g, "&#39;");
+
+    panel.innerHTML = `
+      <div class="settings-general-container pi-enh-plugins-shell">
+        <section class="pi-enh-plugins-toolbar" aria-label="通知管理工具栏">
+          <div class="pi-enh-plugins-heading-row">
+            <div class="pi-enh-plugins-title-wrap">
+              <h2 class="settings-general-title pi-enh-plugins-title">
+                <span>通知管理</span>
+                <span class="pi-enh-module-version">${enabledCount} / ${NOTIFICATION_CHANNELS.length} 类已开启</span>
+              </h2>
+              <p class="pi-enh-plugins-description">按来源和级别控制通知是否显示、响铃或发送到桌面；设置即时生效并保存在当前浏览器。</p>
+            </div>
+            <div class="pi-enh-plugins-actions" aria-label="通知批量操作">
+              <button type="button" class="pi-enh-btn-sm" data-notification-action="enable-all">全部开启</button>
+              <button type="button" class="pi-enh-btn-sm" data-notification-action="disable-all">全部静音</button>
+              <button type="button" class="pi-enh-btn-sm" data-notification-action="reset">恢复默认</button>
+            </div>
+          </div>
+        </section>
+        ${grouped.map((group) => `
+          <section class="pi-enh-notification-group" aria-label="${escape(group)}">
+            <h3 class="pi-enh-notification-group-title">${escape(group)}</h3>
+            <div class="pi-enh-plugins-list" style="padding: 0;">
+              ${NOTIFICATION_CHANNELS.filter((item) => item.group === group).map((item) => {
+                const enabled = settings[item.id] !== false;
+                return `<article class="pi-enh-plugin-item" data-notification-row="${item.id}" data-enabled="${enabled ? "true" : "false"}">
+                  <div class="pi-enh-plugin-copy">
+                    <div class="pi-enh-plugin-name-row"><span class="pi-enh-plugin-name">${escape(item.name)}</span><span class="pi-enh-plugin-category">${escape(item.group)}</span>${item.id === "attention-desktop" ? `<span class="pi-enh-module-version" data-desktop-diagnostic style="font-size:11px;margin-left:6px;">能力：${escape(getDesktopDiagnostic())}</span>` : ""}</div>
+                    <div class="pi-enh-plugin-desc">${escape(item.desc)}</div>
+                  </div>
+                  <button type="button" role="switch" aria-checked="${enabled ? "true" : "false"}" aria-label="${escape(item.name)}" title="${enabled ? "点击静音" : "点击开启"}" class="config-switch" data-notification-toggle="${item.id}"><span class="config-switch-knob" aria-hidden="true"></span></button>
+                </article>`;
+              }).join("")}
+            </div>
+          </section>
+        `).join("")}
+        <section class="pi-enh-notification-history" aria-label="通知历史">
+          <div class="pi-enh-notification-history-head">
+            <div>
+              <h3 class="pi-enh-notification-group-title" style="display: inline-flex; align-items: center; gap: 7px;">通知历史 <span class="pi-enh-module-version">最近 ${history.length} 条</span></h3>
+              <div class="pi-enh-plugin-desc" style="margin-top: 4px;">被静音的通知仍会记录在这里，便于事后排查。</div>
+            </div>
+            <button type="button" class="pi-enh-btn-sm" data-notification-action="clear-history" ${history.length ? "" : "disabled"}>清空历史</button>
+          </div>
+          <div class="pi-enh-notification-history-list">
+            ${history.length ? history.map((item) => {
+              const status = item.suppressed ? "已静音" : "已显示";
+              const statusClass = item.suppressed ? "is-suppressed" : "";
+              const source = sourceLabels[item.channel] || "系统";
+              return `<article class="pi-enh-notification-history-item">
+                <div class="pi-enh-notification-history-meta">${escape(formatTime(item.timestamp))}<br><span class="pi-enh-notification-history-status ${statusClass}">${escape(status)} · ${escape(getNotificationTypeLabel(item.type))}</span></div>
+                <div class="pi-enh-notification-history-message"><span class="pi-enh-notification-history-status">${escape(source)} · ${escape(item.settingId || "")}</span><br>${escape(item.message)}</div>
+              </article>`;
+            }).join("") : `<div class="pi-enh-notification-history-empty">暂无通知历史</div>`}
+          </div>
+        </section>
+      </div>
+    `;
+
+    for (const toggle of panel.querySelectorAll("[data-notification-toggle]")) {
+      toggle.addEventListener("click", () => {
+        const id = toggle.getAttribute("data-notification-toggle");
+        setNotificationEnabled(id, !isNotificationEnabled(id));
+        renderNotificationPanel(panel, nav);
+      });
+    }
+    panel.querySelector('[data-notification-action="enable-all"]')?.addEventListener("click", () => {
+      for (const item of NOTIFICATION_CHANNELS) setNotificationEnabled(item.id, true);
+      renderNotificationPanel(panel, nav);
+    });
+    panel.querySelector('[data-notification-action="disable-all"]')?.addEventListener("click", () => {
+      for (const item of NOTIFICATION_CHANNELS) setNotificationEnabled(item.id, false);
+      renderNotificationPanel(panel, nav);
+    });
+    panel.querySelector('[data-notification-action="reset"]')?.addEventListener("click", () => {
+      notificationSettings = getNotificationDefaults();
+      writeNotificationSettings();
+      applyNotificationVisibility();
+      renderNotificationPanel(panel, nav);
+    });
+    panel.querySelector('[data-notification-action="clear-history"]')?.addEventListener("click", () => {
+      clearNotificationHistory();
+      renderNotificationPanel(panel, nav);
+    });
+  }
+
+  archivedPanelSearchQuery = "";
+  selectedArchivedIds = new Set();
+  lastCheckedArchivedIndex = null;
+  isDateCleanPanelOpen = false;
+  archivedDateCutoffValue = "";
+
+  function getDefaultArchivedDateCutoff() {
+    const d = new Date(Date.now() - 30 * 86400000);
+    const yyyy = d.getFullYear();
+    const mm = String(d.getMonth() + 1).padStart(2, "0");
+    const dd = String(d.getDate()).padStart(2, "0");
+    return `${yyyy}-${mm}-${dd}`;
+  }
+
+  function getArchivedEntryTimestamp(entry) {
+    if (!entry) return 0;
+    if (entry.archivedAt && Number(entry.archivedAt) > 0) return Number(entry.archivedAt);
+    const session = knownSessionsMap.get(entry.id);
+    const rawTime = session?.modified || session?.createdAt || session?.updatedAt || session?.lastModified || session?.time || session?.timestamp;
+    if (rawTime) {
+      const parsed = typeof rawTime === "number" ? rawTime : Date.parse(rawTime);
+      if (!isNaN(parsed) && parsed > 0) return parsed;
+    }
+    return 0;
+  }
+
+  function getSessionIdsBeforeDate(dateStr, entries) {
+    if (!dateStr || !Array.isArray(entries)) return [];
+    const parts = String(dateStr).split("-").map(Number);
+    if (parts.length !== 3 || parts.some(isNaN)) return [];
+    const cutoffTime = new Date(parts[0], parts[1] - 1, parts[2], 0, 0, 0, 0).getTime();
+    if (isNaN(cutoffTime)) return [];
+    const matched = [];
+    for (const entry of entries) {
+      const t = getArchivedEntryTimestamp(entry);
+      if (t > 0 && t < cutoffTime) {
+        matched.push(entry.id);
+      }
+    }
+    return matched;
+  }
+
+  async function executeBatchDeleteArchived(targetIds, panel, nav, triggerBtn) {
+    if (!targetIds || targetIds.length === 0) return;
+    const initialBtnHtml = triggerBtn ? triggerBtn.innerHTML : "";
+    if (triggerBtn) {
+      triggerBtn.disabled = true;
+      triggerBtn.innerHTML = `<span style="font-size: 11.5px;">正在删除 (0/${targetIds.length})...</span>`;
+    }
+
+    showToast(`正在后台删除 ${targetIds.length} 个会话…`, sessionDeleteIcon);
+
+    let successCount = 0;
+    let failCount = 0;
+    const succeededIds = new Set();
+
+    try {
+      for (let i = 0; i < targetIds.length; i++) {
+        const sid = targetIds[i];
+        if (triggerBtn) {
+          triggerBtn.innerHTML = `<span style="font-size: 11.5px;">正在删除 (${i + 1}/${targetIds.length})...</span>`;
+        }
+        try {
+          await deleteArchivedSession(sid);
+          successCount++;
+          succeededIds.add(sid);
+          selectedArchivedIds.delete(sid);
+        } catch (err) {
+          failCount++;
+          console.warn("[pi-enh] 批量删除底层实体清理提示:", sid, err);
+        }
+      }
+
+      if (succeededIds.size > 0) {
+        const archivedEntriesBefore = readStoredArchivedEntries();
+        const nextEntries = archivedEntriesBefore.filter((e) => e && !succeededIds.has(e.id));
+        writeStoredArchivedEntries(nextEntries);
+        if (Array.isArray(window.__PI_ENH_ARCHIVED_MANIFEST__)) {
+          window.__PI_ENH_ARCHIVED_MANIFEST__ = window.__PI_ENH_ARCHIVED_MANIFEST__.filter((e) => (typeof e === "string" ? !succeededIds.has(e) : !succeededIds.has(e?.id)));
+        }
+        void persistArchivedSessionsToServer(nextEntries, undefined, true);
+      }
+    } finally {
+      if (triggerBtn) {
+        triggerBtn.disabled = false;
+        triggerBtn.innerHTML = initialBtnHtml;
+      }
+      requestSessionListRefresh(false, true);
+      if (panel && nav) {
+        renderArchivedPanel(panel, nav);
+      }
+    }
+
+    if (failCount === 0) {
+      showToast(`已成功删除 ${successCount} 个已归档会话`, sessionDeleteIcon);
+    } else if (successCount === 0) {
+      showToast(`删除失败：${failCount} 个会话未能删除，已保留选中`, sessionDeleteIcon);
+    } else {
+      showToast(`批量删除完成：成功 ${successCount} 个，失败 ${failCount} 个（已保留选中）`, sessionDeleteIcon);
+    }
+  }
+
+  function formatArchiveDate(archivedAt) {
+    if (!archivedAt) return "";
+    const d = new Date(archivedAt);
+    if (isNaN(d.getTime())) return "";
+    const now = new Date();
+    const isSameYear = d.getFullYear() === now.getFullYear();
+    const m = d.getMonth() + 1;
+    const day = d.getDate();
+    const hh = String(d.getHours()).padStart(2, "0");
+    const mm = String(d.getMinutes()).padStart(2, "0");
+    const isToday = isSameYear && d.getMonth() === now.getMonth() && d.getDate() === now.getDate();
+    if (isToday) return `今天 ${hh}:${mm}`;
+    const yesterday = new Date(now);
+    yesterday.setDate(yesterday.getDate() - 1);
+    const isYesterday = isSameYear && d.getMonth() === yesterday.getMonth() && d.getDate() === yesterday.getDate();
+    if (isYesterday) return `昨天 ${hh}:${mm}`;
+    if (isSameYear) return `${m}/${day} ${hh}:${mm}`;
+    return `${d.getFullYear()}/${m}/${day} ${hh}:${mm}`;
+  }
+
+  function formatCwdShort(cwd) {
+    if (!cwd) return "";
+    const s = String(cwd).trim();
+    if (s.length <= 22) return s;
+    const parts = s.split(/[\\/]/).filter(Boolean);
+    if (parts.length >= 2) {
+      const sep = s.includes("\\") ? "\\" : "/";
+      return `${parts[0]}${sep}…${sep}${parts[parts.length - 1]}`;
+    }
+    return s.slice(0, 20) + "…";
+  }
+
+  function renderArchivedPanel(panel, nav) {
+    syncMobilePickerOption(nav, "archived");
+    const allEntries = readStoredArchivedEntries();
+    const needsTitleSync = allEntries.some((e) => !e.name || e.name === e.id || !knownSessionTitles.has(e.id));
+    if (needsTitleSync) {
+      addManagedTimeout(syncArchivedTitles, 0);
+    }
+    addManagedTimeout(syncManifestArchivedEntries, 0);
+
+    // 清除已不在列表中的失效勾选项
+    const allEntryIds = new Set(allEntries.map((e) => e.id));
+    for (const sid of selectedArchivedIds) {
+      if (!allEntryIds.has(sid)) selectedArchivedIds.delete(sid);
+    }
+
+    const query = archivedPanelSearchQuery.trim().toLowerCase();
+    const filteredEntries = allEntries.filter((entry) => {
+      if (!query) return true;
+      const title = (knownSessionTitles.get(entry.id) || entry.name || "").toLowerCase();
+      const id = (entry.id || "").toLowerCase();
+      const cwd = (entry.cwd || "").toLowerCase();
+      return title.includes(query) || id.includes(query) || cwd.includes(query);
+    });
+
+    const isSearching = Boolean(query);
+    const countBadgeText = isSearching ? `显示 ${filteredEntries.length} / ${allEntries.length} 个` : `共 ${allEntries.length} 个`;
+
+    const effectiveDateValue = archivedDateCutoffValue || getDefaultArchivedDateCutoff();
+    const idsBeforeDate = getSessionIdsBeforeDate(effectiveDateValue, allEntries);
+    const beforeDateCount = idsBeforeDate.length;
+
+    const selectedCount = selectedArchivedIds.size;
+    const filteredSelectedCount = filteredEntries.filter((e) => selectedArchivedIds.has(e.id)).length;
+    const isAllSelected = filteredEntries.length > 0 && filteredSelectedCount === filteredEntries.length;
+
+    panel.innerHTML = `
+      <div class="settings-general-container" style="display: flex; flex-direction: column; gap: 10px; min-height: 100%;">
+        <div class="pi-enh-archived-toolbar">
+          <div class="pi-enh-archived-header-row">
+            <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+              <h2 class="settings-general-title" style="margin: 0; font-size: 15px; font-weight: 600; color: var(--text); display: flex; align-items: center; gap: 8px;">
+                <span>已归档</span>
+                <span style="font-size: 11.5px; padding: 2px 8px; border-radius: 999px; background: color-mix(in srgb, var(--accent) 14%, transparent); color: var(--accent); font-weight: 500;" data-archived-count>${countBadgeText}</span>
+              </h2>
+            </div>
+            ${allEntries.length > 0 ? `
+              <button type="button" class="pi-enh-btn-sm" data-action="restore-all-archived" style="white-space: nowrap; padding: 4px 10px; font-size: 12px; border-radius: 6px; cursor: pointer; flex-shrink: 0;">
+                全部还原
+              </button>
+            ` : ""}
+          </div>
+          <p style="margin: 4px 0 10px; font-size: 11.5px; color: var(--text-muted); line-height: 1.45;">
+            这些会话已从侧边栏主列表中隐藏。支持批量选择、按住 Shift 连续多选、一键还原或彻底删除，亦可按日期批量清理。
+          </p>
+
+          ${allEntries.length > 0 ? `
+            <div style="display: flex; align-items: center; gap: 10px;">
+              <label class="pi-enh-plugin-search-wrap" style="flex: 1 1 auto; width: 100%;">
+                <svg class="pi-enh-plugin-search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-3.5-3.5"></path></svg>
+                <input class="pi-enh-plugin-search" type="search" data-archived-search aria-label="搜索已归档会话" placeholder="搜索已归档会话标题、ID 或工作目录…" value="${archivedPanelSearchQuery}">
+              </label>
+            </div>
+
+            <div class="pi-enh-archived-batch-bar">
+              <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap; width: 100%;">
+                <label class="pi-enh-archived-select-all-wrap" style="display: inline-flex; align-items: center; gap: 6px; cursor: pointer; user-select: none; font-size: 12.5px; font-weight: 500; color: var(--text);">
+                  <input type="checkbox" data-action="toggle-select-all-archived" class="pi-enh-archived-checkbox" ${isAllSelected ? "checked" : ""}>
+                  <span>全选</span>
+                </label>
+                <span style="font-size: 12px; color: var(--text-muted); line-height: 1.2;" data-archived-selection-info>
+                  ${selectedCount > 0 ? `已勾选 <strong style="color: var(--text);">${selectedCount}</strong> 项` : `共 ${filteredEntries.length} 项`}
+                </span>
+
+                <div style="margin-left: auto; display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+                  ${selectedCount > 0 ? `
+                    <button type="button" class="pi-enh-btn-sm" data-action="batch-restore-selected" style="display: inline-flex; align-items: center; gap: 4px; padding: 4px 10px; font-size: 12px; border-radius: 6px; cursor: pointer;">
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="9 14 4 9 9 4"></polyline><path d="M20 20v-7a4 4 0 0 0-4-4H4"></path></svg>
+                      <span>批量还原 (${selectedCount})</span>
+                    </button>
+                    <button type="button" class="pi-enh-btn-sm pi-enh-archived-delete-btn" data-action="batch-delete-selected" data-stage="init" style="display: inline-flex; align-items: center; gap: 4px; padding: 4px 10px; font-size: 12px; border-radius: 6px; cursor: pointer;">
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"></path></svg>
+                      <span>批量删除 (${selectedCount})</span>
+                    </button>
+                    <button type="button" class="pi-enh-btn-sm" data-action="clear-archived-selection" style="padding: 4px 10px; font-size: 12px; border-radius: 6px; cursor: pointer;">
+                      取消选择
+                    </button>
+                  ` : ""}
+                  <button type="button" class="pi-enh-btn-sm" data-action="toggle-date-clean-panel" style="display: inline-flex; align-items: center; gap: 4px; padding: 4px 10px; font-size: 12px; border-radius: 6px; cursor: pointer; background: ${isDateCleanPanelOpen ? 'var(--bg-hover)' : 'transparent'};">
+                    <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"></rect><line x1="16" y1="2" x2="16" y2="6"></line><line x1="8" y1="2" x2="8" y2="6"></line><line x1="3" y1="10" x2="21" y2="10"></line></svg>
+                    <span>按日期清理${isDateCleanPanelOpen ? " ▲" : " ▼"}</span>
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            ${isDateCleanPanelOpen ? `
+              <div class="pi-enh-archived-date-panel">
+                <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px;">
+                  <div style="font-size: 13px; font-weight: 500; color: var(--text); display: flex; align-items: center; gap: 6px;">
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 14 14"></polyline></svg>
+                    <span>按日期批量清理对话</span>
+                  </div>
+                  <span style="font-size: 11.5px; color: var(--text-muted);">清理在此日期（00:00:00）之前归档的所有会话</span>
+                </div>
+
+                <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
+                  <label style="display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--text);">
+                    <span>选择截止日期：</span>
+                    <input type="date" class="pi-enh-archived-date-input" data-archived-date-input value="${effectiveDateValue}">
+                  </label>
+
+                  <div style="display: inline-flex; align-items: center; gap: 4px;">
+                    <button type="button" class="pi-enh-btn-sm" data-action="quick-date-preset" data-days="7" style="padding: 2px 8px; font-size: 11.5px;">7天前</button>
+                    <button type="button" class="pi-enh-btn-sm" data-action="quick-date-preset" data-days="30" style="padding: 2px 8px; font-size: 11.5px;">30天前</button>
+                    <button type="button" class="pi-enh-btn-sm" data-action="quick-date-preset" data-days="60" style="padding: 2px 8px; font-size: 11.5px;">60天前</button>
+                    <button type="button" class="pi-enh-btn-sm" data-action="quick-date-preset" data-days="90" style="padding: 2px 8px; font-size: 11.5px;">90天前</button>
+                  </div>
+                </div>
+
+                <div style="display: flex; align-items: center; justify-content: space-between; gap: 12px; padding-top: 6px; border-top: 1px solid var(--border, #27272a); flex-wrap: wrap;">
+                  <div style="font-size: 12px; color: var(--text);">
+                    符合条件的早于此日期的会话：<strong style="color: ${beforeDateCount > 0 ? 'var(--accent, #3b82f6)' : 'var(--text-muted)'}; font-size: 13px;" data-date-clean-count>${beforeDateCount}</strong> 个
+                  </div>
+                  <div style="display: inline-flex; align-items: center; gap: 8px;">
+                    <button type="button" class="pi-enh-btn-sm" data-action="select-before-date" ${beforeDateCount === 0 ? "disabled" : ""} style="padding: 4px 10px; font-size: 12px;">
+                      勾选这 ${beforeDateCount} 个会话
+                    </button>
+                    <button type="button" class="pi-enh-btn-sm pi-enh-archived-delete-btn" data-action="delete-before-date" data-stage="init" ${beforeDateCount === 0 ? "disabled" : ""} style="padding: 4px 10px; font-size: 12px;">
+                      <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"></path></svg>
+                      <span>一键删除 (${beforeDateCount})</span>
+                    </button>
+                  </div>
+                </div>
+              </div>
+            ` : ""}
+          ` : ""}
+        </div>
+
+        ${allEntries.length === 0 ? `
+          <div style="display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 56px 20px; color: var(--text-muted); text-align: center;">
+            <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" style="opacity: 0.35; margin-bottom: 12px;">
+              <path d="M21 8v13H3V8"></path><path d="M1 3h22v5H1z"></path><path d="M10 12h4"></path>
+            </svg>
+            <div style="font-size: 14px; font-weight: 500; color: var(--text);">暂无已归档的会话</div>
+            <div style="font-size: 12px; margin-top: 5px; max-width: 340px; line-height: 1.5;">
+              鼠标悬浮在左侧侧边栏会话行上，点击右侧的“⋯”按钮并选择“归档会话”，即可将不需要频繁查阅的会话收纳至此处。
+            </div>
+          </div>
+        ` : isSearching && filteredEntries.length === 0 ? `
+          <div style="display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 48px 20px; color: var(--text-muted); text-align: center;">
+            <div style="font-size: 13.5px; color: var(--text);">未找到匹配“${archivedPanelSearchQuery}”的已归档会话</div>
+            <div style="font-size: 12px; margin-top: 5px;">请尝试缩短关键词或搜索其他词汇。</div>
+          </div>
+        ` : `
+          <div style="display: flex; flex-direction: column; gap: 8px; max-width: 100%;">
+            ${filteredEntries.map((entry, index) => {
+              const displayName = knownSessionTitles.get(entry.id) || (entry.name && entry.name !== entry.id ? entry.name : entry.id.slice(0, 12));
+              const fullDateStr = entry.archivedAt ? new Date(entry.archivedAt).toLocaleString() : "";
+              const shortDateStr = formatArchiveDate(entry.archivedAt);
+              const isSelected = selectedArchivedIds.has(entry.id);
+              const shortCwd = formatCwdShort(entry.cwd);
+              return `
+                <div class="pi-enh-archived-item${isSelected ? " is-selected" : ""}">
+                  <div class="pi-enh-archived-item-main">
+                    <label class="pi-enh-archived-checkbox-wrap" title="选择会话（按住 Shift 可连续多选）">
+                      <input type="checkbox" class="pi-enh-archived-checkbox" data-action="toggle-select-archived" data-session-id="${encodeURIComponent(entry.id)}" data-index="${index}" ${isSelected ? "checked" : ""}>
+                    </label>
+                    <div class="pi-enh-archived-title-row">
+                      <svg class="pi-enh-archived-title-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path></svg>
+                      <span class="pi-enh-archived-title" title="${escapeHtml(displayName)}（点击可展开/收起完整标题）">${escapeHtml(displayName)}</span>
+                    </div>
+                  </div>
+                  <div class="pi-enh-archived-item-footer">
+                    <div class="pi-enh-archived-meta-row">
+                      ${entry.cwd ? `
+                        <span class="pi-enh-archived-meta-tag pi-enh-archived-meta-cwd" title="工作目录: ${escapeHtml(entry.cwd)}">
+                          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z"></path></svg>
+                          <span class="pi-enh-archived-tag-text">${escapeHtml(shortCwd)}</span>
+                        </span>
+                      ` : ""}
+                      ${shortDateStr ? `
+                        <span class="pi-enh-archived-meta-tag pi-enh-archived-meta-date" title="归档时间: ${fullDateStr}">
+                          <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 14 14"></polyline></svg>
+                          <span class="pi-enh-archived-tag-text">${shortDateStr}</span>
+                        </span>
+                      ` : ""}
+                      <span class="pi-enh-archived-meta-tag pi-enh-archived-meta-id" title="完整会话 ID: ${entry.id}">
+                        <span class="pi-enh-archived-tag-text">ID: ${entry.id.slice(0, 8)}…</span>
+                      </span>
+                    </div>
+                    <div class="pi-enh-archived-actions">
+                      <button type="button" class="pi-enh-btn-sm pi-enh-archived-restore-btn" data-action="restore-archived-session" data-session-id="${encodeURIComponent(entry.id)}" title="还原到侧边栏主列表">
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 14 4 9 9 4"></polyline><path d="M20 20v-7a4 4 0 0 0-4-4H4"></path></svg>
+                        <span>还原</span>
+                      </button>
+                      <button type="button" class="pi-enh-btn-sm pi-enh-archived-delete-btn" data-action="delete-archived-session" data-session-id="${encodeURIComponent(entry.id)}" data-stage="init" title="彻底删除此会话">
+                        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"></path><path d="M10 11v6M14 11v6"></path></svg>
+                        <span>删除</span>
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              `;
+            }).join("")}
+          </div>
+        `}
+      </div>
+    `;
+
+    const searchInput = panel.querySelector("[data-archived-search]");
+    if (searchInput) {
+      searchInput.addEventListener("input", () => {
+        archivedPanelSearchQuery = searchInput.value || "";
+        renderArchivedPanel(panel, nav);
+        const nextInput = panel.querySelector("[data-archived-search]");
+        if (nextInput) {
+          nextInput.focus();
+          const len = nextInput.value.length;
+          try { nextInput.setSelectionRange?.(len, len); } catch (err) {}
+        }
+      });
+    }
+
+    // 勾选与 Shift 连续多选事件监听
+    const checkboxes = panel.querySelectorAll('[data-action="toggle-select-archived"]');
+    for (const cb of checkboxes) {
+      cb.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const currIndex = Number(cb.getAttribute("data-index"));
+        const isShift = Boolean(e.shiftKey);
+        const isChecked = cb.checked;
+        const sid = decodeURIComponent(cb.getAttribute("data-session-id") || "");
+
+        if (isShift && lastCheckedArchivedIndex !== null && lastCheckedArchivedIndex !== currIndex) {
+          const start = Math.min(lastCheckedArchivedIndex, currIndex);
+          const end = Math.max(lastCheckedArchivedIndex, currIndex);
+          for (let i = start; i <= end; i++) {
+            const item = filteredEntries[i];
+            if (item && item.id) {
+              if (isChecked) {
+                selectedArchivedIds.add(item.id);
+              } else {
+                selectedArchivedIds.delete(item.id);
+              }
+            }
+          }
+        } else {
+          if (isChecked) {
+            if (sid) selectedArchivedIds.add(sid);
+          } else {
+            if (sid) selectedArchivedIds.delete(sid);
+          }
+        }
+        lastCheckedArchivedIndex = currIndex;
+        renderArchivedPanel(panel, nav);
+      });
+    }
+
+    // 全选/全不选切换
+    const selectAllCb = panel.querySelector('[data-action="toggle-select-all-archived"]');
+    if (selectAllCb) {
+      selectAllCb.addEventListener("change", () => {
+        const checked = selectAllCb.checked;
+        for (const entry of filteredEntries) {
+          if (checked) {
+            selectedArchivedIds.add(entry.id);
+          } else {
+            selectedArchivedIds.delete(entry.id);
+          }
+        }
+        lastCheckedArchivedIndex = null;
+        renderArchivedPanel(panel, nav);
+      });
+    }
+
+    // 批量还原
+    const batchRestoreBtn = panel.querySelector('[data-action="batch-restore-selected"]');
+    if (batchRestoreBtn) {
+      batchRestoreBtn.addEventListener("click", () => {
+        const idsToRestore = [...selectedArchivedIds];
+        if (idsToRestore.length === 0) return;
+        let restoredCount = 0;
+        for (const id of idsToRestore) {
+          if (restoreArchivedSession(id)) {
+            restoredCount++;
+            selectedArchivedIds.delete(id);
+          }
+        }
+        requestSessionListRefresh();
+        renderArchivedPanel(panel, nav);
+        showToast(`已批量还原 ${restoredCount} 个会话`, sessionArchiveIcon);
+      });
+    }
+
+    // 批量删除（两阶段确认）
+    const batchDeleteBtn = panel.querySelector('[data-action="batch-delete-selected"]');
+    if (batchDeleteBtn) {
+      batchDeleteBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const stage = batchDeleteBtn.getAttribute("data-stage") || "init";
+        if (stage !== "confirm") {
+          batchDeleteBtn.setAttribute("data-stage", "confirm");
+          batchDeleteBtn.classList.add("pi-enh-archived-delete-confirming");
+          batchDeleteBtn.innerHTML = `
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><polyline points="20 6 9 17 4 12"></polyline></svg>
+            <span>确认彻底删除 (${selectedArchivedIds.size}) 项？</span>
+          `;
+          if (batchDeleteBtn._confirmTimer) clearTimeout(batchDeleteBtn._confirmTimer);
+          batchDeleteBtn._confirmTimer = setTimeout(() => {
+            batchDeleteBtn.setAttribute("data-stage", "init");
+            batchDeleteBtn.classList.remove("pi-enh-archived-delete-confirming");
+            renderArchivedPanel(panel, nav);
+          }, 5000);
+          return;
+        }
+
+        if (batchDeleteBtn._confirmTimer) clearTimeout(batchDeleteBtn._confirmTimer);
+        const targetIds = [...selectedArchivedIds];
+        executeBatchDeleteArchived(targetIds, panel, nav, batchDeleteBtn);
+      });
+    }
+
+    // 取消选择
+    const clearSelectionBtn = panel.querySelector('[data-action="clear-archived-selection"]');
+    if (clearSelectionBtn) {
+      clearSelectionBtn.addEventListener("click", () => {
+        selectedArchivedIds.clear();
+        lastCheckedArchivedIndex = null;
+        renderArchivedPanel(panel, nav);
+      });
+    }
+
+    // 展开/收起按日期清理面板
+    const toggleDateCleanBtn = panel.querySelector('[data-action="toggle-date-clean-panel"]');
+    if (toggleDateCleanBtn) {
+      toggleDateCleanBtn.addEventListener("click", () => {
+        isDateCleanPanelOpen = !isDateCleanPanelOpen;
+        renderArchivedPanel(panel, nav);
+      });
+    }
+
+    // 日期选择框输入
+    const dateInput = panel.querySelector("[data-archived-date-input]");
+    if (dateInput) {
+      dateInput.addEventListener("change", () => {
+        archivedDateCutoffValue = dateInput.value || getDefaultArchivedDateCutoff();
+        renderArchivedPanel(panel, nav);
+      });
+    }
+
+    // 快捷天数预设
+    const presetBtns = panel.querySelectorAll('[data-action="quick-date-preset"]');
+    for (const pb of presetBtns) {
+      pb.addEventListener("click", () => {
+        const days = Number(pb.getAttribute("data-days")) || 30;
+        const d = new Date(Date.now() - days * 86400000);
+        const yyyy = d.getFullYear();
+        const mm = String(d.getMonth() + 1).padStart(2, "0");
+        const dd = String(d.getDate()).padStart(2, "0");
+        archivedDateCutoffValue = `${yyyy}-${mm}-${dd}`;
+        renderArchivedPanel(panel, nav);
+      });
+    }
+
+    // 勾选指定日期前的会话
+    const selectBeforeDateBtn = panel.querySelector('[data-action="select-before-date"]');
+    if (selectBeforeDateBtn) {
+      selectBeforeDateBtn.addEventListener("click", () => {
+        const ids = getSessionIdsBeforeDate(effectiveDateValue, allEntries);
+        for (const id of ids) {
+          selectedArchivedIds.add(id);
+        }
+        renderArchivedPanel(panel, nav);
+        showToast(`已勾选 ${ids.length} 个早于 ${effectiveDateValue} 的会话`, sessionArchiveIcon);
+      });
+    }
+
+    // 一键删除指定日期前的所有会话（两阶段确认）
+    const deleteBeforeDateBtn = panel.querySelector('[data-action="delete-before-date"]');
+    if (deleteBeforeDateBtn) {
+      deleteBeforeDateBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const stage = deleteBeforeDateBtn.getAttribute("data-stage") || "init";
+        const ids = getSessionIdsBeforeDate(effectiveDateValue, allEntries);
+        if (ids.length === 0) return;
+
+        if (stage !== "confirm") {
+          deleteBeforeDateBtn.setAttribute("data-stage", "confirm");
+          deleteBeforeDateBtn.classList.add("pi-enh-archived-delete-confirming");
+          deleteBeforeDateBtn.innerHTML = `
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><polyline points="20 6 9 17 4 12"></polyline></svg>
+            <span>确认彻底删除这 ${ids.length} 个会话？</span>
+          `;
+          if (deleteBeforeDateBtn._confirmTimer) clearTimeout(deleteBeforeDateBtn._confirmTimer);
+          deleteBeforeDateBtn._confirmTimer = setTimeout(() => {
+            deleteBeforeDateBtn.setAttribute("data-stage", "init");
+            deleteBeforeDateBtn.classList.remove("pi-enh-archived-delete-confirming");
+            renderArchivedPanel(panel, nav);
+          }, 5000);
+          return;
+        }
+
+        if (deleteBeforeDateBtn._confirmTimer) clearTimeout(deleteBeforeDateBtn._confirmTimer);
+        executeBatchDeleteArchived(ids, panel, nav, deleteBeforeDateBtn);
+      });
+    }
+
+    for (const btn of panel.querySelectorAll('[data-action="restore-archived-session"]')) {
+      btn.addEventListener("click", () => {
+        let sessionId = "";
+        try { sessionId = decodeURIComponent(btn.getAttribute("data-session-id") || ""); } catch (e) {}
+        if (!restoreArchivedSession(sessionId)) return;
+        requestSessionListRefresh();
+        renderArchivedPanel(panel, nav);
+        showToast("已还原会话", sessionArchiveIcon);
+      });
+    }
+
+    function resetDeleteBtn(targetBtn) {
+      if (!targetBtn) return;
+      if (targetBtn._confirmTimer) {
+        clearTimeout(targetBtn._confirmTimer);
+        targetBtn._confirmTimer = null;
+      }
+      targetBtn.setAttribute("data-stage", "init");
+      targetBtn.classList.remove("pi-enh-archived-delete-confirming");
+      targetBtn.title = "彻底删除此会话";
+      targetBtn.innerHTML = `
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"></path><path d="M10 11v6M14 11v6"></path></svg>
+        <span>删除</span>
+      `;
+    }
+
+    const deleteButtons = panel.querySelectorAll('[data-action="delete-archived-session"]');
+    for (const btn of deleteButtons) {
+      btn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        const stage = btn.getAttribute("data-stage") || "init";
+        if (stage !== "confirm") {
+          for (const otherBtn of deleteButtons) {
+            if (otherBtn !== btn && otherBtn.getAttribute("data-stage") === "confirm") {
+              resetDeleteBtn(otherBtn);
+            }
+          }
+          btn.setAttribute("data-stage", "confirm");
+          btn.classList.add("pi-enh-archived-delete-confirming");
+          btn.title = "再次点击彻底删除此会话";
+          btn.innerHTML = `
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"></polyline></svg>
+            <span>确认</span>
+          `;
+          if (btn._confirmTimer) clearTimeout(btn._confirmTimer);
+          btn._confirmTimer = setTimeout(() => {
+            resetDeleteBtn(btn);
+          }, 4000);
+          return;
+        }
+
+        if (btn._confirmTimer) {
+          clearTimeout(btn._confirmTimer);
+          btn._confirmTimer = null;
+        }
+        btn.disabled = true;
+        btn.innerHTML = `<span style="font-size: 11.5px;">正在删除...</span>`;
+
+        let sessionId = "";
+        try { sessionId = decodeURIComponent(btn.getAttribute("data-session-id") || ""); } catch (err) {}
+        if (!sessionId) return;
+
+        // 彻底移出归档列表：本地 localStorage、全局 manifest 及选中态全部立即清理
+        const archivedEntriesBeforeDelete = readStoredArchivedEntries();
+        const nextEntries = archivedEntriesBeforeDelete.filter((entry) => entry && entry.id !== sessionId);
+        writeStoredArchivedEntries(nextEntries);
+        if (Array.isArray(window.__PI_ENH_ARCHIVED_MANIFEST__)) {
+          window.__PI_ENH_ARCHIVED_MANIFEST__ = window.__PI_ENH_ARCHIVED_MANIFEST__.filter((entry) => (typeof entry === "string" ? entry !== sessionId : entry?.id !== sessionId));
+        }
+        selectedArchivedIds.delete(sessionId);
+        renderArchivedPanel(panel, nav);
+        showToast("已删除归档会话", sessionDeleteIcon);
+
+        (async () => {
+          // 立即无防抖写回权威服务端 models-config
+          try {
+            await persistArchivedSessionsToServer(nextEntries, undefined, true);
+          } catch (e) {
+            console.warn("[pi-enh] 归档删除服务端同步异常:", e);
+          }
+          // 异步清理底层磁盘实体文件（非阻塞，绝不反向复活已删除条目）
+          try {
+            await deleteArchivedSession(sessionId);
+          } catch (err) {
+            console.warn("[pi-enh] 会话底层实体文件清理提示 (非阻塞):", err);
+          }
+          requestSessionListRefresh(false, true);
+        })();
+      });
+    }
+
+    panel.addEventListener("click", (e) => {
+      if (!e.target.closest || !e.target.closest('[data-action="delete-archived-session"]')) {
+        for (const b of deleteButtons) {
+          if (b.getAttribute("data-stage") === "confirm") {
+            resetDeleteBtn(b);
+          }
+        }
+      }
+    });
+
+    panel.querySelector('[data-action="restore-all-archived"]')?.addEventListener("click", () => {
+      const all = readStoredArchivedEntries();
+      for (const item of all) {
+        restoreArchivedSession(item.id);
+      }
+      requestSessionListRefresh();
+      renderArchivedPanel(panel, nav);
+      showToast(`已全部还原 ${all.length} 个会话`, sessionArchiveIcon);
+    });
+
+    for (const titleEl of panel.querySelectorAll(".pi-enh-archived-title")) {
+      titleEl.addEventListener("click", (e) => {
+        e.stopPropagation();
+        titleEl.classList.toggle("is-expanded");
+      });
+    }
+  }
+
+  window.__PI_ENH_SET_ARCHIVED_SEARCH__ = function (q) {
+    archivedPanelSearchQuery = String(q || "");
+    const panel = document.querySelector(".pi-enh-archived-panel");
+    const nav = document.querySelector(".settings-section-tabs");
+    if (panel) renderArchivedPanel(panel, nav);
+  };
+  window.__PI_ENH_GET_SELECTED_ARCHIVED_IDS__ = () => [...selectedArchivedIds];
+  window.__PI_ENH_CLEAR_ARCHIVED_SELECTION__ = () => {
+    selectedArchivedIds.clear();
+    lastCheckedArchivedIndex = null;
+    const panel = document.querySelector(".pi-enh-archived-panel");
+    const nav = document.querySelector(".settings-section-tabs");
+    if (panel) renderArchivedPanel(panel, nav);
+  };
+  window.__PI_ENH_SELECT_ARCHIVED_BEFORE_DATE__ = (dateStr) => {
+    const allEntries = readStoredArchivedEntries();
+    const ids = getSessionIdsBeforeDate(dateStr, allEntries);
+    for (const id of ids) selectedArchivedIds.add(id);
+    const panel = document.querySelector(".pi-enh-archived-panel");
+    const nav = document.querySelector(".settings-section-tabs");
+    if (panel) renderArchivedPanel(panel, nav);
+    return ids;
+  };
+  window.__PI_ENH_SET_ARCHIVED_DATE_CUTOFF__ = (dateStr) => {
+    archivedDateCutoffValue = String(dateStr || "");
+    const panel = document.querySelector(".pi-enh-archived-panel");
+    const nav = document.querySelector(".settings-section-tabs");
+    if (panel) renderArchivedPanel(panel, nav);
+  };
+  window.__PI_ENH_TOGGLE_DATE_CLEAN_PANEL__ = (force) => {
+    isDateCleanPanelOpen = force !== undefined ? Boolean(force) : !isDateCleanPanelOpen;
+    const panel = document.querySelector(".pi-enh-archived-panel");
+    const nav = document.querySelector(".settings-section-tabs");
+    if (panel) renderArchivedPanel(panel, nav);
+  };
+  window.__PI_ENH_EXECUTE_BATCH_DELETE_ARCHIVED__ = executeBatchDeleteArchived;
+
+  const enhancementPanelFilter = { query: "", category: "all" };
+
+  function escapeQuickActionHtml(value) {
+    return String(value ?? "")
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
+  }
+
+  function quickActionsSyncLabel() {
+    if (quickActionsSyncStatus === "syncing") return "正在同步";
+    if (quickActionsSyncStatus === "dirty") return "本地有修改，尚未同步";
+    if (quickActionsSyncStatus === "error") return "同步失败，AI 继续使用上一版";
+    if (quickActionsSyncStatus === "loading") return "正在同步";
+    return "已同步到 AI";
+  }
+
+  function renderQuickActionsEditorBody(disabled) {
+    const actions = quickActionsDraftConfig.actions;
+    const rows = actions.map((action, index) => `
+      <article class="pi-enh-quick-config-row" data-quick-action-row="${index}">
+        <div class="pi-enh-quick-config-row-head">
+          <strong>${escapeQuickActionHtml(action.label)}</strong>
+          <span class="pi-enh-quick-config-priority">优先级 ${action.priority}</span>
+          <label class="pi-enh-quick-config-enabled"><input type="checkbox" data-quick-action-field="enabled" data-quick-action-index="${index}" ${action.enabled ? "checked" : ""} ${disabled ? "disabled" : ""}>启用</label>
+        </div>
+        <div class="pi-enh-quick-config-grid">
+          <label><span>按钮名称</span><input type="text" maxlength="24" data-quick-action-field="label" data-quick-action-index="${index}" value="${escapeQuickActionHtml(action.label)}" ${disabled ? "disabled" : ""}></label>
+          <label><span>发送内容</span><input type="text" maxlength="200" data-quick-action-field="message" data-quick-action-index="${index}" value="${escapeQuickActionHtml(action.message)}" ${disabled ? "disabled" : ""}></label>
+          <label class="pi-enh-quick-config-condition"><span>AI 匹配条件</span><textarea maxlength="500" rows="2" data-quick-action-field="condition" data-quick-action-index="${index}" ${disabled ? "disabled" : ""}>${escapeQuickActionHtml(action.condition)}</textarea></label>
+          <label><span>点击行为</span><select data-quick-action-field="mode" data-quick-action-index="${index}" ${disabled ? "disabled" : ""}><option value="send" ${action.mode === "send" ? "selected" : ""}>直接发送</option><option value="fill" ${action.mode === "fill" ? "selected" : ""}>仅填入输入框</option></select></label>
+          <label><span>优先级</span><input type="number" data-quick-action-field="priority" data-quick-action-index="${index}" value="${action.priority}" ${disabled ? "disabled" : ""}></label>
+        </div>
+        <div class="pi-enh-quick-config-actions">
+          <button type="button" class="pi-enh-btn-sm" data-quick-action-command="up" data-quick-action-index="${index}" ${disabled || index === 0 ? "disabled" : ""}>上移</button>
+          <button type="button" class="pi-enh-btn-sm" data-quick-action-command="down" data-quick-action-index="${index}" ${disabled || index === actions.length - 1 ? "disabled" : ""}>下移</button>
+          <button type="button" class="pi-enh-btn-sm" data-quick-action-command="duplicate" data-quick-action-index="${index}" ${disabled || actions.length >= QUICK_ACTIONS_MAX_ITEMS ? "disabled" : ""}>复制</button>
+          <button type="button" class="pi-enh-btn-sm" data-quick-action-command="delete" data-quick-action-index="${index}" ${disabled ? "disabled" : ""}>删除</button>
+        </div>
+      </article>`).join("");
+    return `
+      <summary>管理快捷回复 · <span data-quick-actions-sync-state>${quickActionsSyncLabel()}</span></summary>
+      <div class="pi-enh-quick-config-body">
+        <div class="pi-enh-quick-config-toolbar">
+          <span>全局共享 · ${actions.length}/${QUICK_ACTIONS_MAX_ITEMS} 项</span>
+          <div>
+            <button type="button" class="pi-enh-btn-sm" data-quick-action-command="add" ${disabled || actions.length >= QUICK_ACTIONS_MAX_ITEMS ? "disabled" : ""}>新增</button>
+            <button type="button" class="pi-enh-btn-sm" data-quick-action-command="reset" ${disabled ? "disabled" : ""}>恢复默认</button>
+            <button type="button" class="pi-enh-btn-sm pi-enh-btn-primary" data-quick-action-command="save" ${disabled ? "disabled" : ""}>保存并同步</button>
+          </div>
+        </div>
+        ${rows || '<div class="pi-enh-quick-config-empty">暂无快捷回复。可新增动作；无匹配时仍保留 ⚡。</div>'}
+      </div>`;
+  }
+
+  function renderQuickActionsEditor(disabled) {
+    return `<details class="pi-enh-quick-config-editor" data-quick-actions-editor ${disabled ? "data-disabled=true" : ""}>${renderQuickActionsEditorBody(disabled)}</details>`;
+  }
+
+  function refreshQuickActionsEditorDom(root = document) {
+    const editor = root?.querySelector?.("[data-quick-actions-editor]");
+    if (!editor) return;
+    const wasOpen = Boolean(editor.open || editor.hasAttribute?.("open"));
+    const moduleDisabled = !isModuleEnabled("composer-workflow") || !isPluginEnabled("quick-action-buttons");
+    editor.innerHTML = renderQuickActionsEditorBody(moduleDisabled);
+    if (wasOpen) editor.setAttribute?.("open", "");
+  }
+
+  function updateQuickActionDraft(index, field, value) {
+    const actions = quickActionsDraftConfig.actions.map(cloneQuickAction);
+    if (!Number.isInteger(index) || index < 0 || index >= actions.length) return false;
+    if (field === "enabled") actions[index].enabled = Boolean(value);
+    else if (field === "priority") actions[index].priority = Number.parseInt(value, 10);
+    else if (["label", "message", "condition", "mode"].includes(field)) actions[index][field] = String(value);
+    else return false;
+    const normalized = normalizeQuickActionsConfig({ ...quickActionsDraftConfig, actions });
+    if (!normalized) return false;
+    quickActionsDraftConfig = normalized;
+    quickActionsDraftGeneration += 1;
+    quickActionsSyncStatus = "dirty";
+    persistQuickActionsDraft();
+    return true;
+  }
+
+  function createCustomQuickAction(source = null) {
+    const suffix = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
+    return {
+      id: `custom-${suffix}`,
+      label: source ? `${source.label}副本`.slice(0, 24) : "新快捷回复",
+      message: source?.message || "新快捷回复",
+      condition: source?.condition || "请描述此快捷回复应在什么语义场景下显示。",
+      mode: source?.mode || "fill",
+      priority: source?.priority || 10,
+      enabled: true,
+    };
+  }
+
+  function mutateQuickActions(command, index = -1) {
+    let actions = quickActionsDraftConfig.actions.map(cloneQuickAction);
+    if (command === "add" && actions.length < QUICK_ACTIONS_MAX_ITEMS) actions.push(createCustomQuickAction());
+    else if (command === "duplicate" && actions[index] && actions.length < QUICK_ACTIONS_MAX_ITEMS) actions.splice(index + 1, 0, createCustomQuickAction(actions[index]));
+    else if (command === "delete" && actions[index]) actions.splice(index, 1);
+    else if (command === "up" && index > 0) [actions[index - 1], actions[index]] = [actions[index], actions[index - 1]];
+    else if (command === "down" && index >= 0 && index < actions.length - 1) [actions[index], actions[index + 1]] = [actions[index + 1], actions[index]];
+    else if (command === "reset") actions = DEFAULT_QUICK_ACTIONS_CONFIG.actions.map(cloneQuickAction);
+    else return false;
+    if (["up", "down"].includes(command)) {
+      actions.forEach((action, position) => { action.priority = (actions.length - position) * 10; });
+    }
+    const normalized = normalizeQuickActionsConfig({ ...quickActionsDraftConfig, actions });
+    if (!normalized) return false;
+    quickActionsDraftConfig = normalized;
+    quickActionsDraftGeneration += 1;
+    quickActionsSyncStatus = "dirty";
+    persistQuickActionsDraft();
+    return true;
+  }
+
+  function bindQuickActionsEditor(panel) {
+    panel.addEventListener("input", (event) => {
+      const field = event.target?.getAttribute?.("data-quick-action-field");
+      if (!field || field === "enabled" || field === "mode") return;
+      const index = Number.parseInt(event.target.getAttribute("data-quick-action-index"), 10);
+      updateQuickActionDraft(index, field, event.target.value);
+      const state = panel.querySelector("[data-quick-actions-sync-state]");
+      if (state) state.textContent = quickActionsSyncLabel();
+    });
+    panel.addEventListener("change", (event) => {
+      const field = event.target?.getAttribute?.("data-quick-action-field");
+      if (!field) return;
+      const index = Number.parseInt(event.target.getAttribute("data-quick-action-index"), 10);
+      const value = field === "enabled" ? Boolean(event.target.checked) : event.target.value;
+      if (updateQuickActionDraft(index, field, value)) refreshQuickActionsEditorDom(panel);
+    });
+    panel.addEventListener("click", (event) => {
+      const button = event.target?.closest?.("[data-quick-action-command]");
+      const command = button?.getAttribute?.("data-quick-action-command");
+      if (!command || button.disabled) return;
+      const index = Number.parseInt(button.getAttribute("data-quick-action-index"), 10);
+      if (command === "save") {
+        void saveQuickActionsConfig(quickActionsDraftConfig);
+      } else if (mutateQuickActions(command, index)) {
+        refreshQuickActionsEditorDom(panel);
+        if (command === "reset") void saveQuickActionsConfig(quickActionsDraftConfig);
+      }
+    });
+  }
+
+  function renderFeatureToggle(plugin, disabled) {
+    const enabled = isPluginSelected(plugin.id);
+    return `
+      <div class="pi-enh-module-feature" data-plugin-row="${plugin.id}">
+        <div class="pi-enh-module-feature-copy">
+          <span class="pi-enh-module-feature-name">${plugin.name}</span>
+          <span class="pi-enh-module-feature-desc">${plugin.desc}</span>
+          ${plugin.id === "session-attention-sound" ? `<button type="button" class="pi-enh-btn-sm" data-attention-sound-preview ${disabled ? "disabled" : ""}>试听审批提示音</button>` : ""}
+        </div>
+        <button type="button" role="switch" aria-checked="${enabled ? "true" : "false"}" aria-label="${plugin.name}" title="${enabled ? "点击禁用" : "点击启用"}" class="config-switch" data-plugin-toggle="${plugin.id}" ${disabled ? "disabled" : ""}>
+          <span class="config-switch-knob" aria-hidden="true"></span>
+        </button>
+      </div>`;
+  }
+
+  function renderModuleSettingControl(setting, disabled) {
+    if (setting.kind === "action") {
+      return `<button type="button" class="pi-enh-btn-sm" data-plugin-action="${setting.action}" ${disabled ? "disabled" : ""}>${setting.label}</button>`;
+    }
+    const definition = getPluginSettingDefinition(setting.featureId, setting.key);
+    if (!definition) return "";
+    const value = getPluginSetting(setting.featureId, setting.key);
+    const identity = `${setting.featureId}:${setting.key}`;
+    const legacyDataAttribute = setting.featureId === "minimap-full-nav" && setting.key === "initialTurns" ? "data-minimap-initial-turns" : setting.featureId === "minimap-full-nav" && setting.key === "stepTurns" ? "data-minimap-step-turns" : setting.featureId === "session-pin-archive" && setting.key === "retentionDays" ? "data-archive-retention-select" : "";
+    if (definition.type === "select") {
+      const getOptionLabel = (option) => {
+        if (setting.key === "autoRestoreOnPrompt") {
+          return option === 1 ? "自动唤醒（恢复至列表并置顶）" : "保持归档（不自动恢复）";
+        }
+        if (setting.key === "deviceMode") {
+          if (option === "desktop") return "强制电脑桌面（Enter 发送，Shift+Enter 换行）";
+          if (option === "mobile") return "强制移动端（Enter 换行，点击发送）";
+          return "智能自动识别（精准区分触屏电脑与手机）";
+        }
+        return option === 0 ? "永不自动删除" : `${option} 天后自动删除`;
+      };
+      return `<label class="pi-enh-plugin-number-setting"><span>${setting.label}</span><select ${legacyDataAttribute} data-plugin-setting="${identity}" aria-label="${setting.label}" ${disabled ? "disabled" : ""}>${definition.options.map((option) => `<option value="${option}" ${String(value) === String(option) ? "selected" : ""}>${getOptionLabel(option)}</option>`).join("")}</select></label>`;
+    }
+    if (definition.type === "range") {
+      const isMobile = typeof isMobileEnvironment === "function" && isMobileEnvironment();
+      const minVal = isMobile && setting.key === "maxSessions" ? 5 : definition.min;
+      const maxVal = isMobile && setting.key === "maxSessions" ? 30 : definition.max;
+      const currentVal = isMobile && setting.key === "maxSessions" ? getSessionMemoryCacheLimit() : value;
+      const hintText = isMobile && setting.key === "maxSessions" ? "(手机端默认15，推荐10~25)" : setting.key === "swipeDistance" ? "(默认30，推荐20~50)" : "(推荐 30~80)";
+      return `<div class="pi-enh-plugin-range-setting" style="display:inline-flex;align-items:center;gap:8px;flex-wrap:wrap;"><span>${setting.label}</span><input type="range" data-plugin-setting-range="${identity}" min="${minVal}" max="${maxVal}" step="${definition.step || 1}" value="${currentVal}" ${disabled ? "disabled" : ""} style="width:110px;accent-color:var(--accent,#38bdf8);cursor:pointer;" aria-label="${setting.label}滑块"><input ${legacyDataAttribute} type="number" inputmode="numeric" data-plugin-setting="${identity}" aria-label="${setting.label}" min="${minVal}" max="${maxVal}" step="${definition.step || 1}" value="${currentVal}" ${disabled ? "disabled" : ""} style="width:48px;padding:2px 4px;border-radius:5px;background:var(--bg-hover,rgba(255,255,255,0.08));border:1px solid var(--border,#27272a);color:var(--text,#f4f4f5);font-size:11.5px;text-align:center;"><span>${setting.unit || ""}</span><span style="font-size:11px;opacity:0.65;color:var(--text-muted,#a1a1aa);">${hintText}</span></div>`;
+    }
+    return `<label class="pi-enh-plugin-number-setting"><span>${setting.label}</span><input ${legacyDataAttribute} type="number" inputmode="numeric" data-plugin-setting="${identity}" aria-label="${setting.label}" min="${definition.min}" max="${definition.max}" step="1" value="${value}" ${disabled ? "disabled" : ""}><span>${setting.unit || ""}</span></label>`;
+  }
+
+  function moduleStateLabel(state) {
+    return state.state === "off" ? `已关闭 0/${state.total}` : `${state.state === "partial" ? "部分开启" : "全部开启"} ${state.active}/${state.total}`;
+  }
+
+  function getKernelHealthSummary() {
+    const kh = (typeof window !== "undefined" && window.__PI_ENH_KERNEL_HEALTH__) || null;
+    const isolatedList = Array.isArray(kh?.isolatedErrors) ? kh.isolatedErrors : [];
+    const syncErrCount = (typeof syncOperationErrors !== "undefined" && syncOperationErrors instanceof Map) ? syncOperationErrors.size : 0;
+    const totalIsolated = isolatedList.length + syncErrCount;
+    const isInline = typeof document !== "undefined" && !document.getElementById("pi-web-enhancements-script");
+    const modeLabel = isInline ? "首帧 0ms 内联直出" : "热载沙箱运行中";
+    const state = totalIsolated === 0 ? "healthy" : "isolated-warn";
+    const text = totalIsolated === 0
+      ? `微内核沙箱：0 异常 · ${modeLabel}`
+      : `微内核沙箱：已隔离 ${totalIsolated} 项异常 · ${modeLabel}`;
+    const bootTimeStr = kh?.bootedAt ? new Date(kh.bootedAt).toLocaleTimeString() : "即时";
+    const editionStr = kh?.edition || "koxir-standalone-1.0.0";
+    const detailLines = [
+      `发行版内核：${editionStr} (v${ENHANCEMENT_SUITE_VERSION})`,
+      `加载模式：${isInline ? "layout chunk 编译期静态内联 (0 网络请求 / 0ms 延迟)" : "动态热重载模式"}`,
+      `首屏同步挂载：${kh?.initialSyncCompleted !== false ? "已完成 (initialDomSyncImmediate)" : "等待中"}`,
+      `启动时间：${bootTimeStr}`,
+      `已注册插件：${ENHANCEMENT_PLUGINS.length} 项 (${ENHANCEMENT_MODULES.length} 个模块)`,
+      `异常隔离计数：${totalIsolated} 项`,
+    ];
+    if (isolatedList.length > 0) {
+      detailLines.push(`隔离详情：${isolatedList.map((e) => `${e.step}: ${e.error}`).join("; ")}`);
+    }
+    return {
+      state,
+      text,
+      title: detailLines.join(" | "),
+      totalIsolated,
+      isInline,
+    };
+  }
+
+  const KERNEL_SHIELD_SVG = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="flex-shrink:0"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path><polyline points="9 12 11 14 15 10"></polyline></svg>';
+
+  function renderKernelHealthBadgeHtml() {
+    const summary = getKernelHealthSummary();
+    return `<span class="pi-enh-kernel-health-badge" data-kernel-health-badge data-state="${summary.state}" title="${escapeQuickActionHtml(summary.title)}">${KERNEL_SHIELD_SVG}<span data-kernel-health-text>${escapeQuickActionHtml(summary.text)}</span></span>`;
+  }
+
+  function syncEnhancementPanelControls() {
+    const panel = document.querySelector(".pi-enh-plugins-panel");
+    if (!panel) return;
+    for (const row of panel.querySelectorAll("[data-module-row]")) {
+      const id = row.getAttribute("data-module-row");
+      const state = getModuleState(id);
+      if (!state) continue;
+      const disabled = !isModuleEnabled(id);
+      row.setAttribute("data-enabled", String(!disabled));
+      const master = row.querySelector("[data-module-toggle]");
+      if (master) {
+        master.setAttribute("aria-checked", state.state === "partial" ? "mixed" : String(state.state === "on"));
+        master.setAttribute("data-state", state.state);
+        master.setAttribute("title", state.active ? "关闭整组，保留子功能选择" : (state.selected ? "恢复之前的子功能选择" : "开启默认子功能（不启用实验与授权功能）"));
+      }
+      const label = row.querySelector("[data-module-status]");
+      if (label) { label.textContent = moduleStateLabel(state); label.setAttribute("data-state", state.state); }
+      const details = row.querySelector("[data-module-settings]");
+      details?.setAttribute("data-module-disabled", String(disabled));
+      for (const toggle of row.querySelectorAll("[data-plugin-toggle]")) {
+        const selected = isPluginSelected(toggle.getAttribute("data-plugin-toggle"));
+        toggle.setAttribute("aria-checked", String(selected));
+        toggle.setAttribute("title", selected ? "点击禁用" : "点击启用");
+        toggle.disabled = disabled;
+      }
+      for (const input of row.querySelectorAll("[data-plugin-setting]")) {
+        const [featureId, key] = input.getAttribute("data-plugin-setting").split(":");
+        input.disabled = disabled || !isPluginEnabled(featureId);
+        if (document.activeElement !== input) input.value = String(getPluginSetting(featureId, key));
+      }
+      for (const range of row.querySelectorAll("[data-plugin-setting-range]")) {
+        const [featureId, key] = range.getAttribute("data-plugin-setting-range").split(":");
+        range.disabled = disabled || !isPluginEnabled(featureId);
+        if (document.activeElement !== range) range.value = String(getPluginSetting(featureId, key));
+      }
+      for (const action of row.querySelectorAll("[data-plugin-action], [data-attention-sound-preview]")) action.disabled = disabled;
+    }
+    refreshQuickActionsEditorDom(panel);
+    const count = panel.querySelector("[data-enabled-count]");
+    if (count) count.textContent = `${ENHANCEMENT_MODULES.filter(m => getModuleState(m.id).active > 0).length} / ${ENHANCEMENT_MODULES.length} 个模块已启用`;
+    const khBadge = panel.querySelector("[data-kernel-health-badge]");
+    if (khBadge) {
+      const summary = getKernelHealthSummary();
+      khBadge.setAttribute("data-state", summary.state);
+      khBadge.setAttribute("title", summary.title);
+      const khText = khBadge.querySelector("[data-kernel-health-text]");
+      if (khText) khText.textContent = summary.text;
+      else khBadge.innerHTML = `${KERNEL_SHIELD_SVG}<span data-kernel-health-text>${escapeQuickActionHtml(summary.text)}</span>`;
+    }
+  }
+
+  async function resolveWindowsPiBridgeUrl() {
+    const candidates = [
+      "http://127.0.0.1:30149",
+      "http://localhost:30149",
+      "http://127.0.0.1:30149",
+    ];
+    for (const candidate of candidates) {
+      try {
+        const response = await fetch(`${candidate}/ping?_t=${Date.now()}`, {
+          cache: "no-store",
+          signal: AbortSignal.timeout(1200),
+        });
+        const identity = await response.json();
+        if (response.ok && identity?.ok === true && identity?.service === "pi-local-bridge") {
+          return candidate;
+        }
+      } catch (e) {}
+    }
+    throw new Error("Windows 本地桥接未运行（127.0.0.1:30149）");
+  }
+
+  bridgeBaseSyncUrl = null;
+  async function resolveBridgeSyncUrl() {
+    if (bridgeBaseSyncUrl) return bridgeBaseSyncUrl;
+    const hostname = (typeof window !== "undefined" && window.location?.hostname) || "127.0.0.1";
+    // On non-Windows localhost there is no desktop bridge; go directly to the NAS.
+    const candidates = /^(127\.0\.0\.1|localhost)$/.test(hostname) && !/Win/i.test(navigator.platform || "")
+      ? ["http://127.0.0.1:30149"]
+      : [`http://${hostname}:30149`, "http://127.0.0.1:30149", "http://127.0.0.1:30149"];
+    for (const cand of candidates) {
+      try {
+        const res = await fetch(`${cand}/ping`, { signal: AbortSignal.timeout(1500) });
+        if (res.ok) { bridgeBaseSyncUrl = cand; return cand; }
+      } catch (e) {}
+    }
+    bridgeBaseSyncUrl = `http://${hostname}:30149`;
+    return bridgeBaseSyncUrl;
+  }
+
+  async function updateSyncCardView(card, data) {
+    if (!card) return;
+    const badge = card.querySelector("[data-sync-badge]");
+    const sourceDetail = card.querySelector("[data-sync-source-detail]");
+    const targetDetail = card.querySelector("[data-sync-target-detail]");
+    const windowsDetail = card.querySelector("[data-sync-windows-detail]");
+    const macDetail = card.querySelector("[data-sync-mac-detail]");
+    const arrow = card.querySelector("[data-sync-arrow]");
+    const syncBtn = card.querySelector('[data-sync-action="sync"]');
+    const rollbackBtn = card.querySelector('[data-sync-action="rollback"]');
+    const isColleagueInstance = typeof window !== "undefined" && String(window.location?.port) === "30142";
+
+    const colleagueCheckbox = card.querySelector('[data-sync-target-toggle="colleague"]');
+    const windowsCheckbox = card.querySelector('[data-sync-target-toggle="windows"]');
+    const macCheckbox = card.querySelector('[data-sync-target-toggle="mac"]');
+
+    if (data?.preferences) {
+      if (colleagueCheckbox) colleagueCheckbox.checked = data.preferences.colleague !== false;
+      if (windowsCheckbox) windowsCheckbox.checked = data.preferences.windows !== false;
+      if (macCheckbox) macCheckbox.checked = data.preferences.mac !== false;
+    }
+
+    if (!data || !data.ok) {
+      if (badge) {
+        badge.setAttribute("data-state", "DISCONNECTED");
+        badge.textContent = data?.message || "同步守护未响应";
+      }
+      if (sourceDetail) sourceDetail.textContent = "守护未连接";
+      if (targetDetail) targetDetail.textContent = "守护未连接";
+      if (windowsDetail) windowsDetail.textContent = "守护未连接";
+      if (macDetail) macDetail.textContent = "守护未连接";
+      if (syncBtn) syncBtn.disabled = true;
+      if (rollbackBtn) rollbackBtn.disabled = true;
+      return;
+    }
+
+    const srcVer = data.sourceVersion ? `v${data.sourceVersion}` : `v${ENHANCEMENT_SUITE_VERSION}`;
+    const srcTime = data.sourceMtime ? new Date(data.sourceMtime).toLocaleTimeString() : "";
+
+    const colleagueInfo = data.colleague || {
+      version: data.targetVersion,
+      targetMtime: data.targetMtime,
+      isSynced: data.isColleagueSynced !== false,
+      backups: data.backups || [],
+    };
+    const dstVer = colleagueInfo.version ? `v${colleagueInfo.version}` : `v${ENHANCEMENT_SUITE_VERSION}`;
+    const dstTime = colleagueInfo.targetMtime ? new Date(colleagueInfo.targetMtime).toLocaleTimeString() : "";
+
+    const windowsInfo = data.windows;
+    const macInfo = data.mac;
+
+    if (sourceDetail) {
+      sourceDetail.textContent = `${srcVer}${srcTime ? ` · ${srcTime}` : ""} · 日常开发源`;
+    }
+    if (targetDetail) {
+      if (data.preferences && !data.preferences.colleague) {
+        targetDetail.textContent = `${dstVer}${dstTime ? ` · ${dstTime}` : ""} · 同步已暂停 (未勾选)`;
+      } else {
+        const synDesc = colleagueInfo.isSynced ? (isColleagueInstance ? "本机已热生效" : "自动热生效就绪") : "待同步最新改动";
+        targetDetail.textContent = `${dstVer}${dstTime ? ` · ${dstTime}` : ""} · ${synDesc}`;
+      }
+    }
+    if (windowsDetail) {
+      if (data.preferences && !data.preferences.windows) {
+        windowsDetail.textContent = `同步已暂停 (未勾选)${windowsInfo?.online ? "" : " · 设备离线"}`;
+      } else if (!windowsInfo || !windowsInfo.online) {
+        windowsDetail.textContent = windowsInfo?.error ? `离线待机 (${windowsInfo.error}) · 开机自动补齐` : "离线待机 · 开机后自动同步";
+      } else {
+        const winVer = windowsInfo.version ? `v${windowsInfo.version}` : "v未知";
+        const winTime = windowsInfo.targetMtime ? new Date(windowsInfo.targetMtime).toLocaleTimeString() : "";
+        const winDesc = windowsInfo.isSynced ? "自动热生效就绪" : "待同步最新改动";
+        windowsDetail.textContent = `${winVer}${winTime ? ` · ${winTime}` : ""} · ${winDesc}`;
+      }
+    }
+    if (macDetail) {
+      if (data.preferences && !data.preferences.mac) {
+        macDetail.textContent = `同步已暂停 (未勾选)${macInfo?.online ? "" : " · 设备离线"}`;
+      } else if (!macInfo || !macInfo.online) {
+        macDetail.textContent = macInfo?.error ? `离线待机 (${macInfo.error}) · 开机自动补齐` : "离线待机 · 开机后自动同步";
+      } else {
+        const macVer = macInfo.version ? `v${macInfo.version}` : "v未知";
+        const macTime = macInfo.targetMtime ? new Date(macInfo.targetMtime).toLocaleTimeString() : "";
+        const macDesc = macInfo.isSynced ? "自动热生效就绪" : "待同步最新改动";
+        macDetail.textContent = `${macVer}${macTime ? ` · ${macTime}` : ""} · ${macDesc}`;
+      }
+    }
+
+    const allSynced = data.isFullySynced;
+    if (badge) {
+      if (allSynced) {
+        badge.setAttribute("data-state", "SYNCED");
+        const disabledCount = (data.preferences ? [!data.preferences.colleague, !data.preferences.windows, !data.preferences.mac].filter(Boolean).length : 0);
+        if (isColleagueInstance) {
+          badge.textContent = `已同步 30141 最新插件 (${dstVer}) · 自动守护中`;
+        } else if (disabledCount > 0) {
+          badge.textContent = `已启用端已对齐 (${srcVer}) · ${disabledCount} 端同步已暂停`;
+        } else {
+          const winOnline = Boolean(windowsInfo?.online);
+          const macOnline = Boolean(macInfo?.online);
+          if (winOnline && macOnline) {
+            badge.textContent = `四端已完全对齐 (${srcVer}) · 自动守护运行中`;
+          } else {
+            const offlineList = [];
+            if (!winOnline) offlineList.push("Win");
+            if (!macOnline) offlineList.push("Mac");
+            badge.textContent = `已在线端已对齐 (${srcVer}) · ${offlineList.join("/")} 待机`;
+          }
+        }
+      } else {
+        badge.setAttribute("data-state", "PENDING");
+        badge.textContent = `30141 有新改动待同步至各端`;
+      }
+    }
+
+    if (arrow) {
+      arrow.textContent = "➔";
+      arrow.title = "单向流转：群晖 30141 开发源 ➔ 群晖 30142 同事端 & Windows 本地端 & MacBook 本地端";
+    }
+
+    if (syncBtn) {
+      if (isColleagueInstance) {
+        syncBtn.disabled = false;
+        syncBtn.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" class="pi-enh-inline-icon" aria-hidden="true"><path d="M23 4v6h-6M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>检查 30141 最新更新';
+        syncBtn.title = "从 30141 获取最新增强插件并热生效";
+      } else {
+        syncBtn.disabled = allSynced;
+        if (allSynced) {
+          syncBtn.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="pi-enh-inline-icon" aria-hidden="true"><polyline points="20 6 9 17 4 12"></polyline></svg>各已启用端已对齐';
+        } else {
+          syncBtn.innerHTML = '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" class="pi-enh-inline-icon" aria-hidden="true"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/></svg>立即同步至各端';
+        }
+      }
+    }
+
+    if (rollbackBtn) {
+      const hasBackups30142 = (data.backups?.length > 0) || (colleagueInfo.backups?.length > 0);
+      const hasBackupsWin = (windowsInfo?.backups?.length > 0);
+      const hasBackupsMac = (macInfo?.backups?.length > 0);
+      rollbackBtn.disabled = !hasBackups30142 && !hasBackupsWin && !hasBackupsMac;
+      rollbackBtn.title = "一键回滚 30142、Windows 或 MacBook 至最近历史快照";
+    }
+  }
+
+  async function fetchSyncStatus(card, force = false) {
+    try {
+      const bridgeUrl = await resolveBridgeSyncUrl();
+      const query = force ? "?refresh=1" : "";
+      const res = await fetch(bridgeUrl + "/sync/status" + query, { signal: AbortSignal.timeout(8000) });
+      const data = await res.json();
+      updateSyncCardView(card, data);
+      return data;
+    } catch (e) {
+      updateSyncCardView(card, { ok: false, message: "同步服务不可达" });
+      return null;
+    }
+  }
+
+  function initCrossDeviceSyncController(card) {
+    fetchSyncStatus(card);
+
+    // 绑定目标独立复选框（失败恢复 UI）
+    card.querySelectorAll("[data-sync-target-toggle]").forEach((toggle) => {
+      toggle.addEventListener("change", async () => {
+        const target = toggle.getAttribute("data-sync-target-toggle");
+        const enabled = toggle.checked;
+        const prev = !enabled;
+        const targetNames = { colleague: "30142 同事端", windows: "Windows 本地端", mac: "MacBook 本地端" };
+        const label = targetNames[target] || target;
+        toggle.disabled = true;
+
+        try {
+          const bridgeUrl = await resolveBridgeSyncUrl();
+          const res = await fetch(`${bridgeUrl}/sync/preferences`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ target, enabled }),
+            signal: AbortSignal.timeout(10000),
+          });
+          const result = await res.json();
+          if (!res.ok || !result.ok) {
+            toggle.checked = prev;
+            showToast(`设置保存失败: ${result?.error || "请求未成功"}`, null, 4000);
+          } else {
+            showToast(`${label} 自动同步已${enabled ? "开启（正在补齐最新改动）" : "暂停"}`);
+            await fetchSyncStatus(card, true);
+          }
+        } catch (err) {
+          toggle.checked = prev;
+          showToast(`更新设置异常: ${err.message}`, null, 4000);
+        } finally {
+          toggle.disabled = false;
+        }
+      });
+    });
+
+    card.querySelector('[data-sync-action="refresh"]')?.addEventListener("click", () => {
+      fetchSyncStatus(card, true);
+      showToast("已刷新 30141、30142、Windows 与 Mac 对齐状态");
+    });
+
+    card.querySelector('[data-sync-action="sync"]')?.addEventListener("click", async () => {
+      const syncBtn = card.querySelector('[data-sync-action="sync"]');
+      if (syncBtn) syncBtn.disabled = true;
+      showToast("正在将 30141 最新插件同步至各启用端并热生效…", null, 4000);
+      try {
+        const bridgeUrl = await resolveBridgeSyncUrl();
+        const res = await fetch(bridgeUrl + "/sync/execute", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ target: "all" }),
+          signal: AbortSignal.timeout(25000),
+        });
+        const result = await res.json();
+        if (result.ok) {
+          showToast(result.message || "已成功同步至目标端！", null, 3500);
+          await fetchSyncStatus(card, true);
+          if (typeof window.__PI_ENH_RELOAD__ === "function") {
+            window.__PI_ENH_RELOAD__();
+          }
+        } else {
+          showToast("同步失败: " + (result.message || result.error || "未知错误"), null, 5000);
+        }
+      } catch (e) {
+        showToast("同步异常: " + e.message, null, 5000);
+      } finally {
+        if (syncBtn) syncBtn.disabled = false;
+      }
+    });
+
+    card.querySelector('[data-sync-action="rollback"]')?.addEventListener("click", async () => {
+      const targetChoice = prompt("请选择要回滚的目标端：\\n输入 1: 回滚 30142 同事端\\n输入 2: 回滚 Windows 本地端\\n输入 3: 回滚 MacBook 本地端 (127.0.0.1)", "1");
+      if (!targetChoice) return;
+      let target = "30142";
+      let targetName = "30142 同事端";
+      if (targetChoice.trim() === "2") {
+        target = "windows";
+        targetName = "Windows 本地端";
+      } else if (targetChoice.trim() === "3") {
+        target = "mac";
+        targetName = "MacBook 本地端";
+      }
+      showToast(`正在执行 ${targetName} 版本回滚…`, null, 4000);
+      try {
+        const bridgeUrl = await resolveBridgeSyncUrl();
+        const res = await fetch(bridgeUrl + "/sync/rollback", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ target }),
+          signal: AbortSignal.timeout(20000),
+        });
+        const result = await res.json();
+        if (result.ok) {
+          showToast(result.message || `回滚成功！${targetName} 已恢复上一版本快照`, null, 3500);
+          await fetchSyncStatus(card, true);
+          if (typeof window.__PI_ENH_RELOAD__ === "function") {
+            window.__PI_ENH_RELOAD__();
+          }
+        } else {
+          showToast("回滚失败: " + (result.message || result.error || "未知错误"), null, 5000);
+        }
+      } catch (e) {
+        showToast("回滚异常: " + e.message, null, 5000);
+      }
+    });
+  }
+
+  function renderEnhancementModulesPanel(panel, nav) {
+    const enabledCount = ENHANCEMENT_MODULES.filter((module) => getModuleState(module.id).active > 0).length;
+    const categories = [...new Set(ENHANCEMENT_MODULES.map((module) => module.category))];
+    panel.innerHTML = `
+      <div class="settings-general-container pi-enh-plugins-shell">
+        <section class="pi-enh-plugins-toolbar" aria-label="增强模块管理工具栏">
+          <div class="pi-enh-plugins-heading-row">
+            <div class="pi-enh-plugins-title-wrap">
+              <h2 class="settings-general-title pi-enh-plugins-title">
+                <span>网页增强模块</span>
+                <span class="pi-enh-module-version">独立版 v${ENHANCEMENT_SUITE_VERSION}</span>
+                <span class="pi-enh-plugins-enabled-count" data-enabled-count>${enabledCount} / ${ENHANCEMENT_MODULES.length} 个模块已启用</span>
+              </h2>
+            </div>
+            <div class="pi-enh-plugins-actions" aria-label="批量操作">
+              <button type="button" class="pi-enh-btn-sm pi-enh-btn-primary" data-action="hot-reload" title="无感重新加载最新前端补丁，无需刷新或重启后台">↻ 重新热载</button>
+              <button type="button" class="pi-enh-btn-sm" data-action="force-hard-reload" title="穿透 HTTP 强缓存更新前端静态资源并强制刷新">⚡ 强制刷新</button>
+              <button type="button" class="pi-enh-btn-sm" data-action="enable-all" title="恢复各模块，保留原有子功能选择">全部恢复</button>
+              <button type="button" class="pi-enh-btn-sm" data-action="disable-all">全部关闭</button>
+              <button type="button" class="pi-enh-btn-sm" data-action="reset-defaults">恢复默认</button>
+            </div>
+          </div>
+          <p class="pi-enh-plugins-description">
+            <span>总开关：开启 / 部分开启 / 关闭。关闭保留子项选择，再次开启恢复；参数即时生效。</span>
+            ${renderKernelHealthBadgeHtml()}
+          </p>
+          <div class="pi-enh-plugins-filter-row" role="search">
+            <label class="pi-enh-plugin-search-wrap">
+              <svg class="pi-enh-plugin-search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-3.5-3.5"></path></svg>
+              <input class="pi-enh-plugin-search" type="search" data-plugin-search aria-label="搜索增强模块" placeholder="搜索模块或子功能…" autocomplete="off">
+            </label>
+            <div class="pi-enh-category-filters" role="group" aria-label="按类别筛选">
+              <button type="button" class="pi-enh-category-btn" data-plugin-category="all" aria-pressed="${enhancementPanelFilter.category === "all" ? "true" : "false"}">全部</button>
+              ${categories.map((category) => `<button type="button" class="pi-enh-category-btn" data-plugin-category="${category}" aria-pressed="${enhancementPanelFilter.category === category ? "true" : "false"}">${category}</button>`).join("")}
+            </div>
+            <span class="pi-enh-plugin-result-count" data-plugin-count aria-live="polite">共 ${ENHANCEMENT_MODULES.length} 个模块</span>
+          </div>
+        </section>
+
+        <div class="pi-enh-sync-card" data-pi-enh-sync-card>
+          <div class="pi-enh-sync-header">
+            <div class="pi-enh-sync-title-wrap">
+              <span class="pi-enh-sync-title"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="pi-enh-inline-icon" aria-hidden="true"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/></svg>跨端自动同步 (群晖 30141 开发源 ➔ 30142 同事端 &amp; Windows &amp; Mac 本地)</span>
+              <span class="pi-enh-sync-status-badge" data-sync-badge data-state="LOADING">正在检测各端对齐状态…</span>
+            </div>
+            <div class="pi-enh-sync-actions">
+              <button type="button" class="pi-enh-btn-sm pi-enh-btn-primary" data-sync-action="sync" title="立即将 30141 最新增强插件同步并热生效至各目标端">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" class="pi-enh-inline-icon" aria-hidden="true"><polyline points="20 6 9 17 4 12"></polyline></svg>立即同步至各端
+              </button>
+              <button type="button" class="pi-enh-btn-sm" data-sync-action="rollback" title="一键回滚目标端至最近一次历史快照">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" class="pi-enh-inline-icon" aria-hidden="true"><polyline points="1 4 1 10 7 10"></polyline><path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"></path></svg>回滚快照
+              </button>
+              <button type="button" class="pi-enh-btn-sm" data-sync-action="refresh" title="重新获取 30141、30142、Windows 与 Mac 的版本及对齐状态">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" class="pi-enh-inline-icon" aria-hidden="true"><path d="M23 4v6h-6M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/></svg>刷新
+              </button>
+            </div>
+          </div>
+          <div class="pi-enh-sync-body" data-sync-body>
+            <div class="pi-enh-sync-node pi-enh-sync-node-source" data-sync-node="source">
+              <span class="pi-enh-sync-node-name"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="pi-enh-inline-icon" aria-hidden="true"><rect x="2" y="2" width="20" height="8" rx="2" ry="2"></rect><rect x="2" y="14" width="20" height="8" rx="2" ry="2"></rect><line x1="6" y1="6" x2="6.01" y2="6"></line><line x1="6" y1="18" x2="6.01" y2="18"></line></svg>群晖 30141 (日常开发源)</span>
+              <span class="pi-enh-sync-node-detail" data-sync-source-detail>检测中…</span>
+            </div>
+            <div class="pi-enh-sync-arrow" data-sync-arrow>➔</div>
+            <div class="pi-enh-sync-targets-col">
+              <div class="pi-enh-sync-node" data-sync-node="target-colleague">
+                <label class="pi-enh-sync-target-check-wrap" title="开启/暂停 30142 同事端自动同步">
+                  <span class="pi-enh-sync-node-name"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="pi-enh-inline-icon" aria-hidden="true"><path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path><circle cx="9" cy="7" r="4"></circle><path d="M23 21v-2a4 4 0 0 0-3-3.87"></path><path d="M16 3.13a4 4 0 0 1 0 7.75"></path></svg>群晖 30142 (同事使用端)</span>
+                  <input type="checkbox" class="pi-enh-sync-checkbox" data-sync-target-toggle="colleague" aria-label="开启/暂停 30142 同事端自动同步" checked>
+                </label>
+                <span class="pi-enh-sync-node-detail" data-sync-target-detail>检测中…</span>
+              </div>
+              <div class="pi-enh-sync-node" data-sync-node="target-windows">
+                <label class="pi-enh-sync-target-check-wrap" title="开启/暂停 Windows 本地端自动同步">
+                  <span class="pi-enh-sync-node-name"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="pi-enh-inline-icon" aria-hidden="true"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect><line x1="8" y1="21" x2="16" y2="21"></line><line x1="12" y1="17" x2="12" y2="21"></line></svg>Windows 本地端 (127.0.0.1)</span>
+                  <input type="checkbox" class="pi-enh-sync-checkbox" data-sync-target-toggle="windows" aria-label="开启/暂停 Windows 本地端自动同步" checked>
+                </label>
+                <span class="pi-enh-sync-node-detail" data-sync-windows-detail>检测中…</span>
+              </div>
+              <div class="pi-enh-sync-node" data-sync-node="target-mac">
+                <label class="pi-enh-sync-target-check-wrap" title="开启/暂停 MacBook 本地端自动同步">
+                  <span class="pi-enh-sync-node-name"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="pi-enh-inline-icon" aria-hidden="true"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M2 20h20"/></svg>MacBook 本地端 (127.0.0.1)</span>
+                  <input type="checkbox" class="pi-enh-sync-checkbox" data-sync-target-toggle="mac" aria-label="开启/暂停 MacBook 本地端自动同步" checked>
+                </label>
+                <span class="pi-enh-sync-node-detail" data-sync-mac-detail>检测中…</span>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div class="pi-enh-pwa-card" data-pi-enh-pwa-card>
+          <div class="pi-enh-pwa-header">
+            <div class="pi-enh-pwa-title-wrap">
+              <span class="pi-enh-pwa-title"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="pi-enh-inline-icon" aria-hidden="true"><rect x="5" y="2" width="14" height="20" rx="2" ry="2"></rect><line x1="12" y1="18" x2="12.01" y2="18"></line></svg>移动端与 PWA 独立应用模式</span>
+              <span class="pi-enh-pwa-badge" data-pwa-status-badge data-standalone="${isPwaStandaloneMode() ? 'true' : 'false'}">${isPwaStandaloneMode() ? "● 原生 PWA 独立运行中" : "○ 浏览器标签页模式"}</span>
+            </div>
+            <div class="pi-enh-pwa-actions">
+              <button type="button" class="pi-enh-btn-sm pi-enh-btn-primary" data-pwa-action="copy-flag-origin" title="一键复制局域网安全源地址用于 Chrome Flags 信任">
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="pi-enh-inline-icon" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>复制局域网安全源地址
+              </button>
+            </div>
+          </div>
+          <div class="pi-enh-pwa-body">
+            <p class="pi-enh-pwa-desc">
+              ${isPwaStandaloneMode()
+                ? "当前已处于原生 PWA 独立窗口运行状态，已自动激活全面屏防误触安全区域与系统返回键防误退保护。"
+                : "在手机端 Chrome 打开时，如需像原生 App 一样全屏无地址栏运行：在手机 Chrome 访问 <code>chrome://flags/#unsafely-treat-insecure-origin-as-secure</code>，将当前地址填入并启用，即可在右上角菜单一键【安装应用】。"}
+            </p>
+          </div>
+        </div>
+
+        <div class="pi-enh-plugins-list pi-enh-modules-list">
+          ${ENHANCEMENT_MODULES.map((module) => {
+            const enabled = isModuleEnabled(module.id);
+            const disabled = !enabled;
+            const state = getModuleState(module.id);
+            const features = module.features.map((featureId) => ENHANCEMENT_PLUGINS.find((plugin) => plugin.id === featureId)).filter(Boolean);
+            return `<article class="pi-enh-plugin-item pi-enh-module-item" data-module-row="${module.id}" data-plugin-category-name="${module.category}" data-enabled="${enabled ? "true" : "false"}">
+              <div class="pi-enh-module-header">
+                <div class="pi-enh-plugin-copy">
+                  <div class="pi-enh-plugin-name-row">
+                    <span class="pi-enh-plugin-name">${module.name}</span>
+                    <span class="pi-enh-plugin-category">${module.category}</span>
+                    <span class="pi-enh-module-version">v${module.version}</span>
+                  </div>
+                  <div class="pi-enh-plugin-desc">${module.desc}</div>
+                </div>
+                <div class="pi-enh-module-master">
+                  <span class="pi-enh-module-status" id="pi-enh-status-${module.id}" data-module-status data-state="${state.state}" aria-live="polite">${moduleStateLabel(state)}</span>
+                  <button type="button" role="checkbox" aria-checked="${state.state === "partial" ? "mixed" : String(state.state === "on")}" aria-label="${module.name}总开关" aria-describedby="pi-enh-status-${module.id}" class="config-switch pi-enh-module-toggle" data-state="${state.state}" data-module-toggle="${module.id}">
+                    <span class="config-switch-knob" aria-hidden="true"></span>
+                  </button>
+                </div>
+              </div>
+                <details class="pi-enh-module-settings" data-module-settings="${module.id}" ${disabled ? "data-module-disabled=true" : ""}>
+                  <summary data-module-expand="${module.id}">配置 ${features.length} 项子功能${module.settings.length ? ` · ${module.settings.length} 项参数` : ""}</summary>
+                  <div class="pi-enh-module-settings-body" ${disabled ? "aria-disabled=true" : ""}>
+                    <div class="pi-enh-module-features">${features.map((plugin) => renderFeatureToggle(plugin, disabled)).join("")}</div>
+                    ${module.id === "composer-workflow" ? renderQuickActionsEditor(disabled || !isPluginEnabled("quick-action-buttons")) : ""}
+                    ${module.settings.length ? `<div class="pi-enh-plugin-number-settings pi-enh-module-parameters">${module.settings.map((setting) => renderModuleSettingControl(setting, disabled || (setting.featureId && !isPluginEnabled(setting.featureId)))).join("")}</div>` : ""}
+                  </div>
+                </details>
+            </article>`;
+          }).join("")}
+        </div>
+        <div class="pi-enh-plugin-empty" data-plugin-empty role="status" hidden>没有匹配的模块，请调整搜索词或分类。</div>
+      </div>`;
+
+    bindQuickActionsEditor(panel);
+    if (!window.__PI_ENH_DISABLE_QUICK_ACTION_CONTEXT_FETCH__) void loadQuickActionsConfig().then(() => refreshQuickActionsEditorDom(panel));
+
+    const searchInput = panel.querySelector("[data-plugin-search]");
+    if (searchInput) {
+      searchInput.value = enhancementPanelFilter.query;
+      searchInput.addEventListener("input", () => {
+        enhancementPanelFilter.query = searchInput.value || "";
+        applyEnhancementPanelFilter(panel);
+      });
+    }
+    for (const categoryButton of panel.querySelectorAll("[data-plugin-category]")) {
+      categoryButton.addEventListener("click", () => {
+        enhancementPanelFilter.category = categoryButton.getAttribute("data-plugin-category") || "all";
+        applyEnhancementPanelFilter(panel);
+      });
+    }
+    panel.querySelector('[data-action="hot-reload"]')?.addEventListener("click", () => {
+      if (typeof window.__PI_ENH_RELOAD__ === "function") {
+        if (typeof window.__PI_WEB_ENHANCEMENTS_CLEANUP__ === "function") {
+          try { window.__PI_WEB_ENHANCEMENTS_CLEANUP__(); } catch (e) {}
+        }
+        window.__PI_ENH_PENDING_TOAST__ = { message: "已成功热载最新补丁，会话零中断" };
+        window.__PI_ENH_RELOAD__();
+      } else showToast("已处于最新热载状态");
+    });
+    panel.querySelector('[data-action="force-hard-reload"]')?.addEventListener("click", forceHardReloadApp);
+    panel.querySelector('[data-action="enable-all"]')?.addEventListener("click", () => {
+      for (const module of ENHANCEMENT_MODULES) setModuleEnabled(module.id, true);
+      showToast("已恢复全部模块；保留原有子功能选择");
+    });
+    panel.querySelector('[data-action="disable-all"]')?.addEventListener("click", () => {
+      for (const module of ENHANCEMENT_MODULES) setModuleEnabled(module.id, false);
+      showToast("已关闭所有增强模块；子功能偏好已保留");
+    });
+    panel.querySelector('[data-action="reset-defaults"]')?.addEventListener("click", () => {
+      resetEnhancementSettings();
+      showToast("已恢复默认增强设置");
+    });
+    panel.querySelector('[data-pwa-action="copy-flag-origin"]')?.addEventListener("click", () => {
+      const origin = (typeof window !== "undefined" && window.location ? window.location.origin : "http://127.0.0.1:30141");
+      copyText(origin, "已复制局域网安全源地址: " + origin);
+      showToast("已复制地址！在手机 Chrome 访问 chrome://flags/#unsafely-treat-insecure-origin-as-secure 粘贴并启用即可一键安装 PWA", null, 6000);
+    });
+    for (const toggle of panel.querySelectorAll("[data-module-toggle]")) {
+      toggle.addEventListener("click", () => {
+        const id = toggle.getAttribute("data-module-toggle");
+        toggleModuleFromPanel(id);
+      });
+    }
+    for (const toggle of panel.querySelectorAll("[data-plugin-toggle]")) {
+      toggle.addEventListener("click", () => {
+        const id = toggle.getAttribute("data-plugin-toggle");
+        if (!toggle.disabled) setPluginEnabled(id, !isPluginSelected(id));
+      });
+    }
+    for (const range of panel.querySelectorAll("[data-plugin-setting-range]")) {
+      const identity = range.getAttribute("data-plugin-setting-range");
+      const [featureId, key] = identity.split(":");
+      const counterpartInput = panel.querySelector(`input[data-plugin-setting="${identity}"]`);
+      range.addEventListener("input", () => {
+        if (counterpartInput) counterpartInput.value = range.value;
+      });
+      range.addEventListener("change", () => {
+        const val = setPluginSetting(featureId, key, range.value);
+        range.value = String(val);
+        if (counterpartInput) counterpartInput.value = String(val);
+        showToast(`已设置 ${range.getAttribute("aria-label")?.replace("滑块", "") || "参数"}: ${val}`);
+      });
+    }
+    for (const input of panel.querySelectorAll("[data-plugin-setting]")) {
+      input.addEventListener("change", () => {
+        const identity = String(input.getAttribute("data-plugin-setting") || "");
+        const [featureId, key] = identity.split(":");
+        const value = setPluginSetting(featureId, key, input.value);
+        input.value = String(value);
+        const counterpartRange = panel.querySelector(`[data-plugin-setting-range="${identity}"]`);
+        if (counterpartRange) counterpartRange.value = String(value);
+        if (featureId === "session-pin-archive" && isPluginEnabled(featureId)) void purgeExpiredArchives();
+        showToast(`已更新 ${input.getAttribute("aria-label") || "参数"}: ${value}`);
+      });
+    }
+    for (const action of panel.querySelectorAll("[data-plugin-action]")) {
+      action.addEventListener("click", async () => {
+        const type = action.getAttribute("data-plugin-action");
+        if (type === "clear-session-cache") {
+          await clearSessionCaches();
+          showToast("已清空会话缓存");
+        } else if (type === "download-crash-diagnostics") {
+          window.__PI_ENH_CRASH_DIAGNOSTICS__?.download();
+        } else if (type === "request-desktop-notification") {
+          await requestDesktopAttentionPermission();
+        } else if (type === "sync-pinned-manifest") {
+          showToast("正在读取统一置顶配置...", sessionPinIcon, 2000);
+          await syncManifestPinnedEntries(true);
+          showToast("已同步统一置顶配置，正在刷新页面...", sessionPinIcon, 1500);
+          setTimeout(() => {
+            if (typeof window !== "undefined" && window.location && typeof window.location.reload === "function") {
+              window.location.reload();
+            }
+          }, 350);
+        }
+      });
+    }
+    syncEnhancementPanelControls();
+    const syncCard = panel.querySelector("[data-pi-enh-sync-card]");
+    if (syncCard) {
+      initCrossDeviceSyncController(syncCard);
+    }
+    applyEnhancementPanelFilter(panel);
+  }
+
+  function applyEnhancementPanelFilter(panel) {
+    const query = enhancementPanelFilter.query.trim().toLocaleLowerCase();
+    let visibleCount = 0;
+
+    for (const row of panel.querySelectorAll("[data-module-row]")) {
+      const module = getEnhancementModule(row.getAttribute("data-module-row"));
+      const featureText = module?.features.map((featureId) => {
+        const plugin = ENHANCEMENT_PLUGINS.find((item) => item.id === featureId);
+        return plugin ? `${plugin.name} ${plugin.desc}` : "";
+      }).join(" ") || "";
+      const matchesCategory = enhancementPanelFilter.category === "all" || module?.category === enhancementPanelFilter.category;
+      const searchable = module ? `${module.name} ${module.desc} ${module.category} ${featureText}`.toLocaleLowerCase() : "";
+      const visible = Boolean(matchesCategory && (!query || searchable.includes(query)));
+      row.hidden = !visible;
+      if (visible) visibleCount += 1;
+    }
+
+    for (const button of panel.querySelectorAll("[data-plugin-category]")) {
+      const active = button.getAttribute("data-plugin-category") === enhancementPanelFilter.category;
+      button.setAttribute("aria-pressed", active ? "true" : "false");
+    }
+
+    const resultCount = panel.querySelector("[data-plugin-count]");
+    if (resultCount) {
+      const filtering = Boolean(query || enhancementPanelFilter.category !== "all");
+      resultCount.textContent = filtering ? `显示 ${visibleCount} / ${ENHANCEMENT_MODULES.length} 个模块` : `共 ${ENHANCEMENT_MODULES.length} 个模块`;
+    }
+    const emptyState = panel.querySelector("[data-plugin-empty]");
+    if (emptyState) emptyState.hidden = visibleCount !== 0;
+  }
+
+  function renderEnhancementsPanel(panel, nav) {
+    // Keep the v3 renderer as a one-release recovery surface while v4 modules
+    // migrate existing browser preferences. Normal users always get modules.
+    if (!window.__PI_ENH_LEGACY_SETTINGS_RENDERER__) return renderEnhancementModulesPanel(panel, nav);
+
+    const enabledCount = ENHANCEMENT_PLUGINS.filter((p) => isPluginEnabled(p.id)).length;
+    const categories = [...new Set(ENHANCEMENT_PLUGINS.map((plugin) => plugin.category))];
+    const archivedSessionIds = [...readStoredSessionIds(ARCHIVED_SESSION_STORAGE_KEY)];
+    panel.innerHTML = `
+      <div class="settings-general-container pi-enh-plugins-shell">
+        <section class="pi-enh-plugins-toolbar" aria-label="增强插件管理工具栏">
+          <div class="pi-enh-plugins-heading-row">
+            <div class="pi-enh-plugins-title-wrap">
+              <h2 class="settings-general-title pi-enh-plugins-title">
+                <span>网页增强插件</span>
+                <span class="pi-enh-plugins-enabled-count" data-enabled-count>${enabledCount} / ${ENHANCEMENT_PLUGINS.length} 已启用</span>
+              </h2>
+              <p class="pi-enh-plugins-description">管理网页端交互、显示及保护增强特性。设置即时生效，并保存在当前浏览器。</p>
+            </div>
+            <div class="pi-enh-plugins-actions" aria-label="批量操作">
+              <button type="button" class="pi-enh-btn-sm pi-enh-btn-primary" data-action="hot-reload" title="无感重新加载最新前端补丁，无需刷新或重启后台">↻ 重新热载</button>
+              <button type="button" class="pi-enh-btn-sm" data-action="force-hard-reload" style="color: #fca5a5; border-color: rgba(239, 68, 68, 0.38);" title="穿透 HTTP 强缓存更新前端静态资源并强制刷新">⚡ 强制刷新</button>
+              <button type="button" class="pi-enh-btn-sm" data-action="enable-all" title="开启全部增强">全部开启</button>
+              <button type="button" class="pi-enh-btn-sm" data-action="disable-all" title="关闭全部增强">全部关闭</button>
+              <button type="button" class="pi-enh-btn-sm" data-action="reset-defaults" title="恢复默认开启状态">恢复默认</button>
+            </div>
+          </div>
+          <div class="pi-enh-plugins-filter-row" role="search">
+            <label class="pi-enh-plugin-search-wrap">
+              <svg class="pi-enh-plugin-search-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-3.5-3.5"></path></svg>
+              <input class="pi-enh-plugin-search" type="search" data-plugin-search aria-label="搜索增强插件" placeholder="搜索插件…" autocomplete="off">
+            </label>
+            <div class="pi-enh-category-filters" role="group" aria-label="按类别筛选">
+              <button type="button" class="pi-enh-category-btn" data-plugin-category="all" aria-pressed="${enhancementPanelFilter.category === "all" ? "true" : "false"}">全部</button>
+              ${categories.map((category) => `<button type="button" class="pi-enh-category-btn" data-plugin-category="${category}" aria-pressed="${enhancementPanelFilter.category === category ? "true" : "false"}">${category}</button>`).join("")}
+            </div>
+            <span class="pi-enh-plugin-result-count" data-plugin-count aria-live="polite">共 ${ENHANCEMENT_PLUGINS.length} 个</span>
+          </div>
+        </section>
+
+        <div class="pi-enh-plugins-list">
+          ${ENHANCEMENT_PLUGINS.map((plugin) => {
+            const enabled = isPluginEnabled(plugin.id);
+            return `
+              <div class="pi-enh-plugin-item" data-plugin-row="${plugin.id}" data-plugin-category-name="${plugin.category}" data-enabled="${enabled ? "true" : "false"}">
+                <div class="pi-enh-plugin-copy">
+                  <div class="pi-enh-plugin-name-row">
+                    <span class="pi-enh-plugin-name">${plugin.name}</span>
+                    <span class="pi-enh-plugin-category">${plugin.category}</span>
+                  </div>
+                  <div class="pi-enh-plugin-desc">${plugin.desc}</div>
+                  ${plugin.id === "session-memory-cache" ? `
+                    <div class="pi-enh-cache-settings-row" style="margin-top: 8px; display: flex; align-items: center; flex-wrap: wrap; gap: 8px; font-size: 12px; color: var(--text-muted, #a1a1aa);">
+                      <span>缓存上限：</span>
+                      <input type="range" data-session-cache-limit-range min="${typeof isMobileEnvironment === "function" && isMobileEnvironment() ? 5 : 15}" max="${typeof isMobileEnvironment === "function" && isMobileEnvironment() ? 30 : 100}" step="5" value="${getSessionMemoryCacheLimit()}" style="width: 110px; accent-color: var(--accent, #38bdf8); cursor: pointer;" aria-label="会话缓存容量滑块">
+                      <input type="number" data-session-cache-limit-input min="${typeof isMobileEnvironment === "function" && isMobileEnvironment() ? 5 : 15}" max="${typeof isMobileEnvironment === "function" && isMobileEnvironment() ? 30 : 100}" step="5" value="${getSessionMemoryCacheLimit()}" style="width: 48px; padding: 2px 4px; border-radius: 5px; background: var(--bg-hover, rgba(255,255,255,0.08)); border: 1px solid var(--border, #27272a); color: var(--text, #f4f4f5); font-size: 11.5px; text-align: center;" aria-label="会话缓存容量数值">
+                      <span>个会话</span>
+                      <span style="font-size: 11px; opacity: 0.65;">${typeof isMobileEnvironment === "function" && isMobileEnvironment() ? "(手机端默认15，推荐10~25)" : "(推荐 30~80)"}</span>
+                    </div>
+                    <div class="pi-enh-cache-toolbar" style="margin-top: 6px; display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text-muted, #a1a1aa);">
+                      <span data-cache-count-label>内存 ${sessionMemoryCache.size}/${getSessionMemoryCacheLimit()} · 持久 ${Object.keys(persistentSessionManifest).length} 个会话</span>
+                      <button type="button" class="pi-enh-btn-sm" data-action="clear-session-cache" style="padding: 2px 8px; font-size: 11px;">🧹 清空缓存</button>
+                    </div>
+                  ` : ""}
+                  ${plugin.id === "minimap-full-nav" ? `
+                    <div class="pi-enh-plugin-number-settings" aria-label="会话导航轮数设置">
+                      <label class="pi-enh-plugin-number-setting">
+                        <span>初始显示</span>
+                        <input data-minimap-initial-turns min="1" max="50" step="1" value="${getMinimapHistorySettings().initialTurns}" type="number" inputmode="numeric" aria-label="会话导航初始显示轮数">
+                        <span>轮</span>
+                      </label>
+                      <label class="pi-enh-plugin-number-setting">
+                        <span>每次加载</span>
+                        <input data-minimap-step-turns min="1" max="50" step="1" value="${getMinimapHistorySettings().stepTurns}" type="number" inputmode="numeric" aria-label="会话导航每次加载轮数">
+                        <span>轮</span>
+                      </label>
+                    </div>
+                  ` : ""}
+                  ${plugin.id === "session-attention-sound" ? `<button type="button" class="config-btn" data-attention-sound-preview>试听审批提示音</button>` : ""}
+                  ${plugin.id === "session-attention-desktop" ? `
+                    <button type="button" class="config-btn" data-desktop-notification-permission style="margin-top:8px">${typeof Notification !== "undefined" && Notification.permission === "granted" ? "通知权限已允许" : "手动授权浏览器通知"}</button>
+                  ` : ""}
+                  ${plugin.id === "session-pin-archive" ? `
+                    <div style="margin-top: 8px; display: flex; align-items: center; flex-wrap: wrap; gap: 8px; font-size: 12px; color: var(--text-muted, #a1a1aa);">
+                      <span>归档保留期限：</span>
+                      <select data-archive-retention-select style="padding: 2px 8px; border-radius: 5px; background: var(--bg-hover, rgba(255,255,255,0.08)); border: 1px solid var(--border, #27272a); color: var(--text, #f4f4f5); font-size: 11.5px;">
+                        <option value="7">7 天后自动删除</option>
+                        <option value="30">30 天后自动删除</option>
+                        <option value="60">60 天后自动删除 (默认)</option>
+                        <option value="90">90 天后自动删除</option>
+                        <option value="180">180 天后自动删除</option>
+                        <option value="0">永不自动删除</option>
+                      </select>
+                      <span style="margin-left: 6px;">新任务唤醒：</span>
+                      <select data-archive-auto-restore-select style="padding: 2px 8px; border-radius: 5px; background: var(--bg-hover, rgba(255,255,255,0.08)); border: 1px solid var(--border, #27272a); color: var(--text, #f4f4f5); font-size: 11.5px;">
+                        <option value="1">自动唤醒（恢复至列表并置顶）</option>
+                        <option value="0">保持归档（不自动恢复）</option>
+                      </select>
+                    </div>
+                  ` : ""}
+                </div>
+                <button type="button" role="switch" aria-checked="${enabled ? "true" : "false"}" aria-label="${plugin.name}" title="${enabled ? "点击禁用" : "点击启用"}" class="config-switch" data-plugin-toggle="${plugin.id}">
+                  <span class="config-switch-knob" aria-hidden="true"></span>
+                </button>
+              </div>
+            `;
+          }).join("")}
+        </div>
+        <div class="pi-enh-plugin-empty" data-plugin-empty role="status" hidden>没有匹配的插件，请调整搜索词或分类。</div>
+      </div>
+    `;
+
+    const searchInput = panel.querySelector("[data-plugin-search]");
+    if (searchInput) {
+      searchInput.value = enhancementPanelFilter.query;
+      searchInput.addEventListener("input", () => {
+        enhancementPanelFilter.query = searchInput.value || "";
+        applyEnhancementPanelFilter(panel);
+      });
+    }
+    for (const categoryButton of panel.querySelectorAll("[data-plugin-category]")) {
+      categoryButton.addEventListener("click", () => {
+        enhancementPanelFilter.category = categoryButton.getAttribute("data-plugin-category") || "all";
+        applyEnhancementPanelFilter(panel);
+      });
+    }
+
+    // Bind action buttons
+    panel.querySelector('[data-action="hot-reload"]')?.addEventListener("click", () => {
+      if (typeof window.__PI_ENH_RELOAD__ === "function") {
+        if (typeof window.__PI_WEB_ENHANCEMENTS_CLEANUP__ === "function") {
+          try { window.__PI_WEB_ENHANCEMENTS_CLEANUP__(); } catch (e) {}
+        }
+        window.__PI_ENH_PENDING_TOAST__ = { message: "已成功热载最新补丁，会话零中断" };
+        window.__PI_ENH_RELOAD__();
+        addManagedTimeout(() => renderEnhancementsPanel(panel, nav), 200);
+      } else {
+        showToast("已处于最新热载状态");
+      }
+    });
+
+    panel.querySelector('[data-action="force-hard-reload"]')?.addEventListener("click", forceHardReloadApp);
+
+    panel.querySelector('[data-action="enable-all"]')?.addEventListener("click", () => {
+      for (const p of ENHANCEMENT_PLUGINS) setPluginEnabled(p.id, true);
+      renderEnhancementsPanel(panel, nav);
+      showToast("已开启所有增强插件");
+    });
+    panel.querySelector('[data-action="disable-all"]')?.addEventListener("click", () => {
+      for (const p of ENHANCEMENT_PLUGINS) setPluginEnabled(p.id, false);
+      renderEnhancementsPanel(panel, nav);
+      showToast("已关闭所有增强插件");
+    });
+    panel.querySelector('[data-action="reset-defaults"]')?.addEventListener("click", () => {
+      for (const p of ENHANCEMENT_PLUGINS) setPluginEnabled(p.id, p.defaultEnabled);
+      renderEnhancementsPanel(panel, nav);
+      showToast("已恢复默认增强设置");
+    });
+
+    panel.querySelector('[data-action="clear-session-cache"]')?.addEventListener("click", async () => {
+      await clearSessionCaches();
+      const label = panel.querySelector("[data-cache-count-label]");
+      if (label) label.textContent = `内存 0/${getSessionMemoryCacheLimit()} · 持久 0 个会话`;
+      showToast("已清空会话双层缓存");
+    });
+
+    const sessionCacheRange = panel.querySelector("[data-session-cache-limit-range]");
+    const sessionCacheInput = panel.querySelector("[data-session-cache-limit-input]");
+    if (sessionCacheRange && sessionCacheInput) {
+      sessionCacheRange.addEventListener("input", () => {
+        sessionCacheInput.value = sessionCacheRange.value;
+      });
+      const updateSessionCacheLimit = (val) => {
+        const nextLimit = setSessionMemoryCacheLimit(val);
+        sessionCacheRange.value = String(nextLimit);
+        sessionCacheInput.value = String(nextLimit);
+        const countLabel = panel.querySelector("[data-cache-count-label]");
+        if (countLabel) countLabel.textContent = `内存 ${sessionMemoryCache.size}/${nextLimit} · 持久 ${Object.keys(persistentSessionManifest).length} 个会话`;
+        showToast(`已设置会话缓存上限为 ${nextLimit} 个会话`);
+      };
+      sessionCacheRange.addEventListener("change", () => updateSessionCacheLimit(sessionCacheRange.value));
+      sessionCacheInput.addEventListener("change", () => updateSessionCacheLimit(sessionCacheInput.value));
+    }
+
+    for (const restoreButton of panel.querySelectorAll('[data-action="restore-archived-session"]')) {
+      restoreButton.addEventListener("click", () => {
+        let sessionId = "";
+        try { sessionId = decodeURIComponent(restoreButton.getAttribute("data-session-id") || ""); } catch (e) {}
+        if (!restoreArchivedSession(sessionId)) return;
+        requestSessionListRefresh();
+        renderEnhancementsPanel(panel, nav);
+        showToast("已还原会话", sessionArchiveIcon);
+      });
+    }
+
+    const retentionSelect = panel.querySelector("[data-archive-retention-select]");
+    if (retentionSelect) {
+      retentionSelect.value = String(getArchiveRetentionDays());
+      retentionSelect.addEventListener("change", () => {
+        const days = setArchiveRetentionDays(retentionSelect.value);
+        showToast(days > 0 ? `已设置归档满 ${days} 天自动删除` : "已设置为永不自动删除归档会话");
+        purgeExpiredArchives();
+      });
+    }
+
+    const minimapInitialInput = panel.querySelector("[data-minimap-initial-turns]");
+    if (minimapInitialInput) {
+      minimapInitialInput.addEventListener("change", () => {
+        const turns = setMinimapInitialTurns(minimapInitialInput.value);
+        minimapInitialInput.value = String(turns);
+        showToast(`会话导航初始显示 ${turns} 轮`);
+      });
+    }
+    const minimapStepInput = panel.querySelector("[data-minimap-step-turns]");
+    if (minimapStepInput) {
+      minimapStepInput.addEventListener("change", () => {
+        const turns = setMinimapStepTurns(minimapStepInput.value);
+        minimapStepInput.value = String(turns);
+        showToast(`会话导航每次加载 ${turns} 轮`);
+      });
+    }
+
+    panel.querySelector("[data-desktop-notification-permission]")?.addEventListener("click", () => { void requestDesktopAttentionPermission(); });
+
+    // Bind toggles
+    for (const toggle of panel.querySelectorAll("[data-plugin-toggle]")) {
+      toggle.addEventListener("click", () => {
+        const id = toggle.getAttribute("data-plugin-toggle");
+        const plugin = ENHANCEMENT_PLUGINS.find((p) => p.id === id);
+        const current = toggle.getAttribute("aria-checked") === "true";
+        const next = !current;
+        setPluginEnabled(id, next);
+        toggle.setAttribute("aria-checked", next ? "true" : "false");
+        toggle.setAttribute("title", next ? "点击禁用" : "点击启用");
+        const row = toggle.closest("[data-plugin-row]");
+        if (row) row.setAttribute("data-enabled", next ? "true" : "false");
+        showToast(`${next ? "已启用" : "已停用"}: ${plugin ? plugin.name : id}`);
+        const countBadge = panel.querySelector("[data-enabled-count]");
+        if (countBadge) {
+          const newCount = ENHANCEMENT_PLUGINS.filter((p) => isPluginEnabled(p.id)).length;
+          countBadge.textContent = `${newCount} / ${ENHANCEMENT_PLUGINS.length} 已启用`;
+        }
+      });
+    }
+    applyEnhancementPanelFilter(panel);
+  }
+
+  // ==========================================
+  // Silent ETag / Mtime Poller (静默热载探针)
+  // ==========================================
+  currentScriptTag = null;
+  pollerIntervalId = null;
+
+  function isBrowserIdleForHotReload() {
+    const isBusy = typeof isLiveRunning === "function" ? isLiveRunning() : Boolean(findActiveStopButton());
+    if (isBusy) return false;
+    const active = document.activeElement;
+    if (active && (active.tagName === "TEXTAREA" || active.tagName === "INPUT" || active.isContentEditable)) {
+      return false;
+    }
+    if (document.querySelector(".pi-enh-menu, .pi-enh-quote-bar, .pi-enh-annotation-editor, .pi-enh-annotation-list")) {
+      return false;
+    }
+    return true;
+  }
+
+  async function checkScriptUpdate() {
+    if (isLoginPage()) return;
+    try {
+      const res = await fetch("/pi-web-enhancements.js", { method: "HEAD", cache: "no-cache" });
+      if (!res.ok) return;
+      const tag = res.headers.get("etag") || res.headers.get("last-modified");
+      if (!tag) return;
+      if (currentScriptTag === null) {
+        currentScriptTag = tag;
+        return;
+      }
+      if (tag !== currentScriptTag) {
+        if (!isBrowserIdleForHotReload()) return;
+        currentScriptTag = tag;
+        if (typeof window.__PI_ENH_RELOAD__ === "function") {
+          if (typeof window.__PI_WEB_ENHANCEMENTS_CLEANUP__ === "function") {
+            try { window.__PI_WEB_ENHANCEMENTS_CLEANUP__(); } catch (e) {}
+          }
+          // 静默无感热载，控制台记录即可，绝不弹窗打扰用户
+          console.log("[Pi Web Enhancements] Silently reloading latest patch...");
+          window.__PI_ENH_RELOAD__();
+        }
+      }
+    } catch (e) {}
+  }
+
+  // 遵照 AGENTS.md 铁律：网页增强脚本改动一律只同步纯静态文件，由用户自主决定何时刷新页面或重启。
+  // 严禁在浏览器后台运行每3秒的高频热载轮询，防止在用户正常交互与流式输出期间突然销毁 DOM 与掐断 EventSource 连接导致页面崩溃。
+  // 若需手动检查更新，可通过控制台调用 window.__PI_ENH_CHECK_UPDATE__()
+  window.__PI_ENH_CHECK_UPDATE__ = checkScriptUpdate;
+
+  // Register clean teardown hook for safe zero-downtime hot-reloads
+  window.__PI_WEB_ENHANCEMENTS_CLEANUP__ = function () {
+    if (isDisposed) return;
+    isDisposed = true;
+
+    try {
+      // 0. Disconnect and restore document title observer and descriptor (only restore if still owned)
+      if (titleObserver) {
+        try { titleObserver.disconnect(); } catch (e) {}
+        titleObserver = null;
+      }
+      if (headObserver) {
+        try { headObserver.disconnect(); } catch (e) {}
+        headObserver = null;
+      }
+      if (typeof document !== "undefined" && installedTitleGetter) {
+        try {
+          const curDesc = Object.getOwnPropertyDescriptor(document, "title");
+          if (curDesc && curDesc.get === installedTitleGetter && curDesc.set === installedTitleSetter) {
+            if (hadOwnTitleDesc && prevOwnTitleDesc) {
+              try { Object.defineProperty(document, "title", prevOwnTitleDesc); } catch (e) {}
+            } else {
+              try { delete document.title; } catch (e) {}
+            }
+          }
+        } catch (e) {}
+      }
+
+      // 1. Disconnect and nullify MutationObserver to prevent infinite loops and memory leaks
+      if (chatObserver) {
+        try { chatObserver.disconnect(); } catch (e) {}
+        chatObserver = null;
+      }
+      if (sidebarObserver) {
+        try { sidebarObserver.disconnect(); } catch (e) {}
+        sidebarObserver = null;
+      }
+      observedTarget = null;
+      isMutatingInternally = false;
+      syncScheduled = false;
+      hasDeferredSync = false;
+      if (domSyncTimerId !== null) {
+        try { clearTimeout(domSyncTimerId); } catch (e) {}
+        domSyncTimerId = null;
+      }
+      if (domSyncFrameId !== null && typeof cancelAnimationFrame === "function") {
+        try { cancelAnimationFrame(domSyncFrameId); } catch (e) {}
+        domSyncFrameId = null;
+      }
+
+      // 2. Abort pending metrics requests and invalidate token
+      ++metricsScheduleToken;
+      if (metricsScheduleTimer !== null) {
+        try { clearManagedTimeout(metricsScheduleTimer); } catch (e) {}
+        metricsScheduleTimer = null;
+      }
+      if (metricsAbortController) {
+        try { metricsAbortController.abort(); } catch (e) {}
+        metricsAbortController = null;
+      }
+
+      // 2.1 Clear pending models-config debounces and resolve pending resolvers to false
+      if (pendingPersistDecorationsTimer) {
+        clearTimeout(pendingPersistDecorationsTimer);
+        pendingPersistDecorationsTimer = null;
+      }
+      while (pendingPersistDecorationsResolvers.length > 0) {
+        try { pendingPersistDecorationsResolvers.shift()(false); } catch (e) {}
+      }
+
+      if (pendingPersistArchivedTimer) {
+        clearTimeout(pendingPersistArchivedTimer);
+        pendingPersistArchivedTimer = null;
+      }
+      while (pendingPersistArchivedResolvers.length > 0) {
+        try { pendingPersistArchivedResolvers.shift()(false); } catch (e) {}
+      }
+
+      if (pendingPersistPinnedTimer) {
+        clearTimeout(pendingPersistPinnedTimer);
+        pendingPersistPinnedTimer = null;
+      }
+      while (pendingPersistPinnedResolvers.length > 0) {
+        try { pendingPersistPinnedResolvers.shift()(false); } catch (e) {}
+      }
+
+      // 2.2 Abort any inflight models-config bounded fetches
+      for (const controller of activeModelsConfigAbortControllers) {
+        try { controller.abort(); } catch (e) {}
+      }
+      activeModelsConfigAbortControllers.clear();
+
+      // 2.3 Cancel pending session revalidations
+      for (const handle of activeRevalidationHandles) {
+        try {
+          if (handle.type === "idle" && typeof window !== "undefined" && typeof window.cancelIdleCallback === "function") {
+            window.cancelIdleCallback(handle.id);
+          } else if (handle.type === "timeout") {
+            clearTimeout(handle.id);
+          }
+        } catch (e) {}
+      }
+      activeRevalidationHandles.clear();
+
+      // 2.4 Clear queue message detail cache and bump generation
+      clearQueueDetailCache();
+
+      // 3. Clear all managed active event listeners and timers
+      while (activeCleanups.length > 0) {
+        try {
+          const cleanup = activeCleanups.pop();
+          cleanup();
+        } catch (e) {}
+      }
+      managedTimeoutCleanups.clear();
+
+      if (restoreTitleTimer !== null) {
+        try { clearManagedTimeout(restoreTitleTimer); } catch (e) {}
+        restoreTitleTimer = null;
+      }
+
+      // Explicitly clear legacy interval handles if any
+      try { clearInterval(mainSyncIntervalId); } catch (e) {}
+      try { clearInterval(liveStopwatchIntervalId); } catch (e) {}
+      try { clearInterval(thinkingIntervalId); } catch (e) {}
+      try { clearInterval(pollerIntervalId); } catch (e) {}
+      try { clearInterval(projectStatusIntervalId); } catch (e) {}
+      try { setProjectStatusMonitoring(false); } catch (e) {}
+      isProjectStatusMonitoringActive = false;
+
+      // 4. Thorough DOM cleanup
+      removeAskUserWebNative();
+      removeQuickActionButtons();
+      removeScrollBottomButton();
+      removeLocalPathLauncher();
+      removeProjectStatusIndicators();
+      removeCompactionEnhancements();
+      removeOrphanProcessBars();
+      document.documentElement?.classList.remove("pi-enh-tool-collapse-active");
+      document.documentElement?.classList.remove("pi-enh-native-message-font-active");
+      removeDraftRestoredBadge();
+      removeSessionPinArchiveControls();
+      if (typeof setSessionBatchMode === "function") setSessionBatchMode(false);
+      if (typeof removeSessionBatchTrigger === "function") removeSessionBatchTrigger();
+      if (typeof removeSessionBatchBar === "function") removeSessionBatchBar();
+      if (typeof closeBatchDeleteModal === "function") closeBatchDeleteModal();
+      removeComposerFilePaste();
+      removeComposerImageZoom();
+      removeImageDblClickPreview();
+      syncStreamingThinkingGuard(false);
+      removeAnnotationUi();
+      removeBottomShortcutsBar();
+      clearModelScopeWarningVisibility();
+      if (typeof cleanupSessionScrollTracking === "function") {
+        try { cleanupSessionScrollTracking(); } catch (e) {}
+      }
+      // 清除可能存在的 Toast 节点与定时器，绝不在样式卸载时残留 DOM 导致掉落到左下角
+      if (typeof dismissToast === "function") {
+        try { dismissToast(true); } catch (e) {}
+      }
+      for (const el of document.querySelectorAll(".pi-enh-menu, .pi-enh-quote-bar, #pi-enh-protocol-frame, .pi-enh-draft-badge, .pi-enh-plugins-panel, .pi-enh-notifications-panel, .pi-enh-archived-panel, [data-pi-enh-tab], .pi-enh-search-group-divider, .pi-enh-search-archived-badge, .pi-enh-search-restore-btn, .pi-enh-attachments-bar, .pi-enh-attachment-card, dialog.pi-enh-image-zoom-dialog, .pi-enh-toast, .pi-enh-annotation-rail")) {
+        try { el.remove(); } catch (e) {}
+      }
+      if (durationTooltip && durationTooltip.parentNode) {
+        try { durationTooltip.parentNode.removeChild(durationTooltip); } catch (e) {}
+        durationTooltip = null;
+      }
+      if (usageTooltip && usageTooltip.parentNode) {
+        try { usageTooltip.parentNode.removeChild(usageTooltip); } catch (e) {}
+        usageTooltip = null;
+      }
+      activeTooltipType = null;
+      if (styleEl && styleEl.parentNode) {
+        try { styleEl.parentNode.removeChild(styleEl); } catch (e) {}
+      }
+      for (const s of document.querySelectorAll("#pi-web-enhancements-style")) {
+        try { s.remove(); } catch (e) {}
+      }
+      delete window.__PI_WEB_ENHANCEMENTS_LOADED__;
+      for (const b of document.querySelectorAll(".pi-enh-duration-badge")) {
+        try { b.remove(); } catch (e) {}
+      }
+      for (const h of document.querySelectorAll(".pi-enh-minimap-header")) {
+        try { h.remove(); } catch (e) {}
+      }
+
+      delete window.__PI_ENH_ACTIVE_CLEANUPS_COUNT__;
+      delete window.__PI_ENH_CLEAR_MANAGED_TIMEOUT__;
+      delete window.__PI_ENH_ADD_MANAGED_TIMEOUT__;
+      delete window.__PI_ENH_WITH_MUTATION_GUARD__;
+      delete window.__PI_ENH_SCHEDULE_DOM_SYNC__;
+      delete window.__PI_ENH_HAS_DEFERRED_SYNC__;
+      delete window.__PI_ENH_SCHEDULE_CURRENT_SESSION_METRICS__;
+      delete window.__PI_ENH_METRICS_ABORT_CONTROLLER__;
+      delete window.__PI_ENH_IS_PROJECT_STATUS_MONITORING__;
+      delete window.__PI_ENH_SYNC_COMPACTION__;
+      delete window.__PI_ENH_REMOVE_COMPACTION__;
+      delete window.__PI_ENH_FETCH_QUEUED_MESSAGE_DETAIL__;
+      delete window.__PI_ENH_GET_QUEUE_DETAIL_CACHE_STATS__;
+      delete window.__PI_ENH_RECONCILE_USER_MESSAGE__;
+      delete window.__PI_ENH_SESSION_HISTORY_ORDER_GUARD__;
+    } catch (e) {
+      console.warn("[Pi Web Enhancements] cleanup warning:", e);
+    }
+  };
+
+  window.__PI_ENH_ACTIVE_CLEANUPS_COUNT__ = () => activeCleanups.length;
+  window.__PI_ENH_CLEAR_MANAGED_TIMEOUT__ = clearManagedTimeout;
+  window.__PI_ENH_ADD_MANAGED_TIMEOUT__ = addManagedTimeout;
+  window.__PI_ENH_WITH_MUTATION_GUARD__ = withMutationGuard;
+  window.__PI_ENH_SCHEDULE_DOM_SYNC__ = scheduleDomSync;
+  window.__PI_ENH_HAS_DEFERRED_SYNC__ = () => hasDeferredSync;
+  window.__PI_ENH_SCHEDULE_CURRENT_SESSION_METRICS__ = scheduleCurrentSessionMetrics;
+  Object.defineProperty(window, "__PI_ENH_METRICS_ABORT_CONTROLLER__", {
+    configurable: true,
+    get() { return metricsAbortController; }
+  });
+  window.__PI_ENH_IS_PROJECT_STATUS_MONITORING__ = () => isProjectStatusMonitoringActive;
+  window.__PI_ENH_SYNC_COMPACTION__ = syncCompactionCards;
+  window.__PI_ENH_REMOVE_COMPACTION__ = removeCompactionEnhancements;
+  window.__PI_ENH_FETCH_QUEUED_MESSAGE_DETAIL__ = fetchQueuedMessageDetail;
+  window.__PI_ENH_GET_QUEUE_ATTACHMENT_REVISION__ = () => queueAttachmentRevision;
+  window.__PI_ENH_GET_QUEUE_DETAIL_CACHE_STATS__ = () => ({
+    count: queuedMessageDetailCache.size,
+    bytes: currentQueueDetailCacheBytes,
+    generation: queueDetailCacheGeneration,
+    inFlightCount: queuedMessageDetailInFlight.size,
+  });
+  window.__PI_ENH_SESSION_HISTORY_ORDER_GUARD__ = {
+    handleStreamEvent: handleSessionHistoryOrderStreamEvent,
+    handleAction: handleSessionHistoryOrderAction,
+    wrapFetch: wrapSessionHistoryOrderGuard,
+    shouldProtect: shouldProtectSessionHistoryOrder,
+    isMessagesUpToDate: isMessagesUpToDateWithWatermark,
+    clearState: clearSessionHistoryOrderState,
+    getState: getOrCreateHistoryOrderState,
+    extractNormalizedHistoryKey,
+  };
+  window.__PI_ENH_IS_PLUGIN_ENABLED__ = isPluginEnabled;
+
+  const kernelHealth = window.__PI_ENH_KERNEL_HEALTH__ || {
+    edition: "koxir-standalone-1.0.0",
+    version: "1.0.0",
+    bootedAt: Date.now(),
+    initialSyncCompleted: false,
+    isolatedErrors: [],
+  };
+  kernelHealth.edition = "koxir-standalone-1.0.0";
+  kernelHealth.version = ENHANCEMENT_SUITE_VERSION;
+  window.__PI_ENH_KERNEL_HEALTH__ = kernelHealth;
+  window.__PI_WEB_STANDALONE_VERSION__ = ENHANCEMENT_SUITE_VERSION;
+  function runIsolatedKernelStep(stepName, fn) {
+    try {
+      if (typeof fn === "function") fn();
+    } catch (err) {
+      kernelHealth.isolatedErrors.push({
+        step: stepName,
+        error: String(err && err.message ? err.message : err),
+        at: Date.now(),
+      });
+      console.warn(`[Pi Web Kernel Sandbox] Isolated error in ${stepName}:`, err);
+    }
+  }
+  window.__PI_ENH_RUN_ISOLATED_STEP__ = runIsolatedKernelStep;
+
+  window.__PI_WEB_ENHANCEMENTS_LOADED__ = true;
+  runIsolatedKernelStep("initialDomSyncImmediate", () => {
+    if (!isLoginPage()) {
+      runAllSyncOperations();
+      kernelHealth.initialSyncCompleted = true;
+    }
+  });
+  if (typeof requestAnimationFrame === "function") {
+    requestAnimationFrame(() => {
+      if (!isDisposed && !isLoginPage()) {
+        runIsolatedKernelStep("initialDomSyncAnimationFrame", () => runAllSyncOperations());
+      }
+    });
+  }
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", () => {
+      if (!isDisposed && !isLoginPage()) {
+        runIsolatedKernelStep("initialDomSyncDOMContentLoaded", () => runAllSyncOperations());
+      }
+    }, { once: true });
+  }
+  console.log(`[Pi Web Enhancements] v${ENHANCEMENT_SUITE_VERSION} Loaded: Module Settings Manager active.`);
+})();
