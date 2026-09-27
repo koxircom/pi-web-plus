@@ -2,11 +2,11 @@
 
 Pi Web Standalone Edition releases are distributed exclusively through [`koxircom/pi-web-standalone` GitHub Releases](https://github.com/koxircom/pi-web-standalone/releases):
 
-- GitHub Release tag: `v<version>` in `koxircom/pi-web-standalone` (for example, planned release `v1.0.4`)
-- Release tarball asset: `pi-web-standalone-<version>.tgz` (for example, `pi-web-standalone-1.0.4.tgz`)
+- GitHub Release tag: `v<version>` in `koxircom/pi-web-standalone` (for example, planned release `v1.0.5`)
+- Release tarball asset: `pi-web-standalone-<version>.tgz` (for example, `pi-web-standalone-1.0.5.tgz`)
 - Official install command (replace `<version>` when targeting another release):
   ```bash
-  npm install -g https://github.com/koxircom/pi-web-standalone/releases/download/v1.0.4/pi-web-standalone-1.0.4.tgz
+  npm install -g https://github.com/koxircom/pi-web-standalone/releases/download/v1.0.5/pi-web-standalone-1.0.5.tgz
   ```
 
 > **Release Invariants**:
@@ -33,7 +33,7 @@ npm run lint
 Expected:
 
 - Node.js is `22.19.0` or newer (`>=22.19.0`).
-- `git status` is clean, or only contains the intentional version bump (`package.json` and `package-lock.json`, e.g. `1.0.4`).
+- `git status` is clean, or only contains the intentional version bump (`package.json` and `package-lock.json`, e.g. `1.0.5`).
 - `package.json` retains `"name": "@agegr/pi-web"`, `"piWebEdition": "koxir-standalone"`, and `"standalone": true`.
 - GitHub CLI is authenticated with write/release access to `koxircom/pi-web-standalone`.
 
@@ -115,7 +115,7 @@ Expected:
 
 ## 5. Synchronize Running Instances
 
-Pushing `main` or publishing a GitHub Release does **not** automatically update running Pi Web environments. After verifying the release asset and `Latest` status, upgrade target running instances from the official GitHub Release tarball (for example, `v1.0.4`):
+Pushing `main` or publishing a GitHub Release does **not** automatically update running Pi Web environments. After verifying the release asset and `Latest` status, upgrade target running instances from the official GitHub Release tarball (for example, `v1.0.5`):
 
 ```bash
 npm install -g "https://github.com/koxircom/pi-web-standalone/releases/download/v${VERSION}/pi-web-standalone-${VERSION}.tgz"

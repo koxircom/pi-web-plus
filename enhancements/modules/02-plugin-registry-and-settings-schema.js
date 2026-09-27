@@ -537,7 +537,7 @@
     },
   ];
 
-  const ENHANCEMENT_SUITE_VERSION = window.__PI_WEB_STANDALONE_VERSION__ || "1.0.4";
+  const ENHANCEMENT_SUITE_VERSION = window.__PI_WEB_STANDALONE_VERSION__ || "1.0.5";
   const ENHANCEMENT_SETTINGS_SCHEMA_VERSION = 1;
   const ENHANCEMENT_SETTINGS_STORAGE_KEY = "pi-enh-settings-v1";
   const ENHANCEMENT_PLUGIN_SETTINGS = {
@@ -1134,6 +1134,9 @@
         syncSettingsDialogEnhancements();
       }
     } else if (id === "session-odoo-addons") {
+      if (enabled && typeof refreshSessionOdooAddonsManifest === "function") {
+        void refreshSessionOdooAddonsManifest({ force: true, reason: "plugin-toggle" });
+      }
       syncSessionOdooAddons();
       requestSessionListRefresh();
     } else if (id === "session-dblclick-rename") {
@@ -4490,23 +4493,101 @@
   } catch (e) {}
   const SESSION_ODOO_ADDON_BASE_MARGIN = 4;
   const SESSION_ODOO_ADDON_ROW_HEIGHT = 24;
+  const SESSION_ODOO_ADDONS_MANIFEST_URL = "/pi-odoo-addons-manifest.json";
+  const SESSION_ODOO_ADDONS_POLL_INTERVAL_MS = 15000;
+  const SESSION_ODOO_ADDONS_MIN_REFRESH_GAP_MS = 3000;
 
   function getSessionOdooAddonsExtraHeight(addonsCount) {
     if (!addonsCount || addonsCount <= 0) return 0;
     return SESSION_ODOO_ADDON_BASE_MARGIN + addonsCount * SESSION_ODOO_ADDON_ROW_HEIGHT;
   }
 
-  function getSessionOdooAddons(sessionId) {
-    if (!sessionId || !isPluginEnabled("session-odoo-addons")) return [];
-    const items = window.__PI_ENH_ODOO_ADDONS_MANIFEST__?.sessions?.[sessionId];
+  function normalizeOdooAddonsLatestByAddon(latestByAddon) {
+    if (!latestByAddon || typeof latestByAddon !== "object" || Array.isArray(latestByAddon)) return {};
+    const normalized = {};
+    for (const [tech, entry] of Object.entries(latestByAddon)) {
+      if (typeof tech !== "string" || !/^[a-z][a-z0-9_]*$/.test(tech)) continue;
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
+      const sessionId = typeof entry.sessionId === "string" ? entry.sessionId.trim() : "";
+      if (!sessionId) continue;
+      const updatedAt = typeof entry.updatedAt === "string" ? entry.updatedAt.trim() : "";
+      normalized[tech] = { sessionId, updatedAt };
+    }
+    return normalized;
+  }
+
+  function isLatestSessionForOdooAddon(sessionId, technical, manifest = window.__PI_ENH_ODOO_ADDONS_MANIFEST__) {
+    if (typeof sessionId !== "string" || !sessionId.trim()) return false;
+    if (typeof technical !== "string" || !/^[a-z][a-z0-9_]*$/.test(technical)) return false;
+    const latestByAddon = manifest?.latestByAddon;
+    if (!latestByAddon || typeof latestByAddon !== "object" || Array.isArray(latestByAddon)) return false;
+    const entry = latestByAddon[technical];
+    if (!entry || typeof entry !== "object" || Array.isArray(entry)) return false;
+    const latestSid = typeof entry.sessionId === "string" ? entry.sessionId.trim() : "";
+    if (!latestSid) return false;
+    return latestSid === sessionId.trim();
+  }
+
+  function normalizeSessionOdooAddonItems(items, sessionId = "", manifest = window.__PI_ENH_ODOO_ADDONS_MANIFEST__) {
     if (!Array.isArray(items)) return [];
     const unique = new Map();
     for (const item of items) {
       const technical = typeof item === "string" ? item : item?.technical;
       if (typeof technical !== "string" || !/^[a-z][a-z0-9_]*$/.test(technical)) continue;
-      unique.set(technical, { technical, status: typeof item?.status === "string" ? item.status : "" });
+      const normalizedItem = { technical, status: typeof item?.status === "string" ? item.status : "" };
+      const isLatest = sessionId ? isLatestSessionForOdooAddon(sessionId, technical, manifest) : false;
+      Object.defineProperty(normalizedItem, "isLatest", {
+        value: isLatest,
+        enumerable: false,
+        configurable: true,
+        writable: true,
+      });
+      unique.set(technical, normalizedItem);
     }
     return [...unique.values()];
+  }
+
+  function isValidOdooAddonsManifestPayload(data) {
+    if (!data || typeof data !== "object" || Array.isArray(data)) return false;
+    if (!data.sessions || typeof data.sessions !== "object" || Array.isArray(data.sessions)) return false;
+    for (const val of Object.values(data.sessions)) {
+      if (val !== null && val !== undefined && !Array.isArray(val)) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  function computeOdooAddonsSessionsSignature(manifest) {
+    if (!isValidOdooAddonsManifestPayload(manifest)) return "";
+    const sessions = manifest.sessions;
+    const keys = Object.keys(sessions).sort();
+    const parts = [];
+    for (const sid of keys) {
+      const normalized = normalizeSessionOdooAddonItems(sessions[sid], sid, manifest);
+      if (normalized.length === 0) continue;
+      const itemStr = normalized
+        .map((it) => `${it.technical}:${it.status}${it.isLatest ? "@latest" : ""}`)
+        .join(",");
+      parts.push(`${sid}=[${itemStr}]`);
+    }
+    if (parts.length === 0) return "";
+    const latestMap = normalizeOdooAddonsLatestByAddon(manifest.latestByAddon);
+    const latestKeys = Object.keys(latestMap).sort();
+    if (latestKeys.length > 0) {
+      const latestStr = latestKeys
+        .map((tech) => `${tech}:${latestMap[tech].sessionId}:${latestMap[tech].updatedAt}`)
+        .join(",");
+      parts.push(`__latest__=[${latestStr}]`);
+    }
+    return parts.join("|");
+  }
+
+  function getSessionOdooAddons(sessionId) {
+    if (!sessionId || !isPluginEnabled("session-odoo-addons")) return [];
+    const manifest = window.__PI_ENH_ODOO_ADDONS_MANIFEST__;
+    const items = manifest?.sessions?.[sessionId];
+    return normalizeSessionOdooAddonItems(items, sessionId, manifest);
   }
 
   function syncSessionOdooAddonsHeight(row, sessionId) {
@@ -4556,21 +4637,29 @@
 
     // 渲染每个插件一行：仅显示插件的技术标识名称（不显示中文，如仅显示 kx_srm）
     let html = "";
+    const activeManifest = window.__PI_ENH_ODOO_ADDONS_MANIFEST__;
     for (const addon of addons) {
       const tech = (typeof addon === "string" ? addon : (addon.technical || addon.name || "")).trim();
       if (!tech) continue;
-      const tooltip = addon.status ? `${tech} · ${addon.status}` : tech;
+      const isLatest = isLatestSessionForOdooAddon(sessionId, tech, activeManifest);
+      const baseTooltip = addon.status ? `${tech} · ${addon.status}` : tech;
+      const tooltip = isLatest ? `${baseTooltip} · 最新实际更新会话` : baseTooltip;
+      const ariaLabel = isLatest ? `${tech}（最新实际更新会话）` : `${tech}（历史更新会话）`;
+      const pillClass = isLatest ? "pi-enh-odoo-addon-pill is-latest" : "pi-enh-odoo-addon-pill";
 
       html += `<div class="pi-enh-odoo-addon-row">
-        <span class="pi-enh-odoo-addon-pill" title="${escapeHtml(tooltip)}">
-          <span class="pi-enh-odoo-addon-dot"></span>
+        <span class="${pillClass}" data-pi-enh-latest="${isLatest ? "true" : "false"}" title="${escapeHtml(tooltip)}" aria-label="${escapeHtml(ariaLabel)}">
+          <span class="pi-enh-odoo-addon-dot" aria-hidden="true"></span>
           <span class="pi-enh-odoo-addon-name">${escapeHtml(tech)}</span>
         </span>
       </div>`;
     }
 
     // 不重复替换相同节点，避免 MutationObserver 自激和悬停/选择闪烁。
-    if (container.innerHTML !== html) container.innerHTML = html;
+    if (container.__renderedHtml !== html && container.innerHTML !== html) {
+      container.innerHTML = html;
+    }
+    container.__renderedHtml = html;
     syncSessionOdooAddonsHeight(row, sessionId);
   }
 
@@ -4656,6 +4745,12 @@
         }
         const height = (SESSION_NORMAL_ITEM_HEIGHT * fallbackGroups.length + getSessionHeadersHeight(fallbackGroups)) + "px";
         if (container.style.height !== height) container.style.height = height;
+        const pinnedCount = getPinnedSessionCount(fallbackGroups);
+        const recents = container.querySelector(".pi-enh-session-section-recents");
+        if (recents && pinnedCount) {
+          const top = (getSessionItemTop(pinnedCount, fallbackGroups) - SESSION_RECENTS_HEADER_HEIGHT) + "px";
+          if (recents.style.top !== top) recents.style.top = top;
+        }
       }
     }
   }
@@ -4677,10 +4772,242 @@
     syncSessionOdooAddonsLayout();
   }
 
+  let activeOdooAddonsRefreshPromise = null;
+  let activeOdooAddonsAbortController = null;
+  let odooAddonsPollTimer = null;
+  let lastOdooAddonsRefreshAttemptAt = 0;
+  let hasSyncedAuthoritativeOdooAddonsManifest = false;
+  let isOdooAddonsRefreshDisposed = false;
+
+  function isOdooAddonsPageHidden() {
+    try {
+      if (typeof document !== "undefined") {
+        if (document.visibilityState === "hidden" || document.hidden === true) {
+          return true;
+        }
+      }
+    } catch (e) {}
+    return false;
+  }
+
+  function cancelSessionOdooAddonsRefresh() {
+    if (activeOdooAddonsAbortController) {
+      try {
+        activeOdooAddonsAbortController.abort();
+      } catch (e) {}
+      activeOdooAddonsAbortController = null;
+    }
+    activeOdooAddonsRefreshPromise = null;
+  }
+
+  function refreshSessionOdooAddonsManifest(options = {}) {
+    const opts = typeof options === "boolean" ? { force: options } : (options || {});
+    const force = Boolean(opts.force);
+
+    if (isDisposed || isOdooAddonsRefreshDisposed) {
+      return Promise.resolve({ updated: false, changed: false, skipped: true, reason: "disposed" });
+    }
+    if (!isPluginEnabled("session-odoo-addons") && !force) {
+      return Promise.resolve({ updated: false, changed: false, skipped: true, reason: "plugin-disabled" });
+    }
+    if (typeof isLoginPage === "function" && isLoginPage()) {
+      return Promise.resolve({ updated: false, changed: false, skipped: true, reason: "login-page" });
+    }
+    if (isOdooAddonsPageHidden() && !opts.allowHidden) {
+      return Promise.resolve({ updated: false, changed: false, skipped: true, reason: "hidden" });
+    }
+
+    if (activeOdooAddonsRefreshPromise) {
+      return activeOdooAddonsRefreshPromise;
+    }
+
+    const now = Date.now();
+    const minGap = typeof opts.minGapMs === "number" ? opts.minGapMs : SESSION_ODOO_ADDONS_MIN_REFRESH_GAP_MS;
+    if (!force && lastOdooAddonsRefreshAttemptAt > 0 && (now - lastOdooAddonsRefreshAttemptAt) < minGap) {
+      return Promise.resolve({ updated: false, changed: false, skipped: true, reason: "throttled" });
+    }
+
+    lastOdooAddonsRefreshAttemptAt = now;
+
+    const currentPromise = (async () => {
+      let controller = null;
+      try {
+        const activeFetch =
+          typeof window !== "undefined" && typeof window.fetch === "function"
+            ? window.fetch.bind(window)
+            : (typeof fetch === "function" ? fetch : null);
+        if (!activeFetch) {
+          return { updated: false, changed: false, skipped: true, reason: "no-fetch" };
+        }
+
+        if (typeof AbortController === "function") {
+          controller = new AbortController();
+          activeOdooAddonsAbortController = controller;
+        }
+
+        const fetchOpts = { cache: "no-store" };
+        if (controller && controller.signal) {
+          fetchOpts.signal = controller.signal;
+        }
+
+        const res = await activeFetch(`${SESSION_ODOO_ADDONS_MANIFEST_URL}?v=${Date.now()}`, fetchOpts);
+        if (isDisposed || isOdooAddonsRefreshDisposed || (controller && controller.signal && controller.signal.aborted)) {
+          return { updated: false, changed: false, skipped: true, reason: "aborted" };
+        }
+        if (!res || !res.ok) {
+          return { updated: false, changed: false, error: `HTTP_${res ? res.status : "NO_RESPONSE"}` };
+        }
+
+        const nextManifest = await res.json();
+        if (isDisposed || isOdooAddonsRefreshDisposed || (controller && controller.signal && controller.signal.aborted)) {
+          return { updated: false, changed: false, skipped: true, reason: "aborted" };
+        }
+        if (!isValidOdooAddonsManifestPayload(nextManifest)) {
+          return { updated: false, changed: false, error: "INVALID_PAYLOAD" };
+        }
+
+        const currentManifest = window.__PI_ENH_ODOO_ADDONS_MANIFEST__;
+        const curValid = isValidOdooAddonsManifestPayload(currentManifest);
+        const curRev = curValid ? (Number(currentManifest.revision) || 0) : 0;
+        const nextRev = Number(nextManifest.revision) || 0;
+        const curUpdatedAt = curValid && typeof currentManifest.updatedAt === "string" ? currentManifest.updatedAt : "";
+        const nextUpdatedAt = typeof nextManifest.updatedAt === "string" ? nextManifest.updatedAt : "";
+        const curSig = computeOdooAddonsSessionsSignature(currentManifest);
+        const nextSig = computeOdooAddonsSessionsSignature(nextManifest);
+
+        // Fail-closed 防空抹除守卫：若当前已有非空插件且远端返回既无 revision 又无任何会话条目的空壳，保留旧值
+        const nextSessionKeysCount = Object.keys(nextManifest.sessions).length;
+        if (curSig !== "" && nextSig === "" && nextSessionKeysCount === 0 && nextRev <= 0) {
+          return { updated: false, changed: false, error: "EMPTY_UNVERSIONED_MANIFEST" };
+        }
+        if (hasSyncedAuthoritativeOdooAddonsManifest && curSig !== "" && nextSig === "" && nextRev > 0 && nextRev < curRev) {
+          return { updated: false, changed: false, skipped: true, reason: "stale-revision" };
+        }
+
+        hasSyncedAuthoritativeOdooAddonsManifest = true;
+
+        const contentChanged = !curValid || curSig !== nextSig;
+        const versionChanged = !curValid || curRev !== nextRev || curUpdatedAt !== nextUpdatedAt;
+        if (!contentChanged && !versionChanged) {
+          return { updated: false, changed: false, revision: curRev };
+        }
+
+        window.__PI_ENH_ODOO_ADDONS_MANIFEST__ = nextManifest;
+        syncSessionOdooAddons();
+        if (contentChanged) {
+          try {
+            window.__PI_ENH_RERENDER_SESSIONS__?.();
+          } catch (e) {}
+        }
+        return { updated: true, changed: contentChanged, versionChanged, revision: nextRev };
+      } catch (err) {
+        return { updated: false, changed: false, error: err && err.message ? err.message : "FETCH_ERROR" };
+      } finally {
+        if (activeOdooAddonsAbortController === controller) {
+          activeOdooAddonsAbortController = null;
+        }
+        if (activeOdooAddonsRefreshPromise === currentPromise) {
+          activeOdooAddonsRefreshPromise = null;
+        }
+      }
+    })();
+
+    activeOdooAddonsRefreshPromise = currentPromise;
+    return currentPromise;
+  }
+
+  function setupSessionOdooAddonsAutoRefresh() {
+    if (typeof window !== "undefined" && window.__PI_ENH_ODOO_ADDONS_REFRESH_CONTROLLER__?.cleanup) {
+      try {
+        window.__PI_ENH_ODOO_ADDONS_REFRESH_CONTROLLER__.cleanup();
+      } catch (e) {}
+    }
+
+    isOdooAddonsRefreshDisposed = false;
+
+    const onVisibilityChange = () => {
+      if (!isOdooAddonsPageHidden() && isPluginEnabled("session-odoo-addons")) {
+        void refreshSessionOdooAddonsManifest({ reason: "visibility" });
+      }
+    };
+
+    const onWindowFocus = () => {
+      if (!isOdooAddonsPageHidden() && isPluginEnabled("session-odoo-addons")) {
+        void refreshSessionOdooAddonsManifest({ reason: "focus" });
+      }
+    };
+
+    const onWindowOnline = () => {
+      if (!isOdooAddonsPageHidden() && isPluginEnabled("session-odoo-addons")) {
+        void refreshSessionOdooAddonsManifest({ force: true, reason: "online" });
+      }
+    };
+
+    if (typeof document !== "undefined" && typeof document.addEventListener === "function") {
+      document.addEventListener("visibilitychange", onVisibilityChange);
+    }
+    if (typeof window !== "undefined" && typeof window.addEventListener === "function") {
+      window.addEventListener("focus", onWindowFocus);
+      window.addEventListener("online", onWindowOnline);
+    }
+
+    if (odooAddonsPollTimer) {
+      clearInterval(odooAddonsPollTimer);
+      odooAddonsPollTimer = null;
+    }
+    if (typeof setInterval === "function") {
+      odooAddonsPollTimer = setInterval(() => {
+        if (isDisposed || isOdooAddonsRefreshDisposed || isOdooAddonsPageHidden()) return;
+        if (!isPluginEnabled("session-odoo-addons")) return;
+        if (typeof isLoginPage === "function" && isLoginPage()) return;
+        void refreshSessionOdooAddonsManifest({ reason: "poll" });
+      }, SESSION_ODOO_ADDONS_POLL_INTERVAL_MS);
+    }
+
+    const cleanup = () => {
+      isOdooAddonsRefreshDisposed = true;
+      cancelSessionOdooAddonsRefresh();
+      if (odooAddonsPollTimer) {
+        clearInterval(odooAddonsPollTimer);
+        odooAddonsPollTimer = null;
+      }
+      if (typeof document !== "undefined" && typeof document.removeEventListener === "function") {
+        try { document.removeEventListener("visibilitychange", onVisibilityChange); } catch (e) {}
+      }
+      if (typeof window !== "undefined" && typeof window.removeEventListener === "function") {
+        try { window.removeEventListener("focus", onWindowFocus); } catch (e) {}
+        try { window.removeEventListener("online", onWindowOnline); } catch (e) {}
+      }
+    };
+
+    if (Array.isArray(activeCleanups)) {
+      activeCleanups.push(cleanup);
+    }
+
+    if (typeof window !== "undefined") {
+      window.__PI_ENH_ODOO_ADDONS_REFRESH_CONTROLLER__ = {
+        refresh: refreshSessionOdooAddonsManifest,
+        cancel: cancelSessionOdooAddonsRefresh,
+        cleanup,
+        getPollTimer: () => odooAddonsPollTimer,
+      };
+    }
+
+    if (!isOdooAddonsPageHidden() && isPluginEnabled("session-odoo-addons") && !(typeof isLoginPage === "function" && isLoginPage())) {
+      void refreshSessionOdooAddonsManifest({ force: true, reason: "bootstrap-reconcile" });
+    }
+
+    return cleanup;
+  }
+
+  setupSessionOdooAddonsAutoRefresh();
+
   window.__PI_ENH_GET_SESSION_ODOO_ADDONS__ = getSessionOdooAddons;
   // 旧的客户端写入口作废：只有带明确 session ID 的记录器可写持久清单。
   delete window.__PI_ENH_SET_SESSION_ODOO_ADDONS__;
   window.__PI_ENH_SYNC_SESSION_ODOO_ADDONS__ = syncSessionOdooAddons;
+  window.__PI_ENH_REFRESH_SESSION_ODOO_ADDONS_MANIFEST__ = refreshSessionOdooAddonsManifest;
+  window.__PI_ENH_CANCEL_SESSION_ODOO_ADDONS_REFRESH__ = cancelSessionOdooAddonsRefresh;
 
   function computeSessionTitle(session) {
     if (!session) return "";

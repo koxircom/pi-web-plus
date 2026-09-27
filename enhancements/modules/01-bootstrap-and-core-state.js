@@ -2837,6 +2837,11 @@
       box-shadow: 0 0 5px #ffffff, 0 0 8px rgba(255, 255, 255, 0.6);
       flex-shrink: 0;
     }
+    .pi-enh-odoo-addon-pill.is-latest .pi-enh-odoo-addon-dot,
+    html:not(.dark) .pi-enh-odoo-addon-pill.is-latest .pi-enh-odoo-addon-dot {
+      background-color: #22c55e;
+      box-shadow: 0 0 5px #22c55e, 0 0 9px rgba(34, 197, 94, 0.85);
+    }
     .pi-enh-odoo-addon-name {
       font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
       font-size: 10.5px;
