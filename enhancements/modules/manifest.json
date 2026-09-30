@@ -5,8 +5,8 @@
   "targetFile": "enhancements/pi-web-enhancements.js",
   "mirrorFile": "public/pi-web-enhancements.js",
   "totalLines": 65412,
-  "totalBytes": 3067752,
-  "bundleSha256": "ba9668c9703b129895443f44acb949a8d2074356744346830c44f0dd755ce226",
+  "totalBytes": 3067828,
+  "bundleSha256": "d62008c4c1d17fb22e7f2ff0c09e4caff43b90dd6bd0c6e607de10a70b7d0982",
   "modules": [
     {
       "index": 1,
@@ -21,8 +21,8 @@
         9239
       ],
       "lineRangeText": "1-9239",
-      "bytes": 327828,
-      "sha256": "036525ae0eda19acf3e7ef797c89312d8c9537d0c392844caca3e270ce120dff",
+      "bytes": 327834,
+      "sha256": "8ef16903a3184878f233724d81d4b51e6cf1899be2359b6532f34ec32e4fc046",
       "responsibility": "IIFE 启动引导、路由自愈保护、页面标题脱敏防抖、顶层 TDZ 声明提升、Managed Lifecycle 零泄漏注册表、全局 CSS 样式表注入、通知偏好与历史、Toast 与剪贴板工具。"
     },
     {
@@ -72,8 +72,8 @@
         28999
       ],
       "lineRangeText": "22311-28999",
-      "bytes": 299946,
-      "sha256": "4572cbfa1186825631135b371df7e09cbb8c67368200e3a7ea88b75115c6ef3c",
+      "bytes": 299952,
+      "sha256": "1222f85aaa5472d3d11ec6885f91cd5fa924c557876aace9fce14645e6b1b3f8",
       "responsibility": "侧边栏会话行右键上下文菜单、未读水位线管理、会话行内重命名与双击重命名、快捷引用工具条与文本批注 (Quote Toolbar & Annotations)、ask_user 网页原生选择器与四题交互原型、跨项目会话状态提示 (Cross-project Session Status Indicator)。"
     },
     {
@@ -140,8 +140,8 @@
         65412
       ],
       "lineRangeText": "58706-65412",
-      "bytes": 330125,
-      "sha256": "126d1944fccb3eaa3cab1f06d91ce26fac93240426e2b5efa0cb4b65610a3eab",
+      "bytes": 330189,
+      "sha256": "441e22e338d60513c3c46e8292525e0cffbe9b6c3165b780be817da1625addf5",
       "responsibility": "设置对话框尺寸与侧边栏宽度拖拽调节、设置侧边栏折叠控制器、设置弹窗增强插件面板与归档管理标签页、设置项双击快捷入口与底部快捷栏、全局用量与成本大盘 (Usage & Cost Dashboard)、静默热载探针、零泄漏清理钩子 (__PI_WEB_ENHANCEMENTS_CLEANUP__)、Plugin Micro-Kernel 异常隔离沙箱与首屏 0ms 同步立即执行挂载。"
     }
   ]

@@ -5459,9 +5459,9 @@
       .replace(/^✅\s*\(.*?\)\s*/, "")
       .replace(/^(?:🔵|🟠【等待答复】|⚠️\s*需要确认|🟠\s*需要确认|🔴\s*任务中断|🟢\s*已完成待验收|🟢\s*已完成)\s*(?:·\s*)?/, "")
       .replace(/\s+·\s+(?:🟠【等待答复】|⚠️\s*需要确认|🟠\s*需要确认|🔴\s*任务中断|🟢\s*已完成待验收|🟢\s*已完成|🔵\s*运行中|🔵)\s*$/, "")
-      .replace(/\s*[-·|_]\s*(?:π\+\s*)?\bPi\s*Web(?:\s+Plus\b|\s*\+)?/gi, "")
-      .replace(/(?:π\+\s*)?\bPi\s*Web(?:\s+Plus\b|\s*\+)?\s*[-·|_]\s*/gi, "")
-      .replace(/(?:π\+\s*)?\bPi\s*Web(?:\s+Plus\b|\s*\+)?/gi, "")
+      .replace(/\s*[-·|_]\s*(?:π\+\s*)?\bPi\s*Web\b(?:\s+Plus\b|\s*\+)?/gi, "")
+      .replace(/(?:π\+\s*)?\bPi\s*Web\b(?:\s+Plus\b|\s*\+)?\s*[-·|_]\s*/gi, "")
+      .replace(/(?:π\+\s*)?\bPi\s*Web\b(?:\s+Plus\b|\s*\+)?/gi, "")
       .replace(/\s*[-·|_]\s*$/, "")
       .trim();
     return clean || "work";

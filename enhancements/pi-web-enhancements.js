@@ -168,9 +168,9 @@
   function sanitizePageTitle(rawTitle) {
     if (!rawTitle) return "";
     let clean = String(rawTitle)
-      .replace(/\s*[-·|_]\s*(?:π\+\s*)?\bPi\s*Web(?:\s+Plus\b|\s*\+)?/gi, "")
-      .replace(/(?:π\+\s*)?\bPi\s*Web(?:\s+Plus\b|\s*\+)?\s*[-·|_]\s*/gi, "")
-      .replace(/(?:π\+\s*)?\bPi\s*Web(?:\s+Plus\b|\s*\+)?/gi, "")
+      .replace(/\s*[-·|_]\s*(?:π\+\s*)?\bPi\s*Web\b(?:\s+Plus\b|\s*\+)?/gi, "")
+      .replace(/(?:π\+\s*)?\bPi\s*Web\b(?:\s+Plus\b|\s*\+)?\s*[-·|_]\s*/gi, "")
+      .replace(/(?:π\+\s*)?\bPi\s*Web\b(?:\s+Plus\b|\s*\+)?/gi, "")
       .replace(/\s*[-·|_]\s*$/, "")
       .trim();
     return clean;
@@ -27769,9 +27769,9 @@
       .replace(/^✅\s*\(.*?\)\s*/, "")
       .replace(/^(?:🔵|🟠【等待答复】|⚠️\s*需要确认|🟠\s*需要确认|🔴\s*任务中断|🟢\s*已完成待验收|🟢\s*已完成)\s*(?:·\s*)?/, "")
       .replace(/\s+·\s+(?:🟠【等待答复】|⚠️\s*需要确认|🟠\s*需要确认|🔴\s*任务中断|🟢\s*已完成待验收|🟢\s*已完成|🔵\s*运行中|🔵)\s*$/, "")
-      .replace(/\s*[-·|_]\s*(?:π\+\s*)?\bPi\s*Web(?:\s+Plus\b|\s*\+)?/gi, "")
-      .replace(/(?:π\+\s*)?\bPi\s*Web(?:\s+Plus\b|\s*\+)?\s*[-·|_]\s*/gi, "")
-      .replace(/(?:π\+\s*)?\bPi\s*Web(?:\s+Plus\b|\s*\+)?/gi, "")
+      .replace(/\s*[-·|_]\s*(?:π\+\s*)?\bPi\s*Web\b(?:\s+Plus\b|\s*\+)?/gi, "")
+      .replace(/(?:π\+\s*)?\bPi\s*Web\b(?:\s+Plus\b|\s*\+)?\s*[-·|_]\s*/gi, "")
+      .replace(/(?:π\+\s*)?\bPi\s*Web\b(?:\s+Plus\b|\s*\+)?/gi, "")
       .replace(/\s*[-·|_]\s*$/, "")
       .trim();
     return clean || "work";
@@ -59922,7 +59922,7 @@ parse_Primary(n.content)}catch(l){}a="/EncryptionInfo";n=Qe.find(e,a);if(!n||!n.
 
   function buildPiWebPlusBrandSvg(textColor) {
     const safeColor = String(textColor || "#1a1a1a").replace(/"/g, "'");
-    return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 186 32" width="186" height="32" role="img" aria-label="π+ Pi Web Plus"><title>π+ Pi Web Plus</title><path data-pi-brand-part="bubble" d="M5.7 24.7 L3.7 29.8 Q3.3 30.7 4.3 30.3 L9.8 28.1 A14.4 14.4 0 1 0 5.7 24.7 Z" fill="#23454b"/><path data-pi-brand-part="pi-bar" d="M6.2 13.1 C6.8 11.2 8.0 10.5 9.8 10.5 H18.2" fill="none" stroke="#ffffff" stroke-width="2.45" stroke-linecap="round" stroke-linejoin="round"/><path data-pi-brand-part="pi-left-leg" d="M10.5 10.7 L8.7 21.3" fill="none" stroke="#ffffff" stroke-width="2.45" stroke-linecap="round"/><path data-pi-brand-part="pi-right-leg" d="M15.1 10.7 L14.6 19.3 C14.5 20.8 15.4 21.5 16.9 21.2" fill="none" stroke="#ffffff" stroke-width="2.45" stroke-linecap="round" stroke-linejoin="round"/><path data-pi-brand-part="plus" d="M23.3 11.5 V16.9 M20.6 14.2 H26.0" fill="none" stroke="#ffffff" stroke-width="2.2" stroke-linecap="round"/><text data-pi-brand-part="wordmark" x="42" y="23.2" fill="${safeColor}" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace" font-size="21.5" font-weight="700" letter-spacing="-0.3">Pi Web Plus</text></svg>`;
+    return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 32" width="200" height="32" role="img" aria-label="π+ Pi Web Plus"><title>π+ Pi Web Plus</title><path data-pi-brand-part="bubble" d="M16 1.5 H30 C37.73 1.5 44 7.77 44 15.5 C44 23.23 37.73 29.5 30 29.5 H15.7 L5 31.6 L7.8 25.1 C4.2 22.55 2 19.12 2 15.5 C2 7.77 8.27 1.5 16 1.5 Z" fill="#23454b"/><path data-pi-brand-part="pi-bar" d="M8.8 12.4 C9.6 10.4 10.9 9.8 12.8 9.8 H23.6" fill="none" stroke="#ffffff" stroke-width="2.45" stroke-linecap="round" stroke-linejoin="round"/><path data-pi-brand-part="pi-left-leg" d="M13.6 10.1 L11.7 21.5" fill="none" stroke="#ffffff" stroke-width="2.45" stroke-linecap="round"/><path data-pi-brand-part="pi-right-leg" d="M20.4 10.1 L20 19.2 C19.9 20.9 20.8 21.6 22.4 21.3" fill="none" stroke="#ffffff" stroke-width="2.45" stroke-linecap="round" stroke-linejoin="round"/><path data-pi-brand-part="plus" d="M33.1 11.3 V18.7 M29.4 15 H36.8" fill="none" stroke="#ffffff" stroke-width="2.2" stroke-linecap="round"/><text data-pi-brand-part="wordmark" x="56" y="23.2" fill="${safeColor}" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace" font-size="21.5" font-weight="700" letter-spacing="-0.3">Pi Web Plus</text></svg>`;
   }
 
   function removePiWebPlusBranding() {
@@ -59994,7 +59994,7 @@ parse_Primary(n.content)}catch(l){}a="/EncryptionInfo";n=Qe.find(e,a);if(!n||!n.
           img.getAttribute("data-pi-brand-logo") !== "true" ||
           img.getAttribute("data-pi-brand-color") !== textColor ||
           img.hasAttribute("srcset") ||
-          img.getAttribute("width") !== "186" ||
+          img.getAttribute("width") !== "200" ||
           img.getAttribute("height") !== "32";
 
         if (needsUpdate) {
@@ -60003,12 +60003,12 @@ parse_Primary(n.content)}catch(l){}a="/EncryptionInfo";n=Qe.find(e,a);if(!n||!n.
           if (img.hasAttribute("srcset")) img.removeAttribute("srcset");
           if (img.hasAttribute("sizes")) img.removeAttribute("sizes");
           img.setAttribute("src", dataUri);
-          img.setAttribute("width", "186");
+          img.setAttribute("width", "200");
           img.setAttribute("height", "32");
           img.setAttribute("alt", "π+ Pi Web Plus");
           img.setAttribute("data-pi-brand-logo", "true");
           img.setAttribute("data-pi-brand-color", textColor);
-          img.style.width = "186px";
+          img.style.width = "200px";
           img.style.height = "32px";
           img.style.maxWidth = "100%";
           img.style.objectFit = "contain";

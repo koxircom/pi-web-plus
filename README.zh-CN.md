@@ -4,7 +4,7 @@
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="./public/icons/pi-web-plus-logo-dark.svg" />
     <source media="(prefers-color-scheme: light)" srcset="./public/icons/pi-web-plus-logo-light.svg" />
-    <img alt="π+ Pi Web Plus" src="./public/icons/pi-web-plus-logo-light.svg" width="186" height="32" />
+    <img alt="π+ Pi Web Plus" src="./public/icons/pi-web-plus-logo-light.svg" width="200" height="32" />
   </picture>
 </p>
 

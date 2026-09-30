@@ -100,7 +100,7 @@ test("public SVG brand assets and repository metadata satisfy Pi Web Plus contra
     ["light", lightSvg, "#1a1a1a"],
     ["dark", darkSvg, "#e8e8e8"],
   ]) {
-    assert.match(svg, /<svg[^>]+viewBox="0 0 186 32"/, `${name} svg must have viewBox`);
+    assert.match(svg, /<svg[^>]+viewBox="0 0 200 32"/, `${name} svg must have viewBox`);
     assert.match(svg, /data-pi-brand-part="bubble"/, `${name} svg must contain bubble path`);
     assert.match(svg, /data-pi-brand-part="pi-bar"/, `${name} svg must contain pi vector path`);
     assert.match(svg, /data-pi-brand-part="plus"/, `${name} svg must contain plus vector path`);
@@ -282,7 +282,7 @@ async function verifyBundleInBrowser(chromium, bundleCode, label) {
     assert.equal(initialState.hasBrandAttr, "true", `${label}: data-pi-brand-logo marker`);
     assert.equal(initialState.hasSrcset, false, `${label}: srcset removed while SVG active`);
     assert.equal(initialState.hasSizes, false, `${label}: sizes removed while SVG active`);
-    assert.equal(initialState.imgWidthAttr, "186", `${label}: width=186`);
+    assert.equal(initialState.imgWidthAttr, "200", `${label}: width=200`);
     assert.equal(initialState.imgHeightAttr, "32", `${label}: height=32`);
     assert.equal(initialState.imgAlt, "π+ Pi Web Plus", `${label}: alt text`);
     assert.match(initialState.decodedSvg, /data-pi-brand-part="pi-bar"/, `${label}: vector pi path`);
@@ -292,7 +292,7 @@ async function verifyBundleInBrowser(chromium, bundleCode, label) {
     assert.equal(initialState.decodedSvg.includes('fill="#1a1a1a"'), true, `${label}: light theme text color`);
     assert.equal(initialState.spanDisplay, "none", `${label}: original Pi Web span hidden`);
     assert.equal(initialState.sidebarText, "Pi Web Plus", `${label}: sidebar brand text`);
-    assert.equal(initialState.desktopGeometry.imgWidth, 186, `${label}: rendered SVG width`);
+    assert.equal(initialState.desktopGeometry.imgWidth, 200, `${label}: rendered SVG width`);
     assert.equal(initialState.desktopGeometry.imgHeight, 32, `${label}: rendered SVG height`);
     assert.equal(initialState.desktopGeometry.welcomeGap > 20, true, `${label}: desktop welcome no overlap`);
     assert.equal(initialState.desktopGeometry.batchBtnPresent, true, `${label}: batch button coexists`);
@@ -355,12 +355,22 @@ async function verifyBundleInBrowser(chromium, bundleCode, label) {
       results.dotPlusSymbol = document.title;
       document.title = "Pi Web Plus";
       results.barePlus = document.title;
+      document.title = "Pi Website research";
+      results.website = document.title;
+      document.title = "Pi Websocket diagnostics";
+      results.websocket = document.title;
+      results.sidebarWebsite = window.__PI_ENH_COMPOSE_WINDOW_TITLE__("Pi Website research", "idle");
+      results.sidebarWebsocket = window.__PI_ENH_COMPOSE_WINDOW_TITLE__("Pi Websocket diagnostics", "idle");
       return results;
     });
     assert.equal(titleResults.suffixPlus, "work", `${label}: 'work - Pi Web Plus' -> 'work'`);
     assert.equal(titleResults.prefixPlus, "my-repo", `${label}: 'Pi Web Plus - my-repo' -> 'my-repo'`);
     assert.equal(titleResults.dotPlusSymbol, "my-repo", `${label}: 'my-repo · Pi Web+' -> 'my-repo'`);
     assert.equal(titleResults.barePlus, "work", `${label}: 'Pi Web Plus' -> fallback 'work' without orphan Plus`);
+    assert.equal(titleResults.website, "Pi Website research", `${label}: preserve non-brand Website title`);
+    assert.equal(titleResults.websocket, "Pi Websocket diagnostics", `${label}: preserve non-brand Websocket title`);
+    assert.equal(titleResults.sidebarWebsite, "Pi Website research", `${label}: sidebar preserves Website title`);
+    assert.equal(titleResults.sidebarWebsocket, "Pi Websocket diagnostics", `${label}: sidebar preserves Websocket title`);
 
     // 5. Toggle OFF -> full reversible restoration -> Toggle ON -> Hot Unload Cleanup
     const toggleOffState = await page.evaluate(() => {

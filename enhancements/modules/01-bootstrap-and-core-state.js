@@ -168,9 +168,9 @@
   function sanitizePageTitle(rawTitle) {
     if (!rawTitle) return "";
     let clean = String(rawTitle)
-      .replace(/\s*[-·|_]\s*(?:π\+\s*)?\bPi\s*Web(?:\s+Plus\b|\s*\+)?/gi, "")
-      .replace(/(?:π\+\s*)?\bPi\s*Web(?:\s+Plus\b|\s*\+)?\s*[-·|_]\s*/gi, "")
-      .replace(/(?:π\+\s*)?\bPi\s*Web(?:\s+Plus\b|\s*\+)?/gi, "")
+      .replace(/\s*[-·|_]\s*(?:π\+\s*)?\bPi\s*Web\b(?:\s+Plus\b|\s*\+)?/gi, "")
+      .replace(/(?:π\+\s*)?\bPi\s*Web\b(?:\s+Plus\b|\s*\+)?\s*[-·|_]\s*/gi, "")
+      .replace(/(?:π\+\s*)?\bPi\s*Web\b(?:\s+Plus\b|\s*\+)?/gi, "")
       .replace(/\s*[-·|_]\s*$/, "")
       .trim();
     return clean;
