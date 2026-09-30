@@ -563,6 +563,14 @@
       category: "运行监控",
       defaultEnabled: true,
     },
+    {
+      id: "pi-web-plus-branding",
+      name: "Pi Web Plus SVG 品牌",
+      desc: "将新会话与侧边栏品牌升级为矢量「π+ Pi Web Plus」SVG 标识，自适应深浅色主题且支持独立开关无损恢复。",
+      version: "1.0.0",
+      category: "显示增强",
+      defaultEnabled: true,
+    },
   ];
 
   const ENHANCEMENT_SUITE_VERSION = window.__PI_WEB_STANDALONE_VERSION__ || "1.0.5";
@@ -599,7 +607,7 @@
     { id: "background-attention", name: "后台会话提醒", desc: "管理跨项目状态、提示音与桌面通知。", category: "运行监控", version: "1.0.0", defaultEnabled: true, features: ["project-status-indicator", "session-attention-sound", "session-attention-desktop"] },
     { id: "notification-management", name: "通知管理", desc: "管理所有站内通知、网页操作提示、提示音与桌面提醒，并查看通知历史。", category: "偏好记忆", version: "1.0.0", defaultEnabled: true, features: ["notification-center"] },
     { id: "safety-performance", name: "安全与性能保护", desc: "管理误触保护、模型警告可见性和代码块扫描保护。", category: "安全防护", version: "1.0.0", defaultEnabled: true, features: ["model-scope-warning", "esc-guard", "code-block-scan-guard", "streaming-thinking-guard", "client-crash-diagnostics"] },
-    { id: "local-workspace", name: "本地工作区工具", desc: "管理本地路径直达和会话缓存。", category: "快捷操作", version: "1.0.0", defaultEnabled: true, features: ["local-path-launcher", "obsidian-markdown-viewer", "excel-sheet-preview", "session-memory-cache", "session-history-integrity", "session-history-order-guard", "cross-device-session-sync", "session-panel-binding", "file-panel-overlay-guard", "general-settings-dashboard", "workspace-picker-hover", "settings-sidebar-layout"] },
+    { id: "local-workspace", name: "本地工作区工具", desc: "管理本地路径直达和会话缓存。", category: "快捷操作", version: "1.0.0", defaultEnabled: true, features: ["local-path-launcher", "obsidian-markdown-viewer", "excel-sheet-preview", "session-memory-cache", "session-history-integrity", "session-history-order-guard", "cross-device-session-sync", "session-panel-binding", "file-panel-overlay-guard", "general-settings-dashboard", "workspace-picker-hover", "settings-sidebar-layout", "pi-web-plus-branding"] },
     { id: "preference-memory", name: "偏好记忆", desc: "管理思考深度的跨会话记忆与浏览器增强设置归档。", category: "偏好记忆", version: "1.0.0", defaultEnabled: true, features: ["thinking-persistence", "enhancement-settings-archive"] },
   ];
   const ENHANCEMENT_MODULE_SETTINGS = {
@@ -1332,6 +1340,12 @@
       if (!enabled) {
         hideUsagePanel(document.querySelector(".settings-section-tabs"));
         document.querySelectorAll(".settings-dialog-main.pi-enh-usage-panel").forEach((el) => el.remove());
+      }
+    } else if (id === "pi-web-plus-branding") {
+      if (typeof syncPiWebPlusBranding === "function") {
+        syncPiWebPlusBranding();
+      } else if (typeof window !== "undefined" && typeof window.__PI_ENH_SYNC_BRANDING__ === "function") {
+        window.__PI_ENH_SYNC_BRANDING__();
       }
     }
   }

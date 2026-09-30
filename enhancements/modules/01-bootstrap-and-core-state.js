@@ -53,9 +53,49 @@
   } catch (e) {}
 
   // 0.2 Logo 浏览器缓存与首屏秒开常驻加速引擎 (Instant Logo Preload & Cache Engine)
+  function isPiWebPlusBrandingActiveEarly() {
+    if (typeof isPluginEnabled === "function") {
+      try {
+        return Boolean(isPluginEnabled("pi-web-plus-branding"));
+      } catch (e) {}
+    }
+    try {
+      if (typeof localStorage !== "undefined" && localStorage) {
+        const direct = localStorage.getItem("pi-enh-plugin-pi-web-plus-branding");
+        if (direct === "false") return false;
+        if (direct === "true") return true;
+        const raw = localStorage.getItem("pi-enh-settings-v1") || localStorage.getItem("pi-enh-features");
+        if (raw) {
+          const cfg = JSON.parse(raw);
+          if (cfg && cfg.modules && cfg.modules["local-workspace"] && cfg.modules["local-workspace"].enabled === false) {
+            return false;
+          }
+          if (cfg && cfg.features && cfg.features["pi-web-plus-branding"] && cfg.features["pi-web-plus-branding"].enabled === false) {
+            return false;
+          }
+          if (cfg && cfg["pi-web-plus-branding"] && cfg["pi-web-plus-branding"].enabled === false) {
+            return false;
+          }
+        }
+      }
+    } catch (e) {}
+    return true;
+  }
+
   (function initLogoInstantCache() {
     if (typeof window === "undefined") return;
     const LOGO_PATH = "/icons/apple-touch-icon.png";
+    if (isPiWebPlusBrandingActiveEarly()) {
+      try {
+        if (typeof document !== "undefined" && document.head) {
+          for (const preloadLink of document.head.querySelectorAll(`link[rel="preload"][href*="${LOGO_PATH}"]`)) {
+            preloadLink.remove();
+          }
+        }
+        delete window.__PI_ENH_LOGO_PRELOAD_IMG__;
+      } catch {}
+      return;
+    }
 
     // A. 动态注入 <link rel="preload"> 提升网络层解析优先级
     try {
@@ -128,9 +168,9 @@
   function sanitizePageTitle(rawTitle) {
     if (!rawTitle) return "";
     let clean = String(rawTitle)
-      .replace(/\s*[-·|_]\s*Pi\s*Web\b/gi, "")
-      .replace(/\bPi\s*Web\s*[-·|_]\s*/gi, "")
-      .replace(/\bPi\s*Web\b/gi, "")
+      .replace(/\s*[-·|_]\s*(?:π\+\s*)?\bPi\s*Web(?:\s+Plus\b|\s*\+)?/gi, "")
+      .replace(/(?:π\+\s*)?\bPi\s*Web(?:\s+Plus\b|\s*\+)?\s*[-·|_]\s*/gi, "")
+      .replace(/(?:π\+\s*)?\bPi\s*Web(?:\s+Plus\b|\s*\+)?/gi, "")
       .replace(/\s*[-·|_]\s*$/, "")
       .trim();
     return clean;
@@ -315,7 +355,11 @@
           // Preserve the native title before sanitizing the enhanced display.
           // Legacy cores publish it through document.title, newer cores also
           // provide __PI_WEB_NATIVE_TITLE_BASE__ directly.
-          if (typeof val === "string" && (val === "Pi Web" || val.endsWith(" - Pi Web"))) {
+          if (
+            typeof val === "string" &&
+            (/^(?:π\+\s*)?Pi\s*Web(?:\s+Plus|\+)?$/i.test(val.trim()) ||
+             /\s-\s(?:π\+\s*)?Pi\s*Web(?:\s+Plus|\+)?$/i.test(val.trim()))
+          ) {
             window.__PI_WEB_NATIVE_TITLE_BASE__ = val;
           }
 

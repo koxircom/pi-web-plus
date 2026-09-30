@@ -1,12 +1,12 @@
 # Release Checklist
 
-Pi Web Standalone Edition releases are distributed exclusively through [`koxircom/pi-web-standalone` GitHub Releases](https://github.com/koxircom/pi-web-standalone/releases):
+Pi Web Plus (Standalone Edition) releases are distributed exclusively through [`koxircom/pi-web-plus` GitHub Releases](https://github.com/koxircom/pi-web-plus/releases):
 
-- GitHub Release tag: `v<version>` in `koxircom/pi-web-standalone` (for example, `v1.1.0`)
+- GitHub Release tag: `v<version>` in `koxircom/pi-web-plus` (for example, `v1.1.0`)
 - Release tarball asset: `pi-web-standalone-<version>.tgz` (for example, `pi-web-standalone-1.1.0.tgz`)
 - Official install command (replace `<version>` when targeting another release):
   ```bash
-  npm install -g https://github.com/koxircom/pi-web-standalone/releases/download/v1.1.0/pi-web-standalone-1.1.0.tgz
+  npm install -g https://github.com/koxircom/pi-web-plus/releases/download/v1.1.0/pi-web-standalone-1.1.0.tgz
   ```
 
 > **Release Invariants**:
@@ -38,7 +38,7 @@ Expected:
 - Node.js is `22.19.0` or newer (`>=22.19.0`).
 - `git status` is clean, or only contains the intentional version bump (`package.json` and `package-lock.json`, e.g. `1.1.0`).
 - `package.json` retains `"name": "@agegr/pi-web"`, `"piWebEdition": "koxir-standalone"`, and `"standalone": true`.
-- GitHub CLI is authenticated with write/release access to `koxircom/pi-web-standalone`.
+- GitHub CLI is authenticated with write/release access to `koxircom/pi-web-plus`.
 
 ## 2. Offline Build, `npm pack`, and Tarball Verification
 
@@ -73,7 +73,7 @@ rm -rf "$TMP_PREFIX"
 
 ## 4. Commit, Tag, Upload GitHub Release Asset, and Verify `Latest`
 
-Commit the version bump (if not already committed), create the annotated `v<version>` tag, and push `main` and tags to `koxircom/pi-web-standalone`:
+Commit the version bump (if not already committed), create the annotated `v<version>` tag, and push `main` and tags to `koxircom/pi-web-plus`:
 
 ```bash
 git diff -- package.json package-lock.json
@@ -90,12 +90,12 @@ git log --oneline --decorate "v<previous>..v${VERSION}"
 git diff --stat "v<previous>..v${VERSION}"
 ```
 
-Create the GitHub Release on `koxircom/pi-web-standalone`, attach `pi-web-standalone-${VERSION}.tgz`, and mark it as `Latest` (required because `/api/app-update` checks `releases/latest`):
+Create the GitHub Release on `koxircom/pi-web-plus`, attach `pi-web-standalone-${VERSION}.tgz`, and mark it as `Latest` (required because `/api/app-update` checks `releases/latest`):
 
 ```bash
 gh release create "v${VERSION}" \
   "./pi-web-standalone-${VERSION}.tgz#pi-web-standalone-${VERSION}.tgz" \
-  --repo koxircom/pi-web-standalone \
+  --repo koxircom/pi-web-plus \
   --verify-tag \
   --latest \
   --title "v${VERSION}" \
@@ -106,22 +106,22 @@ Verify the published release metadata, asset URL, and `isLatest: true` status:
 
 ```bash
 gh release view "v${VERSION}" \
-  --repo koxircom/pi-web-standalone \
+  --repo koxircom/pi-web-plus \
   --json tagName,isDraft,assets,url
-gh api repos/koxircom/pi-web-standalone/releases/latest --jq '.tag_name'
+gh api repos/koxircom/pi-web-plus/releases/latest --jq '.tag_name'
 ```
 
 Expected:
 
 - `isDraft` is `false`, and the `/releases/latest` API returns `v${VERSION}`.
-- `assets` contains `pi-web-standalone-${VERSION}.tgz` with download URL `https://github.com/koxircom/pi-web-standalone/releases/download/v${VERSION}/pi-web-standalone-${VERSION}.tgz`.
+- `assets` contains `pi-web-standalone-${VERSION}.tgz` with download URL `https://github.com/koxircom/pi-web-plus/releases/download/v${VERSION}/pi-web-standalone-${VERSION}.tgz`.
 
 ## 5. Synchronize Running Instances
 
 Pushing `main` or publishing a GitHub Release does **not** automatically update running Pi Web environments. After verifying the release asset and `Latest` status, upgrade target running instances from the official GitHub Release tarball (for example, `v1.1.0`):
 
 ```bash
-npm install -g "https://github.com/koxircom/pi-web-standalone/releases/download/v${VERSION}/pi-web-standalone-${VERSION}.tgz"
+npm install -g "https://github.com/koxircom/pi-web-plus/releases/download/v${VERSION}/pi-web-standalone-${VERSION}.tgz"
 ```
 
 After installation:

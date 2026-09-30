@@ -1091,9 +1091,297 @@
   }
 
   // ==========================================
+  // 5.9 Pi Web Plus SVG Branding (π+ Pi Web Plus 矢量品牌标识)
+  // ==========================================
+  const BRAND_IMG_TRACKED_ATTRS = ["src", "srcset", "sizes", "loading", "width", "height", "style", "alt", "decoding", "fetchpriority"];
+  const BRAND_SPAN_TRACKED_ATTRS = ["style", "hidden", "aria-hidden"];
+  const BRAND_SIDEBAR_TRACKED_ATTRS = ["style", "title", "aria-label"];
+  const brandElementSnapshots = new WeakMap();
+
+  const PI_WEB_THEME_PALETTES = {
+    light: "#1a1a1a",
+    dark: "#e8e8e8",
+    mist: "#202e2b",
+    rose: "#34282e",
+    pine: "#e6ede8",
+  };
+
+  function captureBrandAttrsSnapshot(el, attrNames, includeText = false) {
+    if (!el) return null;
+    if (brandElementSnapshots.has(el)) return brandElementSnapshots.get(el);
+    const attrs = {};
+    for (const name of attrNames) {
+      attrs[name] = {
+        has: el.hasAttribute(name),
+        value: el.getAttribute(name),
+      };
+    }
+    const snap = {
+      attrs,
+      textContent: includeText ? el.textContent : null,
+    };
+    brandElementSnapshots.set(el, snap);
+    return snap;
+  }
+
+  function restoreBrandAttrsSnapshot(el, attrNames, restoreText = false) {
+    if (!el) return;
+    const snap = brandElementSnapshots.get(el);
+    if (!snap) return;
+    for (const name of attrNames) {
+      const entry = snap.attrs[name];
+      if (!entry) continue;
+      if (entry.has && entry.value !== null) {
+        if (el.getAttribute(name) !== entry.value) {
+          el.setAttribute(name, entry.value);
+        }
+      } else if (el.hasAttribute(name)) {
+        el.removeAttribute(name);
+      }
+    }
+    if (restoreText && typeof snap.textContent === "string") {
+      if ((el.textContent || "").trim() === "Pi Web Plus" || !el.textContent) {
+        el.textContent = snap.textContent;
+      }
+    }
+    brandElementSnapshots.delete(el);
+  }
+
+  function isBrandColorLight(colorStr) {
+    const m = String(colorStr || "").match(/rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/i);
+    if (m) {
+      const r = Number(m[1]), g = Number(m[2]), b = Number(m[3]);
+      return (r * 0.299 + g * 0.587 + b * 0.114) > 140;
+    }
+    const hex = String(colorStr || "").trim().replace(/^#/, "");
+    if (/^[0-9a-f]{3}$/i.test(hex)) {
+      const r = parseInt(hex[0] + hex[0], 16);
+      const g = parseInt(hex[1] + hex[1], 16);
+      const b = parseInt(hex[2] + hex[2], 16);
+      return (r * 0.299 + g * 0.587 + b * 0.114) > 140;
+    }
+    if (/^[0-9a-f]{6}$/i.test(hex)) {
+      const r = parseInt(hex.slice(0, 2), 16);
+      const g = parseInt(hex.slice(2, 4), 16);
+      const b = parseInt(hex.slice(4, 6), 16);
+      return (r * 0.299 + g * 0.587 + b * 0.114) > 140;
+    }
+    return false;
+  }
+
+  function resolvePiWebBrandTextColor(labelSpan, img) {
+    const docEl = typeof document !== "undefined" ? document.documentElement : null;
+    const themeAttr = String(docEl?.getAttribute?.("data-theme") || docEl?.dataset?.theme || "").trim().toLowerCase();
+    const hasDarkClass = Boolean(docEl?.classList?.contains?.("dark"));
+    const isDark = hasDarkClass || themeAttr === "dark" || themeAttr === "pine";
+
+    let computedColor = "";
+    try {
+      const probeEl = labelSpan || img?.parentElement || document.body || docEl;
+      if (probeEl && typeof window !== "undefined" && typeof window.getComputedStyle === "function") {
+        const cs = window.getComputedStyle(probeEl);
+        const rawColor = (cs.color || "").trim();
+        if (rawColor && rawColor !== "transparent" && rawColor !== "rgba(0, 0, 0, 0)") {
+          computedColor = rawColor;
+        }
+      }
+    } catch (e) {}
+
+    let cssVarText = "";
+    try {
+      if (docEl && typeof window !== "undefined" && typeof window.getComputedStyle === "function") {
+        cssVarText = window.getComputedStyle(docEl).getPropertyValue("--text").trim();
+        if (!cssVarText && document.body) {
+          cssVarText = window.getComputedStyle(document.body).getPropertyValue("--text").trim();
+        }
+      }
+    } catch (e) {}
+
+    const candidate = cssVarText || computedColor;
+    if (candidate) {
+      const candidateIsLight = isBrandColorLight(candidate);
+      if (isDark && !candidateIsLight) {
+        return PI_WEB_THEME_PALETTES[themeAttr] || PI_WEB_THEME_PALETTES.dark;
+      }
+      if (!isDark && candidateIsLight && (themeAttr === "light" || !themeAttr)) {
+        return PI_WEB_THEME_PALETTES.light;
+      }
+      return candidate;
+    }
+
+    if (themeAttr && PI_WEB_THEME_PALETTES[themeAttr]) {
+      return PI_WEB_THEME_PALETTES[themeAttr];
+    }
+    return isDark ? PI_WEB_THEME_PALETTES.dark : PI_WEB_THEME_PALETTES.light;
+  }
+
+  function buildPiWebPlusBrandSvg(textColor) {
+    const safeColor = String(textColor || "#1a1a1a").replace(/"/g, "'");
+    return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 186 32" width="186" height="32" role="img" aria-label="π+ Pi Web Plus"><title>π+ Pi Web Plus</title><path data-pi-brand-part="bubble" d="M5.7 24.7 L3.7 29.8 Q3.3 30.7 4.3 30.3 L9.8 28.1 A14.4 14.4 0 1 0 5.7 24.7 Z" fill="#23454b"/><path data-pi-brand-part="pi-bar" d="M6.2 13.1 C6.8 11.2 8.0 10.5 9.8 10.5 H18.2" fill="none" stroke="#ffffff" stroke-width="2.45" stroke-linecap="round" stroke-linejoin="round"/><path data-pi-brand-part="pi-left-leg" d="M10.5 10.7 L8.7 21.3" fill="none" stroke="#ffffff" stroke-width="2.45" stroke-linecap="round"/><path data-pi-brand-part="pi-right-leg" d="M15.1 10.7 L14.6 19.3 C14.5 20.8 15.4 21.5 16.9 21.2" fill="none" stroke="#ffffff" stroke-width="2.45" stroke-linecap="round" stroke-linejoin="round"/><path data-pi-brand-part="plus" d="M23.3 11.5 V16.9 M20.6 14.2 H26.0" fill="none" stroke="#ffffff" stroke-width="2.2" stroke-linecap="round"/><text data-pi-brand-part="wordmark" x="42" y="23.2" fill="${safeColor}" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace" font-size="21.5" font-weight="700" letter-spacing="-0.3">Pi Web Plus</text></svg>`;
+  }
+
+  function removePiWebPlusBranding() {
+    if (typeof document === "undefined") return;
+    try {
+      for (const img of document.querySelectorAll("img[data-pi-brand-logo]")) {
+        restoreBrandAttrsSnapshot(img, BRAND_IMG_TRACKED_ATTRS, false);
+        img.removeAttribute("data-pi-brand-logo");
+        img.removeAttribute("data-pi-brand-color");
+      }
+      for (const span of document.querySelectorAll("[data-pi-brand-hidden-label]")) {
+        restoreBrandAttrsSnapshot(span, BRAND_SPAN_TRACKED_ATTRS, false);
+        span.removeAttribute("data-pi-brand-hidden-label");
+      }
+      for (const btn of document.querySelectorAll("[data-pi-brand-sidebar-title]")) {
+        restoreBrandAttrsSnapshot(btn, BRAND_SIDEBAR_TRACKED_ATTRS, true);
+        btn.removeAttribute("data-pi-brand-sidebar-title");
+      }
+      for (const row of document.querySelectorAll("[data-pi-brand-sidebar-row]")) {
+        restoreBrandAttrsSnapshot(row, ["style"], false);
+        row.removeAttribute("data-pi-brand-sidebar-row");
+      }
+      for (const actions of document.querySelectorAll("[data-pi-brand-sidebar-actions]")) {
+        restoreBrandAttrsSnapshot(actions, ["style"], false);
+        actions.removeAttribute("data-pi-brand-sidebar-actions");
+      }
+      for (const newBtn of document.querySelectorAll("[data-pi-brand-sidebar-newbtn]")) {
+        restoreBrandAttrsSnapshot(newBtn, ["style"], false);
+        newBtn.removeAttribute("data-pi-brand-sidebar-newbtn");
+      }
+    } catch (e) {}
+  }
+
+  function syncPiWebPlusBranding() {
+    if (typeof document === "undefined" || isDisposed) return;
+    if (!isPluginEnabled("pi-web-plus-branding")) {
+      removePiWebPlusBranding();
+      return;
+    }
+
+    try {
+      if (document.head) {
+        for (const preloadLink of document.head.querySelectorAll('link[rel="preload"][href*="/icons/apple-touch-icon.png"]')) {
+          preloadLink.remove();
+        }
+      }
+      delete window.__PI_ENH_LOGO_PRELOAD_IMG__;
+    } catch (e) {}
+
+    try {
+      const candidateImgs = document.querySelectorAll('img[data-pi-brand-logo], img[src*="apple-touch-icon"], img[srcset*="apple-touch-icon"]');
+      for (const img of candidateImgs) {
+        if (img.closest?.(".web-login-brand")) continue;
+        const nextEl = img.nextElementSibling;
+        const labelSpan = (nextEl && nextEl.tagName === "SPAN" && (
+          nextEl.hasAttribute("data-pi-brand-hidden-label") ||
+          /^(?:π\+\s*)?Pi\s*Web(?:\s+Plus|\+)?$/i.test((nextEl.textContent || "").trim())
+        )) ? nextEl : null;
+
+        if (!labelSpan && !img.hasAttribute("data-pi-brand-logo")) continue;
+
+        captureBrandAttrsSnapshot(img, BRAND_IMG_TRACKED_ATTRS, false);
+        if (labelSpan) {
+          captureBrandAttrsSnapshot(labelSpan, BRAND_SPAN_TRACKED_ATTRS, false);
+        }
+
+        const textColor = resolvePiWebBrandTextColor(labelSpan, img);
+        const needsUpdate =
+          img.getAttribute("data-pi-brand-logo") !== "true" ||
+          img.getAttribute("data-pi-brand-color") !== textColor ||
+          img.hasAttribute("srcset") ||
+          img.getAttribute("width") !== "186" ||
+          img.getAttribute("height") !== "32";
+
+        if (needsUpdate) {
+          const svg = buildPiWebPlusBrandSvg(textColor);
+          const dataUri = "data:image/svg+xml;utf8," + encodeURIComponent(svg);
+          if (img.hasAttribute("srcset")) img.removeAttribute("srcset");
+          if (img.hasAttribute("sizes")) img.removeAttribute("sizes");
+          img.setAttribute("src", dataUri);
+          img.setAttribute("width", "186");
+          img.setAttribute("height", "32");
+          img.setAttribute("alt", "π+ Pi Web Plus");
+          img.setAttribute("data-pi-brand-logo", "true");
+          img.setAttribute("data-pi-brand-color", textColor);
+          img.style.width = "186px";
+          img.style.height = "32px";
+          img.style.maxWidth = "100%";
+          img.style.objectFit = "contain";
+          img.style.objectPosition = "left center";
+          img.style.flexShrink = "0";
+          img.style.display = "block";
+        }
+
+        if (labelSpan) {
+          if (labelSpan.getAttribute("data-pi-brand-hidden-label") !== "true") {
+            labelSpan.setAttribute("data-pi-brand-hidden-label", "true");
+          }
+          if (labelSpan.getAttribute("aria-hidden") !== "true") {
+            labelSpan.setAttribute("aria-hidden", "true");
+          }
+          if (labelSpan.style.display !== "none") {
+            labelSpan.style.display = "none";
+          }
+        }
+      }
+
+      for (const btn of document.querySelectorAll("button")) {
+        if (btn.closest?.(".pi-enh-plugins-panel, .settings-dialog-backdrop, [role='dialog']")) continue;
+        const isMarked = btn.hasAttribute("data-pi-brand-sidebar-title");
+        const rawText = (btn.textContent || "").trim();
+        if (!isMarked && rawText !== "Pi Web" && rawText !== "Pi Web Plus") continue;
+        const row = btn.parentElement;
+        if (!row) continue;
+        const hasSiblingButtons = Boolean(
+          row.querySelector?.('button[aria-controls="session-search-input"], #pi-enh-session-batch-btn') ||
+          (btn.nextElementSibling && btn.nextElementSibling.querySelector?.("button")) ||
+          btn.style?.minWidth === "6ch"
+        );
+        if (!isMarked && !hasSiblingButtons) continue;
+
+        captureBrandAttrsSnapshot(btn, BRAND_SIDEBAR_TRACKED_ATTRS, true);
+        if (!isMarked) btn.setAttribute("data-pi-brand-sidebar-title", "true");
+        if (rawText === "Pi Web") {
+          btn.textContent = "Pi Web Plus";
+        }
+        if (btn.style.fontSize !== "13.5px") btn.style.fontSize = "13.5px";
+        if (btn.style.letterSpacing !== "-0.03em") btn.style.letterSpacing = "-0.03em";
+        if (btn.style.whiteSpace !== "nowrap") btn.style.whiteSpace = "nowrap";
+        if (btn.style.flexShrink !== "0") btn.style.flexShrink = "0";
+
+        if (row) {
+          captureBrandAttrsSnapshot(row, ["style"], false);
+          if (!row.hasAttribute("data-pi-brand-sidebar-row")) row.setAttribute("data-pi-brand-sidebar-row", "true");
+          if (row.style.gap !== "6px") row.style.gap = "6px";
+          if (row.style.flexWrap !== "nowrap") row.style.flexWrap = "nowrap";
+        }
+        const actions = btn.nextElementSibling;
+        if (actions && actions.tagName === "DIV") {
+          captureBrandAttrsSnapshot(actions, ["style"], false);
+          if (!actions.hasAttribute("data-pi-brand-sidebar-actions")) actions.setAttribute("data-pi-brand-sidebar-actions", "true");
+          if (actions.style.gap !== "4px") actions.style.gap = "4px";
+          if (actions.style.flexShrink !== "0") actions.style.flexShrink = "0";
+          if (actions.style.alignItems !== "center") actions.style.alignItems = "center";
+          const firstActionBtn = actions.querySelector("button:first-child");
+          if (firstActionBtn && firstActionBtn.getAttribute("aria-controls") !== "session-search-input" && firstActionBtn.id !== "pi-enh-session-batch-btn") {
+            captureBrandAttrsSnapshot(firstActionBtn, ["style"], false);
+            if (!firstActionBtn.hasAttribute("data-pi-brand-sidebar-newbtn")) firstActionBtn.setAttribute("data-pi-brand-sidebar-newbtn", "true");
+            if (firstActionBtn.style.paddingLeft !== "8px") firstActionBtn.style.paddingLeft = "8px";
+            if (firstActionBtn.style.paddingRight !== "9px") firstActionBtn.style.paddingRight = "9px";
+          }
+        }
+      }
+    } catch (e) {}
+  }
+
+  window.__PI_ENH_SYNC_BRANDING__ = syncPiWebPlusBranding;
+  window.__PI_ENH_REMOVE_BRANDING__ = removePiWebPlusBranding;
+
+  // ==========================================
   // 6. Settings Dialog Enhancements & Archived Tabs (设置对话框增强与归档管理)
   // ==========================================
   function syncSettingsDialogEnhancements() {
+    syncPiWebPlusBranding();
     // 弹窗打开瞬间立即静默并发预热模型数据，确保切换至模型标签页时 0ms 瞬间秒开
     if (typeof window !== "undefined" && typeof window.__PI_ENH_PRELOAD_MODELS_CACHE__ === "function") {
       void window.__PI_ENH_PRELOAD_MODELS_CACHE__();
@@ -6224,6 +6512,7 @@ window.__PI_ENH_RENDER_USAGE_PANEL__ = renderUsagePanel;
       removeAnnotationUi();
       removeBottomShortcutsBar();
       clearModelScopeWarningVisibility();
+      removePiWebPlusBranding();
       if (typeof cleanupSessionScrollTracking === "function") {
         try { cleanupSessionScrollTracking(); } catch (e) {}
       }
@@ -6303,6 +6592,8 @@ window.__PI_ENH_RENDER_USAGE_PANEL__ = renderUsagePanel;
       delete window.__PI_ENH_GET_QUEUE_DETAIL_CACHE_STATS__;
       delete window.__PI_ENH_RECONCILE_USER_MESSAGE__;
       delete window.__PI_ENH_SESSION_HISTORY_ORDER_GUARD__;
+      delete window.__PI_ENH_SYNC_BRANDING__;
+      delete window.__PI_ENH_REMOVE_BRANDING__;
     } catch (e) {
       console.warn("[Pi Web Enhancements] cleanup warning:", e);
     }

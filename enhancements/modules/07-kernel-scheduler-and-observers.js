@@ -54,6 +54,9 @@
           if (isPluginEnabled("pi-mail-auto-collapse") && typeof syncPiMailCards === "function") {
             syncPiMailCards();
           }
+          if (typeof syncPiWebPlusBranding === "function") {
+            syncPiWebPlusBranding();
+          }
         });
 
         // 针对输入框、队列变动立即触发同步，消除 50ms 延时导致的界面跳动（带内部变更守卫防死循环）
@@ -172,6 +175,9 @@
       syncSessionTags();
       syncSessionOdooAddons();
       syncSessionSectionHeaders();
+      if (typeof syncPiWebPlusBranding === "function") {
+        syncPiWebPlusBranding();
+      }
     });
   }
 
@@ -235,11 +241,15 @@
           withMutationGuard(() => {
             syncSessionTags();
           });
+        } else if (!isMutatingInternally && typeof syncPiWebPlusBranding === "function") {
+          withMutationGuard(() => {
+            syncPiWebPlusBranding();
+          });
         }
       });
       const root = document.querySelector(".sidebar-container") || document.documentElement || document.body;
       if (root) {
-        sidebarObserver.observe(root, { childList: true, subtree: true });
+        sidebarObserver.observe(root, { childList: true, characterData: true, subtree: true });
         activeCleanups.push(() => {
           if (sidebarObserver) {
             try { sidebarObserver.disconnect(); } catch (e) {}
@@ -251,6 +261,35 @@
   }
 
   initSidebarObserver();
+
+  let themeBrandObserver = null;
+  function initThemeBrandObserver() {
+    if (themeBrandObserver || typeof MutationObserver !== "function" || typeof document === "undefined") return;
+    try {
+      const docEl = document.documentElement;
+      if (!docEl) return;
+      themeBrandObserver = new MutationObserver(() => {
+        if (isDisposed || isMutatingInternally) return;
+        if (typeof syncPiWebPlusBranding === "function") {
+          withMutationGuard(() => {
+            syncPiWebPlusBranding();
+          });
+        }
+      });
+      themeBrandObserver.observe(docEl, {
+        attributes: true,
+        attributeFilter: ["class", "data-theme", "style"],
+      });
+      activeCleanups.push(() => {
+        if (themeBrandObserver) {
+          try { themeBrandObserver.disconnect(); } catch (e) {}
+          themeBrandObserver = null;
+        }
+      });
+    } catch (e) {}
+  }
+
+  initThemeBrandObserver();
 
   try {
     const rawSessions = typeof window !== "undefined" && typeof window.__PI_ENH_GET_RAW_SESSIONS__ === "function" ? window.__PI_ENH_GET_RAW_SESSIONS__() : null;
@@ -885,8 +924,8 @@
 
   function isCurrentEmptySession() {
     try {
-      // 1. 若页面存在首屏 Brand 元素（包含 apple-touch-icon 图标或标题区域），说明处于新建/空会话初始状态
-      const brandLogo = document.querySelector('img[src*="apple-touch-icon"]');
+      // 1. 若页面存在首屏 Brand 元素（包含 data-pi-brand-logo 或 apple-touch-icon 图标或标题区域），说明处于新建/空会话初始状态
+      const brandLogo = document.querySelector('img[data-pi-brand-logo], img[src*="apple-touch-icon"]');
       if (brandLogo && isElementVisibleForLiveTimer(brandLogo)) {
         return true;
       }

@@ -1,10 +1,20 @@
-# Pi Web Standalone Edition
+# Pi Web Plus
+
+<p align="left">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="./public/icons/pi-web-plus-logo-dark.svg" />
+    <source media="(prefers-color-scheme: light)" srcset="./public/icons/pi-web-plus-logo-light.svg" />
+    <img alt="π+ Pi Web Plus" src="./public/icons/pi-web-plus-logo-light.svg" width="186" height="32" />
+  </picture>
+</p>
+
+> **品牌更新：** 当前 `main` 源码已包含 π+ SVG 品牌标识，历史 v1.1.0 发行包保持原样，不覆盖既有资产。
 
 [English](./README.md) | [日本語](./README.ja.md) | [Русский](./README.ru.md)
 
-面向 [pi 编程智能体](https://github.com/earendil-works/pi)（`@earendil-works/pi-coding-agent`）的独立版（Standalone Edition）本地浏览器界面。Pi Web Standalone Edition 与 pi 共用本机配置和会话文件，可在浏览器中查找和继续对话、运行智能体、配置模型与资源，并查看项目文件。
+面向 [pi 编程智能体](https://github.com/earendil-works/pi)（`@earendil-works/pi-coding-agent`）的独立增强版（**Pi Web Plus**，Standalone Edition）本地浏览器界面。Pi Web Plus 与 pi 共用本机配置和会话文件，可在浏览器中查找和继续对话、运行智能体、配置模型与资源，并查看项目文件。
 
-> **说明**：外部上游静态演示站仅展示旧版上游基础界面，不代表 **Pi Web Standalone Edition**（独立发行版内置完整前端增强套件，并通过 [`koxircom/pi-web-standalone`](https://github.com/koxircom/pi-web-standalone) 独立发布）。
+> **说明**：外部上游静态演示站仅展示旧版上游基础界面，不代表 **Pi Web Plus**（独立发行版内置完整前端增强套件，并通过 [`koxircom/pi-web-plus`](https://github.com/koxircom/pi-web-plus) 独立发布）。
 
 ![Pi Web 展示包含结构化 Markdown、工具调用和项目导航的 pi 会话](docs/screenshot2.png)
 
@@ -20,23 +30,23 @@
 
 ## 快速开始
 
-Pi Web Standalone 要求 Node.js 22.19.0 或更高版本（`node >=22.19`）。先用 `node --version` 检查版本，然后从 [`koxircom/pi-web-standalone` GitHub Releases](https://github.com/koxircom/pi-web-standalone/releases) 全局安装官方预构建 `.tgz` 发行包并启动 `pi-web`：
+Pi Web Plus 要求 Node.js 22.19.0 或更高版本（`node >=22.19`）。先用 `node --version` 检查版本，然后从 [`koxircom/pi-web-plus` GitHub Releases](https://github.com/koxircom/pi-web-plus/releases) 全局安装官方预构建 `.tgz` 发行包并启动 `pi-web`：
 
 ```bash
-npm install -g https://github.com/koxircom/pi-web-standalone/releases/download/v1.1.0/pi-web-standalone-1.1.0.tgz
+npm install -g https://github.com/koxircom/pi-web-plus/releases/download/v1.1.0/pi-web-standalone-1.1.0.tgz
 pi-web
 ```
 
-> **重要说明**：内部 `package.json` 的包名仍保留为 `@agegr/pi-web` 以维持运行时兼容，但 Pi Web Standalone 仅通过 [`koxircom/pi-web-standalone` GitHub Releases](https://github.com/koxircom/pi-web-standalone/releases) 的 `.tgz` 资产分发。**切勿从公共 npm 源拉取或安装 `@agegr/pi-web`**，否则会误装外部旧版上游包。
+> **重要说明**：内部 `package.json` 的包名仍保留为 `@agegr/pi-web` 以维持运行时兼容，但 Pi Web Plus 仅通过 [`koxircom/pi-web-plus` GitHub Releases](https://github.com/koxircom/pi-web-plus/releases) 的 `.tgz` 资产分发。**切勿从公共 npm 源拉取或安装 `@agegr/pi-web`**，否则会误装外部旧版上游包。
 
 服务就绪后，命令行会尝试自动打开浏览器。如果没有打开，请访问 [http://127.0.0.1:30141](http://127.0.0.1:30141)。Pi Web 默认仅监听 `127.0.0.1`。
 
 如果尚未配置模型 Provider，请打开**模型（Models）**面板登录或添加 API Key。
 
-上例以 `v1.1.0` 标准资产（`pi-web-standalone-1.1.0.tgz`）为格式示例。安装指定版本或升级新版本时，请先用 `Ctrl+C` 停止正在运行的进程，将链接中的 `v1.1.0` 和 `1.1.0` 替换为 [GitHub Releases](https://github.com/koxircom/pi-web-standalone/releases) 中对应的目标版本号 `<version>` 后重新执行安装命令：
+上例以 `v1.1.0` 标准资产（`pi-web-standalone-1.1.0.tgz`）为格式示例。安装指定版本或升级新版本时，请先用 `Ctrl+C` 停止正在运行的进程，将链接中的 `v1.1.0` 和 `1.1.0` 替换为 [GitHub Releases](https://github.com/koxircom/pi-web-plus/releases) 中对应的目标版本号 `<version>` 后重新执行安装命令：
 
 ```bash
-npm install -g https://github.com/koxircom/pi-web-standalone/releases/download/v<version>/pi-web-standalone-<version>.tgz
+npm install -g https://github.com/koxircom/pi-web-plus/releases/download/v<version>/pi-web-standalone-<version>.tgz
 ```
 
 - **Web 依赖 SDK 与全局 CLI 边界**：Pi Web `v1.1.0` 的 Web 运行时依赖统一使用 `@earendil-works/pi-*` SDK `0.99.1`，安装或升级 Pi Web **不会**自动升级宿主机全局安装的 `pi` Agent CLI。
@@ -79,10 +89,10 @@ PI_WEB_PASSWORD='足够长的随机密码' pi-web --hostname 0.0.0.0
 
 服务端的模型和 API 请求会读取标准的 `HTTP_PROXY`、`HTTPS_PROXY` 和 `NO_PROXY` 环境变量。
 
-macOS 或 Linux（通过 [GitHub Release `.tgz` 安装包](https://github.com/koxircom/pi-web-standalone/releases/download/v1.1.0/pi-web-standalone-1.1.0.tgz)安装并启动）：
+macOS 或 Linux（通过 [GitHub Release `.tgz` 安装包](https://github.com/koxircom/pi-web-plus/releases/download/v1.1.0/pi-web-standalone-1.1.0.tgz)安装并启动）：
 
 ```bash
-npm install -g https://github.com/koxircom/pi-web-standalone/releases/download/v1.1.0/pi-web-standalone-1.1.0.tgz
+npm install -g https://github.com/koxircom/pi-web-plus/releases/download/v1.1.0/pi-web-standalone-1.1.0.tgz
 HTTP_PROXY=http://127.0.0.1:7890 \
 HTTPS_PROXY=http://127.0.0.1:7890 \
 NO_PROXY=localhost,127.0.0.1 \
@@ -92,7 +102,7 @@ pi-web
 Windows PowerShell：
 
 ```powershell
-npm install -g https://github.com/koxircom/pi-web-standalone/releases/download/v1.1.0/pi-web-standalone-1.1.0.tgz
+npm install -g https://github.com/koxircom/pi-web-plus/releases/download/v1.1.0/pi-web-standalone-1.1.0.tgz
 $env:HTTP_PROXY = "http://127.0.0.1:7890"
 $env:HTTPS_PROXY = "http://127.0.0.1:7890"
 $env:NO_PROXY = "localhost,127.0.0.1"

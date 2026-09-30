@@ -3,14 +3,14 @@
   "version": "1.1.0",
   "piWebEdition": "koxir-standalone",
   "standalone": true,
-  "description": "Pi Web Standalone Edition — Web UI for the pi coding agent",
-  "homepage": "https://github.com/koxircom/pi-web-standalone#readme",
+  "description": "Pi Web Plus — Standalone Edition Web UI for the pi coding agent",
+  "homepage": "https://github.com/koxircom/pi-web-plus#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/koxircom/pi-web-standalone.git"
+    "url": "git+https://github.com/koxircom/pi-web-plus.git"
   },
   "bugs": {
-    "url": "https://github.com/koxircom/pi-web-standalone/issues"
+    "url": "https://github.com/koxircom/pi-web-plus/issues"
   },
   "license": "MIT",
   "engines": {

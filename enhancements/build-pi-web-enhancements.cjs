@@ -30,7 +30,7 @@ const MODULE_SPECS = [
     startAnchor: "// 0. Enhancement Plugins Registry (网页插件注册与管理)",
     includePrecedingBanner: true,
     responsibility:
-      "ENHANCEMENT_PLUGINS (76 个插件) 注册表与默认配置 Schema、模块与插件启闭持久化、用户消息状态对齐与大图去重、会话置顶/归档/背景色/多维彩色标签/Odoo 插件更新状态胶囊与分组保留策略。",
+      "ENHANCEMENT_PLUGINS (77 个插件) 注册表与默认配置 Schema、模块与插件启闭持久化、用户消息状态对齐与大图去重、会话置顶/归档/背景色/多维彩色标签/Odoo 插件更新状态胶囊与分组保留策略。",
   },
   {
     index: 3,

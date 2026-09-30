@@ -1,6 +1,6 @@
-# Pi Web 增强插件系统 (Pi Web Enhancements Suite)
+# Pi Web Plus 增强插件系统 (Pi Web Plus Enhancements Suite)
 
-本项目基于官方 [agegr/pi-web](https://github.com/agegr/pi-web) 构建，内置了一整套强大、优雅且经过严格端到端测试的前端增强插件体系。
+本项目为 **Pi Web Plus**（[`koxircom/pi-web-plus`](https://github.com/koxircom/pi-web-plus)，基于官方 [agegr/pi-web](https://github.com/agegr/pi-web) 演进的独立增强发行版），内置了一整套强大、优雅且经过严格端到端测试的前端增强插件体系。
 
 ---
 
@@ -31,6 +31,7 @@
 - **总耗时拆解徽标与进度条气泡 (Turn Duration Breakdown Tooltip)**：任务完成后在消息底部渲染精美的耗时徽章（如 `⏱️ 1分42秒`）；鼠标悬停或移动端轻触可查看思考、工具调用（细分子工具次数与耗时）和生成的详细耗时分布柱状图。
 
 ### 3. 显示与布局现代化
+- **Pi Web Plus SVG 品牌标识 (`pi-web-plus-branding`)**：新会话欢迎区与左侧栏统一呈现矢量「π+ Pi Web Plus」SVG 品牌标识，自适应深浅色主题且支持随时一键无损切换恢复。
 - **设置弹窗左侧导航与自适应加宽 (Settings Sidebar Layout)**：将设置弹窗的选项卡重构为符合现代 IDE 习惯的左侧垂直侧边栏导航，支持展开/收起为迷你图标模式，扩大面板可视面积。
 - **常规设置双列仪表盘 (General Settings Dashboard)**：将常规面板升级为双列卡片仪表盘布局，大幅提升空间利用率，并集成一键重启/维护操作入口。
 - **工具卡片全宽左对齐与布局稳定 (Tool Card Layout Stability)**：彻底消除工具卡片在不同屏幕分辨率下的阶梯式右偏或居中悬挂，保持 100% 全宽对齐与优雅截断。

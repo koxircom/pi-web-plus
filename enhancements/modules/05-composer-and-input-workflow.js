@@ -12350,7 +12350,7 @@
 
   function isNewSessionWelcomeDomVisible() {
     try {
-      const brandLogo = document.querySelector?.('img[src*="apple-touch-icon"]');
+      const brandLogo = document.querySelector?.('img[data-pi-brand-logo], img[src*="apple-touch-icon"]');
       if (!brandLogo) return false;
       const rect = brandLogo.getBoundingClientRect?.();
       if (!rect || rect.width <= 0 || rect.height <= 0) return false;

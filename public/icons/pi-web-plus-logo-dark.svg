@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 186 32" width="186" height="32" role="img" aria-label="π+ Pi Web Plus">
+  <title>π+ Pi Web Plus</title>
+  <path data-pi-brand-part="bubble" d="M5.7 24.7 L3.7 29.8 Q3.3 30.7 4.3 30.3 L9.8 28.1 A14.4 14.4 0 1 0 5.7 24.7 Z" fill="#23454b"/>
+  <path data-pi-brand-part="pi-bar" d="M6.2 13.1 C6.8 11.2 8.0 10.5 9.8 10.5 H18.2" fill="none" stroke="#ffffff" stroke-width="2.45" stroke-linecap="round" stroke-linejoin="round"/>
+  <path data-pi-brand-part="pi-left-leg" d="M10.5 10.7 L8.7 21.3" fill="none" stroke="#ffffff" stroke-width="2.45" stroke-linecap="round"/>
+  <path data-pi-brand-part="pi-right-leg" d="M15.1 10.7 L14.6 19.3 C14.5 20.8 15.4 21.5 16.9 21.2" fill="none" stroke="#ffffff" stroke-width="2.45" stroke-linecap="round" stroke-linejoin="round"/>
+  <path data-pi-brand-part="plus" d="M23.3 11.5 V16.9 M20.6 14.2 H26.0" fill="none" stroke="#ffffff" stroke-width="2.2" stroke-linecap="round"/>
+  <text data-pi-brand-part="wordmark" x="42" y="23.2" fill="#e8e8e8" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace" font-size="21.5" font-weight="700" letter-spacing="-0.3">Pi Web Plus</text>
+</svg>
