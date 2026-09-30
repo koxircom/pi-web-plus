@@ -33,6 +33,13 @@ export function buildSessionSyncUrl(options: {
   return `/api/sessions/${encodeURIComponent(options.sessionId)}?${params}`;
 }
 
+/** Only committed history changes invalidate disk/network snapshots. Streaming
+ * deltas and replayed tool progress update separate state and must not starve
+ * initial hydration before it even reaches fetch. */
+export function invalidatesSessionHistory(eventType: string): boolean {
+  return /^(message_end|compaction_start|auto_compaction_start)$/.test(eventType);
+}
+
 // Epoch identity survives remounts without unbounded per-session counters.
 const epochs = new Map<string, number>();
 let epochSerial = 0;

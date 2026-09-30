@@ -780,6 +780,36 @@ function parseEntryTimestamp(timestamp: string): number | undefined {
   return Number.isNaN(parsed) ? undefined : parsed;
 }
 
+function parseAssistantTimestamp(timestamp: unknown): number | undefined {
+  if (typeof timestamp === "number") {
+    return Number.isFinite(timestamp) ? timestamp : undefined;
+  }
+  if (typeof timestamp === "string") {
+    const trimmed = timestamp.trim();
+    if (!trimmed) return undefined;
+    const parsed = Date.parse(trimmed);
+    if (!Number.isNaN(parsed)) return parsed;
+    const asNum = Number(trimmed);
+    if (Number.isFinite(asNum)) return asNum;
+  }
+  return undefined;
+}
+
+function resolveAssistantCompletedAt(
+  entryTimestamp: unknown,
+  messageTimestamp: unknown,
+): number | undefined {
+  const completedAt = parseAssistantTimestamp(entryTimestamp);
+  if (completedAt === undefined) return undefined;
+
+  const startedAt = parseAssistantTimestamp(messageTimestamp);
+  if (startedAt !== undefined && completedAt < startedAt) {
+    return undefined;
+  }
+
+  return completedAt;
+}
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -872,6 +902,12 @@ function entryToUiMessage(
       if (typeof legacyContent === "string") {
         message = { ...message, content: [{ type: "text", text: legacyContent }] } as AgentMessage;
       }
+      if (message.role === "assistant") {
+        const completedAt = resolveAssistantCompletedAt(entry.timestamp, message.timestamp);
+        if (completedAt !== undefined) {
+          message = { ...message, completedAt } as AgentMessage;
+        }
+      }
       if (!options.deferThinking || message.role !== "assistant") return message;
       const content = message.content;
       return {
@@ -881,7 +917,7 @@ function entryToUiMessage(
             ? { ...block, thinking: getThinkingPreview(block.thinking), deferred: true }
             : block
         )),
-      };
+      } as AgentMessage;
     }
     case "compaction":
       return {

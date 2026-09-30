@@ -52,19 +52,88 @@
     }
   } catch (e) {}
 
-  // 0.5 物理级去除标签页中的 Pi Web 标识与防止标题抖动
+  // 0.2 Logo 浏览器缓存与首屏秒开常驻加速引擎 (Instant Logo Preload & Cache Engine)
+  (function initLogoInstantCache() {
+    if (typeof window === "undefined") return;
+    const LOGO_PATH = "/icons/apple-touch-icon.png";
+
+    // A. 动态注入 <link rel="preload"> 提升网络层解析优先级
+    try {
+      if (document.head && !document.querySelector(`link[rel="preload"][href*="${LOGO_PATH}"]`)) {
+        const link = document.createElement("link");
+        link.rel = "preload";
+        link.as = "image";
+        link.href = LOGO_PATH;
+        link.type = "image/png";
+        link.setAttribute("fetchpriority", "high");
+        document.head.appendChild(link);
+      }
+    } catch {}
+
+    // B. 浏览器内存 Image 常驻与位图提前解码 (Pre-decoded in Memory)
+    try {
+      if (typeof Image !== "undefined") {
+        const logoImg = new Image();
+        logoImg.src = LOGO_PATH;
+        if (typeof logoImg.decode === "function") {
+          logoImg.decode().catch(() => {});
+        }
+        window.__PI_ENH_LOGO_PRELOAD_IMG__ = logoImg;
+      }
+    } catch {}
+
+    // C. 浏览器现代 CacheStorage 主动预存 (PWA / CacheStorage 强缓存)
+    try {
+      if ("caches" in window && typeof caches.open === "function") {
+        caches.open("pi-web-logo-cache-v1").then((cache) => {
+          cache.match(LOGO_PATH).then((existing) => {
+            if (!existing) {
+              fetch(LOGO_PATH, { cache: "force-cache" })
+                .then((resp) => {
+                  if (resp && resp.ok) cache.put(LOGO_PATH, resp.clone());
+                })
+                .catch(() => {});
+            }
+          });
+        }).catch(() => {});
+      }
+    } catch {}
+
+    // D. DOM 渲染优化：一旦页面挂载该 Logo，立即附加高速渲染属性 (fetchpriority/decoding/eager)
+    function optimizeLogoElement(el) {
+      if (!el || el.__pi_logo_optimized) return;
+      el.__pi_logo_optimized = true;
+      try {
+        if (!el.getAttribute("fetchpriority")) el.setAttribute("fetchpriority", "high");
+        if (!el.getAttribute("decoding")) el.setAttribute("decoding", "async");
+        if (el.loading === "lazy") el.loading = "eager";
+      } catch {}
+    }
+
+    if (typeof document !== "undefined") {
+      const applyExisting = () => {
+        for (const img of document.querySelectorAll(`img[src*="${LOGO_PATH}"]`)) {
+          optimizeLogoElement(img);
+        }
+      };
+      if (document.readyState === "loading") {
+        document.addEventListener("DOMContentLoaded", applyExisting, { once: true });
+      } else {
+        applyExisting();
+      }
+    }
+  })();
+
+  // 0.5 物理级去除标签页中的 Pi Web 标识与防止标题抖动（保留状态文字 🔵/🟠/🔴/🟢 等）
   function sanitizePageTitle(rawTitle) {
-    if (!rawTitle) return "work";
+    if (!rawTitle) return "";
     let clean = String(rawTitle)
       .replace(/\s*[-·|_]\s*Pi\s*Web\b/gi, "")
       .replace(/\bPi\s*Web\s*[-·|_]\s*/gi, "")
       .replace(/\bPi\s*Web\b/gi, "")
-      .replace(/^\(⏱️.*?\)\s*/, "")
-      .replace(/^⏱️\s+[\d.]+s\s+·\s+/, "")
-      .replace(/^✅\s*\(.*?\)\s*/, "")
-      .replace(/^(?:🟠【等待答复】|⚠️\s*需要确认)\s*(?:·\s*)?/, "")
+      .replace(/\s*[-·|_]\s*$/, "")
       .trim();
-    return clean || "work";
+    return clean;
   }
 
   // Safe Hot-Reloading: Clean up any previous instance before re-initializing
@@ -167,6 +236,204 @@
     bridgeBaseSyncUrl = null,
     currentScriptTag = null,
     pollerIntervalId = null;
+
+  function isProjectStatusIndicatorActive() {
+    if (isDisposed) return false;
+    if (typeof isPluginEnabled === "function") {
+      try {
+        return Boolean(isPluginEnabled("project-status-indicator"));
+      } catch (e) {}
+    }
+    try {
+      if (typeof localStorage !== "undefined") {
+        const direct = localStorage.getItem("pi-enh-plugin-project-status-indicator");
+        if (direct === "false") return false;
+        if (direct === "true") return true;
+        const raw = localStorage.getItem("pi-enh-settings-v1") || localStorage.getItem("pi-enh-features");
+        if (raw) {
+          const cfg = JSON.parse(raw);
+          if (cfg && cfg.features && cfg.features["project-status-indicator"] && cfg.features["project-status-indicator"].enabled === false) {
+            return false;
+          }
+          if (cfg && cfg["project-status-indicator"] && cfg["project-status-indicator"].enabled === false) {
+            return false;
+          }
+        }
+      }
+    } catch (e) {}
+    return true;
+  }
+
+  // 0.6 document.title setter 拦截与 DOM 更新防护（去除 Pi Web 尾缀并防止与原生 MutationObserver 死循环）
+  try {
+    if (typeof document !== "undefined") {
+      hadOwnTitleDesc = Object.prototype.hasOwnProperty.call(document, "title");
+      let desc = hadOwnTitleDesc
+        ? Object.getOwnPropertyDescriptor(document, "title")
+        : (Object.getOwnPropertyDescriptor(Document.prototype, "title") ||
+           (typeof HTMLDocument !== "undefined" && Object.getOwnPropertyDescriptor(HTMLDocument.prototype, "title")) ||
+           Object.getOwnPropertyDescriptor(Object.getPrototypeOf(document) || Document.prototype, "title"));
+
+      let origGet = null;
+      let origSet = null;
+
+      if (desc && (desc.get || desc.set)) {
+        origGet = desc.get;
+        origSet = desc.set;
+      } else if (desc && "value" in desc) {
+        let storedVal = desc.value;
+        origGet = function () { return storedVal; };
+        origSet = function (val) { storedVal = val; };
+      }
+
+      if (origSet) {
+        // 防止热重载重复 defineProperty 套娃，解包最底层原始方法
+        if (origGet && origGet.__pi_enh_orig_get) {
+          origGet = origGet.__pi_enh_orig_get;
+        }
+        if (origSet && origSet.__pi_enh_orig_set) {
+          origSet = origSet.__pi_enh_orig_set;
+        }
+
+        prevOwnTitleDesc = hadOwnTitleDesc ? Object.getOwnPropertyDescriptor(document, "title") : null;
+
+        let isSettingTitleInternally = false;
+
+        installedTitleGetter = function () {
+          const raw = origGet ? origGet.call(this) : "";
+          if (!isProjectStatusIndicatorActive()) {
+            return raw;
+          }
+          const sanitized = sanitizePageTitle(raw);
+          return sanitized || raw;
+        };
+        installedTitleGetter.__pi_enh_title__ = true;
+        installedTitleGetter.__pi_enh_orig_get = origGet;
+
+        installedTitleSetter = function (val) {
+          window.__PI_WEB_NATIVE_TITLE_RAW__ = val;
+          // Preserve the native title before sanitizing the enhanced display.
+          // Legacy cores publish it through document.title, newer cores also
+          // provide __PI_WEB_NATIVE_TITLE_BASE__ directly.
+          if (typeof val === "string" && (val === "Pi Web" || val.endsWith(" - Pi Web"))) {
+            window.__PI_WEB_NATIVE_TITLE_BASE__ = val;
+          }
+
+          if (!isProjectStatusIndicatorActive()) {
+            origSet.call(this, val);
+            return;
+          }
+
+          const cleanBase = sanitizePageTitle(val);
+          // A sanitized enhancer write must not replace an authoritative native base.
+          if (!window.__PI_WEB_NATIVE_TITLE_BASE__ && cleanBase && !/^(?:🔵|🟠|🔴|🟢|⚠️)/.test(cleanBase)) {
+            window.__PI_WEB_NATIVE_TITLE_BASE__ = cleanBase;
+          }
+
+          // 状态前缀保护：若当前 val 本身已带有状态前缀（如 🔵、🟠 需要确认、🟢 已完成等），直接使用 cleanBase
+          let targetTitle = cleanBase;
+          const hasStatusPrefix = /^(?:🔵|🟠|🔴|🟢|⚠️)/.test(cleanBase);
+
+          if (!hasStatusPrefix && typeof window.__PI_ENH_COMPOSE_WINDOW_TITLE__ === "function") {
+            try {
+              const composed = window.__PI_ENH_COMPOSE_WINDOW_TITLE__(cleanBase);
+              if (composed) targetTitle = composed;
+            } catch (e) {}
+          }
+
+          if (!targetTitle) {
+            targetTitle = cleanBase || (val ? sanitizePageTitle(val) : "") || "work";
+          }
+
+          // 获取当前底层真实的 title，若已等于目标值则禁止重复写入（防止与原生 MutationObserver 死循环）
+          const currentTitle = origGet ? origGet.call(this) : (document.querySelector("title")?.textContent || "");
+          if (currentTitle === targetTitle) {
+            return;
+          }
+
+          if (isSettingTitleInternally) {
+            origSet.call(this, targetTitle);
+            return;
+          }
+
+          isSettingTitleInternally = true;
+          try {
+            origSet.call(this, targetTitle);
+          } finally {
+            isSettingTitleInternally = false;
+          }
+        };
+        installedTitleSetter.__pi_enh_title__ = true;
+        installedTitleSetter.__pi_enh_orig_set = origSet;
+
+        Object.defineProperty(document, "title", {
+          configurable: true,
+          enumerable: true,
+          get: installedTitleGetter,
+          set: installedTitleSetter,
+        });
+
+        // 初始若已有标题且开启增强，同步一次净化
+        if (isProjectStatusIndicatorActive() && document.title) {
+          const initClean = sanitizePageTitle(document.title);
+          if (initClean && initClean !== document.title) {
+            installedTitleSetter.call(document, document.title);
+          }
+        }
+      }
+
+      let isSanitizingDomTitle = false;
+      const cleanDomTitle = () => {
+        if (isDisposed || isSanitizingDomTitle) return;
+        if (!isProjectStatusIndicatorActive()) return;
+        const titleEl = document.querySelector("title");
+        if (!titleEl) return;
+        const currentText = titleEl.textContent || "";
+        if (!/Pi\s*Web/i.test(currentText)) return;
+        let cleaned = sanitizePageTitle(currentText);
+        if (!cleaned) return;
+        const hasStatus = /^(?:🔵|🟠|🔴|🟢|⚠️)/.test(cleaned);
+        if (!hasStatus && typeof window.__PI_ENH_COMPOSE_WINDOW_TITLE__ === "function") {
+          try {
+            const composed = window.__PI_ENH_COMPOSE_WINDOW_TITLE__(cleaned);
+            if (composed) cleaned = composed;
+          } catch (e) {}
+        }
+        if (titleEl.textContent !== cleaned) {
+          isSanitizingDomTitle = true;
+          try {
+            titleEl.textContent = cleaned;
+          } finally {
+            isSanitizingDomTitle = false;
+          }
+        }
+      };
+
+      if (typeof MutationObserver !== "undefined") {
+        titleObserver = new MutationObserver(cleanDomTitle);
+        const attachTitleObserver = () => {
+          if (isDisposed) return;
+          const t = document.querySelector("title");
+          if (t) {
+            titleObserver.observe(t, { childList: true, characterData: true, subtree: true });
+            cleanDomTitle();
+          }
+        };
+
+        if (document.head) {
+          headObserver = new MutationObserver(() => {
+            if (isDisposed) return;
+            const t = document.querySelector("title");
+            if (t) {
+              attachTitleObserver();
+            }
+          });
+          headObserver.observe(document.head, { childList: true });
+        }
+        attachTitleObserver();
+      }
+    }
+  } catch (e) {}
 
   // --- Managed Lifecycle & Zero-Leak Teardown Registry ---
   const activeCleanups = [];
@@ -282,6 +549,7 @@
       --safe-left: env(safe-area-inset-left, 0px);
       --safe-right: env(safe-area-inset-right, 0px);
     }
+
 
     /* 优雅的发送/排队微光流动画 (Sent Micro-pulse Transition) */
     @keyframes pi-enh-sent-pulse {
@@ -1821,12 +2089,29 @@
       background: rgba(255, 255, 255, 0.2);
     }
 
-    /* 会话压缩卡片默认折叠与交互样式 */
+    /* 会话压缩卡片默认折叠与交互样式（含首帧 0ms 原生结构直折，杜绝先展开再折叠造成的高度跳变） */
+    html.pi-enh-compaction-collapse-active .chat-content div[style*="border-radius: 8px"]:has(.markdown-compaction-message) > div:nth-child(2):not([data-user-expanded="true"]),
     html.pi-enh-compaction-collapse-active .pi-enh-compaction-body:not([data-user-expanded="true"]) {
       display: none !important;
     }
+    html.pi-enh-compaction-collapse-active .chat-content div[style*="border-radius: 8px"]:has(.markdown-compaction-message) > div:first-child:not([data-user-expanded="true"]),
     html.pi-enh-compaction-collapse-active .pi-enh-compaction-header:not([data-user-expanded="true"]) {
       border-bottom: none !important;
+    }
+
+    /* 孤立纯过程消息与前置过程块首帧 0ms 原生直折（加载即以折叠态出现，对齐原生 React eI() 过程块判定，杜绝先加载展开再异步折叠引发的往返跳动） */
+    html.pi-enh-tool-collapse-active:not(.pi-enh-chat-running) .chat-content [data-entry-id]:has(> div[data-message-role="assistant"] button):not(:has([data-message-text="true"])):not(:has([role="alert"])):not([data-pi-enh-orphan-expanded="true"]),
+    html.pi-enh-tool-collapse-active:not(.pi-enh-chat-running) .chat-content [data-entry-id]:has(> div[data-message-role="assistant"] > div[style*="flex-direction: column"] > div:last-child:not([data-message-text="true"]):has(button)):not(:has([role="alert"])):not([data-pi-enh-orphan-expanded="true"]),
+    html.pi-enh-tool-collapse-active .chat-content [data-entry-id]:has(> div[data-message-role="assistant"] button):not(:has([data-message-text="true"])):not(:has([role="alert"])):not([data-pi-enh-orphan-expanded="true"]):has(~ [data-entry-id] [data-message-text="true"], ~ [data-entry-id] .markdown-compaction-message, ~ [data-entry-id] [data-message-role="user"], ~ [data-entry-id] .markdown-user-message),
+    html.pi-enh-tool-collapse-active .chat-content [data-entry-id]:has(> div[data-message-role="assistant"] > div[style*="flex-direction: column"] > div:last-child:not([data-message-text="true"]):has(button)):not(:has([role="alert"])):not([data-pi-enh-orphan-expanded="true"]):has(~ [data-entry-id] [data-message-text="true"], ~ [data-entry-id] .markdown-compaction-message, ~ [data-entry-id] [data-message-role="user"], ~ [data-entry-id] .markdown-user-message),
+    html.pi-enh-tool-collapse-active .chat-content [data-pi-enh-orphan-grouped="true"]:not([data-pi-enh-orphan-expanded="true"]) {
+      display: none !important;
+    }
+    html.pi-enh-tool-collapse-active:not(.pi-enh-chat-running) .chat-content div[data-message-role="assistant"] > div[style*="flex-direction: column"] > div:has(~ div:not([data-message-text="true"]) button):not([data-pi-enh-orphan-expanded="true"]),
+    html.pi-enh-tool-collapse-active:not(.pi-enh-chat-running) .chat-content div[data-message-role="assistant"] > div[style*="flex-direction: column"] > div:not([data-message-text="true"]):has(button):has(~ [data-message-text="true"]):not([data-pi-enh-orphan-expanded="true"]),
+    html.pi-enh-tool-collapse-active .chat-content [data-entry-id]:has(~ [data-entry-id]) div[data-message-role="assistant"] > div[style*="flex-direction: column"] > div:has(~ div:not([data-message-text="true"]) button):not([data-pi-enh-orphan-expanded="true"]),
+    html.pi-enh-tool-collapse-active .chat-content [data-entry-id]:has(~ [data-entry-id]) div[data-message-role="assistant"] > div[style*="flex-direction: column"] > div:not([data-message-text="true"]):has(button):has(~ [data-message-text="true"]):not([data-pi-enh-orphan-expanded="true"]) {
+      display: none !important;
     }
 
     /* 消息底部 footer 容器：移动端与窄屏弹性自适应与防挤压换行（精确命中包含 margin-top: 4px 的 footer，杜绝误伤工具列容器） */
@@ -1892,7 +2177,7 @@
 
     /* 恢复助手正文原生字号；不触碰消息 footer、时间或 Token 消耗 */
     .pi-enh-native-message-font-active div[data-message-role="assistant"] .markdown-body {
-      font-size: 14px !important;
+      font-size: var(--chat-content-font-size, 14px) !important;
       line-height: 1.7 !important;
       font-family: inherit !important;
       font-weight: inherit !important;
@@ -1962,6 +2247,29 @@
       font-size: 10px !important;
       user-select: none !important;
       margin: 0 1px !important;
+    }
+
+    /* 对话轮次序号徽章 (Turn Number Indicator) */
+    .pi-enh-turn-number-badge {
+      display: inline-flex !important;
+      align-items: center !important;
+      font-size: 11px !important;
+      line-height: 1.2 !important;
+      font-weight: 500 !important;
+      font-variant-numeric: tabular-nums !important;
+      color: var(--text-muted, #a1a1aa) !important;
+      opacity: 0.82 !important;
+      margin-right: 5px !important;
+      user-select: none !important;
+      white-space: nowrap !important;
+      letter-spacing: -0.01em !important;
+      transition: opacity 0.15s ease, color 0.15s ease !important;
+      cursor: default !important;
+      flex-shrink: 0 !important;
+    }
+    .pi-enh-turn-number-badge:hover {
+      opacity: 1 !important;
+      color: var(--text, #f4f4f5) !important;
     }
 
     /* 子 Agent 省钱摘要卡片（独立全宽紧凑区域） */
@@ -2477,7 +2785,7 @@
       overflow: hidden !important;
       text-overflow: ellipsis !important;
       white-space: nowrap !important;
-      line-height: 1.4 !important;
+      line-height: 20px !important;
     }
 
     /* 元数据行：强制单行、高度锁定最大 18px，彻底杜绝任何折行撑高与挤爆 */
@@ -2837,10 +3145,20 @@
       box-shadow: 0 0 5px #ffffff, 0 0 8px rgba(255, 255, 255, 0.6);
       flex-shrink: 0;
     }
+    .pi-enh-odoo-addon-pill.is-latest,
+    html:not(.dark) .pi-enh-odoo-addon-pill.is-latest {
+      border-color: #65c988;
+      box-shadow: 0 0 4px rgba(132, 174, 144, 0.11), inset 0 0 3px rgba(132, 174, 144, 0.07);
+    }
+    .pi-enh-odoo-addon-pill.is-latest:hover,
+    html:not(.dark) .pi-enh-odoo-addon-pill.is-latest:hover {
+      border-color: #83dda2;
+      box-shadow: 0 0 7px rgba(132, 174, 144, 0.19), inset 0 0 4px rgba(132, 174, 144, 0.1);
+    }
     .pi-enh-odoo-addon-pill.is-latest .pi-enh-odoo-addon-dot,
     html:not(.dark) .pi-enh-odoo-addon-pill.is-latest .pi-enh-odoo-addon-dot {
       background-color: #22c55e;
-      box-shadow: 0 0 5px #22c55e, 0 0 9px rgba(34, 197, 94, 0.85);
+      box-shadow: 0 0 3px rgba(34, 197, 94, 0.32);
     }
     .pi-enh-odoo-addon-name {
       font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
@@ -3239,6 +3557,9 @@
       justify-content: space-between;
       gap: 16px;
       margin-bottom: 12px;
+    }
+    @media (min-width: 641px) {
+      .pi-enh-archived-header-row { padding-right: 32px; }
     }
     .pi-enh-archived-item {
       display: flex;
@@ -3922,7 +4243,7 @@
       }
     }
     /* 侧边栏底部快捷入口与设置选项卡双击快捷 */
-    [data-pi-enh-shortcuts-host="true"] > button:not(.pi-enh-shortcut-btn),
+    [data-pi-enh-shortcuts-host="true"]:not([data-pi-enh-shortcuts-disabled="true"]) > button:not(.pi-enh-shortcut-btn),
     .sidebar-container > div:last-child:not([data-pi-enh-shortcuts-disabled="true"]) > button:not(.pi-enh-shortcut-btn) {
       display: none !important;
     }
@@ -4443,12 +4764,21 @@
 
       html.pi-enh-settings-sidebar-active .agents-feature-actions,
       html.pi-enh-settings-sidebar-active .config-detail-actions,
+      html.pi-enh-settings-sidebar-active .enabled-models-banner,
+      html.pi-enh-settings-sidebar-active .config-panel-header,
       html.pi-enh-settings-sidebar-active .pi-enh-plugins-toolbar,
       html.pi-enh-settings-sidebar-active .pi-enh-archived-header-actions,
       html.pi-enh-settings-sidebar-active .pi-enh-tags-header-actions,
       html.pi-enh-settings-sidebar-active .pi-enh-notifications-header-actions,
       html.pi-enh-settings-sidebar-active .pi-enh-usage-title-row {
-        padding-right: 44px !important;
+        padding-right: 52px !important;
+        box-sizing: border-box !important;
+      }
+
+      html.pi-enh-settings-sidebar-active .enabled-models-banner-text {
+        min-width: 0 !important;
+        flex: 1 1 auto !important;
+        overflow: hidden !important;
       }
 
       /* 侧边栏底部快捷入口双击提示 */
@@ -6655,6 +6985,8 @@
     }
 
     /* 回到底部悬浮快捷按钮 (Scroll-to-Bottom Button - Codex 风格) */
+    /* Enhancement owns this action only while its control exists; off/dispose restores native CSS. */
+    .chat-content:has(> .pi-enh-scroll-bottom-btn) .chat-scroll-to-bottom { display: none; }
     .pi-enh-scroll-bottom-btn {
       position: absolute;
       left: 50%;
@@ -7854,6 +8186,251 @@
     }
 
     /* ==========================================================================
+       Excel Sheet Interactive Preview (Excel 在线交互表格预览)
+       ========================================================================== */
+    .pi-enh-excel-container {
+      display: flex;
+      flex-direction: column;
+      width: 100%;
+      height: 100%;
+      background: var(--bg-panel, #18181b);
+      color: var(--text, #f4f4f5);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      overflow: hidden;
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      z-index: 10;
+    }
+    .pi-enh-excel-toolbar {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 6px 14px;
+      background: var(--bg, #09090b);
+      border-bottom: 1px solid var(--border, #27272a);
+      font-size: 12px;
+      flex-shrink: 0;
+      user-select: none;
+    }
+    .pi-enh-excel-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      padding: 2px 7px;
+      border-radius: 4px;
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.02em;
+      background: rgba(16, 185, 129, 0.15);
+      color: #34d399;
+      border: 1px solid rgba(16, 185, 129, 0.3);
+      flex-shrink: 0;
+    }
+    .pi-enh-excel-meta {
+      color: var(--text-dim, #71717a);
+      font-size: 11px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      margin-right: auto;
+    }
+    .pi-enh-excel-search {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      background: var(--bg-panel, #18181b);
+      border: 1px solid var(--border, #27272a);
+      border-radius: 6px;
+      padding: 2px 8px;
+      color: var(--text, #f4f4f5);
+      font-size: 12px;
+      width: 160px;
+      transition: border-color 0.15s, width 0.15s;
+    }
+    .pi-enh-excel-search:focus-within {
+      border-color: #10b981;
+      width: 200px;
+    }
+    .pi-enh-excel-search input {
+      background: transparent;
+      border: none;
+      outline: none;
+      color: inherit;
+      font-size: 11px;
+      width: 100%;
+    }
+    .pi-enh-excel-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      padding: 3px 8px;
+      border-radius: 5px;
+      border: 1px solid var(--border, #27272a);
+      background: var(--bg-panel, #18181b);
+      color: var(--text, #f4f4f5);
+      font-size: 11px;
+      cursor: pointer;
+      transition: background 0.15s, border-color 0.15s, color 0.15s;
+      flex-shrink: 0;
+    }
+    .pi-enh-excel-btn:hover {
+      background: var(--border, #27272a);
+      color: #fff;
+    }
+    .pi-enh-excel-btn.is-active {
+      background: rgba(16, 185, 129, 0.2);
+      border-color: #10b981;
+      color: #34d399;
+    }
+    .pi-enh-excel-grid-wrap {
+      flex: 1;
+      min-height: 0;
+      overflow: auto;
+      position: relative;
+      background: var(--bg-panel, #18181b);
+      scrollbar-gutter: stable;
+    }
+    .pi-enh-excel-table {
+      border-collapse: separate;
+      border-spacing: 0;
+      min-width: 100%;
+      table-layout: auto;
+      font-size: 12px;
+      color: var(--text, #f4f4f5);
+    }
+    .pi-enh-excel-th {
+      position: sticky;
+      top: 0;
+      background: var(--bg, #121214) !important;
+      color: var(--text-dim, #a1a1aa);
+      font-family: var(--font-mono, monospace);
+      font-weight: 600;
+      font-size: 11px;
+      padding: 5px 10px;
+      border-right: 1px solid var(--border, #27272a);
+      border-bottom: 1px solid var(--border, #27272a);
+      text-align: center;
+      user-select: none;
+      z-index: 5;
+      white-space: nowrap;
+    }
+    .pi-enh-excel-row-num {
+      position: sticky;
+      left: 0;
+      background: var(--bg, #121214) !important;
+      color: var(--text-dim, #71717a);
+      font-family: var(--font-mono, monospace);
+      font-size: 11px;
+      padding: 5px 8px;
+      border-right: 1px solid var(--border, #27272a);
+      border-bottom: 1px solid var(--border, #27272a);
+      text-align: center;
+      user-select: none;
+      z-index: 6;
+      width: 44px;
+      min-width: 44px;
+      box-sizing: border-box;
+    }
+    .pi-enh-excel-corner {
+      position: sticky;
+      top: 0;
+      left: 0;
+      z-index: 7 !important;
+      background: var(--bg, #09090b) !important;
+    }
+    .pi-enh-excel-td {
+      padding: 4px 10px;
+      border-right: 1px solid var(--border, #27272a);
+      border-bottom: 1px solid var(--border, #27272a);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      max-width: 420px;
+      line-height: 1.5;
+      box-sizing: border-box;
+      user-select: text;
+    }
+    .pi-enh-excel-td.num {
+      text-align: right;
+      font-family: var(--font-mono, monospace);
+      color: #1d4ed8;
+    }
+    .pi-enh-excel-td.date {
+      text-align: center;
+      color: #be185d;
+    }
+    html.dark .pi-enh-excel-td.num { color: #93c5fd; }
+    html.dark .pi-enh-excel-td.date { color: #fbcfe8; }
+    .pi-enh-excel-tr:hover .pi-enh-excel-td {
+      background: rgba(255, 255, 255, 0.035);
+    }
+    .pi-enh-excel-tr:hover .pi-enh-excel-row-num {
+      color: #34d399;
+      background: var(--bg-hover, #18181b) !important;
+    }
+    .pi-enh-excel-td.is-match {
+      background: rgba(234, 179, 8, 0.28) !important;
+      color: #fef08a !important;
+      font-weight: 600;
+      outline: 1px solid #eab308;
+    }
+    .pi-enh-excel-td.is-selected {
+      outline: 2px solid #10b981 !important;
+      outline-offset: -2px;
+      background: rgba(16, 185, 129, 0.12) !important;
+    }
+    .pi-enh-excel-bottom-bar {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      padding: 4px 10px;
+      background: var(--bg, #09090b);
+      border-top: 1px solid var(--border, #27272a);
+      flex-shrink: 0;
+      overflow-x: auto;
+      scrollbar-width: thin;
+      user-select: none;
+    }
+    .pi-enh-excel-tab {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 12px;
+      font-size: 11px;
+      font-weight: 500;
+      color: var(--text-dim, #a1a1aa);
+      border-radius: 4px;
+      cursor: pointer;
+      transition: all 0.15s;
+      white-space: nowrap;
+      border: 1px solid transparent;
+    }
+    .pi-enh-excel-tab:hover {
+      background: var(--bg-panel, #18181b);
+      color: var(--text, #f4f4f5);
+    }
+    .pi-enh-excel-tab.is-active {
+      color: #34d399;
+      font-weight: 600;
+      background: var(--bg-panel, #18181b);
+      border-color: rgba(16, 185, 129, 0.4);
+      border-bottom: 2px solid #10b981;
+    }
+    .pi-enh-excel-status-spinner {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 12px;
+      height: 100%;
+      color: var(--text-dim, #a1a1aa);
+      font-size: 13px;
+    }
+
+    /* ==========================================================================
        General Settings Dashboard Layout & Modern Dual-Column Containers
        (常规设置现代化自平衡双列卡片架构 - 杜绝网格行高对齐断层与留白空洞)
        ========================================================================== */
@@ -8277,6 +8854,23 @@
       border-color: var(--accent, #a4c2f4) !important;
       box-shadow: 0 0 0 2px var(--bg-panel), 0 0 8px color-mix(in srgb, var(--accent, #a4c2f4) 55%, transparent) !important;
     }
+
+    /* 移动端与嵌套滚动触控链优化 (Nested Scroll Chaining & Mobile Bubble View) */
+    @media (max-width: 768px) {
+      div[style*="maxHeight: 300"],
+      div[style*="max-height: 300px"],
+      div[style*="var(--user-bg)"],
+      div[style*="var(--bg-user)"] {
+        max-height: min(75vh, 600px) !important;
+      }
+    }
+    div[style*="var(--user-bg)"],
+    div[style*="var(--bg-user)"],
+    .chat-content [class*="overflow-y-auto"],
+    .chat-content pre {
+      overscroll-behavior-y: auto !important;
+      -webkit-overflow-scrolling: touch !important;
+    }
   `;
   document.head.appendChild(styleEl);
 
@@ -8639,6 +9233,13 @@
       defaultEnabled: true,
     },
     {
+      id: "turn-number-indicator",
+      name: "对话轮次序号",
+      desc: "在每一轮用户消息下面的时间左边显示轮次序号（如 #1、#2），直观掌握对话轮次与上下文深度。",
+      category: "显示增强",
+      defaultEnabled: true,
+    },
+    {
       id: "task-tool-auto-collapse",
       name: "任务完成自动折叠工具过程",
       desc: "任务处理、等待模型及工具调用期间保持全部过程展开；仅任务完成后自动折叠本轮过程（bash、wiki 等）。最终答复保持可见，工具卡片仍可按需手动展开。", 
@@ -8660,9 +9261,9 @@
       defaultEnabled: true,
     },
     {
-      id: "subagent-default-profile",
-      name: "默认子 Agent profile",
-      desc: "从当前工作目录下实际生效且已启用的 profile 中选择服务端默认值；显式指定 subagent_type 的调用不受影响。",
+      id: "subagent-model-override",
+      name: "子任务模型",
+      desc: "统一设置所有子 Agent profile 使用的模型；单次 Agent 调用显式指定 model 时优先。",
       category: "偏好记忆",
       defaultEnabled: true,
     },
@@ -8692,6 +9293,13 @@
       id: "compaction-auto-collapse",
       name: "会话压缩摘要自动折叠",
       desc: "会话历史压缩（compaction）卡片默认自动收起大段长篇摘要，仅保留一行标题横条；点击顶部栏随时展开或重新收起。",
+      category: "显示增强",
+      defaultEnabled: true,
+    },
+    {
+      id: "pi-mail-auto-collapse",
+      name: "协作消息自动折叠",
+      desc: "跨会话协作消息长卡片默认收起为单行亲民摘要，仅呈现「协作消息 · 已收到」并支持随时展开/收起及原文复制。",
       category: "显示增强",
       defaultEnabled: true,
     },
@@ -8789,7 +9397,7 @@
     {
       id: "mobile-model-keyboard-guard",
       name: "移动端模型切换防弹软键盘",
-      desc: "移动端点击切换模型时自动收起软键盘并禁用搜索框自动聚焦，限制下拉菜单顶部视口边界，防止菜单被软键盘顶出屏幕。",
+      desc: "移动端点击切换模型时保持软键盘展开不打断输入，下拉菜单物理锚定紧挨在按钮正上方，键盘收起时自适应同步跟随，防止菜单脱节悬空。",
       category: "交互增强",
       defaultEnabled: true,
     },
@@ -8950,7 +9558,7 @@
     {
       id: "session-odoo-addons",
       name: "Odoo 插件更新状态胶囊",
-      desc: "在会话项下方展示该会话更新的 Odoo 插件圆角药丸标签（白色边框、纯白文字、微光发光底纹，每行一个插件）。",
+      desc: "在会话项下方展示该会话更新的 Odoo 插件圆角药丸标签（最新插件显示绿点与绿色边框、历史修改显示白点与白框，纯白文字、微光发光底纹，每行一个插件）。",
       category: "显示增强",
       defaultEnabled: true,
     },
@@ -9123,6 +9731,13 @@
       defaultEnabled: true,
     },
     {
+      id: "excel-sheet-preview",
+      name: "Excel 表格在线预览",
+      desc: "在右侧文件面板中直接交互式预览 Excel（.xlsx / .xls / .csv）工作簿，支持多工作表标签切换、冻结表头、行列标尺与单元格搜索。",
+      category: "显示增强",
+      defaultEnabled: true,
+    },
+    {
       id: "workspace-picker-hover",
       name: "工作区菜单悬停高亮",
       desc: "为侧边栏工作区/项目下拉菜单中的所有选项（历史路径、使用默认目录、自定义路径）添加平滑悬停与点击交互反馈，防止视觉上产生卡顿感。",
@@ -9134,6 +9749,13 @@
       name: "会话批量管理与删除",
       desc: "支持在左侧会话列表进行鼠标多选、Shift 范围连续选择、全选并一键批量彻底删除会话。",
       category: "快捷操作",
+      defaultEnabled: true,
+    },
+    {
+      id: "pi-agent-update-notice",
+      name: "Pi Agent 更新提示",
+      desc: "实时检测上游官方 Pi Coding Agent (https://github.com/earendil-works/pi) 的版本发布。当有新版本时，在新建会话页面与设置面板中以轻量徽章形式醒目提示，并提供直达 Release 链接。",
+      category: "运行监控",
       defaultEnabled: true,
     },
   ];
@@ -9162,9 +9784,9 @@
     },
   };
   const ENHANCEMENT_MODULES = [
-    { id: "task-insights", name: "任务运行信息", desc: "集中管理任务耗时、速度和回合用量信息。", category: "运行监控", version: "1.0.0", defaultEnabled: true, features: ["model-generation-speed", "turn-duration", "live-stopwatch", "turn-usage-total", "usage-cost-dashboard"] },
-    { id: "conversation-navigation", name: "对话阅读与导航", desc: "管理过程折叠、工具卡片布局、滚动稳定、会话导航和回到底部工具。", category: "交互增强", version: "1.0.0", defaultEnabled: true, features: ["task-tool-auto-collapse", "tool-card-layout-stability", "subagent-dispatch-cards", "history-scroll-stability", "session-scroll-restore", "session-virtual-scroll", "compaction-auto-collapse", "chat-scrollbar", "native-message-font", "minimap-full-nav", "scroll-to-bottom", "image-dblclick-preview"] },
-    { id: "subagent-dispatch", name: "子 Agent 调度", desc: "管理未显式指定 subagent_type 时使用的服务端默认 profile；实际调度始终由服务端动态读取。", category: "偏好记忆", version: "1.0.0", defaultEnabled: true, features: ["subagent-default-profile"] },
+    { id: "task-insights", name: "任务运行信息", desc: "集中管理任务耗时、速度和回合用量信息。", category: "运行监控", version: "1.0.0", defaultEnabled: true, features: ["model-generation-speed", "turn-duration", "turn-number-indicator", "live-stopwatch", "turn-usage-total", "usage-cost-dashboard", "pi-agent-update-notice"] },
+    { id: "conversation-navigation", name: "对话阅读与导航", desc: "管理过程折叠、工具卡片布局、滚动稳定、会话导航和回到底部工具。", category: "交互增强", version: "1.0.0", defaultEnabled: true, features: ["user-message-reconcile", "task-tool-auto-collapse", "tool-card-layout-stability", "subagent-dispatch-cards", "history-scroll-stability", "session-scroll-restore", "session-virtual-scroll", "compaction-auto-collapse", "pi-mail-auto-collapse", "chat-scrollbar", "native-message-font", "minimap-full-nav", "scroll-to-bottom", "image-dblclick-preview"] },
+    { id: "subagent-dispatch", name: "子 Agent 调度", desc: "管理全部子任务统一使用的服务端模型；实际模型由服务端动态读取。", category: "偏好记忆", version: "1.0.0", defaultEnabled: true, features: ["subagent-model-override"] },
     { id: "selection-context", name: "划选引用与上下文", desc: "管理文本划选引用、注释与发送上下文。", category: "交互增强", version: "1.0.0", defaultEnabled: true, features: ["quick-quote"] },
     { id: "session-sidebar", name: "会话列表增强", desc: "管理会话列表的快捷菜单、归档、标签、布局、颜色、快捷入口和搜索。", category: "交互增强", version: "1.0.0", defaultEnabled: true, features: ["context-menu", "session-pin-archive", "session-section-headers", "session-model-label", "session-item-compact", "session-color", "session-tags", "session-odoo-addons", "session-dblclick-rename", "session-search-shortcut", "session-search-project-folding", "session-batch-actions", "settings-tab-shortcuts", "mobile-swipe-drawer"] },
     { id: "composer-workflow", name: "输入与附件增强", desc: "管理编辑器快捷操作、草稿、附件和移动端输入保护。", category: "交互增强", version: "1.0.0", defaultEnabled: true, features: ["quick-action-buttons", "empty-send-continue", "composer-draft-cache", "composer-file-paste", "composer-image-zoom", "mobile-enter-newline", "mobile-model-keyboard-guard", "composer-clean-placeholder", "codex-composer-layout", "composer-model-reasoning-pill", "composer-queue-panel", "running-model-switch", "composer-markdown-format", "composer-format-toggle", "composer-compact-button", "composer-tool-preset", "composer-modes", "at-mention-plugins"] },
@@ -9172,7 +9794,7 @@
     { id: "background-attention", name: "后台会话提醒", desc: "管理跨项目状态、提示音与桌面通知。", category: "运行监控", version: "1.0.0", defaultEnabled: true, features: ["project-status-indicator", "session-attention-sound", "session-attention-desktop"] },
     { id: "notification-management", name: "通知管理", desc: "管理所有站内通知、网页操作提示、提示音与桌面提醒，并查看通知历史。", category: "偏好记忆", version: "1.0.0", defaultEnabled: true, features: ["notification-center"] },
     { id: "safety-performance", name: "安全与性能保护", desc: "管理误触保护、模型警告可见性和代码块扫描保护。", category: "安全防护", version: "1.0.0", defaultEnabled: true, features: ["model-scope-warning", "esc-guard", "code-block-scan-guard", "streaming-thinking-guard", "client-crash-diagnostics"] },
-    { id: "local-workspace", name: "本地工作区工具", desc: "管理本地路径直达和会话缓存。", category: "快捷操作", version: "1.0.0", defaultEnabled: true, features: ["local-path-launcher", "obsidian-markdown-viewer", "session-memory-cache", "session-history-integrity", "session-history-order-guard", "cross-device-session-sync", "session-panel-binding", "file-panel-overlay-guard", "general-settings-dashboard", "workspace-picker-hover", "settings-sidebar-layout"] },
+    { id: "local-workspace", name: "本地工作区工具", desc: "管理本地路径直达和会话缓存。", category: "快捷操作", version: "1.0.0", defaultEnabled: true, features: ["local-path-launcher", "obsidian-markdown-viewer", "excel-sheet-preview", "session-memory-cache", "session-history-integrity", "session-history-order-guard", "cross-device-session-sync", "session-panel-binding", "file-panel-overlay-guard", "general-settings-dashboard", "workspace-picker-hover", "settings-sidebar-layout"] },
     { id: "preference-memory", name: "偏好记忆", desc: "管理思考深度的跨会话记忆与浏览器增强设置归档。", category: "偏好记忆", version: "1.0.0", defaultEnabled: true, features: ["thinking-persistence", "enhancement-settings-archive"] },
   ];
   const ENHANCEMENT_MODULE_SETTINGS = {
@@ -9180,7 +9802,7 @@
       { kind: "action", action: "download-crash-diagnostics", label: "导出客户端异常记录（仅本地）" },
     ],
     "subagent-dispatch": [
-      { kind: "subagent-profile", featureId: "subagent-default-profile", key: "defaultProfile", label: "默认子 Agent profile", description: "仅在调用未显式指定 subagent_type 时生效；选项来自当前 cwd 下实际生效且已启用的 profile。" },
+      { kind: "subagent-model", featureId: "subagent-model-override", key: "subagentModel", label: "子任务模型", description: "覆盖 worker、scout 等所有 profile 自带的模型；单次 Agent 调用显式传入 model 时仍优先。" },
     ],
     "composer-workflow": [
       { kind: "setting", featureId: "mobile-enter-newline", key: "deviceMode", label: "回车设备模式" },
@@ -9518,6 +10140,7 @@
   }
 
   function onPluginStateChanged(id, enabled) {
+    if (id === "settings-tab-shortcuts") syncBottomShortcutsBar(true);
     if (id === "settings-sidebar-layout") {
       if (document.documentElement) {
         document.documentElement.classList.toggle("pi-enh-settings-sidebar-active", Boolean(enabled));
@@ -9557,6 +10180,9 @@
     } else if (id === "obsidian-markdown-viewer") {
       if (!enabled) removeMarkdownViewerEnhancements();
       else syncMarkdownViewerMode();
+    } else if (id === "excel-sheet-preview") {
+      if (!enabled && typeof removeExcelViewerEnhancements === "function") removeExcelViewerEnhancements();
+      else if (typeof syncExcelViewerMode === "function") syncExcelViewerMode();
     } else if (id === "model-scope-warning") {
       syncModelScopeWarnings();
     } else if (id === "turn-duration") {
@@ -9566,6 +10192,20 @@
         }
       } else {
         syncAllDurationBadges();
+      }
+    } else if (id === "turn-number-indicator") {
+      if (!enabled) {
+        if (typeof clearAllTurnNumberBadges === "function") {
+          clearAllTurnNumberBadges();
+        } else if (typeof window !== "undefined" && typeof window.__PI_ENH_CLEAR_TURN_NUMBERS__ === "function") {
+          window.__PI_ENH_CLEAR_TURN_NUMBERS__();
+        }
+      } else {
+        if (typeof syncAllTurnNumberBadges === "function") {
+          syncAllTurnNumberBadges();
+        } else if (typeof window !== "undefined" && typeof window.__PI_ENH_SYNC_TURN_NUMBERS__ === "function") {
+          window.__PI_ENH_SYNC_TURN_NUMBERS__();
+        }
       }
     } else if (id === "model-generation-speed") {
       if (!enabled) {
@@ -9607,6 +10247,25 @@
         syncCompactionCards();
       } else {
         removeCompactionEnhancements();
+      }
+    } else if (id === "pi-mail-auto-collapse") {
+      if (typeof syncPiMailActiveState === "function") {
+        syncPiMailActiveState();
+      } else if (typeof window !== "undefined" && typeof window.__PI_ENH_SYNC_PI_MAIL_ACTIVE_STATE__ === "function") {
+        window.__PI_ENH_SYNC_PI_MAIL_ACTIVE_STATE__();
+      }
+      if (enabled) {
+        if (typeof syncPiMailCards === "function") {
+          syncPiMailCards();
+        } else if (typeof window !== "undefined" && typeof window.__PI_ENH_SYNC_PI_MAIL_CARDS__ === "function") {
+          window.__PI_ENH_SYNC_PI_MAIL_CARDS__();
+        }
+      } else {
+        if (typeof removePiMailEnhancements === "function") {
+          removePiMailEnhancements();
+        } else if (typeof window !== "undefined" && typeof window.__PI_ENH_REMOVE_PI_MAIL_ENHANCEMENTS__ === "function") {
+          window.__PI_ENH_REMOVE_PI_MAIL_ENHANCEMENTS__();
+        }
       }
     } else if (id === "live-stopwatch") {
       if (!enabled) {
@@ -9704,14 +10363,21 @@
     } else if (id === "streaming-thinking-guard") {
       syncStreamingThinkingGuard(enabled);
     } else if (id === "session-pin-archive") {
-      if (!enabled) removeSessionPinArchiveControls();
-      else {
+      if (!enabled) {
+        removeSessionPinArchiveControls();
+        removeSessionSectionHeaders();
+      } else {
         syncSessionPinArchiveControls();
         void syncManifestPinnedEntries();
         void syncManifestArchivedEntries();
       }
+      syncSessionOdooAddonsLayout();
+      syncSessionSectionHeaders();
       requestSessionListRefresh();
     } else if (id === "session-section-headers") {
+      if (!enabled) removeSessionSectionHeaders();
+      syncSessionOdooAddonsLayout();
+      syncSessionSectionHeaders();
       requestSessionListRefresh();
     } else if (id === "session-model-label") {
       if (!enabled) removeSessionModelLabels();
@@ -9726,6 +10392,12 @@
       if (!enabled) {
         removeSessionTagsRowAll();
         closeSessionTagsPopover();
+        const tagMenuItem = activeMenu?.querySelector('[data-action="open-session-tags"]');
+        if (tagMenuItem) {
+          clearTimeout(tagMenuItem._openSubmenuTimer);
+          clearTimeout(tagMenuItem._closeSubmenuTimer);
+          tagMenuItem.remove();
+        }
         const tagsTab = document.querySelector(".settings-section-tabs [data-pi-enh-tab='tags']");
         if (tagsTab) tagsTab.remove();
         const tagsPanel = document.querySelector(".pi-enh-tags-panel");
@@ -10689,6 +11361,7 @@
   function isDurableStateEnabled() {
     if (typeof window === "undefined" || !window) return false;
     if (window.__PI_ENH_DURABLE_STATE_ENABLED__ !== true) return false;
+    if (window.__PI_ENH_NATIVE_STATE_API__ === true) return true;
     try {
       const loc = window.location;
       if (!loc) return false;
@@ -10704,6 +11377,7 @@
   }
 
   function getDurableStateBaseUrl() {
+    if (window.__PI_ENH_NATIVE_STATE_API__ === true) return "/api";
     try {
       const loc = window.location;
       const protocol = loc.protocol || "http:";
@@ -10716,7 +11390,7 @@
 
   function getDurableStateInstanceParam() {
     try {
-      const port = window.location?.port;
+      const port = String(window.location?.port || "");
       if (port === "30142") return "30142";
       return "30141";
     } catch (e) {
@@ -10868,8 +11542,19 @@
     const values = snapshotValues || collectPreferenceSnapshotValues();
     if (Object.keys(values).length === 0) return;
     const serialized = JSON.stringify(values);
-    try { if (localStorage.getItem("pi-enh-preferences-archived-v1") === serialized) return; } catch (e) {}
-    if (pendingDecorationOperations.some(op => op.type === "preferences_snapshot" && op.clientId === clientId && JSON.stringify(op.values) === serialized)) return;
+    let lastPendingSnapshot = null;
+    for (let i = pendingDecorationOperations.length - 1; i >= 0; i--) {
+      const op = pendingDecorationOperations[i];
+      if (op && op.type === "preferences_snapshot" && op.clientId === clientId) {
+        lastPendingSnapshot = op;
+        break;
+      }
+    }
+    if (lastPendingSnapshot) {
+      if (JSON.stringify(lastPendingSnapshot.values) === serialized) return;
+    } else {
+      try { if (localStorage.getItem("pi-enh-preferences-archived-v1") === serialized) return; } catch (e) {}
+    }
 
     recordDecorationOperation({
       type: "preferences_snapshot",
@@ -10963,10 +11648,14 @@
   let activeDurableStateSyncPromise = null;
   async function syncDurableState(force = false) {
     if (isDisposed) return Promise.resolve();
+    if (window.__PI_ENH_NATIVE_STATE_API__ === true && window.__PI_ENH_DURABLE_STATE_ENABLED__ === false) return Promise.resolve();
     if (activeDurableStateSyncPromise) return activeDurableStateSyncPromise;
     activeDurableStateSyncPromise = (async () => {
       try {
-        const endpoint = `${getDurableStateBaseUrl()}/enhancement-state?instance=${getDurableStateInstanceParam()}`;
+        const isNative = window.__PI_ENH_NATIVE_STATE_API__ === true;
+        const endpoint = isNative
+          ? `${getDurableStateBaseUrl()}/enhancement-state`
+          : `${getDurableStateBaseUrl()}/enhancement-state?instance=${getDurableStateInstanceParam()}`;
         let res, data;
         try {
           const fetchRes = await fetchModelsConfigBounded(endpoint, {
@@ -10983,6 +11672,10 @@
         }
 
         if (!res?.ok || !isValidDurablePostResponse({ ...data, acknowledgedOpIds: [] }, [])) {
+          if (res?.status === 409 && data?.error === "NOT_INITIALIZED") {
+            // 状态服务未初始化（空库正常状态），保留本地状态，不打印异常警告
+            return;
+          }
           console.warn("[pi-enh] 独立状态服务返回异常或格式错误:", res?.status);
           return;
         }
@@ -11311,7 +12004,10 @@
             const sentOpIds = sanitizedOperations.map((o) => o.opId);
 
             try {
-              const endpoint = `${getDurableStateBaseUrl()}/enhancement-state/operations?instance=${getDurableStateInstanceParam()}`;
+              const isNative = window.__PI_ENH_NATIVE_STATE_API__ === true;
+              const endpoint = isNative
+                ? `${getDurableStateBaseUrl()}/enhancement-state/operations`
+                : `${getDurableStateBaseUrl()}/enhancement-state/operations?instance=${getDurableStateInstanceParam()}`;
               let resp, result;
               try {
                 const fetchRes = await fetchModelsConfigBounded(endpoint, {
@@ -13129,13 +13825,52 @@
     return latestSid === sessionId.trim();
   }
 
+  function isConfirmedOdooAddonStatus(status) {
+    if (typeof status !== "string") return false;
+    const s = status.trim();
+    if (!s) return false;
+
+    // 排除明确的未安装、失败、未改动、需人工审核、纯兼容但未改
+    if (/未安装|uninstalled|not\s+installed/i.test(s)) return false;
+    if (/需人工审核|待讨论|未成功|部署失败|升级失败|failed/i.test(s)) return false;
+    if (/未改动|未改|未更新|未升级|无变动|无变化|未变动|unchanged/i.test(s)) return false;
+    if (/兼容但未改|保持兼容[，,\s]+未改|兼容[，,\s]+无变动/i.test(s)) return false;
+
+    const hasUpdateWord = /已更新|已升级|已部署|已发布|已修改|updated|upgraded/i.test(s);
+    const hasCompatWord = /保持兼容|已保持兼容|兼容|compatible/i.test(s);
+    const hasVersionChange =
+      /(?:\d+\.)+\d+.*?(?:->|→|至|=>).*?(?:\d+\.)+\d+/i.test(s) ||
+      /v?\d+(?:\.\d+)+.*?(?:->|→|至|=>).*?v?\d+(?:\.\d+)+/i.test(s);
+
+    if (hasUpdateWord) {
+      return true;
+    }
+
+    // 只有状态中有可证明版本变动的 X→Y 且兼容时保留；纯兼容带单个版本号（如 18.0.1.1.426（已保持兼容））属未改隐藏
+    if (hasCompatWord && hasVersionChange) {
+      return true;
+    }
+
+    // 纯安装-only（如已安装、installed、`.90` 已安装、(installed)）或纯版本号无更新证据均返回 false 隐藏
+    return false;
+  }
+
   function normalizeSessionOdooAddonItems(items, sessionId = "", manifest = window.__PI_ENH_ODOO_ADDONS_MANIFEST__) {
     if (!Array.isArray(items)) return [];
     const unique = new Map();
     for (const item of items) {
       const technical = typeof item === "string" ? item : item?.technical;
       if (typeof technical !== "string" || !/^[a-z][a-z0-9_]*$/.test(technical)) continue;
-      const normalizedItem = { technical, status: typeof item?.status === "string" ? item.status : "" };
+      const status = typeof item?.status === "string" ? item.status : "";
+      if (!isConfirmedOdooAddonStatus(status)) continue;
+
+      const normalizedItem = { technical, status };
+      if (item?.updatedAt) {
+        normalizedItem.updatedAt = item.updatedAt;
+      }
+      if (item?.name) {
+        normalizedItem.name = item.name;
+      }
       const isLatest = sessionId ? isLatestSessionForOdooAddon(sessionId, technical, manifest) : false;
       Object.defineProperty(normalizedItem, "isLatest", {
         value: isLatest,
@@ -13244,7 +13979,7 @@
       if (!tech) continue;
       const isLatest = isLatestSessionForOdooAddon(sessionId, tech, activeManifest);
       const baseTooltip = addon.status ? `${tech} · ${addon.status}` : tech;
-      const tooltip = isLatest ? `${baseTooltip} · 最新实际更新会话` : baseTooltip;
+      const tooltip = isLatest ? `${baseTooltip} · 最新实际更新会话` : `${baseTooltip} · 历史更新会话`;
       const ariaLabel = isLatest ? `${tech}（最新实际更新会话）` : `${tech}（历史更新会话）`;
       const pillClass = isLatest ? "pi-enh-odoo-addon-pill is-latest" : "pi-enh-odoo-addon-pill";
 
@@ -13282,7 +14017,10 @@
     }
 
     const rows = document.querySelectorAll(".pi-enh-session-row-host[data-pi-enh-session-id]");
-    if (!rows || rows.length === 0) return;
+    if (!rows || rows.length === 0) {
+      if (typeof removeSessionSectionHeaders === "function") removeSessionSectionHeaders();
+      return;
+    }
 
     // 按其所属虚拟列表容器 container = row.parentElement?.parentElement 分组
     const containerMap = new Map();
@@ -13299,8 +14037,11 @@
       list.push({ row, wrapper, sid: row.dataset.piEnhSessionId });
     }
 
-    const hasKnownGroups = Array.isArray(latestKnownSessionGroups) && latestKnownSessionGroups.length > 0;
-    const indices = hasKnownGroups ? new Map(latestKnownSessionGroups.map((group, index) => [group.root?.id, index])) : null;
+    const hasKnownGroups =
+      Array.isArray(latestKnownSessionGroups) &&
+      latestKnownSessionGroups.length > 0 &&
+      latestKnownSessionGroups.every((group) => Boolean(group?.root?.id));
+    const indices = hasKnownGroups ? new Map(latestKnownSessionGroups.map((group, index) => [group.root.id, index])) : null;
 
     for (const [container, entries] of containerMap.entries()) {
       let allHit = hasKnownGroups && indices !== null;
@@ -13325,34 +14066,16 @@
         if (container.style.height !== height) container.style.height = height;
         const pinnedCount = getPinnedSessionCount(groups);
         const recents = container.querySelector(".pi-enh-session-section-recents");
-        if (recents && pinnedCount) {
+        if (recents && pinnedCount && recents.getAttribute("data-pi-enh-fallback") === "true") {
           const top = (getSessionItemTop(pinnedCount, groups) - SESSION_RECENTS_HEADER_HEIGHT) + "px";
           if (recents.style.top !== top) recents.style.top = top;
         }
-      } else {
-        // 兜底保护，绝不直接 return！按视觉顺序排序构造 fallbackGroups
-        const orderedEntries = entries.slice().sort((a, b) => {
-          const topA = parseFloat(a.wrapper.style.top) || 0;
-          const topB = parseFloat(b.wrapper.style.top) || 0;
-          if (topA !== topB) return topA - topB;
-          return 0; // 相等时保持 DOM 顺序
-        });
-        const fallbackGroups = orderedEntries.map((e) => ({ root: { id: e.sid } }));
-        for (let idx = 0; idx < orderedEntries.length; idx++) {
-          const entry = orderedEntries[idx];
-          const top = getSessionItemTop(idx, fallbackGroups) + "px";
-          if (entry.wrapper.style.top !== top) entry.wrapper.style.top = top;
-          syncSessionOdooAddonsHeight(entry.row, entry.sid);
-        }
-        const height = (SESSION_NORMAL_ITEM_HEIGHT * fallbackGroups.length + getSessionHeadersHeight(fallbackGroups)) + "px";
-        if (container.style.height !== height) container.style.height = height;
-        const pinnedCount = getPinnedSessionCount(fallbackGroups);
-        const recents = container.querySelector(".pi-enh-session-section-recents");
-        if (recents && pinnedCount) {
-          const top = (getSessionItemTop(pinnedCount, fallbackGroups) - SESSION_RECENTS_HEADER_HEIGHT) + "px";
-          if (recents.style.top !== top) recents.style.top = top;
-        }
+      } else if (typeof removeSessionSectionHeaders === "function") {
+        removeSessionSectionHeaders(container);
       }
+    }
+    if (typeof syncSessionSectionHeaders === "function") {
+      syncSessionSectionHeaders();
     }
   }
 
@@ -14424,6 +15147,8 @@
       if (isDisposed) return;
       if (typeof syncSidebarRowsImmediate === "function") {
         syncSidebarRowsImmediate();
+      } else if (typeof syncSessionSectionHeaders === "function") {
+        syncSessionSectionHeaders();
       }
     });
   }
@@ -14487,8 +15212,202 @@
   SESSION_TAGGED_ITEM_HEIGHT = 72;
   const SESSION_TAG_ROW_EXTRA = 18; // 72 - 54
 
+  // 虚拟列表布局快照与前缀高度缓存 (单次布局批次 O(N+K)，零 TTL 强一致性)
+  let sessionLayoutSnapshot = null;
+
+  function safeGetLocalStorageItem(key) {
+    try {
+      return (typeof localStorage !== "undefined" && typeof localStorage?.getItem === "function")
+        ? localStorage.getItem(key)
+        : null;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function getPinnedManifestSignature() {
+    const m = (typeof window !== "undefined" && window?.__PI_ENH_PINNED_MANIFEST__) || null;
+    if (!m) return null;
+    if (Array.isArray(m)) {
+      return m.map((item) => (typeof item === "string" ? item : (item?.id || ""))).join(",");
+    }
+    if (typeof m === "object" && Array.isArray(m.pinned)) {
+      return m.pinned.map((item) => (typeof item === "string" ? item : (item?.id || ""))).join(",");
+    }
+    return String(m);
+  }
+
+  function isSessionLayoutSnapshotValid(snapshot) {
+    if (!snapshot) return false;
+
+    const rawPinned = safeGetLocalStorageItem(PINNED_SESSION_STORAGE_KEY);
+    if (snapshot.rawPinned !== rawPinned) return false;
+    if (rawPinned === null && snapshot.pinnedManifestSig !== getPinnedManifestSignature()) return false;
+
+    const rawTagMappings = safeGetLocalStorageItem(SESSION_TAG_MAPPING_STORAGE_KEY);
+    if (snapshot.rawTagMappings !== rawTagMappings) return false;
+
+    const rawTagDefs = safeGetLocalStorageItem(SESSION_TAGS_STORAGE_KEY);
+    if (snapshot.rawTagDefs !== rawTagDefs) return false;
+
+    const tagsEnabled = isPluginEnabled("session-tags");
+    if (snapshot.tagsEnabled !== tagsEnabled) return false;
+
+    const addonsEnabled = isPluginEnabled("session-odoo-addons");
+    if (snapshot.addonsEnabled !== addonsEnabled) return false;
+
+    const pinArchiveEnabled = isPluginEnabled("session-pin-archive");
+    if (snapshot.pinArchiveEnabled !== pinArchiveEnabled) return false;
+
+    const sectionHeadersEnabled = isPluginEnabled("session-section-headers");
+    if (snapshot.sectionHeadersEnabled !== sectionHeadersEnabled) return false;
+
+    const manifest = (typeof window !== "undefined" && window?.__PI_ENH_ODOO_ADDONS_MANIFEST__) || null;
+    if (snapshot.manifest !== manifest) return false;
+
+    return true;
+  }
+
+  function ensureSessionLayoutSnapshot(groups) {
+    if (!Array.isArray(groups)) return null;
+
+    if (
+      sessionLayoutSnapshot &&
+      sessionLayoutSnapshot.groups === groups &&
+      sessionLayoutSnapshot.groupsLength === groups.length &&
+      isSessionLayoutSnapshotValid(sessionLayoutSnapshot)
+    ) {
+      return sessionLayoutSnapshot;
+    }
+
+    const rawPinned = safeGetLocalStorageItem(PINNED_SESSION_STORAGE_KEY);
+    const pinnedManifestSig = rawPinned === null ? getPinnedManifestSignature() : null;
+    const rawTagMappings = safeGetLocalStorageItem(SESSION_TAG_MAPPING_STORAGE_KEY);
+    const rawTagDefs = safeGetLocalStorageItem(SESSION_TAGS_STORAGE_KEY);
+
+    const tagsEnabled = isPluginEnabled("session-tags");
+    const addonsEnabled = isPluginEnabled("session-odoo-addons");
+    const pinArchiveEnabled = isPluginEnabled("session-pin-archive");
+    const sectionHeadersEnabled = isPluginEnabled("session-section-headers");
+    const manifest = (typeof window !== "undefined" && window?.__PI_ENH_ODOO_ADDONS_MANIFEST__) || null;
+
+    // 1. 置顶统计 (单次批次仅读取/解析 1 次)
+    let pinnedCount = 0;
+    if (pinArchiveEnabled && sectionHeadersEnabled) {
+      const pinnedIds = readStoredSessionIds(PINNED_SESSION_STORAGE_KEY);
+      if (pinnedIds && pinnedIds.size > 0) {
+        for (const group of groups) {
+          const rootId = group?.root?.id;
+          if (rootId && pinnedIds.has(rootId)) {
+            pinnedCount += 1;
+          } else {
+            break;
+          }
+        }
+      }
+    }
+
+    // 2. 标签定义与映射解析 (单次批次各仅解析 1 次，内部只读查表，不写全局可变缓存)
+    let tagMappings = null;
+    let validTagIds = null;
+    if (tagsEnabled) {
+      try {
+        tagMappings = readSessionTagMappings();
+      } catch (e) {}
+      try {
+        const validTags = readSessionTagsDefinitions();
+        if (Array.isArray(validTags) && validTags.length > 0) {
+          validTagIds = new Set(validTags.map((t) => t?.id).filter(Boolean));
+        }
+      } catch (e) {}
+    }
+
+    const total = groups.length;
+    let baseHeadersHeight = 0;
+    if (pinnedCount > 0) {
+      baseHeadersHeight = (pinnedCount < total)
+        ? (SESSION_PINNED_HEADER_HEIGHT + SESSION_RECENTS_HEADER_HEIGHT)
+        : SESSION_PINNED_HEADER_HEIGHT;
+    }
+
+    // 3. 单次 O(N) 遍历预计算：单项高度、前缀 Top 累加数组、Recents 标题位置与总高度补偿
+    const itemHeightsMap = new Map();
+    const itemTops = new Array(total + 1);
+    let extraHeight = 0;
+
+    let currentTop = pinnedCount > 0 ? SESSION_PINNED_HEADER_HEIGHT : 0;
+    itemTops[0] = currentTop;
+    let recentsHeaderTop = 0;
+
+    for (let i = 0; i < total; i++) {
+      const group = groups[i];
+      const rootId = group?.root?.id;
+      let h = SESSION_NORMAL_ITEM_HEIGHT;
+
+      if (rootId) {
+        if (tagsEnabled && tagMappings && validTagIds) {
+          const tIds = tagMappings[rootId];
+          if (Array.isArray(tIds) && tIds.some((id) => validTagIds.has(id))) {
+            h += SESSION_TAG_ROW_EXTRA;
+          }
+        }
+        if (addonsEnabled) {
+          try {
+            const addons = getSessionOdooAddons(rootId);
+            if (addons && addons.length > 0) {
+              h += getSessionOdooAddonsExtraHeight(addons.length);
+            }
+          } catch (e) {}
+        }
+        itemHeightsMap.set(rootId, h);
+      }
+
+      if (h > SESSION_NORMAL_ITEM_HEIGHT) {
+        extraHeight += (h - SESSION_NORMAL_ITEM_HEIGHT);
+      }
+
+      currentTop += h;
+      if (pinnedCount > 0 && i === pinnedCount - 1 && pinnedCount < total) {
+        recentsHeaderTop = currentTop;
+        currentTop += SESSION_RECENTS_HEADER_HEIGHT;
+      }
+      itemTops[i + 1] = currentTop;
+    }
+
+    const headersHeight = baseHeadersHeight + extraHeight;
+
+    sessionLayoutSnapshot = {
+      groups,
+      groupsLength: total,
+      rawPinned,
+      pinnedManifestSig,
+      rawTagMappings,
+      rawTagDefs,
+      tagsEnabled,
+      addonsEnabled,
+      pinArchiveEnabled,
+      sectionHeadersEnabled,
+      manifest,
+      pinnedCount,
+      headersHeight,
+      itemHeightsMap,
+      itemTops,
+      recentsHeaderTop,
+    };
+
+    return sessionLayoutSnapshot;
+  }
+
   function getSessionItemHeight(sessionId) {
     if (!sessionId) return SESSION_NORMAL_ITEM_HEIGHT;
+    if (sessionLayoutSnapshot && isSessionLayoutSnapshotValid(sessionLayoutSnapshot)) {
+      if (sessionLayoutSnapshot.itemHeightsMap && sessionLayoutSnapshot.itemHeightsMap.has(sessionId)) {
+        return sessionLayoutSnapshot.itemHeightsMap.get(sessionId);
+      }
+    } else {
+      sessionLayoutSnapshot = null;
+    }
+
     let h = SESSION_NORMAL_ITEM_HEIGHT;
     if (isPluginEnabled("session-tags")) {
       try {
@@ -14516,7 +15435,15 @@
 
   function getPinnedSessionCount(groups) {
     if (!Array.isArray(groups) || groups.length === 0) return 0;
-    if (!isPluginEnabled("session-pin-archive") || !isPluginEnabled("session-section-headers")) return 0;
+    const isPinArchiveEnabled = isPluginEnabled("session-pin-archive");
+    const isSectionHeadersEnabled = isPluginEnabled("session-section-headers");
+    if (!isPinArchiveEnabled || !isSectionHeadersEnabled) return 0;
+
+    const snapshot = ensureSessionLayoutSnapshot(groups);
+    if (snapshot) {
+      return snapshot.pinnedCount;
+    }
+
     const pinnedIds = readStoredSessionIds(PINNED_SESSION_STORAGE_KEY);
     if (!pinnedIds || pinnedIds.size === 0) return 0;
     let count = 0;
@@ -14532,61 +15459,33 @@
   }
 
   function getSessionHeadersHeight(groups) {
-    const pinnedCount = getPinnedSessionCount(groups);
-    let baseHeadersHeight = 0;
-    if (pinnedCount > 0) {
-      const total = Array.isArray(groups) ? groups.length : 0;
-      baseHeadersHeight = (pinnedCount < total)
-        ? (SESSION_PINNED_HEADER_HEIGHT + SESSION_RECENTS_HEADER_HEIGHT)
-        : SESSION_PINNED_HEADER_HEIGHT;
-    }
-
-    // 动态补偿：累加所有带标签或Odoo插件胶囊会话扩充出来的额外高度，确保虚拟列表总容器绝对对齐防截断
-    let extraHeight = 0;
-    if (Array.isArray(groups)) {
-      for (const group of groups) {
-        const rootId = group?.root?.id;
-        const itemH = getSessionItemHeight(rootId);
-        if (itemH > SESSION_NORMAL_ITEM_HEIGHT) {
-          extraHeight += (itemH - SESSION_NORMAL_ITEM_HEIGHT);
-        }
-      }
-    }
-
-    return baseHeadersHeight + extraHeight;
+    if (!Array.isArray(groups) || groups.length === 0) return 0;
+    const snapshot = ensureSessionLayoutSnapshot(groups);
+    return snapshot ? snapshot.headersHeight : 0;
   }
 
   function getSessionItemTop(index, groups) {
-    const pinnedCount = getPinnedSessionCount(groups);
-    let top = 0;
-
     if (Array.isArray(groups)) {
-      if (pinnedCount > 0) {
-        top += SESSION_PINNED_HEADER_HEIGHT;
+      const snapshot = ensureSessionLayoutSnapshot(groups);
+      if (snapshot && Array.isArray(snapshot.itemTops)) {
+        if (index <= 0) return snapshot.itemTops[0] || 0;
+        if (index < snapshot.itemTops.length) return snapshot.itemTops[index];
+        return snapshot.itemTops[snapshot.itemTops.length - 1];
       }
-      for (let i = 0; i < index && i < groups.length; i++) {
-        const rootId = groups[i]?.root?.id;
-        top += getSessionItemHeight(rootId);
-        if (pinnedCount > 0 && i === pinnedCount - 1 && pinnedCount < groups.length) {
-          top += SESSION_RECENTS_HEADER_HEIGHT;
-        }
-      }
-    } else {
-      const defaultTop = 54 * index;
-      if (pinnedCount <= 0) return defaultTop;
-      if (index < pinnedCount) {
-        return SESSION_PINNED_HEADER_HEIGHT + defaultTop;
-      }
-      return SESSION_PINNED_HEADER_HEIGHT + SESSION_RECENTS_HEADER_HEIGHT + defaultTop;
     }
-
-    return top;
+    const pinnedCount = getPinnedSessionCount(groups);
+    const defaultTop = 54 * index;
+    if (pinnedCount <= 0) return defaultTop;
+    if (index < pinnedCount) {
+      return SESSION_PINNED_HEADER_HEIGHT + defaultTop;
+    }
+    return SESSION_PINNED_HEADER_HEIGHT + SESSION_RECENTS_HEADER_HEIGHT + defaultTop;
   }
 
   function getSessionHeaders(r, groups) {
     const pinnedCount = getPinnedSessionCount(groups);
     if (pinnedCount <= 0 || !r || typeof r.jsx !== "function") return [];
-    const total = groups.length;
+    const total = Array.isArray(groups) ? groups.length : 0;
     const headers = [];
 
     // Pinned Header
@@ -14618,12 +15517,22 @@
 
     // Recents Header (仅当存在非置顶的最近会话时才渲染)
     if (pinnedCount < total) {
-      let pinnedSessionsHeight = 0;
-      for (let i = 0; i < pinnedCount && i < groups.length; i++) {
-        const rootId = groups[i]?.root?.id;
-        pinnedSessionsHeight += getSessionItemHeight(rootId);
+      let recentsTop = 0;
+      if (
+        sessionLayoutSnapshot &&
+        sessionLayoutSnapshot.groups === groups &&
+        sessionLayoutSnapshot.pinnedCount === pinnedCount &&
+        isSessionLayoutSnapshotValid(sessionLayoutSnapshot)
+      ) {
+        recentsTop = sessionLayoutSnapshot.recentsHeaderTop;
+      } else {
+        let pinnedSessionsHeight = 0;
+        for (let i = 0; i < pinnedCount && i < groups.length; i++) {
+          const rootId = groups[i]?.root?.id;
+          pinnedSessionsHeight += getSessionItemHeight(rootId);
+        }
+        recentsTop = SESSION_PINNED_HEADER_HEIGHT + pinnedSessionsHeight;
       }
-      const recentsTop = SESSION_PINNED_HEADER_HEIGHT + pinnedSessionsHeight;
       headers.push(
         r.jsx("div", {
           key: "pi-enh-header-recents",
@@ -14655,11 +15564,232 @@
     return headers;
   }
 
+  function resolveVirtualContainerSessionGroups(entries) {
+    if (!Array.isArray(entries) || entries.length === 0) return null;
+    if (
+      !Array.isArray(latestKnownSessionGroups) ||
+      latestKnownSessionGroups.length === 0 ||
+      !latestKnownSessionGroups.every((group) => Boolean(group?.root?.id))
+    ) {
+      return null;
+    }
+
+    const indices = new Map(
+      latestKnownSessionGroups.map((group, index) => [group.root.id, index])
+    );
+
+    for (const entry of entries) {
+      if (!entry.sid || !indices.has(entry.sid)) {
+        return null;
+      }
+    }
+
+    return {
+      groups: latestKnownSessionGroups,
+      indices,
+    };
+  }
+
+  function removeSessionSectionHeaders(targetContainer = null) {
+    if (typeof document === "undefined") return;
+    const scope = targetContainer && typeof targetContainer.querySelectorAll === "function" ? targetContainer : document;
+    const fallbackNodes = scope.querySelectorAll('.pi-enh-session-section-header[data-pi-enh-fallback="true"]');
+    if (!fallbackNodes || fallbackNodes.length === 0) return;
+    const doRemove = () => {
+      for (const node of fallbackNodes) {
+        if (targetContainer && node.parentElement !== targetContainer) continue;
+        node.remove();
+      }
+    };
+    if (typeof withMutationGuard === "function") {
+      withMutationGuard(doRemove);
+    } else {
+      doRemove();
+    }
+  }
+
+  function applySessionSectionHeaderStyle(el, section, topPx) {
+    if (!el || !el.style) return;
+    const isPinned = section === "pinned";
+    const expectedHeight = (isPinned ? SESSION_PINNED_HEADER_HEIGHT : SESSION_RECENTS_HEADER_HEIGHT) + "px";
+    const expectedTop = isPinned ? "0px" : topPx;
+    const expectedAlign = isPinned ? "center" : "flex-end";
+    const expectedText = isPinned ? "Pinned" : "Recents";
+
+    if (el.style.position !== "absolute") el.style.position = "absolute";
+    if (el.style.top !== expectedTop) el.style.top = expectedTop;
+    if (el.style.left !== "0px") el.style.left = "0px";
+    if (el.style.right !== "0px") el.style.right = "0px";
+    if (el.style.height !== expectedHeight) el.style.height = expectedHeight;
+    if (el.style.display !== "flex") el.style.display = "flex";
+    if (el.style.alignItems !== expectedAlign) el.style.alignItems = expectedAlign;
+    if (el.style.paddingLeft !== "14px") el.style.paddingLeft = "14px";
+    if (el.style.paddingRight !== "8px") el.style.paddingRight = "8px";
+    if (!isPinned && el.style.paddingBottom !== "5px") el.style.paddingBottom = "5px";
+    if (el.style.fontSize !== "12px") el.style.fontSize = "12px";
+    if (el.style.fontWeight !== "400") el.style.fontWeight = "400";
+    if (el.style.color !== "var(--text-muted, #71717a)") el.style.color = "var(--text-muted, #71717a)";
+    if (el.style.userSelect !== "none") el.style.userSelect = "none";
+    if (el.style.pointerEvents !== "none") el.style.pointerEvents = "none";
+    if (el.style.letterSpacing !== "0.01em") el.style.letterSpacing = "0.01em";
+    if (el.textContent !== expectedText) el.textContent = expectedText;
+  }
+
+  function syncSessionSectionHeaders() {
+    if (isDisposed || typeof document === "undefined") return;
+
+    if (!Array.isArray(latestKnownSessionGroups) || !latestKnownSessionGroups.length) {
+      if (Array.isArray(window.__PI_ENH_EARLY_SESSION_GROUPS__) && window.__PI_ENH_EARLY_SESSION_GROUPS__.length > 0) {
+        processSessionGroups(window.__PI_ENH_EARLY_SESSION_GROUPS__);
+      }
+    }
+
+    const rows = document.querySelectorAll(".pi-enh-session-row-host[data-pi-enh-session-id]");
+    if (!rows || rows.length === 0) {
+      removeSessionSectionHeaders();
+      return;
+    }
+
+    const containerMap = new Map();
+    for (const row of rows) {
+      const sid = row.getAttribute("data-pi-enh-session-id") || row.dataset?.piEnhSessionId;
+      if (!sid) continue;
+      const wrapper = row.parentElement;
+      if (!wrapper || wrapper.tagName !== "DIV" || wrapper.style.position !== "absolute") continue;
+      const container = wrapper.parentElement;
+      if (!container || container.tagName !== "DIV" || container.style.position !== "relative") continue;
+      if (typeof container.closest === "function" && container.closest(".settings-dialog-backdrop, [role='dialog']")) continue;
+      let list = containerMap.get(container);
+      if (!list) {
+        list = [];
+        containerMap.set(container, list);
+      }
+      list.push({ row, wrapper, sid });
+    }
+
+    if (containerMap.size === 0) {
+      removeSessionSectionHeaders();
+      return;
+    }
+
+    const headersFeatureActive = isPluginEnabled("session-pin-archive") && isPluginEnabled("session-section-headers");
+
+    const syncDom = () => {
+      const activePinnedContainers = new Set();
+
+      for (const [container, entries] of containerMap.entries()) {
+        const childHeaders = Array.from(container.children).filter(
+          (el) => el.classList && el.classList.contains("pi-enh-session-section-header")
+        );
+        const nativeHeaders = childHeaders.filter(
+          (el) => el.getAttribute("data-pi-enh-fallback") !== "true"
+        );
+        const fallbackHeaders = childHeaders.filter(
+          (el) => el.getAttribute("data-pi-enh-fallback") === "true"
+        );
+
+        if (nativeHeaders.length > 0) {
+          for (const fh of fallbackHeaders) fh.remove();
+          continue;
+        }
+
+        const resolved = headersFeatureActive
+          ? resolveVirtualContainerSessionGroups(entries)
+          : null;
+
+        if (!resolved) {
+          for (const fh of fallbackHeaders) fh.remove();
+          continue;
+        }
+
+        const groups = resolved.groups;
+        const pinnedCount = getPinnedSessionCount(groups);
+        const total = groups.length;
+
+        if (pinnedCount <= 0) {
+          for (const fh of fallbackHeaders) fh.remove();
+          continue;
+        }
+
+        activePinnedContainers.add(container);
+
+        const pinnedCandidates = fallbackHeaders.filter(
+          (el) => el.classList.contains("pi-enh-session-section-pinned") || el.getAttribute("data-pi-enh-section") === "pinned"
+        );
+        let pinnedEl = pinnedCandidates[0] || null;
+        for (let i = 1; i < pinnedCandidates.length; i++) {
+          pinnedCandidates[i].remove();
+        }
+        if (!pinnedEl) {
+          pinnedEl = document.createElement("div");
+          pinnedEl.className = "pi-enh-session-section-header pi-enh-session-section-pinned";
+          pinnedEl.setAttribute("data-pi-enh-section", "pinned");
+          pinnedEl.setAttribute("data-pi-enh-fallback", "true");
+        }
+        applySessionSectionHeaderStyle(pinnedEl, "pinned", "0px");
+        if (pinnedEl.parentElement !== container) {
+          container.insertBefore(pinnedEl, container.firstChild);
+        }
+
+        const recentsCandidates = fallbackHeaders.filter(
+          (el) => el.classList.contains("pi-enh-session-section-recents") || el.getAttribute("data-pi-enh-section") === "recents"
+        );
+        let recentsEl = recentsCandidates[0] || null;
+        for (let i = 1; i < recentsCandidates.length; i++) {
+          recentsCandidates[i].remove();
+        }
+
+        if (pinnedCount < total) {
+          const recentsTopPx = (getSessionItemTop(pinnedCount, groups) - SESSION_RECENTS_HEADER_HEIGHT) + "px";
+          if (!recentsEl) {
+            recentsEl = document.createElement("div");
+            recentsEl.className = "pi-enh-session-section-header pi-enh-session-section-recents";
+            recentsEl.setAttribute("data-pi-enh-section", "recents");
+            recentsEl.setAttribute("data-pi-enh-fallback", "true");
+          }
+          applySessionSectionHeaderStyle(recentsEl, "recents", recentsTopPx);
+          if (recentsEl.parentElement !== container) {
+            container.insertBefore(recentsEl, pinnedEl.nextSibling);
+          }
+        } else if (recentsEl) {
+          recentsEl.remove();
+          recentsEl = null;
+        }
+
+        for (const fh of fallbackHeaders) {
+          if (fh !== pinnedEl && fh !== recentsEl && fh.parentElement === container) {
+            fh.remove();
+          }
+        }
+      }
+
+      for (const stray of document.querySelectorAll('.pi-enh-session-section-header[data-pi-enh-fallback="true"]')) {
+        if (!stray.parentElement || !activePinnedContainers.has(stray.parentElement)) {
+          stray.remove();
+        }
+      }
+    };
+
+    if (typeof withMutationGuard === "function") {
+      withMutationGuard(syncDom);
+    } else {
+      syncDom();
+    }
+  }
+
+  if (Array.isArray(activeCleanups)) {
+    activeCleanups.push(() => {
+      removeSessionSectionHeaders();
+    });
+  }
+
   window.__PI_ENH_GET_SESSION_HEADERS_HEIGHT__ = getSessionHeadersHeight;
   window.__PI_ENH_GET_SESSION_HEADERS__ = getSessionHeaders;
   window.__PI_ENH_GET_SESSION_ITEM_TOP__ = getSessionItemTop;
   window.__PI_ENH_GET_SESSION_ITEM_HEIGHT__ = getSessionItemHeight;
   window.__PI_ENH_GET_PINNED_SESSION_COUNT__ = getPinnedSessionCount;
+  window.__PI_ENH_SYNC_SESSION_SECTION_HEADERS__ = syncSessionSectionHeaders;
+  window.__PI_ENH_REMOVE_SESSION_SECTION_HEADERS__ = removeSessionSectionHeaders;
 
   function toggleSessionPin(sessionId) {
     if (!sessionId) return false;
@@ -14672,6 +15802,11 @@
       window.__PI_ENH_PINNED_MANIFEST__ = window.__PI_ENH_PINNED_MANIFEST__.filter((e) => (typeof e === "string" ? e !== sessionId : e?.id !== sessionId));
       if (!isPinned) window.__PI_ENH_PINNED_MANIFEST__.push(sessionId);
     }
+    if (Array.isArray(latestKnownSessionGroups) && latestKnownSessionGroups.length > 0) {
+      processSessionGroups(latestKnownSessionGroups);
+    }
+    syncSessionOdooAddonsLayout();
+    syncSessionSectionHeaders();
     void persistPinnedSessionsToServer(pinnedIds);
     return !isPinned;
   }
@@ -15158,6 +16293,25 @@
     }
   }
 
+  function isSimpleCoalesceableGet(input, init) {
+    if (typeof input !== "string") return false;
+    if (init == null) return true;
+    if (typeof init !== "object") return false;
+    const proto = Object.getPrototypeOf(init);
+    if (proto !== Object.prototype && proto !== null) return false;
+    const keys = Object.getOwnPropertyNames(init);
+    for (let i = 0; i < keys.length; i++) {
+      const k = keys[i];
+      if (init[k] === undefined) continue;
+      if (k === "method") {
+        if (String(init.method || "GET").toUpperCase() !== "GET") return false;
+      } else if (k !== "cache") {
+        return false;
+      }
+    }
+    return true;
+  }
+
   function isWarmSessionSnapshotUrl(urlStr) {
     const path = getSessionRequestPath(urlStr);
     if (!/\/api\/sessions\/[^/?#]+(?:[?#]|$)/.test(urlStr) || path.endsWith("/context")) return true;
@@ -15529,8 +16683,26 @@
     savePersistentSessionManifest();
   }
 
+  function hasTransientBlobImage(data) {
+    if (!data || typeof data !== "object") return false;
+    const target = data.data && typeof data.data === "object" ? data.data : data;
+    const messages = target?.context?.messages;
+    if (!Array.isArray(messages)) return false;
+    for (let i = 0; i < messages.length; i++) {
+      const msg = messages[i];
+      if (!msg || !Array.isArray(msg.content)) continue;
+      for (let j = 0; j < msg.content.length; j++) {
+        const part = msg.content[j];
+        if (!part || typeof part !== "object" || part.type !== "image") continue;
+        const sourceUrl = part.source && typeof part.source === "object" ? part.source.url : null;
+        if (typeof sourceUrl === "string" && sourceUrl.startsWith("blob:")) return true;
+      }
+    }
+    return false;
+  }
+
   function persistSessionDetail(sessionId, urlStr, data) {
-    if (!canUsePersistentSessionCache() || !isPersistableSessionUrl(urlStr) || !isWarmSessionSnapshotUrl(urlStr)) return Promise.resolve();
+    if (!canUsePersistentSessionCache() || !isPersistableSessionUrl(urlStr) || !isWarmSessionSnapshotUrl(urlStr) || hasTransientBlobImage(data)) return Promise.resolve();
     const stampedData = withSessionCacheTimestamp(data, Number(data?._cachedAt) > 0 ? Number(data._cachedAt) : Date.now());
     const cacheKey = getPersistentCacheKey(urlStr);
     const sessionEpoch = persistentSessionEpochs.get(sessionId) || 0;
@@ -15576,6 +16748,10 @@
         }
       }
       if (!data) return null;
+      if (hasTransientBlobImage(data)) {
+        void invalidatePersistentSession(sessionId);
+        return null;
+      }
       metadata.lastAccessed = Date.now();
       savePersistentSessionManifest();
       return data;
@@ -15643,6 +16819,62 @@
     return handle;
   }
 
+  function bridgeToNativeViewCache(sessionId, data) {
+    if (!sessionId || !data || !data.snapshotRevision || !data.context?.messages) return;
+    try {
+      if (typeof globalThis !== "undefined") {
+        if (!globalThis.__piSessionViewCache) globalThis.__piSessionViewCache = new Map();
+        if (!globalThis.__piSessionWireBaselines) globalThis.__piSessionWireBaselines = new Map();
+        const messages = Array.isArray(data.context.messages) ? data.context.messages : [];
+        const entryIds = Array.isArray(data.context.entryIds) ? data.context.entryIds : [];
+        const revision = String(data.snapshotRevision || "");
+        if (!revision) return;
+        const now = Date.now();
+
+        const viewSnapshot = {
+          sessionId,
+          revision,
+          messages,
+          entryIds,
+          leafId: data.leafId ?? null,
+          oldestEntryId: data.context.oldestEntryId ?? null,
+          hasMore: Boolean(data.context.hasMore),
+          summaryTree: data.tree,
+          thinkingLevel: data.context.thinkingLevel || "off",
+          model: data.context.model || null,
+          stats: data.stats,
+          totalActiveMs: data.totalActiveMs || 0,
+          loadedEntryIds: entryIds,
+          savedAt: now,
+        };
+
+        globalThis.__piSessionViewCache.delete(sessionId);
+        globalThis.__piSessionViewCache.set(sessionId, viewSnapshot);
+        while (globalThis.__piSessionViewCache.size > 8) {
+          const oldest = globalThis.__piSessionViewCache.keys().next().value;
+          if (oldest === undefined) break;
+          globalThis.__piSessionViewCache.delete(oldest);
+        }
+
+        const wireBaseline = {
+          sessionId,
+          revision,
+          messages,
+          entryIds,
+          data,
+          savedAt: now,
+        };
+        globalThis.__piSessionWireBaselines.delete(sessionId);
+        globalThis.__piSessionWireBaselines.set(sessionId, wireBaseline);
+        while (globalThis.__piSessionWireBaselines.size > 8) {
+          const oldest = globalThis.__piSessionWireBaselines.keys().next().value;
+          if (oldest === undefined) break;
+          globalThis.__piSessionWireBaselines.delete(oldest);
+        }
+      }
+    } catch (_) {}
+  }
+
   function commitSessionDetailSnapshot(sessionId, entry, urlStr, stampedData, now = Date.now()) {
     if (!entry || !stampedData) return;
     entry.detailRequests.set(urlStr, { data: stampedData, timestamp: now });
@@ -15660,6 +16892,7 @@
         }
       }
     }
+    bridgeToNativeViewCache(sessionId, stampedData);
     if (typeof window !== "undefined" && typeof window.__PI_ENH_INVALIDATE_DOM_SESSION_SNAPSHOT__ === "function") {
       try { window.__PI_ENH_INVALIDATE_DOM_SESSION_SNAPSHOT__(sessionId); } catch (e) {}
     }
@@ -15720,6 +16953,10 @@
         needsFreshSync: false,
         hasPendingAttention: false,
         completedAt: null,
+        isSettled: false,
+        settledAt: null,
+        runGeneration: 0,
+        settledGeneration: 0,
       };
       sessionMemoryCache.set(sessionId, entry);
     } else {
@@ -15804,8 +17041,8 @@
         }
       }
       const detailUrlBare = `/api/sessions/${encodedId}`;
-      const contextUrl80 = `/api/sessions/${encodedId}/context?tail=80`;
-      const contextUrl1000 = `/api/sessions/${encodedId}/context?tail=1000`;
+      const contextUrl80 = `/api/sessions/${encodedId}/context?deferThinking=1&deferMedia=1&tail=80`;
+      const contextUrl1000 = `/api/sessions/${encodedId}/context?deferThinking=1&deferMedia=1&tail=1000`;
       const primaryContextUrl = isCurrentActive ? contextUrl1000 : contextUrl80;
       const stateUrl = `/api/sessions/${encodedId}/state`;
 
@@ -15986,7 +17223,13 @@
 
         const url1000 = `/api/sessions/${encodeURIComponent(sid)}?deferThinking=1&deferMedia=1&tail=1000`;
         try {
-          await cachedSessionFetch(url1000, { cache: "no-store" });
+          const resp = await cachedSessionFetch(url1000, { cache: "no-store" });
+          if (resp && resp.ok) {
+            try {
+              const freshJson = await resp.clone().json();
+              bridgeToNativeViewCache(sid, freshJson);
+            } catch (_) {}
+          }
         } catch (_) {}
 
         // 每个预加载之间留出 120ms 呼吸缓冲，绝不拥堵网络连接池
@@ -15999,13 +17242,50 @@
 
   const scheduleVisibleSessionsBackgroundPrewarm = schedulePrioritySessionPreloads;
 
+  function isSessionTerminallySettled(sessionId) {
+    if (!sessionId) return false;
+    const entry = sessionMemoryCache.get(sessionId);
+    if (!entry || !entry.isSettled) return false;
+
+    // 终态证据在没有真实新轮 agent_start 或实际发送解除之前持续有效；
+    // 终态检查本身不能因陈旧 DOM 残留的 stop 按钮而删除证据。
+    return true;
+  }
+
+  function markSessionSettled(sessionId, options = {}) {
+    if (!sessionId) return;
+    const entry = getOrCreateSessionEntry(sessionId);
+    entry.isSettled = true;
+    entry.settledAt = Date.now();
+    entry.runGeneration = (entry.runGeneration || 0) + 1;
+    entry.settledGeneration = entry.runGeneration;
+    entry.isRunning = false;
+    entry.completedAt = Date.now();
+    entry.hasPendingAgentEnd = false;
+    entry.hasPendingAttention = false;
+  }
+
   function markSessionRunning(sessionId, running, options = {}) {
     if (!sessionId) return;
     const entry = getOrCreateSessionEntry(sessionId);
     const wasRunning = entry.isRunning;
     const nextRunning = Boolean(running);
-    entry.isRunning = nextRunning;
+
     if (nextRunning) {
+      // 若当前会话处于终态保护中，且调用未携带明确的新轮次信号（非 explicit/start），
+      // 则判定为陈旧状态轮询/滞后的 runningSessionIds，拒绝复活 running。
+      if (!options.explicit && !options.start) {
+        if (isSessionTerminallySettled(sessionId)) {
+          return;
+        }
+      }
+      entry.isSettled = false;
+      entry.settledAt = null;
+      if (options.explicit || options.start) {
+        entry.runGeneration = (entry.runGeneration || 0) + 1;
+        entry.state = null;
+      }
+      entry.isRunning = true;
       entry.completedAt = null;
       // 状态轮询可能在 agent_end 后仍报告 running；只有真正开始新一轮才清掉上一轮的校准证据。
       if (!wasRunning && !entry.hasPendingAgentEnd) {
@@ -16024,10 +17304,45 @@
         // 状态轮询晚于 agent_end 到达时仍可能报告 running，不能覆盖本轮待落盘标记。
         entry.needsFreshSync = false;
       }
-    } else if (wasRunning) {
-      entry.completedAt = Date.now();
-      // 完成瞬间仍需让原生最终同步拿到最新消息，但保留旧快照作为断网/重启兜底。
-      entry.needsFreshSync = true;
+    } else {
+      entry.isRunning = false;
+      if (options.settled) {
+        entry.isSettled = true;
+        entry.settledAt = Date.now();
+        entry.runGeneration = (entry.runGeneration || 0) + 1;
+        entry.settledGeneration = entry.runGeneration;
+
+        // 终态事件可能晚于最近一次 /api/agent 缓存读取；空闲快路径会复用 entry.state。
+        // 只归零任务状态并保留模型/上下文元数据，顶层 running 仍表示 RPC 包装器存活。
+        const cachedData = entry.state?.data;
+        if (cachedData && typeof cachedData === "object" && !Array.isArray(cachedData)) {
+          const taskFlags = ["isStreaming", "isPromptRunning", "isBashRunning", "isCompacting"];
+          const settledData = { ...cachedData };
+          for (const key of taskFlags) {
+            if (typeof settledData[key] === "boolean") settledData[key] = false;
+          }
+          settledData.state = {
+            ...(cachedData.state && typeof cachedData.state === "object" && !Array.isArray(cachedData.state)
+              ? cachedData.state
+              : {}),
+            isStreaming: false,
+            isPromptRunning: false,
+            isBashRunning: false,
+            isCompacting: false,
+          };
+          entry.state = {
+            ...entry.state,
+            data: settledData,
+            timestamp: Date.now(),
+            isRunning: false,
+          };
+        }
+      }
+      if (wasRunning) {
+        entry.completedAt = Date.now();
+        // 完成瞬间仍需让原生最终同步拿到最新消息，但保留旧快照作为断网/重启兜底。
+        entry.needsFreshSync = true;
+      }
     }
   }
 
@@ -16296,6 +17611,21 @@
     return state;
   }
 
+  function parseOrderGuardTimestamp(rawTs) {
+    if (rawTs === undefined || rawTs === null || rawTs === "") return null;
+    if (typeof rawTs === "number") {
+      return Number.isFinite(rawTs) && rawTs > 0 ? rawTs : null;
+    }
+    if (typeof rawTs === "string") {
+      const n = Number(rawTs);
+      if (Number.isFinite(n) && n > 0) return n;
+      const p = Date.parse(rawTs);
+      if (Number.isFinite(p) && p > 0) return p;
+      return null;
+    }
+    return null;
+  }
+
   function handleSessionHistoryOrderStreamEvent(sessionId, data) {
     if (!sessionId || !data) return;
     if (!isPluginEnabled("session-history-order-guard")) return;
@@ -16312,9 +17642,10 @@
       state.revision++;
       const msg = data.message;
       if (msg && typeof msg === "object") {
-        const id = msg.id || msg.entryId || null;
-        const rawTs = msg.timestamp || msg.createdAt;
-        const ts = rawTs !== undefined && rawTs !== null && !isNaN(Number(rawTs)) ? Number(rawTs) : null;
+        if (msg.role === "system") return; // 忽略 system 消息，服务端历史记录接口会过滤 system 消息
+        const id = msg.id || msg.entryId || data.entryId || data.id || null;
+        const rawTs = msg.timestamp ?? msg.createdAt ?? data.timestamp;
+        const ts = parseOrderGuardTimestamp(rawTs);
         if (id || (ts !== null && ts > 0)) {
           state.latestWatermark = {
             id,
@@ -16368,15 +17699,20 @@
     }
     if (!Array.isArray(messages) || messages.length === 0) return false;
 
+    const wTs = parseOrderGuardTimestamp(watermark.timestamp) || 0;
+
     for (let i = messages.length - 1; i >= 0; i--) {
       const m = messages[i];
       if (!m || typeof m !== "object") continue;
       if (watermark.id && (m.id === watermark.id || m.entryId === watermark.id)) {
         return true;
       }
-      const mTs = Number(m.timestamp || m.createdAt || 0);
-      const wTs = Number(watermark.timestamp || 0);
-      if (wTs > 0 && mTs === wTs) {
+      const mTs = parseOrderGuardTimestamp(m.timestamp ?? m.createdAt) || 0;
+      const isTsMatched = wTs > 0 && (
+        mTs === wTs ||
+        (!watermark.id && mTs > 0 && Math.abs(mTs - wTs) <= 120000)
+      );
+      if (isTsMatched) {
         if (!watermark.role || m.role === watermark.role) {
           if (!watermark.toolCallId || m.toolCallId === watermark.toolCallId || m.tool_call_id === watermark.toolCallId) {
             return true;
@@ -16386,13 +17722,90 @@
     }
 
     const lastMsg = messages[messages.length - 1];
-    const lastTs = Number(lastMsg?.timestamp || lastMsg?.createdAt || 0);
-    const wTs = Number(watermark.timestamp || 0);
+    const lastTs = parseOrderGuardTimestamp(lastMsg?.timestamp ?? lastMsg?.createdAt) || 0;
     if (wTs > 0 && lastTs > wTs) {
       return true;
     }
 
     return false;
+  }
+
+  function extractOrderGuardMessagesAndEntryIds(json, sessionId) {
+    if (json && json.protocol === 1) {
+      const wireBaselines =
+        (typeof globalThis !== "undefined" && globalThis.__piSessionWireBaselines instanceof Map
+          ? globalThis.__piSessionWireBaselines
+          : null) ||
+        (typeof window !== "undefined" && window.__piSessionWireBaselines instanceof Map
+          ? window.__piSessionWireBaselines
+          : null);
+      const baseline = sessionId && wireBaselines ? wireBaselines.get(sessionId) : null;
+
+      if (json.mode === "reset") {
+        const messages = Array.isArray(json?.data?.context?.messages)
+          ? json.data.context.messages
+          : (Array.isArray(json?.data?.messages) ? json.data.messages : []);
+        const entryIds = Array.isArray(json?.data?.context?.entryIds)
+          ? json.data.context.entryIds
+          : (Array.isArray(json?.data?.entryIds) ? json.data.entryIds : []);
+        return { messages, entryIds, isUnchangedEnvelope: false };
+      }
+
+      if (json.mode === "delta") {
+        const baseMsgs = Array.isArray(baseline?.messages)
+          ? baseline.messages
+          : (Array.isArray(baseline?.data?.context?.messages) ? baseline.data.context.messages : []);
+        const tailMessages = Array.isArray(json?.tailMessages) ? json.tailMessages : [];
+        const messages = (Number.isInteger(json.dropCount) && Number.isInteger(json.keepCount))
+          ? baseMsgs.slice(json.dropCount, json.dropCount + json.keepCount).concat(tailMessages)
+          : tailMessages;
+        const entryIds = Array.isArray(json?.data?.context?.entryIds)
+          ? json.data.context.entryIds
+          : (Array.isArray(json?.data?.entryIds) ? json.data.entryIds : []);
+        return { messages, entryIds, isUnchangedEnvelope: false };
+      }
+
+      if (json.mode === "unchanged") {
+        let messages = Array.isArray(baseline?.messages)
+          ? baseline.messages
+          : (Array.isArray(baseline?.data?.context?.messages) ? baseline.data.context.messages : []);
+        let entryIds = Array.isArray(baseline?.entryIds)
+          ? baseline.entryIds
+          : (Array.isArray(baseline?.data?.context?.entryIds) ? baseline.data.context.entryIds : []);
+
+        if (messages.length === 0 && entryIds.length === 0 && sessionId) {
+          const memCache = typeof sessionMemoryCache !== "undefined" && sessionMemoryCache instanceof Map
+            ? sessionMemoryCache.get(sessionId)
+            : null;
+          if (memCache && memCache.detailRequests instanceof Map) {
+            for (const slot of memCache.detailRequests.values()) {
+              const ctx = slot?.data?.context;
+              if (Array.isArray(ctx?.messages) && ctx.messages.length > 0) {
+                messages = ctx.messages;
+                entryIds = Array.isArray(ctx.entryIds) ? ctx.entryIds : [];
+                break;
+              }
+            }
+          }
+        }
+        if (messages.length === 0 && entryIds.length === 0 && sessionId) {
+          const accepted = SESSION_HISTORY_ORDER_STATES.get(sessionId)?.latestAccepted;
+          if (accepted) {
+            if (Array.isArray(accepted.messages) && accepted.messages.length > 0) messages = accepted.messages;
+            if (Array.isArray(accepted.entryIds) && accepted.entryIds.length > 0) entryIds = accepted.entryIds;
+          }
+        }
+        return { messages, entryIds, isUnchangedEnvelope: true };
+      }
+    }
+
+    const messages = Array.isArray(json?.context?.messages)
+      ? json.context.messages
+      : (Array.isArray(json?.messages) ? json.messages : []);
+    const entryIds = Array.isArray(json?.context?.entryIds)
+      ? json.context.entryIds
+      : (Array.isArray(json?.entryIds) ? json.entryIds : []);
+    return { messages, entryIds, isUnchangedEnvelope: false };
   }
 
   function extractNormalizedHistoryKey(url) {
@@ -16444,6 +17857,29 @@
     return true;
   }
 
+  function safeCreateOrderGuardResponse(bodyText, status, statusText, rawHeaders) {
+    const headers = new Headers();
+    if (rawHeaders) {
+      try {
+        const entries = typeof rawHeaders.entries === "function" ? rawHeaders.entries() : Object.entries(rawHeaders);
+        for (const [k, v] of entries) {
+          const lk = String(k).toLowerCase();
+          if (lk !== "content-encoding" && lk !== "content-length" && lk !== "transfer-encoding") {
+            headers.set(k, v);
+          }
+        }
+      } catch (_) {}
+    }
+    if (!headers.get("Content-Type")) {
+      headers.set("Content-Type", "application/json; charset=utf-8");
+    }
+    return new Response(bodyText, {
+      status: status || 200,
+      statusText: statusText || "OK",
+      headers,
+    });
+  }
+
   async function wrapSessionHistoryOrderGuard(input, init, url, sessionId, fetchInitial) {
     checkOrderGuardAborted(init, input);
 
@@ -16486,12 +17922,11 @@
       return response;
     }
 
-    const messages = Array.isArray(json?.context?.messages)
-      ? json.context.messages
-      : (Array.isArray(json?.messages) ? json.messages : []);
-    const entryIds = Array.isArray(json?.context?.entryIds)
-      ? json.context.entryIds
-      : (Array.isArray(json?.entryIds) ? json.entryIds : []);
+    const {
+      messages,
+      entryIds,
+      isUnchangedEnvelope,
+    } = extractOrderGuardMessagesAndEntryIds(json, sessionId);
 
     // 2. 检查并发请求乱序覆盖（反序两个 GET）：
     const accepted = state.latestAccepted;
@@ -16519,12 +17954,15 @@
     }
 
     // 3. 检查当前响应是否落后于 SSE watermark、或请求期间有新 revision、或反序且 accepted 已过期
-    const isBehindWatermark = Boolean(
-      state.latestWatermark && !isMessagesUpToDateWithWatermark(messages, state.latestWatermark, entryIds)
-    );
     const hasNewRevision = state.revision > startRevision;
+    const isInitialUpToDate = (isUnchangedEnvelope && messages.length === 0 && entryIds.length === 0 && !hasNewRevision)
+      ? true
+      : isMessagesUpToDateWithWatermark(messages, state.latestWatermark, entryIds);
+    const isBehindWatermark = Boolean(
+      state.latestWatermark && !isInitialUpToDate
+    );
     const isOutdatedByRevision = Boolean(
-      hasNewRevision && state.latestWatermark && !isMessagesUpToDateWithWatermark(messages, state.latestWatermark, entryIds)
+      hasNewRevision && state.latestWatermark && !isInitialUpToDate
     );
     const isBehindAcceptedStale = Boolean(
       accepted && reqEpoch === accepted.epoch && reqSeq < accepted.seq && accepted.key === reqKey
@@ -16554,7 +17992,12 @@
     // 4. 明确落后时，使用 baseFetch/originalWindowFetch no-store 重新读，最多 3 次
     const activeFetch = baseFetch || originalWindowFetch || (typeof window !== "undefined" ? window.fetch : null);
     if (!activeFetch) {
-      throw new Error("[session-history-order-guard] 会话历史记录落后于流式消息版本，且无可用的重读客户端");
+      const err = new Error("[session-history-order-guard] 会话历史记录落后于流式消息版本，且无可用的重读客户端");
+      err.isOrderGuardError = true;
+      err.fallbackResponse = bodyText
+        ? safeCreateOrderGuardResponse(bodyText, response.status, response.statusText, response.headers)
+        : null;
+      throw err;
     }
 
     let freshResponse = null;
@@ -16572,8 +18015,15 @@
         return freshResponse || response;
       }
       attempts++;
+
+      let reqInput = input;
+      if (attempts >= 2 && typeof input === "string" && input.includes("sync=1") && input.includes("baseRevision=")) {
+        reqInput = input.replace(/[?&]baseRevision=[^&#]+/g, "").replace(/\?&/, "?");
+        if (!reqInput.includes("force=1")) reqInput += "&force=1";
+      }
+
       try {
-        freshResponse = await activeFetch(input, {
+        freshResponse = await activeFetch(reqInput, {
           ...init,
           cache: "no-store",
         });
@@ -16595,13 +18045,13 @@
             return freshResponse;
           }
           freshJson = JSON.parse(freshBodyText);
-          freshMessages = Array.isArray(freshJson?.context?.messages)
-            ? freshJson.context.messages
-            : (Array.isArray(freshJson?.messages) ? freshJson.messages : []);
-          freshEntryIds = Array.isArray(freshJson?.context?.entryIds)
-            ? freshJson.context.entryIds
-            : (Array.isArray(freshJson?.entryIds) ? freshJson.entryIds : []);
-          if (isMessagesUpToDateWithWatermark(freshMessages, state.latestWatermark, freshEntryIds)) {
+          const extractedFresh = extractOrderGuardMessagesAndEntryIds(freshJson, sessionId);
+          freshMessages = extractedFresh.messages;
+          freshEntryIds = extractedFresh.entryIds;
+          const isFreshUpToDate = (extractedFresh.isUnchangedEnvelope && freshMessages.length === 0 && freshEntryIds.length === 0 && state.revision === startRevision)
+            ? true
+            : isMessagesUpToDateWithWatermark(freshMessages, state.latestWatermark, freshEntryIds);
+          if (isFreshUpToDate) {
             freshSuccess = true;
             break;
           }
@@ -16615,7 +18065,14 @@
     }
 
     if (!freshSuccess || !freshResponse || !freshResponse.ok || !freshBodyText) {
-      throw new Error("[session-history-order-guard] 会话历史记录落后于流式消息版本，已阻止过期快照覆盖界面");
+      const err = new Error("[session-history-order-guard] 会话历史记录落后于流式消息版本，已阻止过期快照覆盖界面");
+      err.isOrderGuardError = true;
+      err.fallbackResponse = (freshResponse && freshResponse.ok && freshBodyText)
+        ? safeCreateOrderGuardResponse(freshBodyText, freshResponse.status, freshResponse.statusText, freshResponse.headers)
+        : (bodyText
+          ? safeCreateOrderGuardResponse(bodyText, response.status, response.statusText, response.headers)
+          : null);
+      throw err;
     }
 
     const prevSeq = state.latestAccepted?.seq || 0;
@@ -16639,22 +18096,246 @@
   // React replaces its history with this fetch result. A stale-while-revalidate
   // cache cannot be authoritative without a React subscription/commit bridge.
   // Keep this guard independent of SSE invalidation and the legacy cache toggle.
+  let lastKnownSessionListPayload = {
+    sessionListVersion: 0,
+    runningSessionIds: [],
+    completionNotificationSuppressedSessionIds: [],
+  };
+
+  function isTransientFetchError(err, init, input) {
+    if (!err || isRequestAborted(err, init, input)) return false;
+    if (err instanceof TypeError) return true;
+    const msg = String(err?.message || err || "");
+    return /failed to fetch|load failed|networkerror|network request failed|fetch failed/i.test(msg);
+  }
+
+  function normalizeFallbackSessionData(rawData, sessionId) {
+    if (!rawData || typeof rawData !== "object") return null;
+    const base = rawData.protocol === 1 && rawData.data && typeof rawData.data === "object"
+      ? rawData.data
+      : rawData;
+    const rawMessages = Array.isArray(base?.context?.messages)
+      ? base.context.messages
+      : (Array.isArray(base?.messages) ? base.messages : null);
+    if (!Array.isArray(rawMessages)) return null;
+    const rawEntryIds = Array.isArray(base?.context?.entryIds)
+      ? base.context.entryIds
+      : (Array.isArray(base?.entryIds) ? base.entryIds : []);
+    const alignedEntryIds = rawEntryIds.length === rawMessages.length && rawEntryIds.every(id => typeof id === "string" && id.length > 0)
+      ? rawEntryIds
+      : rawMessages.map((m, idx) => {
+          const cand = rawEntryIds[idx] || m?.id || m?.entryId;
+          return typeof cand === "string" && cand.length > 0 ? cand : `fallback-entry-${idx}`;
+        });
+    return {
+      ...base,
+      sessionId: base.sessionId || sessionId,
+      leafId: base.leafId ?? (alignedEntryIds.at(-1) || null),
+      context: {
+        ...(base.context || {}),
+        messages: rawMessages,
+        entryIds: alignedEntryIds,
+        oldestEntryId: base.context?.oldestEntryId ?? (alignedEntryIds[0] || null),
+        hasMore: Boolean(base.context?.hasMore),
+      },
+    };
+  }
+
+  async function buildFallbackSessionHistoryResponse(sessionId, requestUrl) {
+    if (!sessionId) return null;
+    const urlStr = String(requestUrl || "");
+    const isSyncReq = /[?&]sync=1(?:&|$)/.test(urlStr);
+    let reqBaseRev = null;
+    try {
+      reqBaseRev = new URL(urlStr, typeof window !== "undefined" && window.location ? window.location.href : "http://localhost").searchParams.get("baseRevision");
+    } catch (_) {
+      const m = urlStr.match(/[?&]baseRevision=([^&#]+)/);
+      if (m) reqBaseRev = decodeURIComponent(m[1]);
+    }
+
+    const wireBaselines =
+      (typeof globalThis !== "undefined" && globalThis.__piSessionWireBaselines instanceof Map
+        ? globalThis.__piSessionWireBaselines
+        : null) ||
+      (typeof window !== "undefined" && window.__piSessionWireBaselines instanceof Map
+        ? window.__piSessionWireBaselines
+        : null);
+    const baseline = wireBaselines ? wireBaselines.get(sessionId) : null;
+
+    // 1. 检查 SESSION_HISTORY_ORDER_STATES.get(sessionId)?.latestAccepted
+    const accepted = SESSION_HISTORY_ORDER_STATES.get(sessionId)?.latestAccepted;
+    if (accepted && accepted.bodyText) {
+      let canUseAcceptedRaw = true;
+      try {
+        const parsedAcc = JSON.parse(accepted.bodyText);
+        if (parsedAcc && parsedAcc.protocol === 1) {
+          if (parsedAcc.mode === "unchanged" || parsedAcc.mode === "delta") {
+            const targetRev = parsedAcc.mode === "unchanged" ? parsedAcc.revision : parsedAcc.baseRevision;
+            if (!baseline || !baseline.revision || baseline.revision !== targetRev) {
+              canUseAcceptedRaw = false;
+            }
+          }
+        }
+      } catch (_) {}
+      if (canUseAcceptedRaw) {
+        return new Response(accepted.bodyText, {
+          status: accepted.status || 200,
+          statusText: accepted.statusText || "OK",
+          headers: new Headers(accepted.headers || { "Content-Type": "application/json" }),
+        });
+      }
+    }
+
+    // 2. 检查 globalThis.__piSessionWireBaselines?.get?.(sessionId)
+    if (baseline) {
+      if (isSyncReq) {
+        if (reqBaseRev && baseline.revision && reqBaseRev === baseline.revision) {
+          return createCachedResponse(
+            { protocol: 1, mode: "unchanged", revision: baseline.revision },
+            {},
+            "FALLBACK_WIRE_UNCHANGED"
+          );
+        }
+        if (baseline.data) {
+          const normData = normalizeFallbackSessionData(baseline.data, sessionId) || baseline.data;
+          return createCachedResponse(
+            {
+              protocol: 1,
+              mode: "reset",
+              revision: baseline.revision || normData.snapshotRevision || "fallback",
+              data: normData,
+            },
+            {},
+            "FALLBACK_WIRE_RESET"
+          );
+        }
+      } else if (baseline.data) {
+        const normData = normalizeFallbackSessionData(baseline.data, sessionId) || baseline.data;
+        return createCachedResponse(normData, {}, "FALLBACK_WIRE_DATA");
+      }
+    }
+
+    // 3. 检查 globalThis.__piSessionViewCache?.get?.(sessionId)
+    const viewCache =
+      (typeof globalThis !== "undefined" && globalThis.__piSessionViewCache instanceof Map
+        ? globalThis.__piSessionViewCache
+        : null) ||
+      (typeof window !== "undefined" && window.__piSessionViewCache instanceof Map
+        ? window.__piSessionViewCache
+        : null);
+    const viewEntry = viewCache ? viewCache.get(sessionId) : null;
+    if (viewEntry && Array.isArray(viewEntry.messages)) {
+      const sessionData = normalizeFallbackSessionData(
+        {
+          sessionId,
+          snapshotRevision: viewEntry.revision || "fallback",
+          leafId: viewEntry.leafId ?? null,
+          tree: viewEntry.summaryTree,
+          treeFormat: "summary",
+          stats: viewEntry.stats,
+          totalActiveMs: viewEntry.totalActiveMs,
+          context: {
+            messages: viewEntry.messages,
+            entryIds: Array.isArray(viewEntry.entryIds)
+              ? viewEntry.entryIds
+              : (Array.isArray(viewEntry.loadedEntryIds) ? viewEntry.loadedEntryIds : []),
+            oldestEntryId: viewEntry.oldestEntryId ?? null,
+            hasMore: Boolean(viewEntry.hasMore),
+            thinkingLevel: viewEntry.thinkingLevel || "off",
+            model: viewEntry.model ?? null,
+          },
+        },
+        sessionId
+      );
+      if (sessionData) {
+        if (isSyncReq) {
+          return createCachedResponse(
+            {
+              protocol: 1,
+              mode: "reset",
+              revision: viewEntry.revision || "fallback",
+              data: sessionData,
+            },
+            {},
+            "FALLBACK_VIEW_CACHE"
+          );
+        }
+        return createCachedResponse(sessionData, {}, "FALLBACK_VIEW_CACHE");
+      }
+    }
+
+    // 4. 检查 sessionMemoryCache.get(sessionId) 的 findCompatibleSessionDetail（或 readPersistentSessionDetail）
+    const memEntry = typeof sessionMemoryCache !== "undefined" ? sessionMemoryCache.get(sessionId) : null;
+    let cachedData = memEntry ? findCompatibleSessionDetail(memEntry, urlStr)?.data : null;
+    if (!cachedData && memEntry && memEntry.detailRequests instanceof Map) {
+      for (const slot of memEntry.detailRequests.values()) {
+        if (slot?.data && isSnapshotComplete(slot.data)) {
+          cachedData = slot.data;
+          break;
+        }
+      }
+    }
+    if (!cachedData && typeof readPersistentSessionDetail === "function") {
+      try {
+        cachedData = await readPersistentSessionDetail(sessionId, urlStr);
+      } catch (_) {}
+    }
+    if (cachedData) {
+      const normData = normalizeFallbackSessionData(cachedData, sessionId) || cachedData;
+      if (isSyncReq) {
+        return createCachedResponse(
+          {
+            protocol: 1,
+            mode: "reset",
+            revision: normData.snapshotRevision || "fallback",
+            data: normData,
+          },
+          {},
+          "FALLBACK_CACHE"
+        );
+      }
+      return createCachedResponse(normData, {}, "FALLBACK_CACHE");
+    }
+
+    return null;
+  }
+
   async function fetchAuthoritativeHistory(input, init, url) {
     const sessionId = extractSessionIdFromUrl(url);
     const isPrimary = isPrimaryHistoryRequest(url);
     const activeFetch = baseFetch || originalWindowFetch;
-    const warning = document.querySelector('[data-pi-enh-history-sync-warning]');
+    const warning = typeof document !== "undefined" ? document.querySelector('[data-pi-enh-history-sync-warning]') : null;
     if (warning && warning.getAttribute('data-pi-enh-history-sync-warning') !== getActiveSessionId()) clearHistorySyncWarning();
+    const runFetch = async () => isPluginEnabled('session-memory-cache')
+      ? await cachedSessionFetch.call(this, input, init)
+      : await activeFetch(input, { ...init, cache: 'no-store' });
     try {
-      const response = isPluginEnabled('session-memory-cache')
-        ? await cachedSessionFetch.call(this, input, init)
-        : await activeFetch(input, { ...init, cache: 'no-store' });
+      let response;
+      try {
+        response = await runFetch();
+      } catch (firstErr) {
+        if (isTransientFetchError(firstErr, init, input) && activeFetch) {
+          await new Promise((r) => setTimeout(r, 220));
+          response = await activeFetch(input, { ...init, cache: 'no-store' });
+        } else {
+          throw firstErr;
+        }
+      }
       if (isPrimary && sessionId === getActiveSessionId()) {
         if (response.ok) clearHistorySyncWarning();
         else showHistorySyncWarning(sessionId);
       }
       return response;
     } catch (error) {
+      if (isPrimary && sessionId && isTransientFetchError(error, init, input)) {
+        const fallbackResp = await buildFallbackSessionHistoryResponse(sessionId, url);
+        if (fallbackResp) {
+          if (typeof scheduleTerminalSyncCheck === "function") {
+            scheduleTerminalSyncCheck(sessionId, { reason: "network_fallback", force: true });
+          }
+          return fallbackResp;
+        }
+      }
       if (isPrimary && !isRequestAborted(error, init, input) && sessionId === getActiveSessionId()) {
         showHistorySyncWarning(sessionId);
       }
@@ -16760,6 +18441,217 @@
   if (typeof window !== "undefined") {
     setTimeout(prewarmSessionSearchIndex, 1200);
     window.addEventListener("pointerdown", () => prewarmSessionSearchIndex(), { once: true, passive: true });
+  }
+
+  // ==========================================
+  // 模型设置与配置极速内存秒开缓存 (Models Fast SWR Cache)
+  // 解决模型标签页点击打开慢、网络往返等待与界面空白抖动问题
+  // ==========================================
+  const MODELS_FAST_CACHE_TTL = 300000; // 5分钟有效缓存
+  const modelsFastMemoryCache = new Map(); // cacheKey -> { data, headers, timestamp }
+  const inFlightModelsFetches = new Map(); // cacheKey -> Promise
+  const MODELS_STORAGE_PREFIX = "pi-enh-models-cache-v1:";
+
+  function normalizeModelsCacheKey(url) {
+    if (!url || typeof url !== "string") return "";
+    try {
+      const u = new URL(url, typeof window !== "undefined" ? window.location.href : "http://localhost");
+      const cwd = u.searchParams.get("cwd");
+      return cwd ? `${u.pathname}?cwd=${encodeURIComponent(cwd)}` : u.pathname;
+    } catch (_) {
+      return url.split("#")[0].split("?")[0];
+    }
+  }
+
+  function isModelsFastCacheUrl(url) {
+    if (!url || typeof url !== "string") return false;
+    return (
+      url.includes("/api/models-config") ||
+      url.includes("/api/models/enabled") ||
+      url.includes("/api/auth/providers")
+    );
+  }
+
+  function readModelsPersistentSnapshot(cacheKey) {
+    if (typeof localStorage === "undefined") return null;
+    try {
+      const raw = localStorage.getItem(MODELS_STORAGE_PREFIX + cacheKey);
+      if (!raw) return null;
+      const parsed = JSON.parse(raw);
+      if (parsed && parsed.data && typeof parsed.data === "object") {
+        return parsed;
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  function writeModelsPersistentSnapshot(cacheKey, data) {
+    if (typeof localStorage === "undefined") return;
+    try {
+      localStorage.setItem(MODELS_STORAGE_PREFIX + cacheKey, JSON.stringify({
+        data,
+        timestamp: Date.now()
+      }));
+    } catch (_) {}
+  }
+
+  function findCandidateModelsSnapshot(cacheKey) {
+    let entry = modelsFastMemoryCache.get(cacheKey);
+    if (entry && entry.data) return entry;
+
+    if (cacheKey.startsWith("/api/models/enabled")) {
+      for (const [k, v] of modelsFastMemoryCache.entries()) {
+        if (k.startsWith("/api/models/enabled") && v && v.data && v.data.scope !== "project") {
+          return v;
+        }
+      }
+    }
+
+    const persisted = readModelsPersistentSnapshot(cacheKey);
+    if (persisted && persisted.data) {
+      modelsFastMemoryCache.set(cacheKey, {
+        data: persisted.data,
+        headers: { "Content-Type": "application/json" },
+        timestamp: persisted.timestamp || 0
+      });
+      return modelsFastMemoryCache.get(cacheKey);
+    }
+
+    if (cacheKey.startsWith("/api/models/enabled")) {
+      const genericPersisted = readModelsPersistentSnapshot("/api/models/enabled");
+      if (genericPersisted && genericPersisted.data) {
+        modelsFastMemoryCache.set(cacheKey, {
+          data: genericPersisted.data,
+          headers: { "Content-Type": "application/json" },
+          timestamp: genericPersisted.timestamp || 0
+        });
+        return modelsFastMemoryCache.get(cacheKey);
+      }
+    }
+
+    return null;
+  }
+
+  function invalidateModelsFastCache(urlPattern) {
+    if (!urlPattern) {
+      modelsFastMemoryCache.clear();
+      return;
+    }
+    for (const key of Array.from(modelsFastMemoryCache.keys())) {
+      if (key.includes(urlPattern)) {
+        modelsFastMemoryCache.delete(key);
+        try {
+          localStorage.removeItem(MODELS_STORAGE_PREFIX + key);
+        } catch (_) {}
+      }
+    }
+  }
+
+  async function handleModelsFastCacheGet(input, init, requestUrl) {
+    const cacheKey = normalizeModelsCacheKey(requestUrl);
+    const activeFetch = baseFetch || originalWindowFetch || (typeof window !== "undefined" && typeof window.fetch === "function" ? window.fetch : null);
+    if (!activeFetch) return null;
+
+    const candidate = findCandidateModelsSnapshot(cacheKey);
+    const now = Date.now();
+
+    // 1. 命中内存或持久化快照：0ms 瞬间直出给 React
+    if (candidate && candidate.data) {
+      if (now - (candidate.timestamp || 0) > 4000 && !inFlightModelsFetches.has(cacheKey)) {
+        const bgPromise = (async () => {
+          try {
+            const resp = await activeFetch(requestUrl, { ...init, cache: "no-store" });
+            if (resp && (resp.ok || resp.status === 200)) {
+              const freshData = await resp.json();
+              if (freshData && typeof freshData === "object") {
+                const updatedEntry = {
+                  data: freshData,
+                  headers: { "Content-Type": "application/json" },
+                  timestamp: Date.now()
+                };
+                modelsFastMemoryCache.set(cacheKey, updatedEntry);
+                if (cacheKey.startsWith("/api/models/enabled")) {
+                  modelsFastMemoryCache.set("/api/models/enabled", updatedEntry);
+                  writeModelsPersistentSnapshot("/api/models/enabled", freshData);
+                }
+                writeModelsPersistentSnapshot(cacheKey, freshData);
+              }
+            }
+          } catch (_) {} finally {
+            inFlightModelsFetches.delete(cacheKey);
+          }
+        })();
+        inFlightModelsFetches.set(cacheKey, bgPromise);
+      }
+
+      return createCachedResponse(candidate.data, candidate.headers || { "Content-Type": "application/json" }, "MODELS_FAST_CACHE_HIT");
+    }
+
+    // 2. 缓存未命中但有正在进行的同向网络请求：合并请求 (Coalesce)
+    if (inFlightModelsFetches.has(cacheKey)) {
+      try {
+        const sharedData = await inFlightModelsFetches.get(cacheKey);
+        if (sharedData) {
+          return createCachedResponse(sharedData, { "Content-Type": "application/json" }, "MODELS_COALESCED_HIT");
+        }
+      } catch (_) {}
+    }
+
+    // 3. 全新网络拉取
+    let resolveInFlight = null;
+    const inFlightPromise = new Promise(r => { resolveInFlight = r; });
+    inFlightModelsFetches.set(cacheKey, inFlightPromise);
+
+    try {
+      const resp = await activeFetch(input, { ...init, cache: "no-store" });
+      if (resp && (resp.ok || resp.status === 200)) {
+        try {
+          const clone = typeof resp.clone === "function" ? resp.clone() : resp;
+          const freshData = await clone.json();
+          if (freshData && typeof freshData === "object") {
+            const entry = {
+              data: freshData,
+              headers: { "Content-Type": "application/json" },
+              timestamp: Date.now()
+            };
+            modelsFastMemoryCache.set(cacheKey, entry);
+            if (cacheKey.startsWith("/api/models/enabled")) {
+              modelsFastMemoryCache.set("/api/models/enabled", entry);
+              writeModelsPersistentSnapshot("/api/models/enabled", freshData);
+            }
+            writeModelsPersistentSnapshot(cacheKey, freshData);
+            if (resolveInFlight) resolveInFlight(freshData);
+            return createCachedResponse(freshData, resp.headers, "MODELS_LIVE");
+          }
+        } catch (_) {}
+      }
+      if (resolveInFlight) resolveInFlight(null);
+      return resp;
+    } catch (err) {
+      if (resolveInFlight) resolveInFlight(null);
+      throw err;
+    } finally {
+      inFlightModelsFetches.delete(cacheKey);
+    }
+  }
+
+  async function preloadModelsFastCache(customCwd) {
+    try {
+      const activeFetch = baseFetch || originalWindowFetch || (typeof window !== "undefined" && typeof window.fetch === "function" ? window.fetch : null);
+      if (!activeFetch) return;
+      const cwd = customCwd || (typeof window !== "undefined" ? new URLSearchParams(window.location.search).get("cwd") : "");
+      const urls = [
+        "/api/models-config",
+        "/api/auth/providers",
+        "/api/models/enabled",
+        cwd ? `/api/models/enabled?cwd=${encodeURIComponent(cwd)}` : null
+      ].filter(Boolean);
+      await Promise.allSettled(urls.map(u => handleModelsFastCacheGet(u, { method: "GET" }, u)));
+    } catch (_) {}
+  }
+  if (typeof window !== "undefined") {
+    window.__PI_ENH_PRELOAD_MODELS_CACHE__ = preloadModelsFastCache;
+    window.__PI_ENH_INVALIDATE_MODELS_CACHE__ = invalidateModelsFastCache;
   }
 
   let activeSearchAbortController = null;
@@ -17714,17 +19606,32 @@
       }
     }
 
+    // 模型标签页秒开加速：拦截 GET /api/models-config, /api/models/enabled, /api/auth/providers
+    if (requestMethod === "GET" && isModelsFastCacheUrl(requestUrl)) {
+      return await handleModelsFastCacheGet(input, init, requestUrl);
+    }
+    if (requestMethod === "PUT" && (requestUrl.includes("/api/models-config") || requestUrl.includes("/api/models/enabled"))) {
+      invalidateModelsFastCache();
+    }
+
     // 优先拦截并增强会话搜索：自动召回标题、首条消息与会话ID
     if (requestMethod === "GET" && /\/api\/sessions\/search(?:[?#]|$)/.test(requestUrl)) {
       return await handleEnhancedSessionSearch(input, init, requestUrl);
     }
 
+    const callerSignal = init?.signal || input?.signal;
     const reloadSignal = sessionHistoryReloadSignals.get(extractSessionIdFromUrl(requestUrl));
-    if (requestMethod === 'GET' && reloadSignal && /\/api\/sessions\/[^/?#]+(?:\/(?:context|state))?(?:[?#]|$)/.test(requestUrl)) {
-      const callerSignal = init?.signal || input?.signal;
-      init = { ...init, cache: 'no-store', signal: callerSignal
-        ? AbortSignal.any([callerSignal, reloadSignal]) : reloadSignal };
+    if (requestMethod === 'GET' && reloadSignal && callerSignal && /\/api\/sessions\/[^/?#]+(?:\/(?:context|state))?(?:[?#]|$)/.test(requestUrl)) {
+      init = { ...init, cache: 'no-store', signal: AbortSignal.any([callerSignal, reloadSignal]) };
+    } else if (requestMethod === 'GET' && reloadSignal && /\/api\/sessions\/[^/?#]+\/state(?:[?#]|$)/.test(requestUrl)) {
+      init = { ...init, cache: 'no-store', signal: reloadSignal };
     }
+    const isSessionsListGet =
+      requestMethod === "GET" &&
+      /\/api\/sessions(?:\?.*)?$/.test(requestUrl) &&
+      !requestUrl.includes("/search") &&
+      !requestUrl.includes("/context") &&
+      !extractSessionIdFromUrl(requestUrl);
     const isHistoryGet = requestMethod === 'GET' &&
       /\/api\/sessions\/[^/?#]+(?:\/context)?(?:[?#]|$)/.test(requestUrl);
     const targetSessionId = isHistoryGet ? extractSessionIdFromUrl(requestUrl) : null;
@@ -17735,10 +19642,158 @@
       : cachedSessionFetch.call(this, input, init);
 
     let response;
-    if (isPluginEnabled('session-history-order-guard') && shouldProtectSessionHistoryOrder(requestUrl, targetSessionId)) {
-      response = await wrapSessionHistoryOrderGuard(input, init, requestUrl, targetSessionId, fetchInitial);
-    } else {
-      response = await fetchInitial();
+    try {
+      if (isPluginEnabled('session-history-order-guard') && shouldProtectSessionHistoryOrder(requestUrl, targetSessionId)) {
+        response = await wrapSessionHistoryOrderGuard(input, init, requestUrl, targetSessionId, fetchInitial);
+      } else {
+        response = await fetchInitial();
+      }
+    } catch (historyErr) {
+      if (isSessionsListGet && isTransientFetchError(historyErr, init, input)) {
+        const activeFetch = baseFetch || originalWindowFetch;
+        if (activeFetch) {
+          try {
+            await new Promise((r) => setTimeout(r, 200));
+            response = await activeFetch(input, { ...init, cache: "no-store" });
+          } catch (_) {}
+        }
+        if (!response && knownSessionsMap.size > 0) {
+          const fallbackSessions = Array.from(knownSessionsMap.values()).filter(
+            (s) => s?.id && !isSessionDeleted(s.id)
+          );
+          return createCachedResponse(
+            {
+              sessions: fallbackSessions,
+              sessionListVersion: lastKnownSessionListPayload.sessionListVersion || 0,
+              runningSessionIds: Array.isArray(lastKnownSessionListPayload.runningSessionIds)
+                ? lastKnownSessionListPayload.runningSessionIds
+                : [],
+              completionNotificationSuppressedSessionIds: Array.isArray(
+                lastKnownSessionListPayload.completionNotificationSuppressedSessionIds
+              )
+                ? lastKnownSessionListPayload.completionNotificationSuppressedSessionIds
+                : [],
+            },
+            {},
+            "FALLBACK_SESSIONS_LIST"
+          );
+        }
+      }
+
+      if (isHistoryGet && targetSessionId) {
+        const isOrderGuardErr = Boolean(
+          historyErr?.isOrderGuardError ||
+          String(historyErr?.message || "").includes("[session-history-order-guard]")
+        );
+        const isReloadAbortOnly = Boolean(
+          reloadSignal?.aborted && !callerSignal?.aborted && isRequestAborted(historyErr, init, input)
+        );
+        if (isOrderGuardErr || isTransientFetchError(historyErr, init, input) || isReloadAbortOnly) {
+          let fallbackResp = null;
+          try {
+            fallbackResp = await buildFallbackSessionHistoryResponse(targetSessionId, requestUrl);
+          } catch (_) {}
+          fallbackResp = fallbackResp || historyErr?.fallbackResponse || null;
+          if (fallbackResp) {
+            if (typeof scheduleTerminalSyncCheck === "function") {
+              try {
+                scheduleTerminalSyncCheck(targetSessionId, {
+                  reason: isOrderGuardErr ? "order_guard_fallback" : "network_fallback",
+                  force: true,
+                });
+              } catch (_) {}
+            }
+            response = fallbackResp;
+          } else if (isOrderGuardErr) {
+            // 终极防红字熔断：无论如何绝不允许向原生 React 抛出 order-guard 异常，
+            // 否则 React tG 的 catch(e) 会调用 setLoadError(String(e)) 卸载整个聊天窗口并渲染全屏红字！
+            const isSyncReq = /[?&]sync=1(?:&|$)/.test(String(requestUrl || ""));
+            const emptyPayload = isSyncReq
+              ? {
+                  protocol: 1,
+                  mode: "reset",
+                  revision: "fallback",
+                  data: {
+                    sessionId: targetSessionId,
+                    snapshotRevision: "fallback",
+                    context: { messages: [], entryIds: [], oldestEntryId: null, hasMore: false },
+                  },
+                }
+              : {
+                  sessionId: targetSessionId,
+                  snapshotRevision: "fallback",
+                  context: { messages: [], entryIds: [], oldestEntryId: null, hasMore: false },
+                };
+            response = createCachedResponse(emptyPayload, {}, "FALLBACK_ORDER_GUARD_CIRCUIT_BREAKER");
+          }
+        }
+      }
+
+      if (!response) {
+        throw historyErr;
+      }
+    }
+
+    if (
+      response?.ok &&
+      isHistoryGet &&
+      targetSessionId &&
+      !requestUrl.includes("/context") &&
+      /[?&]sync=1(?:&|$)/.test(requestUrl) &&
+      isPluginEnabled("session-memory-cache")
+    ) {
+      try {
+        const cloned = typeof response.clone === "function" ? response.clone() : null;
+        if (cloned) {
+          cloned.json().then((rawPayload) => {
+            try {
+              let fullData = null;
+              if (rawPayload && rawPayload.protocol === 1) {
+                if (rawPayload.mode === "reset" && rawPayload.data?.context?.messages) {
+                  fullData = {
+                    ...rawPayload.data,
+                    snapshotRevision: rawPayload.revision || rawPayload.data.snapshotRevision || null,
+                  };
+                } else {
+                  const wireBase =
+                    (typeof globalThis !== "undefined" && globalThis.__piSessionWireBaselines instanceof Map
+                      ? globalThis.__piSessionWireBaselines.get(targetSessionId)
+                      : null) ||
+                    (typeof window !== "undefined" && window.__piSessionWireBaselines instanceof Map
+                      ? window.__piSessionWireBaselines.get(targetSessionId)
+                      : null);
+                  if (wireBase?.data?.context?.messages) {
+                    fullData = wireBase.data;
+                  } else if (rawPayload.mode === "delta" && rawPayload.data?.context?.entryIds) {
+                    const extracted = extractOrderGuardMessagesAndEntryIds(rawPayload, targetSessionId);
+                    if (extracted.messages.length === rawPayload.data.context.entryIds.length) {
+                      fullData = {
+                        ...rawPayload.data,
+                        snapshotRevision: rawPayload.revision || null,
+                        context: {
+                          ...rawPayload.data.context,
+                          messages: extracted.messages,
+                          entryIds: extracted.entryIds,
+                        },
+                      };
+                    }
+                  }
+                }
+              } else if (rawPayload?.context?.messages) {
+                fullData = rawPayload;
+              }
+              if (fullData && isSnapshotComplete(fullData)) {
+                const memEntry = getOrCreateSessionEntry(targetSessionId);
+                const now = Date.now();
+                const stamped = withSessionCacheTimestamp(fullData, now);
+                const canonicalUrl = `/api/sessions/${encodeURIComponent(targetSessionId)}?deferThinking=1&deferMedia=1&tail=1000`;
+                commitSessionDetailSnapshot(targetSessionId, memEntry, canonicalUrl, stamped, now);
+                recordSessionModelMetadataFromPayload(targetSessionId, stamped);
+              }
+            } catch (_) {}
+          }).catch(() => {});
+        }
+      } catch (_) {}
     }
 
     if (response?.ok && requestMethod === "POST" && /\/api\/agent\/new(?:[?#]|$)/.test(requestUrl) && pendingNewComposerMode) {
@@ -17760,6 +19815,16 @@
     if (response?.ok && requestMethod === "GET" && /\/api\/sessions(?:\?.*)?$/.test(requestUrl) && !requestUrl.includes("/search") && !requestUrl.includes("/context")) {
       try {
         const rawJson = await response.clone().json();
+        if (typeof rawJson?.sessionListVersion === "number") {
+          lastKnownSessionListPayload.sessionListVersion = rawJson.sessionListVersion;
+        }
+        if (Array.isArray(rawJson?.runningSessionIds)) {
+          lastKnownSessionListPayload.runningSessionIds = rawJson.runningSessionIds;
+        }
+        if (Array.isArray(rawJson?.completionNotificationSuppressedSessionIds)) {
+          lastKnownSessionListPayload.completionNotificationSuppressedSessionIds =
+            rawJson.completionNotificationSuppressedSessionIds;
+        }
         if (Array.isArray(rawJson?.sessions)) {
           let hasDeleted = false;
           const cleanSessions = [];
@@ -17918,6 +19983,60 @@
     return false;
   }
 
+  function readSessionRunningState(payload) {
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+      return null;
+    }
+    if (payload.error) {
+      return null;
+    }
+
+    // 1. 优先 nested state 明确布尔 isStreaming / isPromptRunning / isBashRunning 的 OR
+    // /api/sessions/:id/state 接口规范：rpc?.isAlive() 返回 { running: true, state: await rpc.send(get_state) }
+    // 此时顶层 running: true 仅代表 RPC 进程存活，不能作为任务正在运行的依据；
+    // 当 state 内明确提供布尔字段时，全 false 表示 idle，即便外层 running: true
+    const stateObj = payload.state;
+    if (stateObj && typeof stateObj === "object" && !Array.isArray(stateObj)) {
+      const isStreamingBool = typeof stateObj.isStreaming === "boolean";
+      const isPromptBool = typeof stateObj.isPromptRunning === "boolean";
+      const isBashBool = typeof stateObj.isBashRunning === "boolean";
+      const isCompactingBool = typeof stateObj.isCompacting === "boolean";
+
+      if (isStreamingBool || isPromptBool || isBashBool || isCompactingBool) {
+        return Boolean(
+          (isStreamingBool && stateObj.isStreaming) ||
+          (isPromptBool && stateObj.isPromptRunning) ||
+          (isBashBool && stateObj.isBashRunning) ||
+          (isCompactingBool && stateObj.isCompacting)
+        );
+      }
+    }
+
+    // 2. 支持 agent GET 顶层明确任务布尔状态字段 (isStreaming / isPromptRunning / isBashRunning / isCompacting)
+    const topStreamingBool = typeof payload.isStreaming === "boolean";
+    const topPromptBool = typeof payload.isPromptRunning === "boolean";
+    const topBashBool = typeof payload.isBashRunning === "boolean";
+    const topCompactingBool = typeof payload.isCompacting === "boolean";
+    if (topStreamingBool || topPromptBool || topBashBool || topCompactingBool) {
+      return Boolean(
+        (topStreamingBool && payload.isStreaming) ||
+        (topPromptBool && payload.isPromptRunning) ||
+        (topBashBool && payload.isBashRunning) ||
+        (topCompactingBool && payload.isCompacting)
+      );
+    }
+
+    // 3. 只有外层 running: false 可作为未连/未运行证据；running: true 单独不当任务运行，字段缺失或 error 返回 null
+    if (typeof payload.running === "boolean") {
+      if (payload.running === false) {
+        return false;
+      }
+      return null;
+    }
+
+    return null;
+  }
+
   async function cachedSessionFetch(input, init) {
     const activeFetch = baseFetch || originalWindowFetch || (typeof fetch === "function" ? fetch : null);
     if (!activeFetch) return Promise.reject(new Error("fetch unavailable"));
@@ -17928,8 +20047,10 @@
       "GET"
     ).toUpperCase();
     const urlStr = typeof input === "string" ? input : input?.url ? input.url : String(input);
-    // Native versioned envelopes own their exact baseline; never cache them as legacy SessionData.
-    if (method === "GET" && /\/api\/sessions\/[^/?#]+\?[^#]*\bsync=1(?:&|$)/.test(urlStr)) return activeFetch(input, init);
+    // Native versioned envelopes own their exact baseline; directly return activeFetch without caching or rewriting.
+    if (method === "GET" && /\/api\/sessions\/[^/?#]+\?(?:[^#]*&)?sync=1(?=[&#]|$)/.test(urlStr)) {
+      return activeFetch(input, init);
+    }
 
     // 场景 0: 拦截外部文件/UNC路径请求，由本地桥接服务兜底读取，彻底解决 Access denied
     if (method === "GET" && urlStr.includes("/api/files/")) {
@@ -17986,7 +20107,7 @@
             if (lazyEs && typeof lazyEs.upgradeToReal === "function") {
               try { await lazyEs.upgradeToReal(); } catch (_) {}
             }
-            markSessionRunning(targetSessionId, true, { skipPreload: true });
+            markSessionRunning(targetSessionId, true, { skipPreload: true, explicit: true });
             void invalidateSessionCache(targetSessionId);
           }
         }
@@ -18033,18 +20154,18 @@
       ) {
         return createCachedResponse(entry.state?.data || { running: false }, {}, "IDLE_STATE");
       }
+      const reqGeneration = entry.runGeneration;
       const realResp = await activeFetch(input, { ...init, cache: "no-store" });
       if (realResp && (realResp.ok || realResp.status === 200)) {
         try {
           const clone = typeof realResp.clone === "function" ? realResp.clone() : realResp;
           clone.json().then(data => {
-            const isActuallyRunning = Boolean(
-              data?.state?.isStreaming ||
-              data?.state?.isPromptRunning ||
-              data?.state?.isBashRunning
-            );
-            if (typeof data?.running === "boolean") {
-              markSessionRunning(sessionId, isActuallyRunning);
+            if (reqGeneration !== entry.runGeneration) return;
+            const runningState = readSessionRunningState(data);
+            if (runningState === true) {
+              markSessionRunning(sessionId, true);
+            } else if (runningState === false) {
+              markSessionRunning(sessionId, false, { settled: true });
             }
           }).catch(() => {});
         } catch (e) {}
@@ -18082,25 +20203,32 @@
       ) {
         return createCachedResponse(entry.state?.data || { running: false }, {}, "IDLE_STATE");
       }
+      const reqGeneration = entry.runGeneration;
       const realResp = await activeFetch(input, { ...init, cache: "no-store" });
       if (realResp && (realResp.ok || realResp.status === 200)) {
         try {
           const clone = typeof realResp.clone === "function" ? realResp.clone() : realResp;
           const json = await clone.json();
-          entry.state = { data: json, timestamp: Date.now() };
-          const isRunning = Boolean(
-            json?.state?.isStreaming ||
-            json?.state?.isPromptRunning ||
-            json?.state?.isBashRunning
-          );
-          markSessionRunning(sessionId, isRunning);
+          if (reqGeneration === entry.runGeneration) {
+            const runningState = readSessionRunningState(json);
+            if (typeof runningState === "boolean") {
+              entry.state = { data: json, timestamp: Date.now(), isRunning: runningState };
+              if (runningState) {
+                markSessionRunning(sessionId, true);
+              } else {
+                markSessionRunning(sessionId, false, { settled: true });
+              }
+            } else {
+              // 仅在读到明确布尔运行态时采信；字段缺失、error 或未知 running:true 不能凭空标完成
+              entry.state = { data: json, timestamp: Date.now() };
+            }
+          }
         } catch (e) {}
       }
       return realResp;
     }
 
-    // metricsOnly 是后台统计的权威请求，不能命中或写入会话展示缓存，
-    // 否则它可能把刚失效的旧快照重新写回持久层。
+    // metricsOnly 请求直接透传 activeFetch 响应，绝不破坏性投影剥离 model/content/stopReason/details，保证权威统计元数据完整
     if (/[?&]metricsOnly=1(?:&|$)/.test(urlStr)) {
       return activeFetch(input, { ...init, cache: "no-store" });
     }
@@ -18290,18 +20418,22 @@
     }
 
     // 仅在本地完全没有候选快照（全新冷会话）或用户显式要求强制绕过缓存时，才走以下网络拉取
-    const canCoalesceCold = !bypassCache && !isHistoricalPage && isWarmSessionSnapshotUrl(urlStr) && !urlStr.includes("/context");
-    if (canCoalesceCold && inFlightSessionDetailRequests.has(sessionId)) {
+    const isSimpleGet = isSimpleCoalesceableGet(input, init);
+    const explicitCachePolicy = (init && typeof init.cache === "string") ? init.cache : "default";
+    const coalesceKey = JSON.stringify([urlStr, explicitCachePolicy]);
+    const canCoalesceCold = !bypassCache && !isHistoricalPage && isWarmSessionSnapshotUrl(urlStr) && !urlStr.includes("/context") && isSimpleGet;
+    if (canCoalesceCold && inFlightSessionDetailRequests.has(coalesceKey)) {
       try {
-        const sharedJson = await inFlightSessionDetailRequests.get(sessionId);
+        const sharedJson = await inFlightSessionDetailRequests.get(coalesceKey);
         if (sharedJson) return createCachedResponse(sharedJson, {}, "COALESCED");
       } catch (_) {}
     }
     const liveInit = { ...init, cache: "no-store" };
     let resolveColdFlight = null;
+    let coldFlightPromise = null;
     if (canCoalesceCold) {
-      const flightPromise = new Promise((r) => { resolveColdFlight = r; });
-      inFlightSessionDetailRequests.set(sessionId, flightPromise);
+      coldFlightPromise = new Promise((r) => { resolveColdFlight = r; });
+      inFlightSessionDetailRequests.set(coalesceKey, coldFlightPromise);
     }
     let realResp = null;
     try {
@@ -18309,7 +20441,8 @@
       if (realResp && (realResp.ok || realResp.status === 200)) {
         try {
           const clone = typeof realResp.clone === "function" ? realResp.clone() : realResp;
-          const json = await clone.json();
+          const rawJson = await clone.json();
+          const json = rawJson;
           const oldData = entry.detailRequests.get(urlStr)?.data;
           const oldMsgs = oldData?.context?.messages;
           const newMsgs = json?.context?.messages;
@@ -18335,7 +20468,9 @@
     } finally {
       entry.forceBypassCache = false;
       if (resolveColdFlight) resolveColdFlight(null);
-      if (canCoalesceCold) inFlightSessionDetailRequests.delete(sessionId);
+      if (canCoalesceCold && inFlightSessionDetailRequests.get(coalesceKey) === coldFlightPromise) {
+        inFlightSessionDetailRequests.delete(coalesceKey);
+      }
     }
 
     return realResp;
@@ -18360,6 +20495,8 @@
     window.__PI_ENH_CLEAR_SESSION_CACHE__ = clearSessionCaches;
     window.__PI_ENH_INVALIDATE_SESSION_CACHE__ = invalidateSessionCache;
     window.__PI_ENH_MARK_SESSION_RUNNING__ = markSessionRunning;
+    window.__PI_ENH_IS_SESSION_TERMINALLY_SETTLED__ = isSessionTerminallySettled;
+    window.__PI_ENH_MARK_SESSION_SETTLED__ = markSessionSettled;
     window.__PI_ENH_GET_SESSION_CACHE_STATS__ = getSessionCacheStats;
     window.__PI_ENH_GET_SESSION_CACHE_LIMIT__ = getSessionMemoryCacheLimit;
     window.__PI_ENH_SET_SESSION_CACHE_LIMIT__ = setSessionMemoryCacheLimit;
@@ -18986,6 +21123,129 @@
     window.__PI_ENH_SESSION_TURN_BASELINES__ = sessionTurnBaselines;
     window.__PI_ENH_EXPECTED_TURN_SIGNATURES__ = sessionExpectedTurnSignatures;
 
+    function verifySessionStreamSettled(sessionId, eventType) {
+      if (!sessionId) return;
+      const entry = getOrCreateSessionEntry(sessionId);
+      const reqGeneration = entry.runGeneration;
+      const activeFetch = baseFetch || originalWindowFetch || (typeof window !== "undefined" && typeof window.fetch === "function" ? window.fetch : null);
+      if (!activeFetch) return;
+
+      activeFetch(`/api/agent/${encodeURIComponent(sessionId)}`, { cache: "no-store" })
+        .then(async (resp) => {
+          if (!resp || !resp.ok) return;
+          const clone = typeof resp.clone === "function" ? resp.clone() : resp;
+          const json = await clone.json();
+          if (reqGeneration !== entry.runGeneration) return;
+
+          const runningState = readSessionRunningState(json);
+          if (runningState === false) {
+            markSessionSettled(sessionId);
+            markSessionRunning(sessionId, false, { settled: true });
+            entry.isRunning = false;
+            entry.completedAt = Date.now();
+            entry.hasPendingAgentEnd = false;
+            entry.hasPendingAttention = false;
+            broadcastSessionUpdate(sessionId, new Date().toISOString(), "event");
+            if (sessionId === getCurrentSessionId() || sessionId === getActiveSessionId()) {
+              scheduleTerminalSessionReconcile(sessionId, { reason: eventType });
+            } else {
+              if (typeof schedulePrioritySessionPreloads === "function") {
+                schedulePrioritySessionPreloads();
+              }
+            }
+          } else if (runningState === true) {
+            markSessionRunning(sessionId, true);
+          }
+        })
+        .catch(() => {});
+    }
+
+    function handleSessionStreamEvent(sId, data) {
+      if (!sId || !data) return;
+      handleSessionHistoryOrderStreamEvent(sId, data);
+      handleModelSpeedStreamEvent(sId, data);
+      if (data?.type === "agent_start") {
+        // 新一轮开始时明确废弃上一轮的异步校准，状态轮询本身不得做此清理。
+        clearTerminalReconcileTimers(sId);
+        const runningEntry = getOrCreateSessionEntry(sId);
+        runningEntry.hasPendingAgentEnd = false;
+        runningEntry.isSettled = false;
+        runningEntry.settledAt = null;
+        runningEntry.state = null;
+        runningEntry.runGeneration = (runningEntry.runGeneration || 0) + 1;
+        markSessionRunning(sId, true, { explicit: true, start: true });
+        recordSessionTurnBaseline(sId);
+        handleSessionWakeupIfArchived(sId);
+        if (typeof schedulePrioritySessionPreloads === "function") {
+          schedulePrioritySessionPreloads();
+        }
+      } else if (data?.type === "message_end") {
+        recordSessionTurnMessageEnd(sId, data);
+      } else if (data?.type === "connected") {
+        // 普通切换也会收到空闲 connected，它不是任务完成事件。
+        // 仅已知运行→空闲或明确失效时执行完成同步，避免每次切换清缓存并广播伪更新。
+        if (data.isStreaming === false) {
+          const previousEntry = sessionMemoryCache.get(sId);
+          const requiresSync = previousEntry?.isRunning || previousEntry?.needsFreshSync || previousEntry?.hasPendingAgentEnd;
+          markSessionRunning(sId, false);
+          if (!requiresSync) {
+            return;
+          }
+          const entry = getOrCreateSessionEntry(sId);
+          entry.isRunning = false;
+          entry.hasPendingAgentEnd = true;
+          entry.completedAt = Date.now();
+          markSessionNeedsIncrementalSync(sId);
+          void invalidateSessionCache(sId);
+          broadcastSessionUpdate(sId, new Date().toISOString(), "event");
+          if (sId === getCurrentSessionId() || sId === getActiveSessionId()) {
+            scheduleTerminalSessionReconcile(sId, { reason: "connected" });
+          }
+        } else {
+          markSessionRunning(sId, true, { explicit: true });
+        }
+      } else if (data?.type === "agent_end") {
+        // agent_end 仅视作中间事件，不抢先完成同步，不将 needsFreshSync 置 false，不立即 preload
+        const entry = getOrCreateSessionEntry(sId);
+        entry.hasPendingAgentEnd = true;
+        entry.needsFreshSync = true;
+        entry.lastAgentEndTime = Date.now();
+        if (!sessionTurnBaselines.has(sId)) {
+          recordSessionTurnBaseline(sId);
+        }
+        // 原生 React 在收到 agent_end 时会立即调用 tI(session)
+        // 保持 needsFreshSync=true 确保原生 tI 绝不命中未更新的旧缓存
+        // 同时若为当前活跃会话，启动后台权威校准保护
+        if (sId === getCurrentSessionId() || sId === getActiveSessionId()) {
+          scheduleTerminalSessionReconcile(sId, { reason: "agent_end" });
+        }
+      } else if (data?.type === "agent_settled" || data?.type === "prompt_done") {
+        verifySessionStreamSettled(sId, data.type);
+      } else if (data?.type === "tool_execution_end" && data.toolName === "ask_user" && data.toolCallId) {
+        getOrCreateSessionEntry(sId).hasPendingAttention = false;
+        resolveAskUserToolResult(sId, String(data.toolCallId));
+      } else if (data?.type === "extension_ui_request") {
+        const entry = getOrCreateSessionEntry(sId);
+        if (["select", "confirm", "input", "editor", "custom"].includes(data.method)) {
+          entry.hasPendingAttention = data.closed !== true;
+          if (data.closed !== true && typeof schedulePrioritySessionPreloads === "function") {
+            schedulePrioritySessionPreloads();
+          }
+        }
+      } else if (data?.type === "extension_ui_response" || data?.type === "extension_ui_closed") {
+        const entry = getOrCreateSessionEntry(sId);
+        entry.hasPendingAttention = false;
+      }
+      if (["agent_start", "agent_settled", "prompt_done", "extension_ui_request", "extension_ui_response", "extension_ui_closed"].includes(data?.type)
+        || (data?.type === "tool_execution_end" && data.toolName === "ask_user")) {
+        requestProjectStatusRefresh(data?.type === "extension_ui_request" && data.closed === true);
+        if (typeof schedulePrioritySessionPreloads === "function") {
+          schedulePrioritySessionPreloads();
+        }
+      }
+    }
+    window.__PI_ENH_HANDLE_SESSION_STREAM_EVENT__ = handleSessionStreamEvent;
+
     // 全局 EventSource 联动，精准捕获会话生命周期（避免任何旧缓存抹除新消息）
     const OriginalEventSource = window.EventSource;
     if (typeof OriginalEventSource === "function" && !window.__PI_ENH_EVENT_SOURCE_WRAPPED__) {
@@ -19050,6 +21310,7 @@
                   realEs.onmessage = (ev) => {
                     try {
                       const d = JSON.parse(ev.data);
+                      handleSessionStreamEvent(sId, d);
                       if (d?.type === "connected") finish();
                     } catch (_) {}
                     if (typeof this.onmessage === "function") this.onmessage(ev);
@@ -19083,75 +21344,7 @@
             const messageHandler = (event) => {
               try {
                 const data = JSON.parse(event.data);
-                handleSessionHistoryOrderStreamEvent(sId, data);
-                handleModelSpeedStreamEvent(sId, data);
-                if (data?.type === "agent_start") {
-                  // 新一轮开始时明确废弃上一轮的异步校准，状态轮询本身不得做此清理。
-                  clearTerminalReconcileTimers(sId);
-                  const runningEntry = getOrCreateSessionEntry(sId);
-                  runningEntry.hasPendingAgentEnd = false;
-                  markSessionRunning(sId, true);
-                  recordSessionTurnBaseline(sId);
-                  handleSessionWakeupIfArchived(sId);
-                } else if (data?.type === "message_end") {
-                  recordSessionTurnMessageEnd(sId, data);
-                } else if (data?.type === "connected") {
-                  // 普通切换也会收到空闲 connected，它不是任务完成事件。
-                  // 仅已知运行→空闲或明确失效时执行完成同步，避免每次切换清缓存并广播伪更新。
-                  if (data.isStreaming === false) {
-                    const previousEntry = sessionMemoryCache.get(sId);
-                    const requiresSync = previousEntry?.isRunning || previousEntry?.needsFreshSync || previousEntry?.hasPendingAgentEnd;
-                    markSessionRunning(sId, false);
-                    if (!requiresSync) {
-                      return;
-                    }
-                    const entry = getOrCreateSessionEntry(sId);
-                    entry.isRunning = false;
-                    entry.hasPendingAgentEnd = true;
-                    entry.completedAt = Date.now();
-                    markSessionNeedsIncrementalSync(sId);
-                    void invalidateSessionCache(sId);
-                    broadcastSessionUpdate(sId, new Date().toISOString(), "event");
-                    if (sId === getCurrentSessionId() || sId === getActiveSessionId()) {
-                      scheduleTerminalSessionReconcile(sId, { reason: "connected" });
-                    }
-                  } else {
-                    markSessionRunning(sId, true);
-                  }
-                } else if (data?.type === "agent_end") {
-                  // agent_end 仅视作中间事件，不抢先完成同步，不将 needsFreshSync 置 false，不立即 preload
-                  const entry = getOrCreateSessionEntry(sId);
-                  entry.hasPendingAgentEnd = true;
-                  entry.needsFreshSync = true;
-                  entry.lastAgentEndTime = Date.now();
-                  if (!sessionTurnBaselines.has(sId)) {
-                    recordSessionTurnBaseline(sId);
-                  }
-                  // 原生 React 在收到 agent_end 时会立即调用 tI(session)
-                  // 保持 needsFreshSync=true 确保原生 tI 绝不命中未更新的旧缓存
-                  // 同时若为当前活跃会话，启动后台权威校准保护
-                  if (sId === getCurrentSessionId() || sId === getActiveSessionId()) {
-                    scheduleTerminalSessionReconcile(sId, { reason: "agent_end" });
-                  }
-                } else if (data?.type === "agent_settled" || data?.type === "prompt_done") {
-                  markSessionRunning(sId, false);
-                  const entry = getOrCreateSessionEntry(sId);
-                  entry.isRunning = false;
-                  entry.completedAt = Date.now();
-                  entry.hasPendingAgentEnd = false;
-                  // 保留已有快照作为增量基线秒开，由后台 sync=1 精确合并落盘差量，绝不再暴力清空 detailRequests
-                  broadcastSessionUpdate(sId, new Date().toISOString(), "event");
-                  if (sId === getCurrentSessionId() || sId === getActiveSessionId()) {
-                    scheduleTerminalSessionReconcile(sId, { reason: data.type });
-                  }
-                } else if (data?.type === "extension_ui_request") {
-                  const entry = getOrCreateSessionEntry(sId);
-                  entry.hasPendingAttention = true;
-                } else if (data?.type === "extension_ui_response") {
-                  const entry = getOrCreateSessionEntry(sId);
-                  entry.hasPendingAttention = false;
-                }
-                if (["agent_start", "agent_settled", "prompt_done", "extension_ui_request", "extension_ui_response"].includes(data?.type)) requestProjectStatusRefresh(data?.type === "extension_ui_request" && data.closed === true);
+                handleSessionStreamEvent(sId, data);
               } catch (e) {}
             };
             es.addEventListener("message", messageHandler);
@@ -19217,10 +21410,231 @@
     const sessionDomSnapshots = new Map();
     let activeSnapshotOverlay = null;
 
+    function isHandoverReadinessSatisfied(sessionId) {
+      if (!sessionId) return false;
+      const currentActive = getActiveSessionId() || getCurrentSessionId();
+      if (currentActive !== sessionId) return false;
+
+      // 原生历史归属必须已完成切换到目标 sessionId
+      const loaded = window.__PI_ENH_GET_HISTORY_STATE__?.();
+      if (loaded?.sessionId !== sessionId) return false;
+
+      const nativeChat = document.querySelector(".chat-content");
+      if (!nativeChat) return false;
+
+      const scroll = nativeChat.querySelector(".overflow-y-auto") || nativeChat;
+      const nativeEntries = scroll.querySelectorAll("[data-entry-id]");
+      if (nativeEntries.length === 0) return false;
+
+      // 1. 工具卡片与过程折叠检查：若有未折叠的展开项，同步折叠一次并核对
+      if (isPluginEnabled("task-tool-auto-collapse")) {
+        if (typeof window.__PI_ENH_HAS_PENDING_TOOL_COLLAPSE__ === "function" && window.__PI_ENH_HAS_PENDING_TOOL_COLLAPSE__()) {
+          if (typeof window.__PI_ENH_FORCE_TOOL_COLLAPSE__ === "function") {
+            try { window.__PI_ENH_FORCE_TOOL_COLLAPSE__(); } catch (e) {}
+          }
+          if (window.__PI_ENH_HAS_PENDING_TOOL_COLLAPSE__()) {
+            return false;
+          }
+        }
+      }
+
+      // 2. 阅读位置恢复就绪检查：若当前正在恢复中或尚未就绪，严禁提前交接！
+      if (isPluginEnabled("session-scroll-restore")) {
+        if (document.documentElement && document.documentElement.classList.contains("pi-enh-scroll-restoring")) {
+          return false;
+        }
+        if (typeof window.__PI_ENH_IS_SCROLL_RESTORE_READY__ === "function") {
+          if (!window.__PI_ENH_IS_SCROLL_RESTORE_READY__(sessionId)) {
+            return false;
+          }
+        }
+      }
+
+      return true;
+    }
+
+    let activeLoadingPlaceholder = null;
+
+    function dismissStaticLoadingPlaceholder(reason) {
+      if (!activeLoadingPlaceholder) {
+        document.body.removeAttribute("data-pi-enh-session-placeholder-active");
+        const stale = document.querySelectorAll(".pi-enh-session-loading-placeholder");
+        stale.forEach(el => el.remove());
+        return;
+      }
+      try {
+        activeLoadingPlaceholder.cleanup(reason);
+      } catch (e) {}
+      activeLoadingPlaceholder = null;
+      if (reason !== "ready") {
+        document.querySelectorAll(".pi-enh-session-loading-placeholder").forEach(el => el.remove());
+      }
+    }
+
+    function showSessionStaticLoadingPlaceholder(sessionId) {
+      dismissStaticLoadingPlaceholder("superseded");
+      dismissSnapshotOverlay("superseded");
+      if (!isPluginEnabled("session-memory-cache") || !sessionId) return;
+      if (typeof isChatSessionRunning === "function" && isChatSessionRunning(sessionId)) return;
+
+      const chatContent = document.querySelector(".chat-content");
+      const scrollContainer = chatContent?.querySelector(".overflow-y-auto") || chatContent;
+      const targetArea = scrollContainer || chatContent;
+      const rect = targetArea?.getBoundingClientRect();
+      if (!rect || rect.width <= 0 || rect.height <= 0) return;
+
+      const placeholder = document.createElement("div");
+      placeholder.className = "pi-enh-session-loading-placeholder";
+      placeholder.setAttribute("data-target-session-id", sessionId);
+
+      let bgColor = "var(--bg, #ffffff)";
+      try {
+        let el = targetArea;
+        while (el && el !== document.documentElement) {
+          const comp = window.getComputedStyle(el).backgroundColor;
+          if (comp && comp !== "transparent" && comp !== "rgba(0, 0, 0, 0)") {
+            bgColor = comp;
+            break;
+          }
+          el = el.parentElement;
+        }
+        if (bgColor === "var(--bg, #ffffff)") {
+          const bodyBg = window.getComputedStyle(document.body).backgroundColor;
+          if (bodyBg && bodyBg !== "transparent" && bodyBg !== "rgba(0, 0, 0, 0)") {
+            bgColor = bodyBg;
+          }
+        }
+      } catch (e) {}
+
+      Object.assign(placeholder.style, {
+        position: "fixed",
+        top: `${rect.top}px`,
+        left: `${rect.left}px`,
+        width: `${rect.width}px`,
+        height: `${rect.height}px`,
+        zIndex: "44",
+        pointerEvents: "none",
+        overflow: "hidden",
+        backgroundColor: bgColor,
+        contain: "strict",
+      });
+
+      const label = document.createElement("div");
+      label.className = "pi-enh-session-placeholder-label";
+      label.textContent = "正在加载会话...";
+      Object.assign(label.style, {
+        position: "absolute",
+        top: "40%",
+        left: "50%",
+        transform: "translate(-50%, -50%)",
+        fontSize: "13px",
+        lineHeight: "1.4",
+        color: "currentColor",
+        opacity: "0.55",
+        userSelect: "none",
+        pointerEvents: "none",
+      });
+      placeholder.appendChild(label);
+
+      document.body.appendChild(placeholder);
+      document.body.setAttribute("data-pi-enh-session-placeholder-active", "true");
+
+      const timeoutId = setTimeout(() => {
+        dismissStaticLoadingPlaceholder("timeout");
+      }, 6000);
+
+      let rafId = null;
+      let urlChangedToTarget = false;
+      let firstContentAt = 0;
+      let lastLayoutChangeAt = 0;
+      let layoutSignature = "";
+
+      function checkPlaceholderHandover() {
+        const currentActive = getActiveSessionId() || getCurrentSessionId();
+        if (urlChangedToTarget && currentActive && currentActive !== sessionId) {
+          dismissStaticLoadingPlaceholder("switched-away");
+          return;
+        }
+        if (currentActive === sessionId) {
+          urlChangedToTarget = true;
+        }
+        if (!urlChangedToTarget) return;
+
+        // 无快照的首次进入会先显示尾页、随后补齐历史并折叠过程卡片。
+        // 在这段布局交接窗口只展示静态占位，避免 3→100→3 条的可见跳动。
+        const loaded = window.__PI_ENH_GET_HISTORY_STATE__?.();
+        const scroll = document.querySelector(".chat-content .overflow-y-auto");
+        if (loaded?.sessionId !== sessionId || !scroll) return;
+        const entryCount = scroll.querySelectorAll("[data-entry-id]").length;
+        if (!entryCount) return;
+        const now = performance.now();
+        const signature = `${loaded.entryIds?.length || 0}:${entryCount}:${scroll.scrollHeight}`;
+        if (!firstContentAt) firstContentAt = now;
+        if (signature !== layoutSignature) {
+          layoutSignature = signature;
+          lastLayoutChangeAt = now;
+        }
+        if (now - firstContentAt < 1650 || now - lastLayoutChangeAt < 240) return;
+        if (!isHandoverReadinessSatisfied(sessionId)) return;
+
+        dismissStaticLoadingPlaceholder("ready");
+      }
+
+      const observer = new MutationObserver(() => {
+        checkPlaceholderHandover();
+      });
+      observer.observe(document.body, { childList: true, subtree: true });
+
+      function pollPlaceholder() {
+        if (!activeLoadingPlaceholder) return;
+        checkPlaceholderHandover();
+        if (activeLoadingPlaceholder) {
+          rafId = requestAnimationFrame(pollPlaceholder);
+        }
+      }
+      rafId = requestAnimationFrame(pollPlaceholder);
+
+      const gestureEvents = ["wheel", "touchstart", "touchmove", "pointerdown", "mousedown", "keydown"];
+      const onGesture = () => dismissStaticLoadingPlaceholder("user-gesture");
+      for (const ev of gestureEvents) {
+        window.addEventListener(ev, onGesture, { capture: true, passive: true });
+      }
+
+      activeLoadingPlaceholder = {
+        placeholderEl: placeholder,
+        targetSessionId: sessionId,
+        cleanup: (reason) => {
+          clearTimeout(timeoutId);
+          if (rafId) cancelAnimationFrame(rafId);
+          observer.disconnect();
+          for (const ev of gestureEvents) {
+            window.removeEventListener(ev, onGesture, { capture: true, passive: true });
+          }
+          document.body.removeAttribute("data-pi-enh-session-placeholder-active");
+
+          if (reason === "ready") {
+            placeholder.style.transition = "opacity 0.1s ease-out";
+            placeholder.style.opacity = "0";
+            setTimeout(() => {
+              try { placeholder.remove(); } catch (e) {}
+            }, 100);
+          } else {
+            // 所有 user-gesture / superseded / switched-away / plugin-disabled 即时 remove，避免残影叠层
+            try { placeholder.remove(); } catch (e) {}
+          }
+        }
+      };
+    }
+
     function clearDomSessionSnapshots() {
       sessionDomSnapshots.clear();
       dismissSnapshotOverlay("cleared");
+      dismissStaticLoadingPlaceholder("cleared");
     }
+    // 设置面板即时切换时，清理作用域内的 DOM 覆盖层（不能依赖外层对局部函数的 typeof 检查）。
+    addManagedListener(window, "pi:session-cache-change", () => {
+      if (!isPluginEnabled("session-memory-cache")) clearDomSessionSnapshots();
+    });
     window.__PI_ENH_INVALIDATE_DOM_SESSION_SNAPSHOT__ = (sid) => {
       if (sid) sessionDomSnapshots.delete(sid);
     };
@@ -19322,13 +21736,17 @@
         return;
       }
       try {
-        activeSnapshotOverlay.cleanup();
+        activeSnapshotOverlay.cleanup(reason);
       } catch (e) {}
       activeSnapshotOverlay = null;
+      if (reason !== "ready") {
+        document.querySelectorAll(".pi-enh-session-snapshot-overlay").forEach(el => el.remove());
+      }
     }
 
     function showSessionDomSnapshotOverlay(sessionId, snap) {
       dismissSnapshotOverlay("superseded");
+      dismissStaticLoadingPlaceholder("superseded");
       if (!isPluginEnabled("session-memory-cache") || !snap) return;
 
       const chatContent = document.querySelector(".chat-content");
@@ -19393,12 +21811,9 @@
 
       const timeoutId = setTimeout(() => {
         dismissSnapshotOverlay("timeout");
-      }, 1200);
+      }, 6000);
 
-      const observer = new MutationObserver(() => {
-        checkHandoverReadiness();
-      });
-
+      let rafId = null;
       let urlChangedToTarget = false;
 
       function checkHandoverReadiness() {
@@ -19412,29 +21827,53 @@
         }
         if (!urlChangedToTarget) return;
 
-        // 原生加载视图与 .chat-content 互斥；不要扫描整页文案（正文可能恰好提到“正在加载会话”）。
-        const nativeChat = document.querySelector(".chat-content");
-        if (!nativeChat) return;
-
-        const nativeEntries = nativeChat.querySelectorAll("[data-entry-id]");
-        if (nativeEntries.length === 0) return;
-
-        // 虚拟列表切换阅读位置时首个 entryId 不一定仍在视口内；以原生历史归属为交接依据。
-        if (window.__PI_ENH_GET_HISTORY_STATE__?.()?.sessionId !== sessionId) return;
+        if (!isHandoverReadinessSatisfied(sessionId)) return;
 
         dismissSnapshotOverlay("ready");
       }
 
+      const observer = new MutationObserver(() => {
+        checkHandoverReadiness();
+      });
       observer.observe(document.body, { childList: true, subtree: true });
+
+      function pollSnapshot() {
+        if (!activeSnapshotOverlay) return;
+        checkHandoverReadiness();
+        if (activeSnapshotOverlay) {
+          rafId = requestAnimationFrame(pollSnapshot);
+        }
+      }
+      rafId = requestAnimationFrame(pollSnapshot);
+
+      const gestureEvents = ["wheel", "touchstart", "touchmove", "pointerdown", "mousedown", "keydown"];
+      const onGesture = () => dismissSnapshotOverlay("user-gesture");
+      for (const ev of gestureEvents) {
+        window.addEventListener(ev, onGesture, { capture: true, passive: true });
+      }
 
       activeSnapshotOverlay = {
         overlayEl: overlay,
         targetSessionId: sessionId,
-        cleanup: () => {
+        cleanup: (reason) => {
           clearTimeout(timeoutId);
+          if (rafId) cancelAnimationFrame(rafId);
           observer.disconnect();
-          overlay.remove();
+          for (const ev of gestureEvents) {
+            window.removeEventListener(ev, onGesture, { capture: true, passive: true });
+          }
           document.body.removeAttribute("data-pi-enh-session-snapshot-active");
+
+          if (reason === "ready") {
+            overlay.style.transition = "opacity 0.1s ease-out";
+            overlay.style.opacity = "0";
+            setTimeout(() => {
+              try { overlay.remove(); } catch (e) {}
+            }, 100);
+          } else {
+            // 所有 user-gesture / superseded / switched-away / plugin-disabled 即时 remove，避免残影叠层
+            try { overlay.remove(); } catch (e) {}
+          }
         }
       };
     }
@@ -19456,6 +21895,8 @@
       const snap = getValidDomSnapshot(targetSessionId);
       if (snap) {
         showSessionDomSnapshotOverlay(targetSessionId, snap);
+      } else {
+        showSessionStaticLoadingPlaceholder(targetSessionId);
       }
     }, { capture: true, passive: true });
 
@@ -19466,12 +21907,20 @@
           dismissSnapshotOverlay("popstate-change");
         }
       }
+      if (activeLoadingPlaceholder) {
+        const nextId = getActiveSessionId();
+        if (nextId && nextId !== activeLoadingPlaceholder.targetSessionId) {
+          dismissStaticLoadingPlaceholder("popstate-change");
+        }
+      }
       if (!isPluginEnabled("session-memory-cache")) return;
       const targetSessionId = getActiveSessionId();
       if (!targetSessionId) return;
       const snap = getValidDomSnapshot(targetSessionId);
       if (snap) {
         showSessionDomSnapshotOverlay(targetSessionId, snap);
+      } else {
+        showSessionStaticLoadingPlaceholder(targetSessionId);
       }
     }, { passive: true });
 
@@ -19480,9 +21929,10 @@
     window.__PI_ENH_GET_DOM_SNAPSHOT_STATS__ = () => ({
       count: sessionDomSnapshots.size,
       sessionIds: Array.from(sessionDomSnapshots.keys()),
-      activeOverlay: activeSnapshotOverlay ? activeSnapshotOverlay.targetSessionId : null,
+      activeOverlay: activeSnapshotOverlay ? activeSnapshotOverlay.targetSessionId : (activeLoadingPlaceholder ? activeLoadingPlaceholder.targetSessionId : null),
     });
     window.__PI_ENH_DISMISS_SNAPSHOT_OVERLAY__ = dismissSnapshotOverlay;
+    window.__PI_ENH_DISMISS_LOADING_PLACEHOLDER__ = dismissStaticLoadingPlaceholder;
 
     activeCleanups.push(() => {
       clearDomSessionSnapshots();
@@ -19698,6 +22148,100 @@
     document.querySelector(".pi-enh-presence-popover")?.remove();
   } catch (e) {}
 
+  // 界面防红字黑屏自愈看门狗：一旦页面意外渲染出 [session-history-order-guard] 错误节点，自动自愈恢复
+  if (typeof window !== "undefined") {
+    addManagedInterval(() => {
+      try {
+        const errEl = document.querySelector(".chat-content-error, .text-red-400, div[class*='text-red']");
+        if (errEl && errEl.textContent && errEl.textContent.includes("[session-history-order-guard]")) {
+          console.warn("[pi-enh] Detected stale order-guard red error screen on DOM, triggering auto-heal...");
+          errEl.style.display = "none";
+          if (typeof window.__PI_WEB_NATIVE_RELOAD_CURRENT_SESSION__ === "function") {
+            window.__PI_WEB_NATIVE_RELOAD_CURRENT_SESSION__(false);
+          } else if (typeof window.__PI_ENH_RELOAD_CURRENT_SESSION__ === "function") {
+            window.__PI_ENH_RELOAD_CURRENT_SESSION__(false);
+          }
+        }
+      } catch (_) {}
+    }, 1500);
+
+    // 会话加载长期卡死自愈看门狗 (Anti-Loading-Stuck Watchdog)
+    // 专治大体积会话、高频SSE推送/版本并发冲突导致的“一直显示正在加载会话...”
+    let lastStuckSessionId = null;
+    let stuckDetectCount = 0;
+    let lastHealTimestamp = 0;
+
+    addManagedInterval(() => {
+      try {
+        const targetSessionId = getActiveSessionId() || getCurrentSessionId();
+        if (!targetSessionId) {
+          lastStuckSessionId = null;
+          stuckDetectCount = 0;
+          return;
+        }
+
+        const chatContent = document.querySelector(".chat-content");
+        const loadingDiv = Array.from(document.querySelectorAll("div")).find(d =>
+          d.children.length === 0 &&
+          (d.textContent?.includes("正在加载会话") || d.textContent?.includes("Loading session") || d.textContent?.includes("正在載入工作階段"))
+        );
+
+        if (!chatContent && loadingDiv) {
+          if (lastStuckSessionId === targetSessionId) {
+            stuckDetectCount++;
+          } else {
+            lastStuckSessionId = targetSessionId;
+            stuckDetectCount = 1;
+          }
+
+          // 连续检测到卡在 loading 态超过 2 次（约 1.6s ~ 2.4s）
+          if (stuckDetectCount >= 2 && Date.now() - lastHealTimestamp > 1500) {
+            lastHealTimestamp = Date.now();
+            console.warn(`[pi-enh] Detected session loading stuck on "${targetSessionId}" for ${stuckDetectCount * 800}ms, triggering force healing...`);
+
+            // 1. 最优先执行：直接触发原生权威重载，解除 loading 态死锁
+            try {
+              if (typeof window.__PI_WEB_RELOAD_SESSION__ === "function") {
+                const p = window.__PI_WEB_RELOAD_SESSION__(targetSessionId, true, true, { force: true });
+                if (p && typeof p.then === "function") {
+                  p.then(() => {
+                    console.log(`[pi-enh] Watchdog reload successfully resolved for ${targetSessionId}`);
+                  }).catch((err) => {
+                    console.warn(`[pi-enh] Watchdog reload promise rejected:`, err?.message || err);
+                  });
+                }
+              } else if (typeof window.__PI_ENH_RELOAD_CURRENT_SESSION__ === "function") {
+                window.__PI_ENH_RELOAD_CURRENT_SESSION__(true);
+              }
+            } catch (reloadErr) {
+              console.error(`[pi-enh] Watchdog reload invocation error:`, reloadErr);
+            }
+
+            // 2. 尝试快照垫底（安全容错包裹）
+            try {
+              const snap = typeof getValidDomSnapshot === "function" ? getValidDomSnapshot(targetSessionId) : null;
+              if (snap && typeof showSessionDomSnapshotOverlay === "function") {
+                showSessionDomSnapshotOverlay(targetSessionId, snap);
+              }
+            } catch (_) {}
+          }
+        } else {
+          lastStuckSessionId = null;
+          stuckDetectCount = 0;
+        }
+      } catch (_) {}
+    }, 800);
+  }
+
+  // 页面首屏就绪后，平滑延迟 800ms 触发一次高优会话（running/completed/ask_user）优先级预加载
+  if (typeof window !== "undefined") {
+    setTimeout(() => {
+      if (typeof schedulePrioritySessionPreloads === "function") {
+        schedulePrioritySessionPreloads();
+      }
+    }, 800);
+  }
+
   activeCleanups.push(() => {
     if (typeof window !== "undefined" && window.fetch === interceptedFetch) {
       window.fetch = originalWindowFetch;
@@ -19807,13 +22351,13 @@
   }
 
   function recordSessionReadWatermark(sessionId, meta = null) {
-    if (!sessionId) return;
+    if (!sessionId) return false;
     const sMeta = meta || getSessionMetaForWatermark(sessionId);
     const hasLoadedSession = (typeof knownSessionsMap !== "undefined" && knownSessionsMap.has(sessionId))
       || (typeof projectStatusCatalog !== "undefined" && projectStatusCatalog.has(sessionId));
     const hasValidMeta = Boolean(sMeta && (sMeta.runId || sMeta.messageCount));
     if (!hasLoadedSession && !hasValidMeta) {
-      return;
+      return false;
     }
 
     const watermarks = readSessionReadWatermarks();
@@ -19822,7 +22366,7 @@
     const newMessageCount = sMeta?.messageCount || 0;
 
     if (existing && existing.manualUnread === false && (existing.runId || "") === newRunId && (existing.messageCount || 0) === newMessageCount) {
-      return;
+      return false;
     }
 
     watermarks[sessionId] = {
@@ -19835,6 +22379,7 @@
     if (typeof persistReadWatermarksToServer === "function") {
       void persistReadWatermarksToServer();
     }
+    return true;
   }
 
   function recordSessionManualUnread(sessionId) {
@@ -19902,13 +22447,14 @@
       return;
     }
 
-    recordSessionReadWatermark(sessionId);
+    const wasUnread = Boolean(isSessionUnread(sessionId));
+    const watermarkChanged = Boolean(recordSessionReadWatermark(sessionId));
     if (typeof markProjectCompletionRead === "function") {
       markProjectCompletionRead(sessionId);
     }
 
     let markReadChanged = false;
-    if (isSessionUnread(sessionId)) {
+    if (wasUnread) {
       const ids = readUnreadSessionIds();
       if (ids.has(sessionId)) {
         ids.delete(sessionId);
@@ -19927,16 +22473,21 @@
       }
     }
 
-    try {
-      const sMeta = getSessionMetaForWatermark(sessionId);
-      crossDeviceSyncChannel?.postMessage({
-        type: "session_read_status_updated",
-        sessionId,
-        unread: false,
-        meta: sMeta,
-        revision: Date.now(),
-      });
-    } catch (e) {}
+    const unreadChanged = wasUnread !== Boolean(isSessionUnread(sessionId)) || markReadChanged;
+    const shouldBroadcast = Boolean(explicit || watermarkChanged || unreadChanged);
+
+    if (shouldBroadcast) {
+      try {
+        const sMeta = getSessionMetaForWatermark(sessionId);
+        crossDeviceSyncChannel?.postMessage({
+          type: "session_read_status_updated",
+          sessionId,
+          unread: false,
+          meta: sMeta,
+          revision: Date.now(),
+        });
+      } catch (e) {}
+    }
 
     if (markReadChanged && typeof persistReadWatermarksToServer === "function") {
       void persistReadWatermarksToServer();
@@ -21447,7 +23998,7 @@
           if (searchInput) {
             try { searchInput.blur(); } catch (err) {}
           }
-          const composer = document.querySelector(".chat-input-textarea, textarea.chat-input, textarea");
+          const composer = Array.from(document.querySelectorAll(".pi-enh-formatted-composer, .chat-input-textarea, textarea.chat-input, textarea")).find((el) => el.offsetWidth > 0 && el.offsetHeight > 0 && getComputedStyle(el).visibility !== "hidden");
           if (composer) {
             try { composer.focus(); } catch (err) {}
           }
@@ -21458,9 +24009,24 @@
 
     // 4. 底层兜底：esc-guard 拦截意外 Escape 导致的任务中断
     if (isPluginEnabled("esc-guard")) {
-      const isInput = e.target && (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA" || e.target.isContentEditable);
+      const target = e.target;
+      const isInput = target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable);
+      const nativeTextarea = document.querySelector?.("textarea.chat-input-textarea");
+      const formattedComposer = target?.closest?.(".pi-enh-formatted-composer");
+      const nativeFieldset = nativeTextarea?.closest?.("fieldset");
+      const formattedFieldset = formattedComposer?.closest?.("fieldset");
+      const isMainComposer = target === nativeTextarea || Boolean(
+        formattedComposer && nativeFieldset && formattedFieldset === nativeFieldset
+      );
+      const isImeEscape = Boolean(
+        e.isComposing || e.keyCode === 229 || (typeof isComposingInput !== "undefined" && isComposingInput)
+      );
+      const completionOwnsEscape = isMainComposer && !isImeEscape
+        && typeof isComposerCompletionKey === "function"
+        && isComposerCompletionKey(e, nativeTextarea);
       const hasRunningTask = Boolean(typeof isLiveRunning === "function" ? isLiveRunning() : findActiveStopButton());
-      if (!isInput && hasRunningTask) {
+      if (hasRunningTask && !isImeEscape && !completionOwnsEscape && (isMainComposer || !isInput)) {
+        e.preventDefault();
         e.stopPropagation();
       }
     }
@@ -23329,14 +25895,15 @@
     for (const message of messages) {
       if (message?.role === "assistant") {
         for (const block of Array.isArray(message.content) ? message.content : []) {
-          const id = block.toolCallId || block.id;
-          if (block.type === "toolCall" && (block.toolName || block.name) === "ask_user" && id) {
+          const id = getAskUserToolCallId(block);
+          if (isAskUserToolCall(block) && id) {
             pending.set(id, block.input || block.arguments);
           }
         }
-      } else if (message?.role === "toolResult" && message.toolName === "ask_user") {
-        if (message.toolCallId) pending.delete(message.toolCallId);
-        else pending.clear();
+      } else if (isAskUserToolResult(message)) {
+        const resultId = getAskUserToolCallId(message);
+        // 没有真实 toolCallId 时禁止清空其它并行或历史 ask_user 请求。
+        if (resultId) pending.delete(resultId);
       }
     }
     const matches = [...pending.entries()].filter(([, args]) => {
@@ -24347,14 +26914,18 @@
       || String(session?.id || "").slice(0, 12) || "未命名会话";
     const key = value => String(value || "").replace(/\//g, "\\").replace(/\\+$/, "").toLowerCase();
     const empty = id => ({ id, status: "idle", execution: "idle", pendingRequests: [], runId: "", toolNames: [], observedAt: 0 });
-    const list = () => [...new Set([...catalog.keys(), ...entries.keys(), ...Object.keys(projectStatusState?.sessions || {})])].map(id => {
+    const buildEntry = id => {
       const stored = projectStatusState?.sessions?.[id];
       const item = entries.get(id) || (stored && sync.state !== "live" ? { ...empty(id), ...stored } : empty(id));
       const session = catalog.get(id) || {};
       return { ...item, projectKey: key(session.projectKey || session.projectRoot || session.cwd || item.projectKey),
         title: titleOf({ ...session, id, title: item.title }), cwd: session.cwd || item.cwd || "",
         unread: item.status === "completed" && !!item.runId && !isCompletedRead(id, item) };
-    });
+    };
+    const list = () => [...new Set([...catalog.keys(), ...entries.keys(), ...Object.keys(projectStatusState?.sessions || {})])].map(buildEntry);
+    const entry = id => (entries.has(id) || catalog.has(id) || Boolean(projectStatusState?.sessions && Object.hasOwn(projectStatusState.sessions, id)))
+      ? buildEntry(id)
+      : empty(id);
     // Native unread flags are session-level activity hints, not evidence of a
     // new assistant answer. Ended rounds remain factual row labels only.
     const items = (projectKey, status = null, others = false) => list().filter(entry =>
@@ -24421,7 +26992,7 @@
     };
     return {
       apply, list, items, titleOf, markAttention, clearAttention, setCatalog: sessions => { catalog = new Map(sessions.filter(s => s?.id).map(s => [s.id, s])); },
-      entry: id => list().find(item => item.id === id) || empty(id),
+      entry,
       setUnread: ids => { unread = new Set(ids); }, // Native activity is not completion-read evidence.
       setCompletedRead: keys => {
         const next = new Set();
@@ -24619,9 +27190,17 @@
     const requests = getDesktopPendingRequests();
     approvalSoundNotifier.reconcile(requests); void approvalSoundNotifier.notify(requests);
   }
+  let isApprovalSoundUnlocked = false;
   async function unlockApprovalSound(preview = false) {
+    if (isApprovalSoundUnlocked && !preview) return;
     if (!approvalSoundEnabled()) { if (preview) showToast("请开启审批提示音，并检查 Pi Web 声音总开关"); return; }
-    const sound = getApprovalSound(), unlocked = await sound.unlock();
+    const sound = getApprovalSound();
+    if (sound.ready() && !preview) {
+      isApprovalSoundUnlocked = true;
+      return;
+    }
+    const unlocked = await sound.unlock();
+    if (unlocked) isApprovalSoundUnlocked = true;
     if (preview) {
       if (unlocked) sound.play();
       else showToast("浏览器尚未允许播放声音，请点击页面后重试");
@@ -24629,7 +27208,12 @@
     syncApprovalSound();
   }
   addManagedListener(document, "pointerdown", event => { if (event.isTrusted) void unlockApprovalSound(); }, { passive: true });
-  addManagedListener(document, "keydown", event => { if (event.isTrusted) void unlockApprovalSound(); }, { passive: true });
+  addManagedListener(document, "keydown", event => {
+    if (!event.isTrusted || isApprovalSoundUnlocked) return;
+    const tag = event.target?.tagName;
+    if (tag === "TEXTAREA" || tag === "INPUT" || event.target?.isContentEditable) return;
+    void unlockApprovalSound();
+  }, { passive: true });
   addManagedListener(document, "click", event => { if (event.target?.closest?.("[data-attention-sound-preview]")) void unlockApprovalSound(true); });
   activeCleanups.push(disposeApprovalSound);
 
@@ -25228,8 +27812,11 @@
 
   function composeProjectWindowTitle(base, statusOverride = null) {
     const status = statusOverride !== null ? statusOverride : getCurrentEffectiveStatus();
+    if (projectStatusDisposed || !isPluginEnabled("project-status-indicator")) {
+      return window.__PI_WEB_NATIVE_TITLE_BASE__ || base || "Pi Web";
+    }
     const cleanBase = cleanSessionTitleBase(base);
-    if (projectStatusDisposed || !isPluginEnabled("project-status-indicator") || !status || status === "idle") {
+    if (!status || status === "idle") {
       return cleanBase || "work";
     }
 
@@ -25389,8 +27976,11 @@
     updateProjectStatusTitle(null);
   }
 
-  function clearSessionAttention(sessionId, nextStatus = null) {
+  function clearSessionAttention(sessionId, nextStatus = null, resolvedRequestIds = []) {
     if (!sessionId) return;
+    if (Array.isArray(resolvedRequestIds) && resolvedRequestIds.length > 0) {
+      rememberResolvedAskUserRequests(sessionId, resolvedRequestIds);
+    }
     projectStatusModel.clearAttention(sessionId, nextStatus);
     if (projectStatusState.sessions[sessionId]) {
       const current = projectStatusState.sessions[sessionId];
@@ -25419,8 +28009,68 @@
     void refreshProjectInteractions(true);
   }
 
+  function resolveAskUserToolResult(sessionId, toolCallId, broadcast = true) {
+    if (!sessionId || !toolCallId) return false;
+    const current = getEffectiveProjectStatusEntry(sessionId);
+    const pending = current?.status === "attention" ? current.pendingRequests || [] : [];
+    const matched = pending.some(request => request?.id === toolCallId || request?.id === "local-ask" || request?.id === "pending-ask");
+    if (!matched) return false;
+    rememberResolvedAskUserRequests(sessionId, [toolCallId]);
+    const remaining = pending.filter(request => request?.id !== toolCallId && request?.id !== "local-ask" && request?.id !== "pending-ask");
+    if (remaining.length) {
+      markLocalActiveSessionAttention(sessionId, { pendingRequests: remaining, broadcast: false, notify: false });
+    } else {
+      clearSessionAttention(sessionId, null, [toolCallId]);
+    }
+    if (broadcast) projectStatusChannel?.postMessage({ type: "resolved-ask-user", sessionId, toolCallId });
+    return true;
+  }
+
   projectStatusLeader = false; projectStatusChannel = null; let projectStatusLockController = null, releaseProjectStatusLock = null;
   projectStatusLastPayload = null; let projectStatusCatalogVersion = null, projectStatusNextPoll = 0, projectStatusFailures = 0;
+  const projectStatusResolvedAskUserRequests = new Map();
+
+  function getProjectStatusAskUserRequestBucketKey(sessionId, epoch = null) {
+    const resolvedEpoch = String(epoch || projectStatusLastPayload?.statusSnapshot?.epoch || "local");
+    return JSON.stringify([resolvedEpoch, String(sessionId || "")]);
+  }
+
+  function rememberResolvedAskUserRequests(sessionId, requestIds, epoch = null) {
+    if (!sessionId || !Array.isArray(requestIds) || requestIds.length === 0) return;
+    const key = getProjectStatusAskUserRequestBucketKey(sessionId, epoch);
+    const resolved = projectStatusResolvedAskUserRequests.get(key) || new Set();
+    for (const requestId of requestIds) {
+      if (requestId !== undefined && requestId !== null && requestId !== "") resolved.add(String(requestId));
+    }
+    if (resolved.size > 0) projectStatusResolvedAskUserRequests.set(key, resolved);
+    while (projectStatusResolvedAskUserRequests.size > 128) {
+      const oldest = projectStatusResolvedAskUserRequests.keys().next().value;
+      if (oldest === undefined) break;
+      projectStatusResolvedAskUserRequests.delete(oldest);
+    }
+  }
+
+  function filterResolvedAskUserRequests(payload) {
+    const sessions = payload?.interactionState?.sessions;
+    if (!Array.isArray(sessions) || sessions.length === 0) return payload;
+    const epoch = payload?.statusSnapshot?.epoch || "local";
+    let changed = false;
+    const nextSessions = sessions.map(session => {
+      const pendingRequests = session?.pendingRequests;
+      const resolved = projectStatusResolvedAskUserRequests.get(getProjectStatusAskUserRequestBucketKey(session?.sessionId, epoch));
+      if (!resolved || !Array.isArray(pendingRequests) || pendingRequests.length === 0) return session;
+      const filtered = pendingRequests.filter(request => {
+        const requestId = request?.id;
+        return requestId === undefined || requestId === null || requestId === "" || !resolved.has(String(requestId));
+      });
+      if (filtered.length === pendingRequests.length) return session;
+      changed = true;
+      return { ...session, pendingRequests: filtered };
+    });
+    return changed
+      ? { ...payload, interactionState: { ...payload.interactionState, sessions: nextSessions } }
+      : payload;
+  }
   let projectStatusCatalogController = null, projectStatusRefreshQueued = false;
   const COMPLETED_READ_KEY = "pi-enh-completed-read-v1";
   function readCompletedTokens() {
@@ -25460,9 +28110,10 @@
   }
 
   function receiveProjectStatus(payload, catalog = null) {
-    const result = projectStatusModel.apply(payload, Date.now());
+    const reconciledPayload = filterResolvedAskUserRequests(payload);
+    const result = projectStatusModel.apply(reconciledPayload, Date.now());
     if (result.accepted) {
-      projectStatusLastPayload = payload;
+      projectStatusLastPayload = reconciledPayload;
       if (catalog) refreshProjectStatusCatalog(catalog);
       projectStatusModel.setUnread([...readUnreadSessionIds()]);
       projectStatusModel.setCompletedRead(readCompletedTokens());
@@ -25495,6 +28146,9 @@
       } catch (e) {}
     }
     syncProjectStatusIndicators();
+    if (typeof schedulePrioritySessionPreloads === "function") {
+      schedulePrioritySessionPreloads();
+    }
     return result.accepted || (payload && Array.isArray(payload.runningSessionIds));
   }
 
@@ -25533,6 +28187,7 @@
         }
         if (data?.type === "refresh" && projectStatusLeader) requestProjectStatusRefresh();
         if (data?.type === "clear-attention" && data.sessionId) clearSessionAttention(data.sessionId);
+        if (data?.type === "resolved-ask-user" && data.sessionId && data.toolCallId) resolveAskUserToolResult(data.sessionId, data.toolCallId, false);
         if (data?.type === "unavailable") { projectStatusModel.unavailable("unavailable"); syncProjectStatusIndicators(); }
       };
       projectStatusChannel.postMessage({ type: "hello" });
@@ -25594,9 +28249,8 @@
       if (generation !== projectInteractionGeneration || projectStatusDisposed || controller.signal.aborted) return;
       const accepted = receiveProjectStatus(payload);
       refreshProjectStatusCatalogInBackground(payload.sessionListVersion);
-      // 仅在无 interactionState 的旧模式下执行扫描核验；权威新协议绝不能被 context 扫描覆盖
-      const hasInteractionState = Boolean(payload?.interactionState || payload?.statusSnapshot);
-      if (!hasInteractionState && typeof refreshPendingAskUserSessions === "function") {
+      // 权威状态仍负责提供 pending 候选；context 扫描只用真实 toolResult.toolCallId 做补充核销，不能以空/失败响应清除状态。
+      if (typeof refreshPendingAskUserSessions === "function") {
         void refreshPendingAskUserSessions(Array.from(projectStatusCatalog.values()), payload.runningSessionIds || []);
       }
       if (accepted) {
@@ -25654,6 +28308,20 @@
   const projectStatusAskUserLastChecked = new Map();
   const PROJECT_STATUS_ATTENTION_SCAN_LIMIT = 5;
 
+  function getAskUserToolCallId(value) {
+    if (!value || typeof value !== "object") return null;
+    const rawId = value.toolCallId ?? value.tool_call_id ?? value.id;
+    return rawId === undefined || rawId === null || rawId === "" ? null : String(rawId);
+  }
+
+  function isAskUserToolCall(block) {
+    return block?.type === "toolCall" && (block.name === "ask_user" || block.toolName === "ask_user");
+  }
+
+  function isAskUserToolResult(message) {
+    return message?.role === "toolResult" && (message.toolName === "ask_user" || message.name === "ask_user");
+  }
+
   function getPendingAskUserRequests(messages) {
     if (!Array.isArray(messages) || messages.length === 0) return [];
     // 从后往前定位最近一轮交互：寻找最近一个非 toolResult 的消息
@@ -25678,26 +28346,73 @@
     const askCalls = [];
     const content = Array.isArray(assistantMsg.content) ? assistantMsg.content : [];
     for (const block of content) {
-      if (block?.type === "toolCall" && (block.name === "ask_user" || block.toolName === "ask_user")) {
-        const id = block.id || block.toolCallId;
-        if (id) askCalls.push({ id: String(id), method: "select" });
+      if (isAskUserToolCall(block)) {
+        const id = getAskUserToolCallId(block);
+        if (id) askCalls.push({ id, method: "select" });
       }
     }
     if (askCalls.length === 0) return [];
 
-    // 检查该 assistant 之后是否有对应的 toolResult（兼容并行其它工具结果）
+    // 检查该 assistant 之后是否有对应的 toolResult（兼容并行其它工具结果）。
+    // 只有真实 toolCallId 才能核销，缺 ID 的结果不得误清其它请求。
     const resolvedIds = new Set();
     for (let i = targetAssistantIdx + 1; i < messages.length; i++) {
       const msg = messages[i];
       if (msg?.role === "toolResult") {
-        if (msg.toolCallId) resolvedIds.add(String(msg.toolCallId));
-        else if (msg.toolName === "ask_user") {
-          askCalls.forEach(c => resolvedIds.add(c.id));
-        }
+        const resultId = getAskUserToolCallId(msg);
+        if (resultId) resolvedIds.add(resultId);
       }
     }
 
     return askCalls.filter(c => !resolvedIds.has(c.id));
+  }
+
+  // 仅在历史中出现可验证的 ask_user toolResult 时返回 resolved；空/失败响应保持 unknown，调用方不得清除 attention。
+  function getAskUserResolutionState(messages, trackedRequests = []) {
+    if (!Array.isArray(messages) || messages.length === 0) {
+      return { state: "unknown", pendingRequests: [], resolvedIds: [] };
+    }
+
+    const pendingRequests = getPendingAskUserRequests(messages);
+    if (pendingRequests.length > 0) {
+      return { state: "pending", pendingRequests, resolvedIds: [] };
+    }
+
+    const askCallIds = new Set();
+    let latestAskCallIds = new Set();
+    const resultIds = new Set();
+    for (const message of messages) {
+      if (message?.role === "assistant") {
+        const assistantAskIds = new Set();
+        for (const block of Array.isArray(message.content) ? message.content : []) {
+          if (isAskUserToolCall(block)) {
+            const id = getAskUserToolCallId(block);
+            if (id) {
+              askCallIds.add(id);
+              assistantAskIds.add(id);
+            }
+          }
+        }
+        if (assistantAskIds.size > 0) latestAskCallIds = assistantAskIds;
+      }
+      if (isAskUserToolResult(message)) {
+        const resultId = getAskUserToolCallId(message);
+        if (resultId) resultIds.add(resultId);
+      }
+    }
+
+    const trackedIds = new Set((Array.isArray(trackedRequests) ? trackedRequests : [])
+      .map(request => getAskUserToolCallId(request))
+      .filter(Boolean));
+    // 存在真实待决 ID 时，历史中旧的已答复 ask_user 不能清除另一条待决请求。
+    // 只有 legacy 占位 ID 才回退到最近一条 ask_user 的请求 ID。
+    const explicitTrackedIds = [...trackedIds].filter(id => id !== "local-ask" && id !== "pending-ask");
+    const knownIds = explicitTrackedIds.length > 0 ? new Set(explicitTrackedIds) : latestAskCallIds;
+    const resolvedIds = [...resultIds].filter(id => knownIds.has(id));
+    if (resolvedIds.length === 0 || explicitTrackedIds.some(id => !resultIds.has(id))) {
+      return { state: "unknown", pendingRequests: [], resolvedIds: [] };
+    }
+    return { state: "resolved", pendingRequests: [], resolvedIds };
   }
 
   function hasPendingAskUser(messages) {
@@ -25748,7 +28463,7 @@
   }
 
   async function refreshPendingAskUserSessions(sessions, runningSessionIds = []) {
-    if (projectStatusDisposed || isLoginPage() || !isPluginEnabled("project-status-indicator") || projectStatusLastPayload?.interactionState || projectStatusLastPayload?.statusSnapshot) return;
+    if (projectStatusDisposed || isLoginPage() || !isPluginEnabled("project-status-indicator")) return;
     const generation = projectInteractionGeneration;
     const candidates = getPendingAskUserScanCandidates(sessions, runningSessionIds);
 
@@ -25767,19 +28482,24 @@
         });
         if (!response?.ok) return;
         const data = await response.json();
-        if (generation !== projectInteractionGeneration || projectStatusDisposed || scanController.signal.aborted || projectStatusLastPayload?.interactionState || projectStatusLastPayload?.statusSnapshot) return;
+        if (generation !== projectInteractionGeneration || projectStatusDisposed || scanController.signal.aborted) return;
         if (!Array.isArray(data?.context?.messages)) return;
 
         projectStatusAttentionScanTokens.set(session.id, getProjectStatusAttentionScanToken(session));
-        const pendingRequests = getPendingAskUserRequests(data?.context?.messages);
-        if (pendingRequests.length > 0) {
-          markLocalActiveSessionAttention(session.id, { pendingRequests });
+        const messages = data.context.messages;
+        const currentEntry = getEffectiveProjectStatusEntry(session.id);
+        const trackedRequests = [
+          ...(currentEntry?.pendingRequests || []),
+          ...(projectStatusState.sessions?.[session.id]?.pendingRequests || []),
+        ];
+        const resolution = getAskUserResolutionState(messages, trackedRequests);
+        if (resolution.state === "pending") {
+          markLocalActiveSessionAttention(session.id, { pendingRequests: resolution.pendingRequests });
           syncProjectStatusIndicators();
-        } else {
-          const currentEntry = getEffectiveProjectStatusEntry(session.id);
-          if (currentEntry?.status === "attention" || projectStatusState.sessions[session.id]?.status === "attention") {
-            clearSessionAttention(session.id);
-          }
+        } else if (resolution.state === "resolved"
+          && (currentEntry?.status === "attention" || projectStatusState.sessions?.[session.id]?.status === "attention")) {
+          const acknowledgedRequestIds = resolution.resolvedIds;
+          clearSessionAttention(session.id, null, acknowledgedRequestIds);
         }
       } catch (e) {
         // 断网不误清：网络失败或超时保留原有 attention 状态，绝不清除
@@ -26941,6 +29661,16 @@
 
   function isServerRunningForSession(sid) {
     if (!sid) return false;
+
+    // 终态保护检查：若该会话有可验证的终态证据（agent_settled/prompt_done），且未出现新轮次 agent_start 或明确 stop 按钮，
+    // 则陈旧滞后的 statusEntry.execution === "running" 或 runningSessionIds 绝不能复活秒表与运行态。
+    const isSettledFn = typeof isSessionTerminallySettled === "function"
+      ? isSessionTerminallySettled
+      : (typeof window !== "undefined" ? window.__PI_ENH_IS_SESSION_TERMINALLY_SETTLED__ : null);
+    if (typeof isSettledFn === "function" && isSettledFn(sid)) {
+      return false;
+    }
+
     const hasRunningIdsList =
       typeof projectStatusLastPayload !== "undefined" &&
       Array.isArray(projectStatusLastPayload?.runningSessionIds);
@@ -27093,9 +29823,28 @@
       activeTextareaInputListener = null;
       return;
     }
+    let lastWasEmpty = !textarea.value || textarea.value.trim().length === 0;
+    let quickActionDebounceTimer = null;
     activeTextareaInputListener = () => {
       if (isComposing) return;
-      syncQuickActionButtons();
+      const isEmpty = !textarea.value || textarea.value.trim().length === 0;
+      // 状态发生空/非空突变（如完全删空或输入首字），立即无延迟同步
+      if (isEmpty !== lastWasEmpty) {
+        lastWasEmpty = isEmpty;
+        if (quickActionDebounceTimer) {
+          clearTimeout(quickActionDebounceTimer);
+          quickActionDebounceTimer = null;
+        }
+        syncQuickActionButtons();
+      } else {
+        // 持续删除或输入中（长文本长按 Backspace），防抖 160ms，绝不阻塞主线程
+        if (!quickActionDebounceTimer) {
+          quickActionDebounceTimer = setTimeout(() => {
+            quickActionDebounceTimer = null;
+            if (!isComposing) syncQuickActionButtons();
+          }, 160);
+        }
+      }
     };
     textarea.addEventListener("input", activeTextareaInputListener);
     textarea.addEventListener("compositionstart", onCompositionStart);
@@ -27141,6 +29890,45 @@
     return textarea?.closest?.("fieldset")?.querySelector('div[style*="flex-wrap"], div[style*="flexWrap"]') || null;
   }
 
+  function isNativeImagePreviewTrigger(el) {
+    if (!el || !el.tagName || el.tagName.toLowerCase() !== "button") return false;
+    const hasPopup = typeof el.getAttribute === "function"
+      ? el.getAttribute("aria-haspopup")
+      : el.attributes?.["aria-haspopup"];
+    if (hasPopup !== "dialog") return false;
+    if (el.classList?.contains?.("image-preview-close")) return false;
+    if (el.hasAttribute?.("data-no-zoom") || el.hasAttribute?.("data-pi-enh-no-zoom")) return false;
+    if (String(el.textContent || "").trim() !== "") return false;
+    const children = Array.from(el.children || []);
+    if (children.length !== 1) return false;
+    const onlyChild = children[0];
+    return Boolean(onlyChild && onlyChild.tagName && onlyChild.tagName.toLowerCase() === "img");
+  }
+
+  function unwrapNativeImagePreviewTarget(el) {
+    if (!el || !el.tagName) return el;
+    if (isNativeImagePreviewTrigger(el)) {
+      return Array.from(el.children || [])[0] || el;
+    }
+    return el;
+  }
+
+  function getComposerAttachmentItemContainer(img) {
+    if (!img || !img.parentElement) return null;
+    const parent = img.parentElement;
+    if (isNativeImagePreviewTrigger(parent)) {
+      return parent.parentElement || null;
+    }
+    return parent;
+  }
+
+  function getComposerAttachmentRemoveButton(img) {
+    const itemContainer = getComposerAttachmentItemContainer(img);
+    if (!itemContainer) return null;
+    const children = Array.from(itemContainer.children || []);
+    return children.find((c) => c && c.tagName && c.tagName.toLowerCase() === "button" && !isNativeImagePreviewTrigger(c)) || null;
+  }
+
   function findComposerTextarea() {
     return document.querySelector("textarea.chat-input-textarea") ||
       document.querySelector('textarea[style*="fontFamily"]') ||
@@ -27148,18 +29936,68 @@
       document.querySelector("textarea");
   }
 
-  function syncComposerTextareaAutoHeight(textarea) {
+  let composerHeightRafId = null;
+  let lastMeasuredValueLength = -1;
+  let lastMeasuredScrollHeight = -1;
+
+  function syncComposerTextareaAutoHeight(textarea, { immediate = false } = {}) {
     if (!textarea || textarea.tagName !== "TEXTAREA") return;
     if (!textarea.hasAttribute("rows")) textarea.setAttribute("rows", "1");
     if (textarea.style.display === "none") return;
-    if (!textarea.value) {
-      textarea.style.height = "auto";
+
+    const card = textarea.closest?.('.pi-enh-cursor-composer, fieldset > div[style*="max-width"]');
+    // 若用户已手动拉大/拉小高度，保持用户自定义尺寸，彻底跳过高度重排
+    if (card && card.classList.contains("pi-enh-composer-custom-height")) {
       return;
     }
-    textarea.style.height = "auto";
-    const sh = textarea.scrollHeight || 0;
-    if (sh > 0) {
-      textarea.style.height = `${Math.min(sh, 200)}px`;
+
+    const val = textarea.value || "";
+    if (!val) {
+      if (composerHeightRafId) {
+        cancelAnimationFrame(composerHeightRafId);
+        composerHeightRafId = null;
+      }
+      textarea.style.height = "auto";
+      lastMeasuredValueLength = 0;
+      lastMeasuredScrollHeight = 0;
+      return;
+    }
+
+    // 移动端长文本快速删除优化 (Fast Path)：
+    // 当文本很长且已处于溢出滚动状态时，小幅度的字符删除绝不会让高度变矮，跳过 auto 布局颠簸
+    const len = val.length;
+    if (!immediate && lastMeasuredScrollHeight >= 200 && Math.abs(len - lastMeasuredValueLength) < 20) {
+      return;
+    }
+
+    const measureAndApply = () => {
+      composerHeightRafId = null;
+      if (!textarea.isConnected || textarea.style.display === "none") return;
+      if (card && card.classList.contains("pi-enh-composer-custom-height")) return;
+      const currentVal = textarea.value || "";
+      if (!currentVal) {
+        textarea.style.height = "auto";
+        lastMeasuredValueLength = 0;
+        lastMeasuredScrollHeight = 0;
+        return;
+      }
+      textarea.style.height = "auto";
+      const sh = textarea.scrollHeight || 0;
+      lastMeasuredValueLength = currentVal.length;
+      lastMeasuredScrollHeight = sh;
+      if (sh > 0) {
+        textarea.style.height = `${Math.min(sh, 200)}px`;
+      }
+    };
+
+    if (immediate) {
+      if (composerHeightRafId) {
+        cancelAnimationFrame(composerHeightRafId);
+        composerHeightRafId = null;
+      }
+      measureAndApply();
+    } else if (!composerHeightRafId) {
+      composerHeightRafId = requestAnimationFrame(measureAndApply);
     }
   }
 
@@ -27459,8 +30297,71 @@
   let lastObservedNativeDraftKey = null;
   const submittedDraftKeys = new Set();
   const pendingDraftSubmissions = new Map();
+  const nativeDraftRestoreObserverRecords = new Set();
+  let restoringPersistedComposerDraft = false;
   let draftSubmissionPollFrame = 0;
   let clearingStaleDraftSurface = false;
+  const recentlySubmittedSignatures = new Map();
+
+  function recordSubmittedDraftSignature(sig) {
+    if (!sig || typeof sig !== "string") return;
+    recentlySubmittedSignatures.set(sig, Date.now());
+    if (recentlySubmittedSignatures.size > 80) {
+      const now = Date.now();
+      for (const [s, ts] of recentlySubmittedSignatures) {
+        if (now - ts > 600000) recentlySubmittedSignatures.delete(s);
+      }
+    }
+  }
+
+  function isDraftAlreadySentInSession(ownerKey, draft) {
+    if (!draft || (!draft.value && (!draft.images || !draft.images.length))) return false;
+    const text = (draft.value || "").trim();
+    if (!text && !draft.images?.length) return false;
+
+    const sig = JSON.stringify({
+      value: draft.value || "",
+      images: (draft.images || []).map(({ data, mimeType }) => ({ data, mimeType }))
+    });
+    if (recentlySubmittedSignatures.has(sig)) return true;
+
+    try {
+      const sid = typeof getCurrentSessionId === "function" ? getCurrentSessionId() : null;
+      const targetSid = (sid && sid.length >= 20) ? sid : (typeof ownerKey === "string" && ownerKey.length >= 20 ? ownerKey : null);
+      if (targetSid && typeof sessionMemoryCache !== "undefined") {
+        const entry = sessionMemoryCache.get(targetSid);
+        if (entry && entry.detailRequests) {
+          for (const req of entry.detailRequests.values()) {
+            const msgs = req.data?.context?.messages;
+            if (Array.isArray(msgs)) {
+              for (const m of msgs) {
+                if (m.role === "user") {
+                  let userText = "";
+                  if (typeof m.content === "string") userText = m.content.trim();
+                  else if (Array.isArray(m.content)) {
+                    userText = m.content.filter(c => c.type === "text").map(c => c.text).join("\n").trim();
+                  }
+                  if (userText && (userText === text || (text.length >= 10 && userText.includes(text)))) return true;
+                }
+              }
+            }
+          }
+        }
+      }
+
+      if (text) {
+        const userNodes = document.querySelectorAll(".chat-content [data-entry-id], .chat-content .markdown-user-message");
+        for (const node of userNodes) {
+          const content = node.textContent?.trim() || "";
+          if (content && (content === text || (text.length >= 10 && content.includes(text.slice(0, Math.min(text.length, 50)))))) {
+            return true;
+          }
+        }
+      }
+    } catch (_) {}
+
+    return false;
+  }
 
   function validDraftImages(images) {
     return Array.isArray(images) && images.length <= 10 && images.every((img) =>
@@ -27490,6 +30391,10 @@
     if (!isPluginEnabled("composer-draft-cache") || typeof key !== "string" || !key
       || typeof draft?.value !== "string" || !validDraftImages(draft.images)) return false;
     if (!draft.value && !draft.images.length) return removePersistedDraft(key);
+    if (isDraftAlreadySentInSession(key, draft)) {
+      removePersistedDraft(key);
+      return false;
+    }
     try {
       // Each owner has its own atomic entry. Never rewrite another session's
       // draft on quota failure or a concurrent save from another browser tab.
@@ -27515,6 +30420,67 @@
       }
       return true;
     } catch { return false; } // Keep existing drafts intact if storage is full.
+  }
+
+  function installNativeDraftRestoreObserver(native) {
+    const handle = native?.handle;
+    if (!native || !handle) return;
+    for (const record of nativeDraftRestoreObserverRecords) {
+      if (record.handle === handle) continue;
+      if (record.handle.restoreSubmission === record.wrapper) {
+        try { record.handle.restoreSubmission = record.original; } catch {}
+      }
+      nativeDraftRestoreObserverRecords.delete(record);
+    }
+    const original = handle.restoreSubmission;
+    if (typeof original !== "function" || original.__piEnhDraftRestoreObserver) return;
+    const wrapper = function(text, images, targetDraftKey) {
+      const result = original.apply(this, arguments);
+      if (restoringPersistedComposerDraft || !isPluginEnabled("composer-draft-cache")) return result;
+      const owner = typeof targetDraftKey === "string" && targetDraftKey
+        ? targetDraftKey : (native.keyRef?.current || native.key);
+      if (!owner) return result;
+      pendingDraftSubmissions.delete(owner);
+      submittedDraftKeys.delete(owner);
+
+      const current = readNativeComposerDraft();
+      if (current?.key === owner && current.keyRef?.current === owner) {
+        const ctx = nativeDraftContexts.get(current.keyRef);
+        const snapshot = nativeDraftSnapshot(current);
+        if (ctx) {
+          ctx.initialized = true;
+          ctx.lastSaved = EMPTY_DRAFT_SIGNATURE;
+        }
+        if (snapshot && (snapshot.value || snapshot.images.length)
+          && savePersistedDraft(owner, snapshot) && ctx) {
+          ctx.lastSaved = JSON.stringify(snapshot);
+        }
+        return result;
+      }
+
+      // Rejection recovery can target a session that is no longer visible. Keep
+      // the native recovery and the enhancement's durable copy in sync.
+      const recoveredValue = typeof text === "string" ? text : "";
+      const recoveredImages = (Array.isArray(images) ? images : [])
+        .filter((image) => image && typeof image.data === "string" && image.data
+          && typeof image.mimeType === "string" && image.mimeType.startsWith("image/"))
+        .map(({ data, mimeType }) => ({ data, mimeType }));
+      const existing = getPersistedDraft(owner) || { value: "", images: [] };
+      const value = !recoveredValue.trim() ? existing.value
+        : (!existing.value.trim() ? recoveredValue : `${recoveredValue}\n\n${existing.value}`);
+      const mergedImages = [...recoveredImages, ...existing.images];
+      if (mergedImages.length <= 10 && validDraftImages(mergedImages)) {
+        savePersistedDraft(owner, { value, images: mergedImages });
+      }
+      return result;
+    };
+    Object.defineProperty(wrapper, "__piEnhDraftRestoreObserver", { value: true });
+    try {
+      handle.restoreSubmission = wrapper;
+      if (handle.restoreSubmission === wrapper) {
+        nativeDraftRestoreObserverRecords.add({ handle, original, wrapper });
+      }
+    } catch { /* Native imperative handles may be immutable; fail closed. */ }
   }
 
   function committedComposerFiber(fieldset) {
@@ -27562,9 +30528,11 @@
       const imagesRef = hooks[i + 2];
       const imageStateHooks = hookNodes.filter((hook) =>
         hook.memoizedState === imagesRef.current && typeof hook.queue?.dispatch === "function");
-      return { key: props.draftKey, keyRef: hooks[i], valueRef: hooks[i + 1],
+      const native = { key: props.draftKey, keyRef: hooks[i], valueRef: hooks[i + 1],
         imagesRef, pendingRef: hooks[i + 3], textarea, fieldset, handle,
         imageStateHook: imageStateHooks.length === 1 ? imageStateHooks[0] : null };
+      installNativeDraftRestoreObserver(native);
+      return native;
     }
     return null;
   }
@@ -27600,7 +30568,7 @@
         } else if (native.fieldset) {
           for (const img of native.fieldset.querySelectorAll("img")) {
             if (/^(blob:|data:image\/)/.test(img.getAttribute("src") || "")) {
-              img.parentElement?.querySelector("button")?.click();
+              (getComposerAttachmentRemoveButton(img) || (!isNativeImagePreviewTrigger(img.parentElement) ? img.parentElement?.querySelector?.("button") : null))?.click();
             }
           }
         }
@@ -27730,19 +30698,31 @@
       && snapshot.value === submission.text && !submission.accepted) snapshot.value = submission.body;
     const isEmpty = !snapshot.value && !snapshot.images.length;
     if (isEmpty) {
-      if (sub && !sub.accepted && sub.keyRef === ctx.keyRef) {
-        markDraftSubmissionAccepted(sub);
+      const hadSavedContent = typeof ctx.lastSaved === "string"
+        && ctx.lastSaved !== EMPTY_DRAFT_SIGNATURE;
+      // An empty native instance may not have hydrated its session draft yet.
+      // Only erase storage after an observed submission intent or a previously
+      // non-empty draft was explicitly cleared; empty refs alone prove nothing.
+      if (sub?.accepted || submittedDraftKeys.has(ctx.key) || hadSavedContent) {
+        removePersistedDraft(ctx.key);
       }
-      removePersistedDraft(ctx.key);
       ctx.lastSaved = EMPTY_DRAFT_SIGNATURE;
       return;
     }
-    // Never write back stale content on a newly remounted instance whose prior
-    // same-session instance already accepted and cleared the submission.
-    if (sub?.accepted && ctx.keyRef !== sub.keyRef) return;
-    if (sub?.accepted && ctx.keyRef === sub.keyRef) {
-      pendingDraftSubmissions.delete(ctx.key);
-      submittedDraftKeys.delete(ctx.key);
+    // 已提交且已接受的会话：若当前内容与已提交载荷一致，或当前处于提交确认状态且无真实新打字输入，严禁重新写回草稿
+    if (sub?.accepted) {
+      if (JSON.stringify(snapshot) === sub.signature) return;
+      if (ctx.keyRef === sub.keyRef) {
+        pendingDraftSubmissions.delete(ctx.key);
+        submittedDraftKeys.delete(ctx.key);
+      }
+    }
+    if (submittedDraftKeys.has(ctx.key)) {
+      if (sub && JSON.stringify(snapshot) === sub.signature) return;
+    }
+    if (isDraftAlreadySentInSession(ctx.key, snapshot)) {
+      removePersistedDraft(ctx.key);
+      return;
     }
     const signature = JSON.stringify(snapshot);
     if (signature === ctx.lastSaved && getPersistedDraft(ctx.key)) return;
@@ -27772,6 +30752,9 @@
       && (button.classList?.contains("pi-enh-cursor-send")
         || button.classList?.contains("pi-enh-cursor-followup")
         || button.classList?.contains("pi-enh-cursor-steer")
+        || button.querySelector?.('polyline[points*="7.5 3 12 7 7.5 11"]')
+        || button.querySelector?.('path[d*="M5 1"]')
+        || button.querySelector?.('polyline[points*="2.5 3.5 5 1 7.5 3.5"]')
         || labels.some((label) => /发送(?:消息)?|引导|后续消息|send(?:\s+message)?|steer|follow[\s-]?up/i.test(label)));
     const isEditorTarget = target === native.textarea
       || Boolean(activeFormattedComposer && activeFormattedComposer.__boundTextarea === native.textarea && activeFormattedComposer.contains(target));
@@ -27800,6 +30783,7 @@
     if (snapshot && (snapshot.value || snapshot.images.length) && !getPersistedDraft(native.key)) {
       if (savePersistedDraft(native.key, snapshot)) ctx.lastSaved = signature;
     }
+    recordSubmittedDraftSignature(signature);
     const sub = {
       owner: native.key,
       keyRef: native.keyRef,
@@ -27849,7 +30833,7 @@
     const badge = document.createElement("div");
     badge.className = "pi-enh-draft-badge";
     badge.setAttribute("data-draft-owner", ctx.key);
-    badge.style.cssText = "display:inline-flex;align-items:center;gap:6px;margin-left:8px;padding:3px 7px;border:1px solid color-mix(in srgb, var(--primary, #8ab4f8) 55%, transparent);border-radius:999px;background:color-mix(in srgb, var(--primary, #8ab4f8) 12%, transparent);color:var(--primary, #a9c7fa);font-size:12px;line-height:18px;white-space:nowrap;";
+    badge.style.cssText = "display:inline-flex;align-items:center;gap:6px;margin-left:8px;padding:3px 7px;border:1px solid color-mix(in srgb, var(--primary, #8ab4f8) 55%, transparent);border-radius:999px;background:color-mix(in srgb, var(--primary, #8ab4f8) 12%, transparent);color:var(--text, #1a1a1a);font-size:12px;line-height:18px;white-space:nowrap;";
     const label = document.createElement("span");
     label.textContent = `草稿已恢复${draft.images.length ? ` · ${draft.images.length} 张图片` : ""}`;
     const discard = document.createElement("button");
@@ -27870,7 +30854,9 @@
           activeFormattedComposer.__piEnhSyncedValue = "";
         }
         for (const img of ctx.fieldset.querySelectorAll("img")) {
-          if (/^(blob:|data:image\/)/.test(img.getAttribute("src") || "")) img.parentElement?.querySelector("button")?.click();
+          if (/^(blob:|data:image\/)/.test(img.getAttribute("src") || "")) {
+            (getComposerAttachmentRemoveButton(img) || (!isNativeImagePreviewTrigger(img.parentElement) ? img.parentElement?.querySelector?.("button") : null))?.click();
+          }
         }
       } finally {
         clearingStaleDraftSurface = prevClearing;
@@ -27893,10 +30879,8 @@
     if (activeNativeDraft) persistNativeDraft(activeNativeDraft);
     if (!native) return false;
     if (lastObservedNativeDraftKey !== native.key) {
-      if (lastObservedNativeDraftKey) {
-        submittedDraftKeys.delete(lastObservedNativeDraftKey);
-        pendingDraftSubmissions.delete(lastObservedNativeDraftKey);
-      }
+      // Do not infer submission from empty refs while changing owners. The old
+      // composer may still be waiting for native draft hydration or rejection recovery.
       lastObservedNativeDraftKey = native.key;
       requestComposerDraftRestore();
     }
@@ -27961,11 +30945,17 @@
         ctx.initialized = true;
         draftRestoreRequested = false;
         const stored = getPersistedDraft(ctx.key);
-        if (!submittedDraftKeys.has(ctx.key) && !snapshot.value && !snapshot.images.length && stored) {
+        const isStaleAlreadySent = stored && isDraftAlreadySentInSession(ctx.key, stored);
+        if (submittedDraftKeys.has(ctx.key) || isStaleAlreadySent) {
+          // 若本会话已知已完成提交或已包含该用户消息，必须安全清除残余持久化草稿，绝不复活
+          removePersistedDraft(ctx.key);
+        } else if (!snapshot.value && !snapshot.images.length && stored) {
           // Native handle takes the explicit owner and restores Base64 directly;
           // no FileReader, DataTransfer, pending merge, or delayed image injection.
           try {
-            ctx.handle.restoreSubmission(stored.value, stored.images, ctx.key);
+            restoringPersistedComposerDraft = true;
+            try { ctx.handle.restoreSubmission(stored.value, stored.images, ctx.key); }
+            finally { restoringPersistedComposerDraft = false; }
             showDraftRestoredBadge(ctx, stored);
             restored = true;
             if (typeof syncComposerMarkdownFormat === "function") {
@@ -27981,6 +30971,10 @@
       } else if ((snapshot.value || snapshot.images.length) && !getPersistedDraft(ctx.key)) {
         ctx.initialized = true;
         draftRestoreRequested = false;
+      }
+      if ((snapshot?.value || snapshot?.images?.length) && isDraftAlreadySentInSession(ctx.key, snapshot)) {
+        clearStaleRemountedNativeComposer(ctx, ctx.key);
+        removePersistedDraft(ctx.key);
       }
     }
     persistNativeDraft(ctx);
@@ -28020,18 +31014,24 @@
       if (changedText || changedImage) {
         removeDraftRestoredBadge();
         if (current?.key) {
+          const snap = nativeDraftSnapshot(current);
+          const hasContent = snap && (snap.value || snap.images.length);
           const sub = pendingDraftSubmissions.get(current.key);
-          if (sub && sub.keyRef === current.keyRef) {
+          if (sub) {
             if (sub.accepted) {
-              pendingDraftSubmissions.delete(current.key);
-              submittedDraftKeys.delete(current.key);
+              if (hasContent && JSON.stringify(snap) !== sub.signature) {
+                pendingDraftSubmissions.delete(current.key);
+                submittedDraftKeys.delete(current.key);
+              }
             } else {
-              const snap = nativeDraftSnapshot(current);
-              if (snap && (snap.value || snap.images.length) && JSON.stringify(snap) !== sub.signature) {
+              if (hasContent && JSON.stringify(snap) !== sub.signature) {
                 pendingDraftSubmissions.delete(current.key);
                 submittedDraftKeys.delete(current.key);
               }
             }
+          } else if (hasContent) {
+            // 用户在切回或已提交清空后重新进行了真实编辑（即使文字相同也是新草稿）
+            submittedDraftKeys.delete(current.key);
           }
         }
       }
@@ -28054,6 +31054,13 @@
       draftSubmissionPollFrame = 0;
     }
     for (const cleanup of draftListeners.splice(0)) cleanup();
+    for (const record of nativeDraftRestoreObserverRecords) {
+      if (record.handle.restoreSubmission === record.wrapper) {
+        try { record.handle.restoreSubmission = record.original; } catch {}
+      }
+    }
+    nativeDraftRestoreObserverRecords.clear();
+    restoringPersistedComposerDraft = false;
     nativeDraftContexts = new WeakMap();
     activeNativeDraft = null;
     draftRestoreRequested = true;
@@ -29168,6 +32175,7 @@
     const card = document.createElement("div");
     card.className = "pi-enh-attachment-card";
     card.setAttribute("data-attachment-id", att.id);
+    card.style.flexShrink = "0";
 
     const meta = getFileCategoryMeta(att.name, att.type);
     const sizeStr = formatFileSize(att.size);
@@ -29238,15 +32246,16 @@
     if (!textarea) return null;
     const host = textarea.parentElement || textarea;
     const grandParent = host.parentElement;
-    return grandParent?.querySelector(".pi-enh-attachments-bar") || host.querySelector(".pi-enh-attachments-bar");
+    const composerCard = textarea.closest?.('.pi-enh-cursor-composer, fieldset > div[style*="max-width"]') || grandParent;
+    return composerCard?.querySelector?.(".pi-enh-attachments-bar") || grandParent?.querySelector?.(".pi-enh-attachments-bar") || host?.querySelector?.(".pi-enh-attachments-bar") || null;
   }
 
   function syncComposerAttachmentBar(textarea) {
     if (!textarea) return;
     const host = textarea.parentElement || textarea;
     const grandParent = host.parentElement;
+    const composerCard = textarea.closest?.('.pi-enh-cursor-composer, fieldset > div[style*="max-width"]') || grandParent;
     let bar = findComposerAttachmentBar(textarea);
-    const composerCard = textarea.closest?.('.pi-enh-cursor-composer, fieldset > div[style*="max-width"]');
 
     if (pendingComposerAttachments.length === 0) {
       if (bar) bar.remove();
@@ -29255,13 +32264,31 @@
       return;
     }
 
-    if (!bar) {
-      bar = document.createElement("div");
-      bar.className = "pi-enh-attachments-bar";
-      if (grandParent) {
+    // 查找原生图片预览容器（绝不移动或重排原生图片节点，增强自有 bar 挂入其中复用同一 flex 行）
+    const nativeImgContainer = composerCard?.querySelector?.(
+      'div[style*="flex-wrap"]:has(img), .pi-enh-cursor-attachments'
+    );
+
+    if (nativeImgContainer) {
+      if (!bar) {
+        bar = document.createElement("div");
+        bar.className = "pi-enh-attachments-bar";
+        nativeImgContainer.appendChild(bar);
+      } else if (bar.parentElement !== nativeImgContainer) {
+        nativeImgContainer.appendChild(bar);
+      }
+    } else {
+      // 只有文件或原生图片容器卸载时：bar 挂到 composerCard 下的 host 之前，占据 grid-row: 1 顶行
+      if (!bar) {
+        bar = document.createElement("div");
+        bar.className = "pi-enh-attachments-bar";
+        if (grandParent) {
+          grandParent.insertBefore(bar, host);
+        } else {
+          host.appendChild(bar);
+        }
+      } else if (bar.parentElement !== grandParent && grandParent) {
         grandParent.insertBefore(bar, host);
-      } else {
-        host.appendChild(bar);
       }
     }
 
@@ -29845,18 +32872,33 @@
     let p = el.parentElement;
     while (p) {
       const tag = p.tagName ? p.tagName.toLowerCase() : "";
-      if (tag === "dialog" || tag === "button" || tag === "pre" || tag === "code") {
+      if (tag === "dialog" || tag === "pre" || tag === "code") {
+        return false;
+      }
+      if (tag === "button") {
+        if (p !== el.parentElement || !isNativeImagePreviewTrigger(p)) {
+          return false;
+        }
+      }
+      const pCls = typeof p.className === "string" ? p.className : "";
+      if (
+        pCls.includes("chat-message")
+        || pCls.includes("markdown-body")
+        || p.hasAttribute?.("data-message-role")
+        || p.hasAttribute?.("data-entry-id")
+      ) {
         return false;
       }
       p = p.parentElement;
     }
-    const parent = el.parentElement;
-    if (!parent) return false;
-    const hasRemoveBtn = Array.from(parent.children || [])
-      .some((c) => c.tagName && c.tagName.toLowerCase() === "button");
+    const itemContainer = getComposerAttachmentItemContainer(el);
+    if (!itemContainer) return false;
+    const itemTag = itemContainer.tagName ? itemContainer.tagName.toLowerCase() : "";
+    if (itemTag === "button") return false;
+    const hasRemoveBtn = Boolean(getComposerAttachmentRemoveButton(el));
     if (!hasRemoveBtn) return false;
 
-    let curr = parent;
+    let curr = itemContainer;
     while (curr) {
       const tag = curr.tagName ? curr.tagName.toLowerCase() : "";
       const cls = curr.className || "";
@@ -29915,6 +32957,77 @@
     return true;
   }
 
+  const HISTORY_IMAGE_MAX_BYTES = 10 * 1024 * 1024;
+  const HISTORY_IMAGE_FAST_PATH_MAX_BYTES = 1024 * 1024;
+
+  function historyImageBase64ByteLength(data) {
+    if (typeof data !== "string" || !data || data.length % 4 !== 0) return null;
+    const padding = data.endsWith("==") ? 2 : data.endsWith("=") ? 1 : 0;
+    const dataEnd = data.length - padding;
+    for (let index = 0; index < dataEnd; index += 1) {
+      const code = data.charCodeAt(index);
+      if (!((code >= 0x41 && code <= 0x5a) || (code >= 0x61 && code <= 0x7a)
+        || (code >= 0x30 && code <= 0x39) || code === 0x2b || code === 0x2f)) return null;
+    }
+    for (let index = dataEnd; index < data.length; index += 1) {
+      if (data[index] !== "=") return null;
+    }
+    return (data.length / 4) * 3 - padding;
+  }
+
+  function parseHistoryImageDataUrl(source) {
+    if (typeof source !== "string" || source.slice(0, 5).toLowerCase() !== "data:") return null;
+    const comma = source.indexOf(",");
+    if (comma < 0) return null;
+    const header = source.slice(5, comma);
+    const base64Marker = header.toLowerCase().lastIndexOf(";base64");
+    if (base64Marker < 0 || base64Marker !== header.length - 7) return null;
+    const mimeType = header.slice(0, base64Marker).split(";")[0].trim().toLowerCase();
+    if (!mimeType.startsWith("image/")) return null;
+    const data = source.slice(comma + 1);
+    const byteLength = historyImageBase64ByteLength(data);
+    return byteLength === null ? null : { data, mimeType, byteLength };
+  }
+
+  function appendComposerImageState(ctx, image) {
+    const images = ctx?.imagesRef?.current;
+    const stateHook = ctx?.imageStateHook;
+    const mimeType = typeof image?.mimeType === "string" ? image.mimeType.toLowerCase() : "";
+    const byteLength = historyImageBase64ByteLength(image?.data);
+    if (!Array.isArray(images) || images.length >= 10 || ctx.keyRef?.current !== ctx.key
+      || ctx.pendingRef?.current > 0 || byteLength === null || byteLength > HISTORY_IMAGE_MAX_BYTES
+      || !mimeType.startsWith("image/") || !stateHook || stateHook.memoizedState !== images
+      || typeof stateHook.queue?.dispatch !== "function") return false;
+
+    const nextImages = images.concat({
+      data: image.data,
+      mimeType,
+      previewUrl: typeof image.previewUrl === "string" && image.previewUrl
+        ? image.previewUrl : `data:${mimeType};base64,${image.data}`,
+    });
+    if (!validDraftImages(nextImages)) return false;
+    ctx.imagesRef.current = nextImages;
+    try {
+      stateHook.queue.dispatch(nextImages);
+    } catch (error) {
+      ctx.imagesRef.current = images;
+      return false;
+    }
+    try { queueNativeDraftSync(); } catch (error) {}
+    return true;
+  }
+
+  function readBlobAsDataUrl(blob) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => typeof reader.result === "string"
+        ? resolve(reader.result) : reject(new Error("图片读取失败"));
+      reader.onerror = () => reject(reader.error || new Error("图片读取失败"));
+      reader.onabort = () => reject(new Error("图片读取已取消"));
+      reader.readAsDataURL(blob);
+    });
+  }
+
   function getComposerImageEditContext(target) {
     const native = readNativeComposerDraft();
     if (!native?.imageStateHook) return null;
@@ -29944,6 +33057,10 @@
       && galleryContext.initialIndex < items.length
       ? galleryContext.initialIndex
       : 0;
+    const addedHistoryImageSources = new Set();
+    let isAddingHistoryImage = false;
+    let addHistoryImageAbortController = null;
+    let addHistoryImageOperation = 0;
 
     const previousActiveElement = (typeof document !== "undefined" && document.activeElement) ? document.activeElement : null;
 
@@ -30017,7 +33134,7 @@
     zoomOutBtn.setAttribute("data-zoom-action", "out");
     zoomOutBtn.setAttribute("aria-label", "缩小 (-)");
     zoomOutBtn.title = "缩小 (-)";
-    zoomOutBtn.textContent = "➖";
+    zoomOutBtn.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="5" y1="12" x2="19" y2="12"></line></svg>';
 
     const indicator = document.createElement("span");
     indicator.className = "pi-enh-zoom-indicator";
@@ -30032,7 +33149,7 @@
     zoomInBtn.setAttribute("data-zoom-action", "in");
     zoomInBtn.setAttribute("aria-label", "放大 (+)");
     zoomInBtn.title = "放大 (+)";
-    zoomInBtn.textContent = "➕";
+    zoomInBtn.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>';
 
     const editBtn = document.createElement("button");
     editBtn.type = "button";
@@ -30040,7 +33157,7 @@
     editBtn.setAttribute("data-zoom-action", "edit");
     editBtn.setAttribute("aria-label", "编辑与标注图片");
     editBtn.title = "编辑与标注图片";
-    editBtn.textContent = "✏️ 编辑";
+    editBtn.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="margin-right: 4px;"><path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"></path></svg>编辑';
 
     const downloadBtn = document.createElement("button");
     downloadBtn.type = "button";
@@ -30048,7 +33165,36 @@
     downloadBtn.setAttribute("data-zoom-action", "download");
     downloadBtn.setAttribute("aria-label", "下载图片");
     downloadBtn.title = "下载图片";
-    downloadBtn.textContent = "💾 下载";
+    downloadBtn.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="margin-right: 4px;"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>下载';
+
+    let addToConversationLabel = null;
+    const addToConversationBtn = options?.allowAddToConversation ? document.createElement("button") : null;
+    if (addToConversationBtn) {
+      addToConversationBtn.type = "button";
+      addToConversationBtn.className = "pi-enh-zoom-btn pi-enh-zoom-add-to-chat-btn";
+      addToConversationBtn.setAttribute("data-zoom-action", "add-to-chat");
+      addToConversationBtn.setAttribute("aria-label", "添加到当前对话");
+      addToConversationBtn.title = "添加到当前对话";
+      // Center the history toolbar against the mobile viewport, not the padded dialog content box.
+      toolbar.style.position = "fixed";
+      addToConversationBtn.style.gap = "4px";
+      addToConversationBtn.style.padding = "3px 6px";
+      const addIcon = document.createElement("span");
+      addIcon.setAttribute("aria-hidden", "true");
+      addIcon.textContent = "+";
+      addIcon.style.fontSize = "17px";
+      addIcon.style.lineHeight = "1";
+      addToConversationLabel = document.createElement("span");
+      addToConversationLabel.textContent = "添加到对话";
+      addToConversationBtn.appendChild(addIcon);
+      addToConversationBtn.appendChild(addToConversationLabel);
+      addToConversationBtn.addEventListener("click", (e) => {
+        e.preventDefault?.();
+        e.stopPropagation?.();
+        void addHistoryImageToCurrentConversation();
+      });
+    }
+
     downloadBtn.addEventListener("click", (e) => {
       e.stopPropagation?.();
       try {
@@ -30070,6 +33216,7 @@
     toolbar.appendChild(indicator);
     toolbar.appendChild(zoomInBtn);
     toolbar.appendChild(downloadBtn);
+    if (addToConversationBtn) toolbar.appendChild(addToConversationBtn);
 
     dialog.appendChild(counterEl);
     dialog.appendChild(prevBtn);
@@ -30135,6 +33282,14 @@
     window.addEventListener("popstate", onPopState);
 
     function updateGalleryUi() {
+      if (addToConversationBtn) {
+        const currentSource = items[currentIndex]?.src || src;
+        const isAdded = addedHistoryImageSources.has(currentSource);
+        addToConversationBtn.disabled = isAddingHistoryImage || isAdded;
+        addToConversationLabel.textContent = isAddingHistoryImage ? "添加中…" : isAdded ? "已添加" : "添加到对话";
+        addToConversationBtn.setAttribute("aria-label", isAdded ? "已添加到当前对话" : "添加到当前对话");
+        addToConversationBtn.title = isAdded ? "已添加到当前对话" : "添加到当前对话";
+      }
       const total = items.length;
       if (total <= 1) {
         counterEl.style.display = "none";
@@ -30148,6 +33303,149 @@
       prevBtn.disabled = currentIndex <= 0;
       nextBtn.style.display = "";
       nextBtn.disabled = currentIndex >= total - 1;
+    }
+
+    async function addHistoryImageToCurrentConversation() {
+      if (!addToConversationBtn || isAddingHistoryImage) return;
+      const currentItem = items[currentIndex] || { src, alt };
+      const currentSource = currentItem.src || src;
+      if (!currentSource) {
+        showToast("找不到这张图片", null, 2600);
+        return;
+      }
+
+      const nativeBefore = readNativeComposerDraft();
+      if (!nativeBefore || typeof nativeBefore.handle?.addImages !== "function") {
+        showToast("找不到当前对话的输入框", null, 3000);
+        return;
+      }
+      const beforeCount = nativeBefore.imagesRef.current.length;
+      const beforePending = nativeBefore.pendingRef.current;
+      if (beforeCount + beforePending >= 10) {
+        showToast("当前对话最多添加 10 张图片", null, 3000);
+        return;
+      }
+
+      const directSourceImage = parseHistoryImageDataUrl(currentSource);
+      if (directSourceImage && directSourceImage.byteLength > HISTORY_IMAGE_MAX_BYTES) {
+        showToast("图片超过 10 MB，无法添加", null, 3000);
+        return;
+      }
+      const sourceCanSkipNativeCompression = directSourceImage
+        && (directSourceImage.byteLength <= HISTORY_IMAGE_FAST_PATH_MAX_BYTES
+          || directSourceImage.mimeType === "image/gif" || typeof createImageBitmap !== "function");
+      // ChatInput only compresses images above 1 MiB (except GIF); reusing those
+      // already-Base64 sources avoids a redundant fetch/FileReader pass without
+      // changing the native compression policy for larger images.
+      if (sourceCanSkipNativeCompression
+        && appendComposerImageState(nativeBefore, {
+          ...directSourceImage,
+          previewUrl: currentSource,
+        })) {
+        addedHistoryImageSources.add(currentSource);
+        showToast("已添加到当前对话", null, 2400);
+        closeComposerImageZoomModal();
+        return;
+      }
+
+      isAddingHistoryImage = true;
+      const operation = ++addHistoryImageOperation;
+      addHistoryImageAbortController = typeof AbortController === "function" ? new AbortController() : null;
+      const abortController = addHistoryImageAbortController;
+      updateGalleryUi();
+
+      try {
+        const protocol = new URL(currentSource, window.location.href).protocol;
+        if (!(["http:", "https:", "blob:", "data:"].includes(protocol))
+          || (protocol === "data:" && !/^data:image\//i.test(currentSource))) {
+          throw new Error("图片来源不受支持");
+        }
+        const response = await fetch(currentSource, {
+          credentials: "same-origin",
+          signal: abortController?.signal,
+        });
+        if (!response.ok) throw new Error("图片读取失败");
+        const blob = await response.blob();
+        if (!blob.size) throw new Error("图片内容为空");
+        if (blob.size > HISTORY_IMAGE_MAX_BYTES) throw new Error("图片超过 10 MB，无法添加");
+
+        const hintedName = String(currentItem.alt || "历史图片").split(/[\\/]/).pop() || "历史图片";
+        const extensionHint = hintedName.match(/\.([a-z0-9]{1,8})$/i)?.[1]?.toLowerCase();
+        const mimeByExtension = {
+          avif: "image/avif", bmp: "image/bmp", gif: "image/gif", jpeg: "image/jpeg",
+          jpg: "image/jpeg", png: "image/png", svg: "image/svg+xml", webp: "image/webp",
+        };
+        const dataMime = currentSource.match(/^data:(image\/[^;,]+)/i)?.[1]?.toLowerCase();
+        const mimeType = String(blob.type || "").toLowerCase().startsWith("image/")
+          ? blob.type.split(";")[0].toLowerCase()
+          : dataMime || mimeByExtension[extensionHint];
+        if (!mimeType || !mimeType.startsWith("image/")) throw new Error("无法识别图片格式");
+
+        const liveNative = readNativeComposerDraft();
+        if (!liveNative || liveNative.key !== nativeBefore.key || typeof liveNative.handle?.addImages !== "function") {
+          throw new Error("当前对话已切换，请重新添加");
+        }
+        if (liveNative.imagesRef.current.length + liveNative.pendingRef.current >= 10) {
+          throw new Error("当前对话最多添加 10 张图片");
+        }
+
+        const canSkipNativeCompression = blob.size <= HISTORY_IMAGE_FAST_PATH_MAX_BYTES || mimeType === "image/gif"
+          || typeof createImageBitmap !== "function";
+        if (canSkipNativeCompression && liveNative.pendingRef.current === 0 && liveNative.imageStateHook) {
+          const typedBlob = blob.type === mimeType ? blob : new Blob([blob], { type: mimeType });
+          let dataUrl = null;
+          try { dataUrl = await readBlobAsDataUrl(typedBlob); } catch (error) {}
+          if (operation !== addHistoryImageOperation || !dialog.isConnected) return;
+          const directImage = dataUrl && parseHistoryImageDataUrl(dataUrl);
+          if (directImage && directImage.byteLength === blob.size) {
+            let previewUrl = dataUrl;
+            let objectUrl = false;
+            try {
+              previewUrl = URL.createObjectURL(typedBlob);
+              objectUrl = true;
+            } catch (error) {}
+            if (appendComposerImageState(liveNative, { ...directImage, previewUrl })) {
+              addedHistoryImageSources.add(currentSource);
+              showToast("已添加到当前对话", null, 2400);
+              closeComposerImageZoomModal();
+              return;
+            }
+            if (objectUrl) {
+              try { URL.revokeObjectURL(previewUrl); } catch (error) {}
+            }
+          }
+        }
+
+        const extensionByMime = {
+          "image/avif": "avif", "image/bmp": "bmp", "image/gif": "gif", "image/jpeg": "jpg",
+          "image/png": "png", "image/svg+xml": "svg", "image/webp": "webp",
+        };
+        const extension = extensionByMime[mimeType] || extensionHint || "png";
+        const fileBase = hintedName
+          .replace(/\.[^.]+$/, "")
+          .replace(/[<>:\"|?*]/g, "_")
+          .replace(/\s+/g, "_")
+          .slice(0, 80) || "历史图片";
+        const imageFile = new File([blob], `${fileBase}.${extension}`, { type: mimeType });
+        const pendingBefore = liveNative.pendingRef.current;
+        liveNative.handle.addImages([imageFile]);
+        if (liveNative.pendingRef.current <= pendingBefore) {
+          throw new Error("图片未能添加，请检查图片大小或数量");
+        }
+        addedHistoryImageSources.add(currentSource);
+        showToast("已添加到当前对话", null, 2400);
+        closeComposerImageZoomModal();
+      } catch (error) {
+        if (operation === addHistoryImageOperation && dialog.isConnected) {
+          showToast(`添加失败：${error?.message || "图片无法读取"}`, null, 3600);
+        }
+      } finally {
+        if (operation === addHistoryImageOperation) {
+          addHistoryImageAbortController = null;
+          isAddingHistoryImage = false;
+          updateGalleryUi();
+        }
+      }
     }
 
     function switchTo(index) {
@@ -30481,7 +33779,7 @@
         tools.appendChild(button);
       }
 
-      const tipsToggleBtn = makeActionButton("toggle-tips", "💡 指引", "显示/隐藏快捷功能提示");
+      const tipsToggleBtn = makeActionButton("toggle-tips", "指引", "显示/隐藏快捷功能提示");
       if (!isTipsDismissed()) {
         tipsToggleBtn.classList.add("is-active");
         tipsToggleBtn.setAttribute("aria-pressed", "true");
@@ -30971,6 +34269,11 @@
             if (items[currentIndex].editContext) {
               items[currentIndex].editContext.editSrc = dataUrl;
             }
+            const targetDomImg = items[currentIndex].domElement;
+            if (editContext && targetDomImg) {
+              targetDomImg.src = dataUrl;
+              targetDomImg.setAttribute?.("src", dataUrl);
+            }
           }
           if (editContext) editContext.editSrc = dataUrl;
           cleanup();
@@ -31343,6 +34646,10 @@
 
     const cleanup = () => {
       if (dialog.__piEnhCleanup === null) return;
+      addHistoryImageOperation++;
+      try { addHistoryImageAbortController?.abort(); } catch (e) {}
+      addHistoryImageAbortController = null;
+      isAddingHistoryImage = false;
       dialog.__piEnhCleanup = null;
       dialog.__piEnhHandleEscape = null;
       window.removeEventListener("keydown", onGlobalModalKeyDown, true);
@@ -31629,9 +34936,11 @@
 
   function handleComposerImageClick(event) {
     if (!isPluginEnabled("composer-image-zoom")) return;
-    const target = event.target;
-    if (!target) return;
-    if (target.closest && target.closest("button")) return;
+    const rawTarget = event.target;
+    if (!rawTarget) return;
+    const enclosingButton = rawTarget.closest ? rawTarget.closest("button") : null;
+    if (enclosingButton && !isNativeImagePreviewTrigger(enclosingButton)) return;
+    const target = unwrapNativeImagePreviewTarget(rawTarget);
     if (isComposerAttachmentImage(target)) {
       if (typeof event.preventDefault === "function") event.preventDefault();
       if (typeof event.stopPropagation === "function") event.stopPropagation();
@@ -31639,7 +34948,7 @@
       const textarea = findComposerTextarea();
       let container = findComposerImageContainer(textarea);
       if (!container) {
-        let p = target.parentElement;
+        let p = getComposerAttachmentItemContainer(target) || target.parentElement;
         while (p) {
           const style = (typeof p.getAttribute === "function" ? p.getAttribute("style") : p.attributes?.style) || "";
           const cls = p.className || "";
@@ -31685,7 +34994,11 @@
 
   function handleComposerImageMouseOver(event) {
     if (!isPluginEnabled("composer-image-zoom")) return;
-    const target = event.target;
+    const rawTarget = event.target;
+    if (!rawTarget) return;
+    const enclosingButton = rawTarget.closest ? rawTarget.closest("button") : null;
+    if (enclosingButton && !isNativeImagePreviewTrigger(enclosingButton)) return;
+    const target = unwrapNativeImagePreviewTarget(rawTarget);
     if (isComposerAttachmentImage(target)) {
       target.classList?.add("pi-enh-composer-zoomable-img");
       if (!target.hasAttribute || !target.hasAttribute("title") || target.getAttribute("title") === "") {
@@ -31698,6 +35011,9 @@
   addManagedListener(document, "mouseover", handleComposerImageMouseOver, true);
 
   window.__PI_ENH_IS_COMPOSER_IMAGE__ = isComposerAttachmentImage;
+  window.__PI_ENH_IS_NATIVE_IMAGE_PREVIEW_TRIGGER__ = isNativeImagePreviewTrigger;
+  window.__PI_ENH_GET_COMPOSER_IMAGE_CONTAINER_ITEM__ = getComposerAttachmentItemContainer;
+  window.__PI_ENH_GET_COMPOSER_IMAGE_REMOVE_BUTTON__ = getComposerAttachmentRemoveButton;
   window.__PI_ENH_REPLACE_COMPOSER_IMAGE_STATE__ = replaceComposerImageState;
   window.__PI_ENH_IS_IMAGE_ZOOM_ACTIVE__ = () => Boolean(activeZoomDialog && activeZoomDialog.open);
   window.__PI_ENH_OPEN_IMAGE_ZOOM__ = openComposerImageZoomModal;
@@ -32030,6 +35346,24 @@
   let composerQueueBusy = false;
   const composerQueueUnsupported = new Set();
   let composerQueueActionsState = null;
+  let activeQueueHoverCard = null;
+  let activeQueueHoverOwner = null;
+  let activeQueueHoverSessionId = "";
+
+  function closeQueueHoverCard(targetOwner = null) {
+    if (targetOwner && activeQueueHoverOwner && targetOwner !== activeQueueHoverOwner) {
+      return;
+    }
+    if (activeQueueHoverCard) {
+      activeQueueHoverCard.remove();
+      activeQueueHoverCard = null;
+    }
+    activeQueueHoverOwner = null;
+    activeQueueHoverSessionId = "";
+    for (const preview of document.querySelectorAll(".pi-enh-queue-hover-preview")) {
+      preview.remove();
+    }
+  }
 
   function handleQueueOperationError(sessionId, errorMsg, defaultPrefix = "操作") {
     const raw = String(errorMsg || "");
@@ -32044,6 +35378,7 @@
 
   function removeComposerQueuePanel() {
     clearQueueDetailCache();
+    closeQueueHoverCard();
     if (activeZoomDialog?.hasAttribute("data-pi-queue-gallery")) closeComposerImageZoomModal();
     for (const preview of document.querySelectorAll(".pi-enh-queue-hover-preview")) preview.remove();
     composerQueuePanel?.remove();
@@ -32190,6 +35525,7 @@
   }
 
   async function promoteComposerQueuedMessage(entryIndex, sessionId, signature) {
+    closeQueueHoverCard();
     if (composerQueueBusy || sessionId !== getCurrentSessionId() || signature !== composerQueueLastEntriesSignature) return;
     const hasSecure = composerQueueActionsState && (composerQueueActionsState.version === 1 || composerQueueActionsState.version === 2) && !composerQueueUnsupported.has(sessionId);
     if (!hasSecure) {
@@ -32251,6 +35587,7 @@
   }
 
   async function recallSingleQueuedMessage(entryIndex, sessionId, signature) {
+    closeQueueHoverCard();
     if (composerQueueBusy || sessionId !== getCurrentSessionId() || signature !== composerQueueLastEntriesSignature) return;
     const hasSecure = composerQueueActionsState && composerQueueActionsState.version === 2 && !composerQueueUnsupported.has(sessionId);
     if (!hasSecure) {
@@ -32344,6 +35681,7 @@
   }
 
   async function recallAllQueuedMessages(sessionId, signature, entries) {
+    closeQueueHoverCard();
     if (composerQueueBusy || sessionId !== getCurrentSessionId() || signature !== composerQueueLastEntriesSignature) return;
     const hasSecure = composerQueueActionsState && composerQueueActionsState.version === 2 && !composerQueueUnsupported.has(sessionId);
     if (!hasSecure) {
@@ -32438,6 +35776,7 @@
   }
 
   async function deleteSingleQueuedMessage(entryIndex, sessionId, signature) {
+    closeQueueHoverCard();
     if (composerQueueBusy || sessionId !== getCurrentSessionId() || signature !== composerQueueLastEntriesSignature) return;
     const hasSecure = composerQueueActionsState && composerQueueActionsState.version === 2 && !composerQueueUnsupported.has(sessionId);
     if (!hasSecure) {
@@ -32491,15 +35830,7 @@
       style = document.createElement("style");
       style.id = QUEUE_PANEL_STYLE_ID;
       style.textContent = `
-        /* 物理级零延迟隐藏原生队列容器，杜绝 React 挂载时的瞬态闪烁与网格错位 */
-        .pi-enh-cursor-composer > div[style*="padding: 5px 0"],
-        .pi-enh-cursor-composer > div[style*="padding:5px 0"],
-        .pi-enh-cursor-composer > div[style*="padding: 5px"],
-        .pi-enh-cursor-composer > div[style*="padding:5px"],
-        .pi-enh-cursor-composer > div:has(button[title*="移回"]),
-        .pi-enh-cursor-composer > div:has(button[title*="Recall"]),
-        .pi-enh-cursor-composer > div:has(button[title*="recall"]),
-        .pi-enh-cursor-composer > div:has(svg polyline[points*="9 14 4 9 9 4"]),
+        /* Only hide queues explicitly replaced by this enabled plugin. */
         .pi-enh-native-queue-hidden {
           display: none !important;
           position: absolute !important;
@@ -32708,6 +36039,7 @@
       Array.from(node.querySelectorAll("button")).some((button) => /移回输入框|Recall/i.test(button.textContent || ""))
     );
     if (!nativeQueue) {
+      closeQueueHoverCard();
       composerQueuePanel?.remove();
       composerQueuePanel = null;
       composerQueueSignature = "";
@@ -32721,24 +36053,33 @@
       text: row.getAttribute("title") || "",
     }));
     const sessionId = getCurrentSessionId();
+    if (activeQueueHoverCard && (!activeQueueHoverOwner || !activeQueueHoverOwner.isConnected || activeQueueHoverSessionId !== sessionId)) {
+      closeQueueHoverCard();
+    }
     const entriesSignature = JSON.stringify([sessionId, entries]);
     const renderSignature = JSON.stringify([sessionId, entries, queueAttachmentRevision]);
 
-    if (composerQueuePanel?.isConnected && composerQueuePanel.nextElementSibling === card && renderSignature === composerQueueSignature) return;
+    const expectedNext = (composerGoalBarEl && composerGoalBarEl.isConnected && composerGoalBarEl.parentElement === card.parentElement)
+      ? composerGoalBarEl
+      : card;
+
+    if (composerQueuePanel?.isConnected && composerQueuePanel.nextElementSibling === expectedNext && renderSignature === composerQueueSignature) return;
 
     composerQueueSignature = renderSignature;
     composerQueueLastEntriesSignature = entriesSignature;
 
     let panel = composerQueuePanel;
-    const isSamePanel = Boolean(panel?.isConnected && panel.nextElementSibling === card);
+    const isSamePanel = Boolean(panel?.isConnected && panel.nextElementSibling === expectedNext);
     if (!isSamePanel) {
+      closeQueueHoverCard();
       panel?.remove();
       panel = document.createElement("section");
       panel.className = "pi-enh-queue-panel";
       panel.setAttribute("aria-label", "排队消息");
-      card.parentElement.insertBefore(panel, card);
+      card.parentElement.insertBefore(panel, expectedNext);
       composerQueuePanel = panel;
     }
+    closeQueueHoverCard();
     panel.innerHTML = "";
 
     const header = document.createElement("div");
@@ -32839,26 +36180,30 @@
 
         imageBadge.appendChild(label);
 
-        // 鼠标悬停大图卡片预览
-        let hoverCard = null;
+        // 鼠标悬停大图卡片预览（统一单例 hover + owner 身份）
         imageBadge.addEventListener("mouseenter", () => {
           if (!activeSrc) return;
-          hoverCard = document.createElement("div");
+          if (activeQueueHoverCard && activeQueueHoverOwner === imageBadge) return;
+          closeQueueHoverCard();
+          if (!imageBadge.isConnected) return;
+
+          const hoverCard = document.createElement("div");
           hoverCard.className = "pi-enh-queue-hover-preview";
           const hint = count > 1
             ? `共 ${count} 张图片 · 点击放大左右切换`
             : `${firstImg.alt || "图片附件预览"} · 点击放大`;
           hoverCard.innerHTML = `<img src="${activeSrc}" alt="${firstImg.alt || "图片附件"}" onerror="this.style.display='none'" /><span>${hint}</span>`;
           document.body.appendChild(hoverCard);
+          activeQueueHoverCard = hoverCard;
+          activeQueueHoverOwner = imageBadge;
+          activeQueueHoverSessionId = sessionId;
+
           const rect = imageBadge.getBoundingClientRect();
           hoverCard.style.left = `${Math.max(10, Math.min(window.innerWidth - 250, rect.left))}px`;
           hoverCard.style.bottom = `${window.innerHeight - rect.top + 8}px`;
         });
         imageBadge.addEventListener("mouseleave", () => {
-          if (hoverCard) {
-            hoverCard.remove();
-            hoverCard = null;
-          }
+          closeQueueHoverCard(imageBadge);
         });
 
         // 点击与双击均调用全站图片灯箱预览器（传递全部图片 items 并显式禁用 autoEdit）
@@ -32866,10 +36211,7 @@
           if (e) {
             e.stopPropagation?.();
           }
-          if (hoverCard) {
-            hoverCard.remove();
-            hoverCard = null;
-          }
+          closeQueueHoverCard();
           if (typeof openComposerImageZoomModal === "function" && activeSrc && !activeSrc.startsWith("blob:null")) {
             const galleryItems = attachedImages.map((img, idx) => ({
               src: img.data && img.mimeType ? `data:${img.mimeType};base64,${img.data}` : (img.src || ""),
@@ -32968,17 +36310,213 @@
   }
 
   activeCleanups.push(removeComposerQueuePanel);
+  const handleQueueHoverWindowBlurOrScroll = () => {
+    if (activeQueueHoverCard) {
+      closeQueueHoverCard();
+    }
+  };
+  const handleQueueHoverDocumentKeyDown = (e) => {
+    if (e.key === "Escape" && activeQueueHoverCard) {
+      closeQueueHoverCard();
+    }
+  };
+  window.addEventListener("blur", handleQueueHoverWindowBlurOrScroll);
+  window.addEventListener("scroll", handleQueueHoverWindowBlurOrScroll, { capture: true, passive: true });
+  document.addEventListener("keydown", handleQueueHoverDocumentKeyDown, true);
+
+  activeCleanups.push(() => {
+    window.removeEventListener("blur", handleQueueHoverWindowBlurOrScroll);
+    window.removeEventListener("scroll", handleQueueHoverWindowBlurOrScroll, { capture: true });
+    document.removeEventListener("keydown", handleQueueHoverDocumentKeyDown, true);
+    closeQueueHoverCard();
+  });
   window.__PI_ENH_SYNC_COMPOSER_QUEUE__ = syncComposerQueuePanel;
 
   // ==========================================
-  // 3.55.2 Cursor Style Unified Composer Layout
+  // 3.55.2 Cursor Style Unified Composer Layout & Resizable Height
   // ==========================================
   const CODEX_COMPOSER_STYLE_ID = "pi-enh-codex-composer-style";
+  const COMPOSER_RESIZER_CLASS = "pi-enh-composer-resizer";
+  const COMPOSER_CUSTOM_HEIGHT_CLASS = "pi-enh-composer-custom-height";
+  const COMPOSER_HEIGHT_STORAGE_KEY = "pi-web:composer-custom-height";
+
+  function syncComposerPreloadHeightProperty(heightValue) {
+    if (typeof document === "undefined" || !document.documentElement) return;
+    const docEl = document.documentElement;
+    if (typeof heightValue === "number" && Number.isFinite(heightValue) && heightValue >= 44) {
+      const rounded = Math.round(heightValue);
+      docEl.style.setProperty("--pi-enh-preload-composer-height", `${rounded}px`);
+      docEl.setAttribute("data-pi-composer-custom-height", String(rounded));
+    } else {
+      docEl.style.removeProperty("--pi-enh-preload-composer-height");
+      docEl.removeAttribute("data-pi-composer-custom-height");
+    }
+  }
+
+  function applyComposerCustomHeight(card, textarea, height) {
+    if (!card) return;
+    const rounded = Math.round(height);
+    card.classList.add(COMPOSER_CUSTOM_HEIGHT_CLASS);
+    card.style.setProperty("--pi-composer-custom-height", `${rounded}px`);
+    if (textarea) {
+      textarea.style.height = `${rounded}px`;
+    }
+    const formatted = card.querySelector(".pi-enh-formatted-composer");
+    if (formatted) {
+      formatted.style.height = `${rounded}px`;
+    }
+  }
+  window.__PI_ENH_APPLY_COMPOSER_CUSTOM_HEIGHT__ = applyComposerCustomHeight;
+
+  function resetComposerCustomHeight(card, textarea) {
+    if (!card) return;
+    card.classList.remove(COMPOSER_CUSTOM_HEIGHT_CLASS);
+    card.style.removeProperty("--pi-composer-custom-height");
+    if (textarea) {
+      textarea.style.height = "auto";
+      syncComposerTextareaAutoHeight(textarea, { immediate: true });
+    }
+    const formatted = card.querySelector(".pi-enh-formatted-composer");
+    if (formatted) {
+      formatted.style.height = "auto";
+    }
+    try {
+      localStorage.removeItem(COMPOSER_HEIGHT_STORAGE_KEY);
+    } catch (err) {}
+    syncComposerPreloadHeightProperty(null);
+  }
+
+  function syncComposerResizableHeight(card, textarea) {
+    if (!card || !textarea) return;
+    let resizer = card.querySelector(`.${COMPOSER_RESIZER_CLASS}`);
+    if (!resizer) {
+      resizer = document.createElement("div");
+      resizer.className = COMPOSER_RESIZER_CLASS;
+      resizer.setAttribute("role", "separator");
+      resizer.setAttribute("aria-label", "调整输入框高度");
+      resizer.setAttribute("title", "按住拖动调整高度");
+
+      const line = document.createElement("div");
+      line.className = "pi-enh-composer-resizer-line";
+      resizer.appendChild(line);
+
+      card.insertBefore(resizer, card.firstChild);
+
+      let startY = 0;
+      let startHeight = 0;
+      let isDragging = false;
+
+      const onPointerMove = (ev) => {
+        if (!isDragging) return;
+        ev.preventDefault();
+        const deltaY = startY - ev.clientY; // 向上拖为正，输入框增高
+        let targetHeight = startHeight + deltaY;
+
+        const minHeight = 44;
+        const vpHeight = window.visualViewport ? window.visualViewport.height : window.innerHeight;
+        // 允许拉大至可视区域的 80%，给予最充分的阅读与编辑视野，且绝不在高处被吸走反弹
+        const maxHeight = Math.max(minHeight, Math.floor(vpHeight * 0.8));
+
+        targetHeight = Math.max(minHeight, Math.min(maxHeight, targetHeight));
+        applyComposerCustomHeight(card, textarea, targetHeight);
+      };
+
+      const onPointerUp = (ev) => {
+        if (!isDragging) return;
+        isDragging = false;
+        try {
+          if (ev && typeof ev.pointerId === "number") {
+            resizer.releasePointerCapture(ev.pointerId);
+          }
+        } catch (err) {}
+        window.removeEventListener("pointermove", onPointerMove);
+        window.removeEventListener("pointerup", onPointerUp);
+        window.removeEventListener("pointercancel", onPointerUp);
+        card.classList.remove("pi-enh-composer-resizing");
+        document.body.classList.remove("pi-enh-composer-resizing");
+
+        // 绝不自动反弹吸回：用户拖动松手停在哪个高度，就持久保留在哪个高度
+        const currentH = parseFloat(card.style.getPropertyValue("--pi-composer-custom-height") || "0");
+        if (currentH >= 44) {
+          const roundedH = Math.round(currentH);
+          try {
+            localStorage.setItem(COMPOSER_HEIGHT_STORAGE_KEY, String(roundedH));
+          } catch (err) {}
+          syncComposerPreloadHeightProperty(roundedH);
+        }
+      };
+
+      const onPointerDown = (e) => {
+        if (e.button !== 0 && e.pointerType === "mouse") return;
+        e.preventDefault();
+        e.stopPropagation();
+
+        startY = e.clientY;
+        const currentEditor = card.querySelector(".pi-enh-formatted-composer:not([style*='display: none'])") || textarea;
+        startHeight = currentEditor.getBoundingClientRect().height || 56;
+        isDragging = true;
+        try {
+          resizer.setPointerCapture(e.pointerId);
+        } catch (err) {}
+
+        card.classList.add("pi-enh-composer-resizing");
+        document.body.classList.add("pi-enh-composer-resizing");
+
+        // 全局 window 监听，彻底解决手机端手指滑入上方聊天可滚动区域时的手势中断与跳变反弹
+        window.addEventListener("pointermove", onPointerMove, { passive: false });
+        window.addEventListener("pointerup", onPointerUp);
+        window.addEventListener("pointercancel", onPointerUp);
+      };
+
+      resizer.addEventListener("pointerdown", onPointerDown);
+
+      // 若已有保存的高度偏好，自动应用并保持稳定
+      try {
+        const saved = localStorage.getItem(COMPOSER_HEIGHT_STORAGE_KEY);
+        if (saved) {
+          const num = parseFloat(saved);
+          if (Number.isFinite(num) && num >= 44) {
+            applyComposerCustomHeight(card, textarea, num);
+            syncComposerPreloadHeightProperty(num);
+          } else {
+            syncComposerPreloadHeightProperty(null);
+          }
+        } else {
+          syncComposerPreloadHeightProperty(null);
+        }
+      } catch (err) {}
+    }
+  }
 
   function syncCodexComposerLayout() {
     if (!isPluginEnabled("codex-composer-layout")) {
       removeCodexComposerLayout();
       return;
+    }
+
+    // 检查并同步预置高度 CSS 变量与标记（有效数值 >= 44）
+    try {
+      const saved = localStorage.getItem(COMPOSER_HEIGHT_STORAGE_KEY);
+      if (saved) {
+        const num = parseFloat(saved);
+        if (Number.isFinite(num) && num >= 44) {
+          syncComposerPreloadHeightProperty(num);
+        } else {
+          syncComposerPreloadHeightProperty(null);
+        }
+      } else {
+        syncComposerPreloadHeightProperty(null);
+      }
+    } catch (err) {}
+
+    // Preload the model/reasoning grid rules before React mounts a new composer.
+    // Waiting for a mutation observer to decorate the first DOM commit causes a visible height jump.
+    if (isPluginEnabled("composer-model-reasoning-pill")) {
+      ensureComposerModelPillStyle();
+    }
+    if (isPluginEnabled("composer-modes")) {
+      ensureComposerModesStyle();
+      ensureComposerModesStatusObserver();
     }
 
     let style = document.getElementById(CODEX_COMPOSER_STYLE_ID);
@@ -32990,6 +36528,7 @@
         body:has(.settings-dialog-backdrop, .settings-dialog-surface, [role="dialog"][aria-modal="true"]) .pi-enh-cursor-composer {
           display: none !important;
         }
+
 
         /* One grid owns editor and toolbar. Native React nodes are never reparented. */
         .pi-enh-cursor-composer,
@@ -33006,11 +36545,6 @@
           border-radius: 16px !important;
           box-shadow: 0 2px 8px #0000000a !important;
           min-width: 0;
-          animation: pi-enh-composer-in 0.1s ease-out !important;
-        }
-        @keyframes pi-enh-composer-in {
-          from { opacity: 0.92; }
-          to { opacity: 1; }
         }
         .pi-enh-cursor-composer:focus-within,
         fieldset > div[style*="max-width"]:focus-within {
@@ -33019,14 +36553,24 @@
         .pi-enh-cursor-composer .pi-enh-cursor-contents,
         .pi-enh-cursor-composer .pi-enh-cursor-left,
         .pi-enh-cursor-composer .pi-enh-cursor-right,
+        .pi-enh-cursor-composer .pi-enh-cursor-right > .pi-enh-cursor-right-inner:not([hidden]):not([style*="display: none"]):not([style*="display:none"]):not([style*="position: absolute"]):not([style*="position:absolute"]),
         fieldset > div[style*="max-width"] > div:has(textarea),
         fieldset > div[style*="max-width"] > div:has(textarea) > div:has(textarea, .pi-enh-formatted-composer),
         fieldset > div[style*="max-width"] > div[data-pi-composer-toolbar],
         fieldset > div[style*="max-width"] > div[style*="margin-top"],
         fieldset > div[style*="max-width"] [data-pi-composer-left],
         fieldset > div[style*="max-width"] .pi-enh-cursor-left,
-        fieldset > div[style*="max-width"] .pi-enh-cursor-right {
+        fieldset > div[style*="max-width"] .pi-enh-cursor-right,
+        fieldset > div[style*="max-width"] .pi-enh-cursor-right > .pi-enh-cursor-right-inner:not([hidden]):not([style*="display: none"]):not([style*="display:none"]):not([style*="position: absolute"]):not([style*="position:absolute"]) {
           display: contents !important;
+        }
+        .pi-enh-cursor-composer .pi-enh-cursor-right > .pi-enh-cursor-right-inner[hidden],
+        .pi-enh-cursor-composer .pi-enh-cursor-right > .pi-enh-cursor-right-inner[style*="display: none"],
+        .pi-enh-cursor-composer .pi-enh-cursor-right > .pi-enh-cursor-right-inner[style*="display:none"],
+        fieldset > div[style*="max-width"] .pi-enh-cursor-right > .pi-enh-cursor-right-inner[hidden],
+        fieldset > div[style*="max-width"] .pi-enh-cursor-right > .pi-enh-cursor-right-inner[style*="display: none"],
+        fieldset > div[style*="max-width"] .pi-enh-cursor-right > .pi-enh-cursor-right-inner[style*="display:none"] {
+          display: none !important;
         }
 
         /* Cursor 风格文件引用 (@mention) 紧凑浮层：原生 @ 菜单特有 max-height: min(48vh */
@@ -33109,15 +36653,17 @@
           opacity: 0 !important;
         }
 
-        /* 零延迟物理级屏蔽原生队列容器，杜绝任何阶段在 Grid 内部闪烁或引起布局跳动 */
+        /* Keep the native fallback out of the toolbar's narrow auto-placement cells. */
         .pi-enh-cursor-composer > div[style*="padding: 5px 0"],
-        .pi-enh-cursor-composer > div[style*="padding:5px 0"],
-        .pi-enh-cursor-composer > div[style*="padding: 5px"],
-        .pi-enh-cursor-composer > div[style*="padding:5px"],
-        .pi-enh-cursor-composer > div:has(button[title*="移回"]),
-        .pi-enh-cursor-composer > div:has(button[title*="Recall"]),
-        .pi-enh-cursor-composer > div:has(button[title*="recall"]),
-        .pi-enh-cursor-composer > div:has(svg polyline[points*="9 14 4 9 9 4"]) {
+        .pi-enh-cursor-composer > div[style*="padding:5px 0"] {
+          grid-column: 1 / -1 !important;
+          min-width: 0 !important;
+          max-width: 100% !important;
+          box-sizing: border-box !important;
+        }
+
+        /* Queue visibility belongs to composer-queue-panel, not this layout plugin. */
+        .pi-enh-native-queue-hidden {
           display: none !important;
           width: 0 !important;
           height: 0 !important;
@@ -33155,15 +36701,17 @@
           overscroll-behavior: contain !important;
           box-sizing: border-box !important;
         }
-        .pi-enh-cursor-composer:has(.pi-enh-cursor-attachments, div[style*="flex-wrap"] img) .pi-enh-cursor-editor,
-        .pi-enh-cursor-composer:has(.pi-enh-cursor-attachments, div[style*="flex-wrap"] img) textarea.chat-input-textarea,
-        .pi-enh-cursor-composer:has(.pi-enh-cursor-attachments, div[style*="flex-wrap"] img) .pi-enh-formatted-composer,
-        fieldset > div[style*="max-width"]:has(div[style*="flex-wrap"] img) textarea.chat-input-textarea,
-        fieldset > div[style*="max-width"]:has(div[style*="flex-wrap"] img) .pi-enh-formatted-composer {
+        .pi-enh-cursor-composer:has(.pi-enh-cursor-attachments, div[style*="flex-wrap"]:has(img), .pi-enh-attachments-bar, .pi-enh-attachment-card) .pi-enh-cursor-editor,
+        .pi-enh-cursor-composer:has(.pi-enh-cursor-attachments, div[style*="flex-wrap"]:has(img), .pi-enh-attachments-bar, .pi-enh-attachment-card) textarea.chat-input-textarea,
+        .pi-enh-cursor-composer:has(.pi-enh-cursor-attachments, div[style*="flex-wrap"]:has(img), .pi-enh-attachments-bar, .pi-enh-attachment-card) .pi-enh-formatted-composer,
+        fieldset > div[style*="max-width"]:has(div[style*="flex-wrap"]:has(img), .pi-enh-attachments-bar, .pi-enh-attachment-card) textarea.chat-input-textarea,
+        fieldset > div[style*="max-width"]:has(div[style*="flex-wrap"]:has(img), .pi-enh-attachments-bar, .pi-enh-attachment-card) .pi-enh-formatted-composer {
           max-height: clamp(52px, calc(18vh - 12px), 124px) !important;
         }
         .pi-enh-cursor-composer .pi-enh-cursor-attachments,
-        fieldset > div[style*="max-width"] > div[style*="flex-wrap"]:has(img) {
+        fieldset > div[style*="max-width"] > div[style*="flex-wrap"]:has(img),
+        .pi-enh-cursor-composer > .pi-enh-attachments-bar,
+        fieldset > div[style*="max-width"] > .pi-enh-attachments-bar {
           grid-area: 1 / 1 / 2 / -1 !important;
           display: flex !important;
           flex-wrap: nowrap !important;
@@ -33176,6 +36724,11 @@
           overflow-y: hidden !important;
           box-sizing: border-box !important;
           min-width: 0 !important;
+        }
+        /* 当 attachment-bar 挂在原生图片预览容器内部时，使用 display: contents 让 pill 卡片直接无缝复用原生同一 flex 行 */
+        fieldset > div[style*="max-width"] > div[style*="flex-wrap"]:has(img) > .pi-enh-attachments-bar,
+        .pi-enh-cursor-composer .pi-enh-cursor-attachments > .pi-enh-attachments-bar {
+          display: contents !important;
         }
         .pi-enh-cursor-composer .pi-enh-cursor-attachments img,
         fieldset > div[style*="max-width"] > div[style*="flex-wrap"]:has(img) img {
@@ -33225,6 +36778,15 @@
           justify-self: start !important;
           align-self: center !important;
           flex-shrink: 0 !important;
+        }
+
+        /* A text toggle must not auto-place in the 28px icon columns above the editor. */
+        .pi-enh-cursor-composer .pi-enh-format-toggle-btn,
+        fieldset > div[style*="max-width"] .pi-enh-format-toggle-btn {
+          grid-column: 4 !important;
+          grid-row: 3 !important;
+          justify-self: start !important;
+          align-self: center !important;
         }
 
         /* 4. 模型选择器槽位：永远固定在倒数第4列，靠右对齐，绝不重叠 */
@@ -33606,7 +37168,9 @@
         .pi-enh-cursor-composer button:has(svg path[d*="M14.7 6.3"]),
         .pi-enh-cursor-composer div:has(> button[title*="工具预设"]),
         .pi-enh-cursor-composer div:has(> button[aria-label*="工具预设"]),
-        .pi-enh-cursor-composer div:has(> button:has(svg path[d*="M14.7 6.3"])),
+        .pi-enh-cursor-composer div:has(> button[title*="tool preset" i]),
+        .pi-enh-cursor-composer div:has(> button[aria-label*="tool preset" i]),
+        .pi-enh-cursor-composer div:has(> button svg path[d*="M14.7 6.3"]),
 
         .pi-enh-cursor-composer button[title*="压缩上下文"],
         .pi-enh-cursor-composer button[aria-label*="压缩上下文"],
@@ -33617,7 +37181,9 @@
         .pi-enh-cursor-composer button:has(svg polyline[points*="4 14 10 14"]),
         .pi-enh-cursor-composer div:has(> button[title*="压缩上下文"]),
         .pi-enh-cursor-composer div:has(> button[aria-label*="压缩上下文"]),
-        .pi-enh-cursor-composer div:has(> button:has(svg polyline[points*="4 14 10 14"])) {
+        .pi-enh-cursor-composer div:has(> button[title*="compact context" i]),
+        .pi-enh-cursor-composer div:has(> button[aria-label*="compact context" i]),
+        .pi-enh-cursor-composer div:has(> button svg polyline[points*="4 14 10 14"]) {
           display: none !important;
           width: 0 !important;
           height: 0 !important;
@@ -33641,6 +37207,11 @@
           display: inline-flex !important;
           align-items: center !important;
         }
+        .pi-enh-cursor-composer [data-pi-thinking-control][hidden],
+        .pi-enh-cursor-composer [data-pi-thinking-control][style*="display: none"],
+        .pi-enh-cursor-composer [data-pi-thinking-control][style*="display:none"] {
+          display: none !important;
+        }
         .pi-enh-cursor-composer [data-pi-thinking-control] > button,
         .pi-enh-cursor-composer [data-pi-thinking-button],
         .pi-enh-cursor-composer .pi-enh-cursor-left div:has(> button[title*="推理"], > button[aria-label*="推理"], > button[title*="Reasoning" i], > button[title*="thinking" i]) > button {
@@ -33662,10 +37233,10 @@
         }
 
         /* 思考深度下拉菜单弹窗：严格隔离保护，垂直列表排布，杜绝任何外部样式导致横向截断 */
-        .pi-enh-cursor-composer [data-pi-thinking-control] div[style*="position: absolute"],
-        .pi-enh-cursor-composer [data-pi-thinking-control] div[style*="position:absolute"],
-        [data-pi-thinking-control] div[style*="position: absolute"],
-        [data-pi-thinking-control] div[style*="position:absolute"] {
+        .pi-enh-cursor-composer [data-pi-thinking-control] div[style*="position: absolute"]:not([hidden]):not([style*="display: none"]):not([style*="display:none"]),
+        .pi-enh-cursor-composer [data-pi-thinking-control] div[style*="position:absolute"]:not([hidden]):not([style*="display: none"]):not([style*="display:none"]),
+        [data-pi-thinking-control] div[style*="position: absolute"]:not([hidden]):not([style*="display: none"]):not([style*="display:none"]),
+        [data-pi-thinking-control] div[style*="position:absolute"]:not([hidden]):not([style*="display: none"]):not([style*="display:none"]) {
           display: flex !important;
           flex-direction: column !important;
           height: auto !important;
@@ -33676,6 +37247,20 @@
           min-width: 200px !important;
           box-sizing: border-box !important;
           box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35), 0 2px 8px rgba(0, 0, 0, 0.15) !important;
+        }
+        .pi-enh-cursor-composer [data-pi-thinking-control] div[style*="position: absolute"][hidden],
+        .pi-enh-cursor-composer [data-pi-thinking-control] div[style*="position:absolute"][hidden],
+        .pi-enh-cursor-composer [data-pi-thinking-control] div[style*="position: absolute"][style*="display: none"],
+        .pi-enh-cursor-composer [data-pi-thinking-control] div[style*="position: absolute"][style*="display:none"],
+        .pi-enh-cursor-composer [data-pi-thinking-control] div[style*="position:absolute"][style*="display: none"],
+        .pi-enh-cursor-composer [data-pi-thinking-control] div[style*="position:absolute"][style*="display:none"],
+        [data-pi-thinking-control] div[style*="position: absolute"][hidden],
+        [data-pi-thinking-control] div[style*="position:absolute"][hidden],
+        [data-pi-thinking-control] div[style*="position: absolute"][style*="display: none"],
+        [data-pi-thinking-control] div[style*="position: absolute"][style*="display:none"],
+        [data-pi-thinking-control] div[style*="position:absolute"][style*="display: none"],
+        [data-pi-thinking-control] div[style*="position:absolute"][style*="display:none"] {
+          display: none !important;
         }
         .pi-enh-cursor-composer [data-pi-thinking-control] div[style*="position: absolute"] button,
         .pi-enh-cursor-composer [data-pi-thinking-control] div[style*="position:absolute"] button,
@@ -33842,7 +37427,8 @@
             gap: 6px 3px !important;
           }
           .pi-enh-cursor-composer .pi-enh-cursor-left,
-          .pi-enh-cursor-composer .pi-enh-cursor-right {
+          .pi-enh-cursor-composer .pi-enh-cursor-right,
+          .pi-enh-cursor-composer .pi-enh-cursor-right > .pi-enh-cursor-right-inner:not([hidden]):not([style*="display: none"]):not([style*="display:none"]):not([style*="position: absolute"]):not([style*="position:absolute"]) {
             display: contents !important;
           }
           .pi-enh-cursor-composer button.pi-enh-cursor-stop,
@@ -33909,13 +37495,13 @@
           .pi-enh-cursor-composer .pi-enh-formatted-composer,
           fieldset > div[style*="max-width"] textarea.chat-input-textarea,
           fieldset > div[style*="max-width"] .pi-enh-formatted-composer {
-            max-height: clamp(60px, 19vh, 136px) !important;
+            max-height: clamp(70px, 28vh, 200px) !important;
           }
-          .pi-enh-cursor-composer:has(.pi-enh-cursor-attachments, div[style*="flex-wrap"] img) .pi-enh-cursor-editor,
-          .pi-enh-cursor-composer:has(.pi-enh-cursor-attachments, div[style*="flex-wrap"] img) textarea.chat-input-textarea,
-          .pi-enh-cursor-composer:has(.pi-enh-cursor-attachments, div[style*="flex-wrap"] img) .pi-enh-formatted-composer,
-          fieldset > div[style*="max-width"]:has(div[style*="flex-wrap"] img) textarea.chat-input-textarea,
-          fieldset > div[style*="max-width"]:has(div[style*="flex-wrap"] img) .pi-enh-formatted-composer {
+          .pi-enh-cursor-composer:has(.pi-enh-cursor-attachments, div[style*="flex-wrap"]:has(img), .pi-enh-attachments-bar, .pi-enh-attachment-card) .pi-enh-cursor-editor,
+          .pi-enh-cursor-composer:has(.pi-enh-cursor-attachments, div[style*="flex-wrap"]:has(img), .pi-enh-attachments-bar, .pi-enh-attachment-card) textarea.chat-input-textarea,
+          .pi-enh-cursor-composer:has(.pi-enh-cursor-attachments, div[style*="flex-wrap"]:has(img), .pi-enh-attachments-bar, .pi-enh-attachment-card) .pi-enh-formatted-composer,
+          fieldset > div[style*="max-width"]:has(div[style*="flex-wrap"]:has(img), .pi-enh-attachments-bar, .pi-enh-attachment-card) textarea.chat-input-textarea,
+          fieldset > div[style*="max-width"]:has(div[style*="flex-wrap"]:has(img), .pi-enh-attachments-bar, .pi-enh-attachment-card) .pi-enh-formatted-composer {
             max-height: clamp(48px, calc(16vh - 10px), 104px) !important;
           }
         }
@@ -33954,6 +37540,99 @@
             max-height: clamp(36px, calc(22vh - 16px), 64px) !important;
           }
         }
+
+        /* 调整输入框高度手柄 (Resize Handle Bar) - 极细隐蔽设计与零悬停粘连 */
+        .pi-enh-composer-resizer {
+          position: absolute !important;
+          top: -2px !important;
+          left: 0 !important;
+          right: 0 !important;
+          height: 14px !important;
+          display: flex !important;
+          align-items: center !important;
+          justify-content: center !important;
+          cursor: ns-resize !important;
+          touch-action: none !important;
+          user-select: none !important;
+          -webkit-user-select: none !important;
+          -webkit-tap-highlight-color: transparent !important;
+          outline: none !important;
+          z-index: 20 !important;
+        }
+        .pi-enh-composer-resizer-line {
+          width: 32px !important;
+          height: 2px !important;
+          border-radius: 1px !important;
+          background: color-mix(in srgb, var(--border, #71717a) 70%, transparent) !important;
+          transition: background 0.15s ease, width 0.15s ease, height 0.15s ease, opacity 0.15s ease !important;
+          opacity: 0.55 !important;
+          pointer-events: none !important;
+        }
+        /* 仅在支持鼠标 hover 的桌面设备上轻微提高不透明度，依然保持优雅纯灰色，绝无淡蓝色 */
+        @media (hover: hover) and (pointer: fine) {
+          .pi-enh-composer-resizer:hover .pi-enh-composer-resizer-line {
+            opacity: 0.85 !important;
+            width: 36px !important;
+            background: color-mix(in srgb, var(--text-dim, #71717a) 80%, transparent) !important;
+          }
+        }
+        /* 仅在用户实际按住正在拖拽时才显示高亮，松手瞬间恢复中性灰，物理级根除手机触屏粘连 */
+        .pi-enh-composer-resizing .pi-enh-composer-resizer-line {
+          background: var(--accent, #3b82f6) !important;
+          width: 40px !important;
+          height: 2.5px !important;
+          opacity: 0.95 !important;
+        }
+        @media (max-width: 768px) {
+          .pi-enh-composer-resizer {
+            top: -3px !important;
+            height: 18px !important;
+          }
+          .pi-enh-composer-resizer-line {
+            width: 32px !important;
+            height: 2px !important;
+            opacity: 0.5 !important;
+          }
+        }
+
+        /* 预留状态栏 36px 占位槽：仅既有会话、无 shelf 时生效，新会话(:has(.mb-3))不预留 */
+        .chat-content > .relative.shrink-0:has(> fieldset):not(:has(> .mb-3)):not(:has(> .extension-status-shelf))::after {
+          content: "";
+          display: block;
+          height: 36px;
+          flex-shrink: 0;
+        }
+
+        /* 用户拉大/拉小高度首帧预置规则：仅在有用户自定义高度偏好时预置生效，无高度偏好时不污染默认 min-height */
+        html[data-pi-composer-custom-height] .chat-content > .relative.shrink-0 fieldset > div[style*="max-width"]:not(.pi-enh-composer-custom-height) textarea.chat-input-textarea,
+        html[data-pi-composer-custom-height] .chat-content > .relative.shrink-0 fieldset > div[style*="max-width"]:not(.pi-enh-composer-custom-height) .pi-enh-formatted-composer {
+          height: var(--pi-enh-preload-composer-height) !important;
+          max-height: var(--pi-enh-preload-composer-height) !important;
+          min-height: 56px !important;
+          overflow-y: auto !important;
+          overscroll-behavior: contain !important;
+        }
+
+        /* 用户拉大/拉小高度生效规则：最高特异性覆盖默认与媒体查询限制 */
+        .pi-enh-cursor-composer.pi-enh-composer-custom-height .pi-enh-cursor-editor,
+        .pi-enh-cursor-composer.pi-enh-composer-custom-height textarea.chat-input-textarea,
+        .pi-enh-cursor-composer.pi-enh-composer-custom-height .pi-enh-formatted-composer,
+        fieldset > div[style*="max-width"].pi-enh-composer-custom-height textarea.chat-input-textarea,
+        fieldset > div[style*="max-width"].pi-enh-composer-custom-height .pi-enh-formatted-composer {
+          height: var(--pi-composer-custom-height) !important;
+          max-height: var(--pi-composer-custom-height) !important;
+          min-height: 56px !important;
+          overflow-y: auto !important;
+          overscroll-behavior: contain !important;
+        }
+
+        /* 拖拽调整高度时全局防选中文本与光标跳动 */
+        .pi-enh-composer-resizing,
+        .pi-enh-composer-resizing * {
+          user-select: none !important;
+          -webkit-user-select: none !important;
+          cursor: ns-resize !important;
+        }
       `;
       document.head.appendChild(style);
     }
@@ -33962,16 +37641,104 @@
     if (!card) return;
     card.classList.add("pi-enh-cursor-composer");
     textarea.classList.add("pi-enh-cursor-editor");
+    syncComposerResizableHeight(card, textarea);
     syncComposerTextareaAutoHeight(textarea);
     const editor = textarea.parentElement;
     editor.classList.add("pi-enh-cursor-contents");
     if (editor.parentElement !== card) editor.parentElement.classList.add("pi-enh-cursor-contents");
-    const toolbar = Array.from(card.children).find((node) => node.style.marginTop);
+    const toolbar = Array.from(card.children).find((node) => node.style.marginTop || node.hasAttribute?.("data-pi-composer-toolbar"));
     if (toolbar) {
       toolbar.classList.add("pi-enh-cursor-contents");
-      toolbar.firstElementChild?.classList.add("pi-enh-cursor-left");
-      toolbar.lastElementChild?.classList.add("pi-enh-cursor-right");
+      const leftContainer = toolbar.firstElementChild;
+      const rightContainer = toolbar.lastElementChild;
+      leftContainer?.classList.add("pi-enh-cursor-left");
+      rightContainer?.classList.add("pi-enh-cursor-right");
       if (toolbar.children.length > 2) toolbar.children[1].classList.add("pi-enh-cursor-spacer");
+
+      // 1. 30142 unpatched React 兼容：补齐原生图片按钮 data-pi-attach-image（已带标记的 30141 不做改动）
+      if (!toolbar.querySelector('button[data-pi-attach-image]')) {
+        const candidateButtons = Array.from((leftContainer || toolbar).querySelectorAll("button"));
+        const attachBtn = candidateButtons.find((btn) => {
+          if (
+            btn.classList.contains("pi-enh-composer-add-btn") ||
+            btn.hasAttribute("data-pi-composer-add") ||
+            btn.closest(".model-selector, [data-pi-thinking-control], .pi-enh-cursor-right")
+          ) {
+            return false;
+          }
+          const label = `${btn.getAttribute("title") || ""} ${btn.getAttribute("aria-label") || ""}`;
+          return Boolean(
+            btn.querySelector('svg circle[cx="8.5"][cy="8.5"], svg polyline[points*="21 15 16 10 5 21"]') ||
+            /添加图片|上传图片|添加图片或视频|attach\s*image|upload\s*image/i.test(label)
+          );
+        });
+        if (attachBtn && !attachBtn.hasAttribute("data-pi-attach-image")) {
+          attachBtn.setAttribute("data-pi-attach-image", "true");
+          attachBtn.setAttribute("data-pi-enh-tagged-attach", "true");
+        }
+      }
+
+      // 2. 30142 unpatched React 兼容：补齐原生思考控件 data-pi-thinking-control 与 data-pi-thinking-button
+      let thinkingControl = toolbar.querySelector("[data-pi-thinking-control]");
+      if (!thinkingControl) {
+        const rightButtons = Array.from((rightContainer || toolbar).querySelectorAll("button"));
+        const thinkingBtn = rightButtons.find((btn) => {
+          if (btn.closest('div[style*="position: absolute"], div[style*="position:absolute"], [role="listbox"], [role="menu"]')) {
+            return false;
+          }
+          const label = `${btn.getAttribute("title") || ""} ${btn.getAttribute("aria-label") || ""}`;
+          return Boolean(
+            btn.querySelector('svg path[d*="M9.5 2A5.5 5.5"]') ||
+            /推理|思考|reasoning|thinking/i.test(label)
+          );
+        });
+        if (thinkingBtn) {
+          if (!thinkingBtn.hasAttribute("data-pi-thinking-button")) {
+            thinkingBtn.setAttribute("data-pi-thinking-button", "true");
+            thinkingBtn.setAttribute("data-pi-enh-tagged-thinking-button", "true");
+          }
+          const parent = thinkingBtn.parentElement;
+          if (parent && parent.tagName === "DIV" && parent !== toolbar && parent !== card && parent !== rightContainer) {
+            thinkingControl = parent;
+            if (!thinkingControl.hasAttribute("data-pi-thinking-control")) {
+              thinkingControl.setAttribute("data-pi-thinking-control", "true");
+              thinkingControl.setAttribute("data-pi-enh-tagged-thinking-control", "true");
+            }
+          }
+        }
+      } else {
+        const directBtn = Array.from(thinkingControl.children).find((c) => c.tagName === "BUTTON");
+        if (directBtn && !directBtn.hasAttribute("data-pi-thinking-button")) {
+          directBtn.setAttribute("data-pi-thinking-button", "true");
+          directBtn.setAttribute("data-pi-enh-tagged-thinking-button", "true");
+        }
+      }
+
+      // 3. 精确扁平化 30142 controlsMenuRef 下多出的一层直接原生包装层，绝不触碰 30141 已打标直出层或隐藏移动菜单
+      if (rightContainer) {
+        for (const child of Array.from(rightContainer.children)) {
+          if (child.tagName !== "DIV" || child.hasAttribute("data-pi-thinking-control")) {
+            child.classList.remove("pi-enh-cursor-right-inner");
+            continue;
+          }
+          const rawStyle = child.getAttribute("style") || "";
+          const isHiddenOrFloating =
+            child.hidden ||
+            child.getAttribute("aria-hidden") === "true" ||
+            child.style?.display === "none" ||
+            /display\s*:\s*none/i.test(rawStyle) ||
+            child.style?.position === "absolute" ||
+            child.style?.position === "fixed" ||
+            /position\s*:\s*(absolute|fixed)/i.test(rawStyle) ||
+            child.getAttribute("role") === "listbox" ||
+            child.getAttribute("role") === "menu";
+          if (!isHiddenOrFloating && child.querySelector?.("[data-pi-thinking-control], button")) {
+            child.classList.add("pi-enh-cursor-right-inner");
+          } else {
+            child.classList.remove("pi-enh-cursor-right-inner");
+          }
+        }
+      }
     }
     for (const node of Array.from(editor.children)) {
       if (node.tagName === "BUTTON" && !node.classList.contains("pi-enh-quick-fallback-trigger")) {
@@ -34006,6 +37773,13 @@
       if (/提示音|通知声音|压缩|notification sound|compact/i.test(button.title)) button.classList.add("pi-enh-cursor-secondary");
     }
     updateCardContentState(card, textarea);
+    if (typeof pendingComposerAttachments !== "undefined" && pendingComposerAttachments.length > 0) {
+      const nativeImg = card.querySelector?.('div[style*="flex-wrap"]:has(img), .pi-enh-cursor-attachments');
+      const currentBar = findComposerAttachmentBar(textarea);
+      if (!currentBar || !currentBar.isConnected || (nativeImg && currentBar.parentElement !== nativeImg) || (!nativeImg && currentBar.parentElement !== card)) {
+        syncComposerAttachmentBar(textarea);
+      }
+    }
     syncComposerModelPill();
   }
 
@@ -34058,6 +37832,10 @@
   function removeCodexComposerLayout() {
     const style = document.getElementById(CODEX_COMPOSER_STYLE_ID);
     if (style) style.remove();
+    if (typeof pendingComposerAttachments !== "undefined" && pendingComposerAttachments.length > 0) {
+      const ta = findComposerTextarea();
+      if (ta) syncComposerAttachmentBar(ta);
+    }
 
     // 仅定位已标记 composer 卡片的编辑器祖先修复旧 !important
     for (const card of document.querySelectorAll(".pi-enh-cursor-composer")) {
@@ -34090,10 +37868,33 @@
       }
     }
 
+    // 清理本插件在 30142 未打标 DOM 上动态补齐的 data-pi-* 属性，严禁改动 30141 原生已有标记
+    for (const node of document.querySelectorAll('[data-pi-enh-tagged-attach="true"]')) {
+      node.removeAttribute("data-pi-attach-image");
+      node.removeAttribute("data-pi-enh-tagged-attach");
+    }
+    for (const node of document.querySelectorAll('[data-pi-enh-tagged-thinking-control="true"]')) {
+      node.removeAttribute("data-pi-thinking-control");
+      node.removeAttribute("data-pi-enh-tagged-thinking-control");
+    }
+    for (const node of document.querySelectorAll('[data-pi-enh-tagged-thinking-button="true"]')) {
+      node.removeAttribute("data-pi-thinking-button");
+      node.removeAttribute("data-pi-enh-tagged-thinking-button");
+    }
+
+    for (const resizer of document.querySelectorAll(".pi-enh-composer-resizer")) {
+      resizer.remove();
+    }
+    for (const card of document.querySelectorAll(".pi-enh-composer-custom-height")) {
+      card.classList.remove("pi-enh-composer-custom-height");
+      card.style.removeProperty("--pi-composer-custom-height");
+    }
+
     for (const card of document.querySelectorAll(".has-user-content, .pi-enh-has-running-controls")) {
       card.classList.remove("has-user-content", "pi-enh-has-running-controls");
     }
     removeComposerModelPill();
+    syncComposerPreloadHeightProperty(null);
   }
 
   window.__PI_ENH_SYNC_CODEX_COMPOSER_LAYOUT__ = syncCodexComposerLayout;
@@ -34118,8 +37919,45 @@
         }
 
         .pi-enh-cursor-composer.pi-enh-composer-model-pill .pi-enh-cursor-left,
-        .pi-enh-cursor-composer.pi-enh-composer-model-pill .pi-enh-cursor-right {
+        .pi-enh-cursor-composer.pi-enh-composer-model-pill .pi-enh-cursor-right,
+        .pi-enh-cursor-composer.pi-enh-composer-model-pill .pi-enh-cursor-right > .pi-enh-cursor-right-inner:not([hidden]):not([style*="display: none"]):not([style*="display:none"]):not([style*="position: absolute"]):not([style*="position:absolute"]) {
           display: contents !important;
+        }
+
+        /* The outer margin-top toolbar is already contents in the base layout.
+           Flatten its visible, untagged native side wrappers on the first React commit. */
+        .pi-enh-cursor-composer.pi-enh-composer-model-pill > div[style*="margin-top"] > div:first-child:not([hidden]):not([aria-hidden="true"]):not([style*="display: none"]):not([style*="display:none"]),
+        .pi-enh-cursor-composer.pi-enh-composer-model-pill > div[style*="margin-top"] > div:last-child:not([hidden]):not([aria-hidden="true"]):not([style*="display: none"]):not([style*="display:none"]) {
+          display: contents !important;
+        }
+        /* Paired hidden-state rules outrank the native inline display and synced contents classes. */
+        .pi-enh-cursor-composer.pi-enh-composer-model-pill > div[style*="margin-top"] > div:first-child[hidden],
+        .pi-enh-cursor-composer.pi-enh-composer-model-pill > div[style*="margin-top"] > div:first-child[style*="display: none"],
+        .pi-enh-cursor-composer.pi-enh-composer-model-pill > div[style*="margin-top"] > div:first-child[style*="display:none"],
+        .pi-enh-cursor-composer.pi-enh-composer-model-pill > div[style*="margin-top"] > div:last-child[hidden],
+        .pi-enh-cursor-composer.pi-enh-composer-model-pill > div[style*="margin-top"] > div:last-child[style*="display: none"],
+        .pi-enh-cursor-composer.pi-enh-composer-model-pill > div[style*="margin-top"] > div:last-child[style*="display:none"],
+        .pi-enh-cursor-composer.pi-enh-composer-model-pill > div[style*="margin-top"] > div:last-child > div[hidden],
+        .pi-enh-cursor-composer.pi-enh-composer-model-pill > div[style*="margin-top"] > div:last-child > div[style*="display: none"],
+        .pi-enh-cursor-composer.pi-enh-composer-model-pill > div[style*="margin-top"] > div:last-child > div[style*="display:none"],
+        .pi-enh-cursor-composer.pi-enh-composer-model-pill > div[style*="margin-top"] > div:last-child > div > div[hidden]:has(> button svg path[d*="M9.5 2A5.5 5.5"]),
+        .pi-enh-cursor-composer.pi-enh-composer-model-pill > div[style*="margin-top"] > div:last-child > div > div[style*="display: none"]:has(> button svg path[d*="M9.5 2A5.5 5.5"]),
+        .pi-enh-cursor-composer.pi-enh-composer-model-pill > div[style*="margin-top"] > div:last-child > div > div[style*="display:none"]:has(> button svg path[d*="M9.5 2A5.5 5.5"]),
+        .pi-enh-cursor-composer.pi-enh-composer-model-pill .pi-enh-cursor-left[hidden],
+        .pi-enh-cursor-composer.pi-enh-composer-model-pill .pi-enh-cursor-left[style*="display: none"],
+        .pi-enh-cursor-composer.pi-enh-composer-model-pill .pi-enh-cursor-left[style*="display:none"],
+        .pi-enh-cursor-composer.pi-enh-composer-model-pill .pi-enh-cursor-right[hidden],
+        .pi-enh-cursor-composer.pi-enh-composer-model-pill .pi-enh-cursor-right[style*="display: none"],
+        .pi-enh-cursor-composer.pi-enh-composer-model-pill .pi-enh-cursor-right[style*="display:none"] {
+          display: none !important;
+        }
+        /* Mirror the later .pi-enh-cursor-right-inner tag only for the visible inline controls row. */
+        .pi-enh-cursor-composer.pi-enh-composer-model-pill > div[style*="margin-top"] > div:last-child > div:not([hidden]):not([aria-hidden="true"]):not([style*="display: none"]):not([style*="display:none"]):not([style*="position: absolute"]):not([style*="position:absolute"]):not([style*="position: fixed"]):not([style*="position:fixed"]):not([role="listbox"]):not([role="menu"]):has(> div > button svg path[d*="M9.5 2A5.5 5.5"]) {
+          display: contents !important;
+        }
+        /* Hide an orphan pre-model label without changing grid/display participation. */
+        .pi-enh-cursor-composer.pi-enh-composer-model-pill:not(:has(.model-selector)) > div[style*="margin-top"] > div:last-child > div:not([hidden]):not([style*="display: none"]):not([style*="display:none"]):has(> div > button svg path[d*="M9.5 2A5.5 5.5"]) > div:not([hidden]):not([style*="display: none"]):not([style*="display:none"]):has(> button svg path[d*="M9.5 2A5.5 5.5"]) > button > span {
+          visibility: hidden;
         }
 
         /* 加号与图片按钮位置收紧 */
@@ -34144,7 +37982,8 @@
           grid-row: 3 !important;
           align-self: center !important;
         }
-        .pi-enh-cursor-composer.pi-enh-composer-model-pill button[data-pi-attach-image] {
+        .pi-enh-cursor-composer.pi-enh-composer-model-pill button[data-pi-attach-image],
+        .pi-enh-cursor-composer.pi-enh-composer-model-pill > div[style*="margin-top"] > div:first-child > button:has(svg circle[cx="8.5"][cy="8.5"], svg polyline[points*="21 15 16 10 5 21"]) {
           grid-column: 2 !important;
           grid-row: 3 !important;
           justify-self: start !important;
@@ -34159,7 +37998,8 @@
         }
 
         .pi-enh-cursor-composer.pi-enh-composer-model-pill button.pi-enh-cursor-stop,
-        .pi-enh-cursor-composer.pi-enh-composer-model-pill .pi-enh-cursor-right > button.pi-enh-cursor-stop {
+        .pi-enh-cursor-composer.pi-enh-composer-model-pill .pi-enh-cursor-right > button.pi-enh-cursor-stop,
+        .pi-enh-cursor-composer.pi-enh-composer-model-pill .pi-enh-cursor-right > .pi-enh-cursor-right-inner > button.pi-enh-cursor-stop {
           grid-column: -2 !important;
           grid-row: 3 !important;
           justify-self: end !important;
@@ -34181,7 +38021,10 @@
         }
 
         .pi-enh-cursor-composer.pi-enh-composer-model-pill [data-pi-thinking-control],
-        .pi-enh-cursor-composer.pi-enh-composer-model-pill .pi-enh-cursor-right > div[data-pi-thinking-control] {
+        .pi-enh-cursor-composer.pi-enh-composer-model-pill .pi-enh-cursor-right > div[data-pi-thinking-control],
+        .pi-enh-cursor-composer.pi-enh-composer-model-pill .pi-enh-cursor-right > .pi-enh-cursor-right-inner > div[data-pi-thinking-control],
+        .pi-enh-cursor-composer.pi-enh-composer-model-pill .pi-enh-cursor-right > .pi-enh-cursor-right-inner > div:not([data-pi-thinking-control]):has(> button svg path[d*="M9.5 2A5.5 5.5"]),
+        .pi-enh-cursor-composer.pi-enh-composer-model-pill > div[style*="margin-top"] > div:last-child > div:not([hidden]):not([aria-hidden="true"]):not([style*="display: none"]):not([style*="display:none"]):not([style*="position: absolute"]):not([style*="position:absolute"]):not([style*="position: fixed"]):not([style*="position:fixed"]):not([role="listbox"]):not([role="menu"]) > div:not([data-pi-thinking-control]):not([hidden]):not([aria-hidden="true"]):not([style*="display: none"]):not([style*="display:none"]):has(> button svg path[d*="M9.5 2A5.5 5.5"]) {
           grid-column: -3 !important;
           grid-row: 3 !important;
           padding: 0 !important;
@@ -34195,6 +38038,18 @@
           display: inline-flex !important;
         }
 
+        .pi-enh-cursor-composer.pi-enh-composer-model-pill [data-pi-thinking-control][hidden],
+        .pi-enh-cursor-composer.pi-enh-composer-model-pill [data-pi-thinking-control][style*="display: none"],
+        .pi-enh-cursor-composer.pi-enh-composer-model-pill [data-pi-thinking-control][style*="display:none"],
+        .pi-enh-cursor-composer.pi-enh-composer-model-pill .pi-enh-cursor-right > div[data-pi-thinking-control][hidden],
+        .pi-enh-cursor-composer.pi-enh-composer-model-pill .pi-enh-cursor-right > div[data-pi-thinking-control][style*="display: none"],
+        .pi-enh-cursor-composer.pi-enh-composer-model-pill .pi-enh-cursor-right > div[data-pi-thinking-control][style*="display:none"],
+        .pi-enh-cursor-composer.pi-enh-composer-model-pill .pi-enh-cursor-right > .pi-enh-cursor-right-inner > div[data-pi-thinking-control][hidden],
+        .pi-enh-cursor-composer.pi-enh-composer-model-pill .pi-enh-cursor-right > .pi-enh-cursor-right-inner > div[data-pi-thinking-control][style*="display: none"],
+        .pi-enh-cursor-composer.pi-enh-composer-model-pill .pi-enh-cursor-right > .pi-enh-cursor-right-inner > div[data-pi-thinking-control][style*="display:none"] {
+          display: none !important;
+        }
+
         .pi-enh-cursor-composer.pi-enh-composer-model-pill .pi-enh-cursor-send,
         .pi-enh-cursor-composer.pi-enh-composer-model-pill .pi-enh-cursor-actions,
         .pi-enh-cursor-composer.pi-enh-composer-model-pill div[style*="align-self: flex-end"]:not(:has(textarea, [contenteditable])) {
@@ -34204,8 +38059,68 @@
           align-self: center !important;
         }
 
-        .pi-enh-cursor-composer.pi-enh-composer-model-pill:not(:has([data-pi-thinking-control])) .model-selector {
-          grid-column: -3 !important;
+        /* Style the native send button before the observer adds its enhancement class. */
+        .pi-enh-cursor-composer.pi-enh-composer-model-pill button:has(> svg polyline[points*="7.5 3 12 7 7.5 11"]):not(.pi-enh-cursor-send) {
+          position: relative !important;
+          grid-column: -2 !important;
+          grid-row: 3 !important;
+          justify-self: end !important;
+          align-self: center !important;
+          width: 24px !important;
+          height: 24px !important;
+          min-width: 24px !important;
+          max-width: 24px !important;
+          gap: 0 !important;
+          padding: 0 !important;
+          margin: 0 !important;
+          border: none !important;
+          border-radius: 50% !important;
+          box-shadow: none !important;
+          font-size: 0 !important;
+          line-height: 0 !important;
+          display: inline-flex !important;
+          align-items: center !important;
+          justify-content: center !important;
+          box-sizing: border-box !important;
+          overflow: hidden !important;
+          transition: background 0.15s ease, color 0.15s ease, transform 0.1s ease, box-shadow 0.15s ease !important;
+        }
+        .pi-enh-cursor-composer.pi-enh-composer-model-pill button:has(> svg polyline[points*="7.5 3 12 7 7.5 11"]):not(.pi-enh-cursor-send)::before {
+          content: "" !important;
+          position: absolute !important;
+          top: 50% !important;
+          left: 50% !important;
+          transform: translate(-50%, -50%) !important;
+          display: block !important;
+          width: 14px !important;
+          height: 14px !important;
+          margin: 0 !important;
+          padding: 0 !important;
+          pointer-events: none !important;
+          background-color: currentColor !important;
+          -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M12 19V5m-7 7 7-7 7 7' fill='none' stroke='black' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") no-repeat center / contain !important;
+          mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M12 19V5m-7 7 7-7 7 7' fill='none' stroke='black' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") no-repeat center / contain !important;
+        }
+        .pi-enh-cursor-composer.pi-enh-composer-model-pill button:has(> svg polyline[points*="7.5 3 12 7 7.5 11"]):not(.pi-enh-cursor-send) > svg {
+          display: none !important;
+        }
+        .pi-enh-cursor-composer.pi-enh-composer-model-pill button:has(> svg polyline[points*="7.5 3 12 7 7.5 11"]):not(.pi-enh-cursor-send):disabled {
+          background: rgba(128, 128, 128, 0.14) !important;
+          color: var(--text-dim, #71717a) !important;
+          cursor: not-allowed !important;
+          opacity: 0.55 !important;
+        }
+        .pi-enh-cursor-composer.pi-enh-composer-model-pill button:has(> svg polyline[points*="7.5 3 12 7 7.5 11"]):not(.pi-enh-cursor-send):not(:disabled) {
+          background: #efefef !important;
+          color: #262626 !important;
+          cursor: pointer !important;
+          opacity: 1 !important;
+        }
+        .pi-enh-cursor-composer.pi-enh-composer-model-pill button:has(> svg polyline[points*="7.5 3 12 7 7.5 11"]):not(.pi-enh-cursor-send):not(:disabled):hover {
+          background: #ffffff !important;
+        }
+        .pi-enh-cursor-composer.pi-enh-composer-model-pill button:has(> svg polyline[points*="7.5 3 12 7 7.5 11"]):not(.pi-enh-cursor-send):not(:disabled):active {
+          transform: scale(0.94) !important;
         }
 
         /* 当模型选择器或思考控件展开下拉菜单时，外层与控件层叠上下文提升至最前，确保绝不被任何浮动按钮遮挡 */
@@ -34241,8 +38156,8 @@
           transition: background-color 0.15s ease, border-color 0.15s ease !important;
         }
 
-        .pi-enh-cursor-composer.pi-enh-composer-model-pill:not(:has([data-pi-thinking-control]))::after {
-          grid-column: -3 / -2 !important;
+        .pi-enh-cursor-composer.pi-enh-composer-model-pill:not(:has([data-pi-thinking-control], .pi-enh-cursor-right-inner > div > button > svg > path[d*="M9.5 2A5.5 5.5"]))::after {
+          grid-column: -4 / -3 !important;
         }
 
         html[data-theme="light"] .pi-enh-cursor-composer.pi-enh-composer-model-pill::after,
@@ -34312,7 +38227,7 @@
           white-space: nowrap !important;
         }
 
-        .pi-enh-cursor-composer.pi-enh-composer-model-pill:not(:has([data-pi-thinking-control])) .model-selector > button {
+        .pi-enh-cursor-composer.pi-enh-composer-model-pill:not(:has([data-pi-thinking-control], .pi-enh-cursor-right-inner > div > button > svg > path[d*="M9.5 2A5.5 5.5"])) .model-selector > button {
           border-radius: 9999px !important;
           padding: 0 10px 0 12px !important;
         }
@@ -34369,7 +38284,7 @@
           margin-left: 1px !important;
         }
 
-        .pi-enh-cursor-composer.pi-enh-composer-model-pill:not(:has([data-pi-thinking-control])) .model-selector > button::after {
+        .pi-enh-cursor-composer.pi-enh-composer-model-pill:not(:has([data-pi-thinking-control], .pi-enh-cursor-right-inner > div > button > svg > path[d*="M9.5 2A5.5 5.5"])) .model-selector > button::after {
           content: "" !important;
           display: inline-block !important;
           width: 10px !important;
@@ -34527,14 +38442,111 @@
     const style = document.createElement("style");
     style.id = MOBILE_MODEL_GUARD_STYLE_ID;
     style.textContent = `
-      /* 模型下拉列表层叠保护（仅作用于 .model-selector 内部 listbox） */
-      .model-selector > div[role="listbox"],
+      /* 物理吸附铁律：模型选择下拉菜单必须紧挨在按钮正上方，杜绝脱节与半空悬浮 */
+      .model-selector.is-toolbar > div[role="listbox"],
       .model-selector div[role="listbox"] {
+        position: absolute !important;
+        bottom: calc(100% + 6px) !important;
+        top: auto !important;
+        right: 0 !important;
+        left: auto !important;
+        max-width: min(320px, calc(100vw - 16px)) !important;
         z-index: 1200 !important;
-        box-sizing: border-box;
+        box-sizing: border-box !important;
+        box-shadow: 0 -4px 16px rgba(0, 0, 0, 0.14), 0 0 0 1px var(--border) !important;
       }
     `;
     document.head.appendChild(style);
+  }
+
+  let activeTouchTriggerBtn = null;
+  let touchStartX = 0;
+  let touchStartY = 0;
+  let touchStartTime = 0;
+  let touchIsMoved = false;
+
+  function handleModelSelectorTouchStart(e) {
+    if (!isPluginEnabled("mobile-model-keyboard-guard")) return;
+    const target = e?.target;
+    if (!target) return;
+    const el = target.nodeType === 1 ? target : target.parentElement;
+    if (!el || typeof el.closest !== "function") return;
+
+    if (el.closest('textarea, [contenteditable], .pi-enh-formatted-composer, .pi-enh-cursor-editor, input')) {
+      return;
+    }
+    if (el.closest('dialog, .settings-modal, [data-modal]')) return;
+
+    const isTrigger = el.closest(
+      '.model-selector button, .model-selector [role="button"], [data-pi-thinking-control] > button, [data-pi-thinking-button]'
+    );
+    if (!isTrigger) return;
+    if (el.closest('div[role="listbox"], [role="option"]')) return;
+
+    // 检查当前是否正处于打字/键盘展开态
+    const active = document.activeElement;
+    const isEditing = active && (
+      active.tagName === "TEXTAREA" ||
+      active.tagName === "INPUT" ||
+      active.isContentEditable ||
+      active.classList?.contains("pi-enh-formatted-composer")
+    );
+
+    // 核心物理保护：若处于键盘展开状态，在 touchstart 阻止默认失焦行为，保证键盘绝对不被收起！
+    if (isEditing) {
+      if (typeof e.preventDefault === "function") {
+        e.preventDefault();
+      }
+      activeTouchTriggerBtn = isTrigger;
+      const t = e.touches ? e.touches[0] : e;
+      touchStartX = t?.clientX || 0;
+      touchStartY = t?.clientY || 0;
+      touchStartTime = Date.now();
+      touchIsMoved = false;
+    }
+  }
+
+  function handleModelSelectorTouchMove(e) {
+    if (!activeTouchTriggerBtn) return;
+    const t = e.touches ? e.touches[0] : e;
+    if (t) {
+      const dist = Math.hypot((t.clientX || 0) - touchStartX, (t.clientY || 0) - touchStartY);
+      if (dist > 12) {
+        touchIsMoved = true;
+      }
+    }
+  }
+
+  function handleModelSelectorTouchEnd() {
+    if (!activeTouchTriggerBtn) return;
+    const btn = activeTouchTriggerBtn;
+    activeTouchTriggerBtn = null;
+
+    if (touchIsMoved) return;
+    if (Date.now() - touchStartTime > 600) return;
+
+    // 手指抬起，手动触发受信任的 click 事件打开菜单，完美弥补 touchstart 阻止失焦带来的原生 click 抑制！
+    try {
+      btn.click();
+    } catch (_) {}
+  }
+
+  function handleModelSelectorTouchCancel() {
+    activeTouchTriggerBtn = null;
+    touchIsMoved = false;
+  }
+
+  function handleModelSelectorPointerDown(e) {
+    // 桌面端鼠标点击拦截失焦：若当前正在打字，阻止 mousedown 默认失焦，保持输入框焦点且不影响 click 派发
+    if (e.pointerType === "mouse") {
+      const active = document.activeElement;
+      if (active && (active.tagName === "TEXTAREA" || active.tagName === "INPUT" || active.isContentEditable || active.classList?.contains("pi-enh-formatted-composer"))) {
+        const isTrigger = e.target?.closest?.('.model-selector button, .model-selector [role="button"], [data-pi-thinking-control] > button, [data-pi-thinking-button]');
+        if (isTrigger && !e.target.closest('div[role="listbox"], [role="option"]')) {
+          if (typeof e.preventDefault === "function") e.preventDefault();
+        }
+      }
+    }
   }
 
   function handleModelSelectorClick(e) {
@@ -34548,10 +38560,9 @@
     if (el.closest('textarea, [contenteditable], .pi-enh-formatted-composer, .pi-enh-cursor-editor, input')) {
       return;
     }
-
     if (el.closest('dialog, .settings-modal, [data-modal]')) return;
 
-    // 检查是否真正点击了模型选择器触发按钮或思考控件触发按钮（严禁包含外层 card 的 .pi-enh-composer-model-pill）
+    // 检查是否真正点击了模型选择器触发按钮或思考控件触发按钮
     const isTrigger = el.closest(
       '.model-selector button, .model-selector [role="button"], [data-pi-thinking-control] > button, [data-pi-thinking-button]'
     );
@@ -34560,26 +38571,26 @@
     // 若点击已在展开的菜单内部列表项，不干扰
     if (el.closest('div[role="listbox"], [role="option"]')) return;
 
+    // 记录触发前是否是编辑框聚焦态
+    const prevActive = document.activeElement;
+    const wasEditing = prevActive && (
+      prevActive.tagName === "TEXTAREA" ||
+      prevActive.tagName === "INPUT" ||
+      prevActive.isContentEditable ||
+      prevActive.classList?.contains("pi-enh-formatted-composer")
+    );
+
+    // 遵从用户指令：点击模型选择按钮绝不收起软键盘，严禁调用 active.blur()！
     addManagedTimeout(syncOpenModelListboxes, 0);
 
-    if (typeof isMobileEnvironment === "function" && !isMobileEnvironment()) return;
-
-    // 捕获当前编辑框，但必须等本轮 click/React 处理完并打开菜单后再 blur。
-    // pointerdown/touchstart 时立刻收起软键盘会触发视口重排，使手机后续 click 落到已移动的对话输入框。
-    const active = document.activeElement;
-    if (
-      active &&
-      (active.tagName === "TEXTAREA" ||
-        active.tagName === "INPUT" ||
-        active.isContentEditable ||
-        active.classList?.contains("pi-enh-formatted-composer"))
-    ) {
+    // 如果之前正在打字（软键盘展开），确保编辑框保持焦点，绝不被收起软键盘
+    if (wasEditing && prevActive && prevActive.isConnected) {
       addManagedTimeout(() => {
-        if (!isPluginEnabled("mobile-model-keyboard-guard") || !active.isConnected || document.activeElement !== active) return;
-        try {
-          active.blur();
-        } catch (err) {}
-        syncOpenModelListboxes();
+        if (prevActive.isConnected && document.activeElement !== prevActive) {
+          try {
+            prevActive.focus({ preventScroll: true });
+          } catch (_) {}
+        }
       }, 0);
     }
   }
@@ -34595,6 +38606,7 @@
 
     if (!listbox.__piModelGuardOrig) {
       listbox.__piModelGuardOrig = {
+        position: listbox.style.position,
         zIndex: listbox.style.zIndex,
         maxHeight: listbox.style.maxHeight,
         top: listbox.style.top,
@@ -34605,50 +38617,48 @@
       };
     }
 
-    // 1. 视口高度与边界安全保护（visualViewport、安全边距 8px / 触发器间距 6px）
+    // 1. 物理吸附锚定：下拉菜单必须始终挨在模型选择按钮上方 6px，绝对避免高空悬浮脱节
+    listbox.style.setProperty("position", "absolute", "important");
+    listbox.style.setProperty("bottom", "calc(100% + 6px)", "important");
+    listbox.style.setProperty("top", "auto", "important");
+    listbox.style.setProperty("right", "0", "important");
+    listbox.style.setProperty("left", "auto", "important");
     listbox.style.zIndex = "1200";
-    const composerParent = listbox.closest('.pi-enh-cursor-composer');
+
+    const composerParent = listbox.closest('.pi-enh-cursor-composer') || selectorParent.closest('fieldset > div');
     for (const parent of [selectorParent, composerParent]) {
       if (!parent) continue;
       if (parent.__piModelGuardZIndex === undefined) parent.__piModelGuardZIndex = parent.style.zIndex;
       parent.style.zIndex = "1200";
     }
 
+    // 2. 动态视口高度与边界安全限制（visualViewport 边界安全保护）
     const viewport = window.visualViewport;
     const viewportTop = viewport?.offsetTop || 0;
-    const viewportBottom = viewportTop + (viewport?.height || window.innerHeight);
+    const viewportHeight = viewport?.height || window.innerHeight;
+    const viewportBottom = viewportTop + viewportHeight;
     const triggerBtn = selectorParent.querySelector('button[aria-haspopup="listbox"], button');
+
     if (triggerBtn && viewportBottom > viewportTop) {
       const r = triggerBtn.getBoundingClientRect();
-      const availAbove = Math.floor(r.top - 6 - viewportTop - 8);
-      const availBelow = Math.floor(viewportBottom - r.bottom - 6 - 8);
-      if (availAbove >= 120 || availAbove >= availBelow) {
-        listbox.style.top = "";
-        listbox.style.bottom = `${Math.max(8, Math.round(window.innerHeight - r.top + 6))}px`;
-        listbox.style.maxHeight = `${Math.max(60, availAbove)}px`;
-      } else {
-        listbox.style.bottom = "";
-        listbox.style.top = `${Math.max(viewportTop + 8, Math.round(r.bottom + 6))}px`;
-        listbox.style.maxHeight = `${Math.max(60, availBelow)}px`;
+      const availAbove = Math.floor(r.top - viewportTop - 12);
+      const safeMaxHeight = Math.max(80, Math.min(availAbove > 0 ? availAbove : 200, Math.floor(viewportHeight * 0.75)));
+      listbox.style.maxHeight = `${safeMaxHeight}px`;
+
+      // 水平防溢出：确保向左展开的菜单不会超出视口左边缘
+      const safeLeft = (viewport?.offsetLeft || 0) + 8;
+      const safeRight = (viewport?.offsetLeft || 0) + (viewport?.width || window.innerWidth) - 8;
+      const availWidth = Math.floor(Math.max(160, safeRight - safeLeft));
+      listbox.style.maxWidth = `${Math.min(320, availWidth)}px`;
+
+      // 如果按钮右边界距离视口左侧太近，向左展开会超出屏幕左侧，则改向右展开
+      if (r.right - 320 < safeLeft && r.left >= safeLeft) {
+        listbox.style.setProperty("right", "auto", "important");
+        listbox.style.setProperty("left", "0", "important");
       }
     }
 
-    const rect = listbox.getBoundingClientRect();
-    if (rect.top < viewportTop + 8 && viewportBottom > viewportTop) {
-      listbox.style.top = `${Math.round(viewportTop + 8)}px`;
-      listbox.style.bottom = "auto";
-      listbox.style.maxHeight = `${Math.max(60, Math.floor(viewportBottom - viewportTop - 16))}px`;
-    }
-    const safeLeft = (viewport?.offsetLeft || 0) + 8;
-    const safeRight = (viewport?.offsetLeft || 0) + (viewport?.width || window.innerWidth) - 8;
-    if (rect.left < safeLeft || rect.right > safeRight) {
-      const width = Math.min(rect.width, Math.max(1, safeRight - safeLeft));
-      listbox.style.right = "auto";
-      listbox.style.left = `${Math.round(Math.max(safeLeft, Math.min(triggerBtn?.getBoundingClientRect().left ?? rect.left, safeRight - width)))}px`;
-      listbox.style.maxWidth = `${Math.floor(Math.max(1, safeRight - safeLeft))}px`;
-    }
-
-    // 2. 移动端/触屏环境下，拦截搜索框自动聚焦调起虚拟键盘
+    // 3. 移动端/触屏环境下，拦截搜索框自动聚焦调起虚拟键盘
     if (isMobile) {
       const filterInput = listbox.querySelector('input');
       if (filterInput) {
@@ -34725,7 +38735,12 @@
     }
   }
 
-  // 仅在 click 阶段安排延迟 blur；绝不在 pointerdown/touchstart 改变视口与点击目标。
+  // 监听 touch 与 pointer 事件：键盘展开时 touchstart 拦截失焦保持键盘不被关闭，并在 touchend 手动触发点击打开菜单
+  addManagedListener(document, "touchstart", handleModelSelectorTouchStart, { passive: false, capture: true });
+  addManagedListener(document, "touchmove", handleModelSelectorTouchMove, { passive: true, capture: true });
+  addManagedListener(document, "touchend", handleModelSelectorTouchEnd, { passive: true, capture: true });
+  addManagedListener(document, "touchcancel", handleModelSelectorTouchCancel, { passive: true, capture: true });
+  addManagedListener(document, "pointerdown", handleModelSelectorPointerDown, true);
   addManagedListener(document, "click", handleModelSelectorClick, true);
   addManagedListener(document, "input", (e) => {
     if (!isPluginEnabled("mobile-model-keyboard-guard")) return;
@@ -34776,7 +38791,9 @@
   window.__PI_ENH_REMOVE_MOBILE_MODEL_GUARD__ = removeMobileModelKeyboardGuard;
   window.__PI_ENH_INSPECT_MODEL_LISTBOX__ = inspectAndProtectModelListbox;
   window.__PI_ENH_HANDLE_MODEL_SELECTOR_CLICK__ = handleModelSelectorClick;
-  window.__PI_ENH_HANDLE_MODEL_POINTERDOWN__ = handleModelSelectorClick;
+  window.__PI_ENH_HANDLE_MODEL_POINTERDOWN__ = handleModelSelectorPointerDown;
+  window.__PI_ENH_HANDLE_MODEL_TOUCHSTART__ = handleModelSelectorTouchStart;
+  window.__PI_ENH_HANDLE_MODEL_TOUCHEND__ = handleModelSelectorTouchEnd;
 
   // ==========================================
   // 3.55.0 Composer Thinking Options Refinement (思考深度选项垂直排布与排除“默认”)
@@ -34898,10 +38915,12 @@
   let isFormattedViewMode = getPersistedFormattedViewMode();
   isComposingInput = false;
   let composerCompositionEndedAt = 0;
+  let lastCompositionKeyReleased = false;
   let composerFormatTextareaCleanup = null;
 
   function onComposerFormatCompositionStart() {
     isComposingInput = true;
+    lastCompositionKeyReleased = false;
   }
 
   function onComposerFormatCompositionEnd() {
@@ -34910,7 +38929,8 @@
   }
 
   function blockComposerCompositionShortcut(event) {
-    const composing = isComposingInput || event.isComposing || event.keyCode === 229 || Date.now() - composerCompositionEndedAt < 100;
+    const composing = isComposingInput || event.isComposing || event.keyCode === 229
+      || (Date.now() - composerCompositionEndedAt < 100 && !lastCompositionKeyReleased);
     if (!composing) return false;
     if (event.key === "Enter") {
       // Keep IME confirmation native, but never let its Enter become a send.
@@ -35273,6 +39293,50 @@
     return htmlToMarkdown(el.innerHTML);
   }
 
+  function restoreFormattedSelectionFromTextarea(formattedComposer, markdown, textarea) {
+    if (!formattedComposer || !textarea) return false;
+
+    const sourceStart = Number.isFinite(textarea.selectionStart) ? textarea.selectionStart : markdown.length;
+    const sourceEnd = Number.isFinite(textarea.selectionEnd) ? textarea.selectionEnd : sourceStart;
+    const getRenderedOffset = (sourceOffset) => {
+      const prefix = document.createElement("div");
+      const boundedOffset = Math.max(0, Math.min(markdown.length, sourceOffset));
+      prefix.innerHTML = markdownToFormattedHtml(markdown.slice(0, boundedOffset));
+      return (prefix.textContent || "").length;
+    };
+    const locateTextPoint = (renderedOffset) => {
+      const walker = document.createTreeWalker(formattedComposer, NodeFilter.SHOW_TEXT);
+      let remaining = Math.max(0, renderedOffset);
+      let node = null;
+      let lastTextNode = null;
+      while ((node = walker.nextNode())) {
+        const length = (node.nodeValue || "").length;
+        lastTextNode = node;
+        if (remaining <= length) return { node, offset: remaining };
+        remaining -= length;
+      }
+      if (lastTextNode) {
+        return { node: lastTextNode, offset: (lastTextNode.nodeValue || "").length };
+      }
+      return { node: formattedComposer, offset: formattedComposer.childNodes.length };
+    };
+
+    try {
+      const range = document.createRange();
+      const start = locateTextPoint(getRenderedOffset(sourceStart));
+      const end = locateTextPoint(getRenderedOffset(sourceEnd));
+      range.setStart(start.node, start.offset);
+      range.setEnd(end.node, end.offset);
+      const selection = window.getSelection();
+      if (!selection) return false;
+      selection.removeAllRanges();
+      selection.addRange(range);
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
   function updateFormattedViewMode(targetFormatted) {
     isFormattedViewMode = targetFormatted;
     setPersistedFormattedViewMode(isFormattedViewMode);
@@ -35299,9 +39363,11 @@
         activeComposerFormatTextarea.style.display = "none";
         activeFormattedComposer.style.display = "block";
         activeFormattedComposer.focus();
-        const selection = window.getSelection();
-        selection?.selectAllChildren(activeFormattedComposer);
-        selection?.collapseToEnd();
+        if (!restoreFormattedSelectionFromTextarea(activeFormattedComposer, currentMd, activeComposerFormatTextarea)) {
+          const selection = window.getSelection();
+          selection?.selectAllChildren(activeFormattedComposer);
+          selection?.collapseToEnd();
+        }
       } else {
         activeComposerFormatTextarea.style.display = "block";
         activeFormattedComposer.style.display = "none";
@@ -35319,8 +39385,8 @@
     }
   }
 
-  function insertMarkdownIntoComposer(md) {
-    const textarea = activeComposerFormatTextarea || findComposerTextarea();
+  function insertMarkdownIntoComposer(md, targetTextarea = null) {
+    const textarea = targetTextarea || (document.activeElement instanceof HTMLTextAreaElement ? document.activeElement : (activeComposerFormatTextarea || findComposerTextarea()));
     if (!textarea) return;
 
     if (undoDebounceTimer) {
@@ -35331,28 +39397,119 @@
     // 记录 Undo 快照，支持 Ctrl+Z 撤销
     pushComposerUndo(textarea.value || "");
 
-    let newVal = "";
-    if (!textarea.value || textarea.value.trim().length === 0) {
-      newVal = md;
-    } else {
-      const start = textarea.selectionStart ?? textarea.value.length;
-      const end = textarea.selectionEnd ?? textarea.value.length;
-      const beforeText = textarea.value.slice(0, start);
-      const afterText = textarea.value.slice(end);
+    const isFormattedActive = Boolean(
+      isFormattedViewMode &&
+      activeFormattedComposer &&
+      activeFormattedComposer.style.display !== "none" &&
+      (!activeFormattedComposer.__boundTextarea || activeFormattedComposer.__boundTextarea === textarea)
+    );
 
-      // 智能保护：若前序文字不以换行结尾，且粘贴内容以块级语法 (#, -, 1., >, ```, ~~~) 开头，自动插入换行防止粘连失效
-      let normalizedMd = md;
-      if (beforeText && !beforeText.endsWith("\n") && /^(\s*(?:#{1,6}\s|[-*+•◦▪▫–—]\s|\d+\.\s|>\s*|```|~~~))/.test(normalizedMd)) {
-        normalizedMd = "\n" + normalizedMd;
+    const sel = window.getSelection();
+    let range = null;
+    if (isFormattedActive && sel && sel.rangeCount > 0) {
+      try {
+        const r = sel.getRangeAt(0);
+        const containerEl = r.commonAncestorContainer?.nodeType === Node.ELEMENT_NODE
+          ? r.commonAncestorContainer
+          : r.commonAncestorContainer?.parentElement;
+        if (containerEl && activeFormattedComposer.contains(containerEl)) {
+          range = r;
+        }
+      } catch (_) {
+        range = null;
       }
-      newVal = beforeText + normalizedMd + afterText;
     }
+
+    if (isFormattedActive && range) {
+      // 1. 活动 contenteditable 真实 Range 是粘贴选区唯一来源
+      const renderedHtml = markdownToFormattedHtml(md);
+      const tempDoc = new DOMParser().parseFromString(renderedHtml, "text/html");
+      const childElements = Array.from(tempDoc.body.children);
+      const frag = document.createDocumentFragment();
+
+      // 单一段落保护：拆掉外层 div 避免括号中插入被换行
+      const isSingleParagraph = (
+        childElements.length === 1 &&
+        childElements[0].classList.contains("pi-enh-md-p") &&
+        !/\n/.test(md.trim())
+      );
+
+      if (isSingleParagraph) {
+        frag.appendChild(document.createTextNode(md.match(/^[ \t]+/)?.[0] || ""));
+        while (childElements[0].firstChild) {
+          frag.appendChild(childElements[0].firstChild);
+        }
+        frag.appendChild(document.createTextNode(md.match(/[ \t]+$/)?.[0] || ""));
+      } else {
+        while (tempDoc.body.firstChild) {
+          frag.appendChild(tempDoc.body.firstChild);
+        }
+      }
+
+      // 选区替换：若选区未折叠，先删除选中内容
+      if (!range.collapsed) {
+        range.deleteContents();
+      }
+
+      const lastChild = frag.lastChild;
+      let afterSplitNode = null;
+      if (range.startContainer && range.startContainer.nodeType === Node.TEXT_NODE) {
+        const textNode = range.startContainer;
+        afterSplitNode = textNode.splitText(range.startOffset);
+        textNode.parentNode.insertBefore(frag, afterSplitNode);
+      } else {
+        range.insertNode(frag);
+      }
+
+      if (afterSplitNode) {
+        const nextRange = document.createRange();
+        nextRange.setStart(afterSplitNode, 0);
+        nextRange.collapse(true);
+        sel.removeAllRanges();
+        sel.addRange(nextRange);
+      } else if (lastChild) {
+        const nextRange = document.createRange();
+        if (lastChild.nodeType === Node.TEXT_NODE) {
+          nextRange.setStart(lastChild, lastChild.textContent.length);
+          nextRange.setEnd(lastChild, lastChild.textContent.length);
+        } else {
+          nextRange.setStartAfter(lastChild);
+          nextRange.setEndAfter(lastChild);
+        }
+        nextRange.collapse(true);
+        sel.removeAllRanges();
+        sel.addRange(nextRange);
+      }
+
+      const currentMd = extractMarkdownFromFormattedComposer(activeFormattedComposer);
+      setComposerTextareaValue(textarea, currentMd, { focus: false });
+      pushComposerUndo(currentMd);
+      activeFormattedComposer.__piEnhSyncedValue = currentMd;
+
+      const card = textarea.closest?.('.pi-enh-cursor-composer, fieldset > div[style*="max-width"]');
+      if (card) updateCardContentState(card, textarea);
+      return;
+    }
+
+    // 纯 textarea 路径（源码模式或未激活格式化视图）
+    const start = textarea.selectionStart ?? (textarea.value || "").length;
+    const end = textarea.selectionEnd ?? (textarea.value || "").length;
+    const beforeText = (textarea.value || "").slice(0, start);
+    const afterText = (textarea.value || "").slice(end);
+
+    let normalizedMd = md;
+    if (beforeText && !beforeText.endsWith("\n") && /^(\s*(?:#{1,6}\s|[-*+•◦▪▫–—]\s|\d+\.\s|>\s*|```|~~~))/.test(normalizedMd)) {
+      normalizedMd = "\n" + normalizedMd;
+    }
+    const newVal = beforeText + normalizedMd + afterText;
+    const nextCursor = start + normalizedMd.length;
 
     setComposerTextareaValue(textarea, newVal);
     pushComposerUndo(newVal);
 
     if (activeFormattedComposer) {
       activeFormattedComposer.innerHTML = markdownToFormattedHtml(newVal);
+      activeFormattedComposer.__piEnhSyncedValue = newVal;
       if (isFormattedViewMode) {
         textarea.style.display = "none";
         activeFormattedComposer.style.display = "block";
@@ -35362,11 +39519,18 @@
         selection?.collapseToEnd();
       }
     }
+
+    if (!isFormattedViewMode || !activeFormattedComposer) {
+      try {
+        textarea.setSelectionRange(nextCursor, nextCursor);
+      } catch (_) {}
+      textarea.focus();
+    }
   }
 
   function handleComposerMarkdownPaste(event) {
     if (!isPluginEnabled("composer-markdown-format")) return;
-    const textarea = activeComposerFormatTextarea || findComposerTextarea();
+    const textarea = (event.target instanceof HTMLTextAreaElement ? event.target : (activeComposerFormatTextarea || findComposerTextarea()));
     if (!textarea) return;
 
     const html = event.clipboardData?.getData("text/html") || "";
@@ -35389,10 +39553,9 @@
       return;
     }
 
-    const imageFile = files.find((f) => f.type && f.type.startsWith("image/")) ||
-      items.find((it) => it.type && it.type.startsWith("image/"))?.getAsFile?.();
+    const imageFiles = allClipboardFiles.filter((file) => file.type?.startsWith("image/") && !isVideoFile(file.name, file.type));
 
-    if (imageFile) {
+    if (imageFiles.length > 0) {
       // 阻止图片或 base64 文本进入输入框内部
       event.preventDefault();
       event.stopPropagation();
@@ -35403,7 +39566,7 @@
       if (imageInput) {
         try {
           const dt = new DataTransfer();
-          dt.items.add(imageFile);
+          for (const imageFile of imageFiles) dt.items.add(imageFile);
           const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement?.prototype || {}, "files")?.set;
           if (setter) setter.call(imageInput, dt.files);
           else imageInput.files = dt.files;
@@ -35419,25 +39582,41 @@
       if (convertedMd) {
         event.preventDefault();
         event.stopPropagation();
-        insertMarkdownIntoComposer(convertedMd);
+        insertMarkdownIntoComposer(convertedMd, textarea);
         return;
       }
     }
 
-    // Ordinary text (including dictation via clipboard) must keep the same editor.
-    // Only explicit rich/Markdown pastes opt into a different surface.
+    // Ordinary text (including dictation via clipboard) keeps the browser's native insertion path.
+    // Only explicit Markdown text is parsed; rich HTML is handled above.
     if (plain && plain.trim().length > 0) {
       const hasMarkdown = /(^|\n)\s*(?:#{1,6}\s|[-*+]\s|\d+\.\s|>\s|```)|\*\*[^*]+\*\*|__[^_]+__|`[^`\n]+`|\[[^\]]+\]\([^)]+\)/.test(plain);
       if (!hasMarkdown) {
         if (event.target === textarea) return; // Native paste preserves caret/IME/undo.
         event.preventDefault();
         event.stopPropagation();
-        document.execCommand("insertText", false, plain);
+        if (undoDebounceTimer) {
+          clearTimeout(undoDebounceTimer);
+          undoDebounceTimer = null;
+        }
+        pushComposerUndo(textarea.value || "");
+        const inserted = document.execCommand("insertText", false, plain);
+        if (inserted) {
+          if (undoDebounceTimer) {
+            clearTimeout(undoDebounceTimer);
+            undoDebounceTimer = null;
+          }
+          const currentMd = activeFormattedComposer && activeFormattedComposer.style.display !== "none"
+            ? extractMarkdownFromFormattedComposer(activeFormattedComposer)
+            : textarea.value || "";
+          pushComposerUndo(currentMd);
+          lastUndoCharsCount = currentMd.length;
+        }
         return;
       }
       event.preventDefault();
       event.stopPropagation();
-      insertMarkdownIntoComposer(plain);
+      insertMarkdownIntoComposer(plain, textarea);
     }
   }
 
@@ -35600,6 +39779,10 @@
 
     // DOM 提交也已确认为空；不写受控 textarea.value，不派发空 input 冒充接收。
     textarea.style.height = "auto";
+    if (card && card.classList.contains("pi-enh-composer-custom-height")) {
+      card.classList.remove("pi-enh-composer-custom-height");
+      card.style.removeProperty("--pi-composer-custom-height");
+    }
 
     // 原生已消费输入的轻提示；不代表服务端接收或网络投递成功。
     showSentPulseTransition(textarea);
@@ -35666,9 +39849,25 @@
     afterCapture?.();
     await result;
     // This is native input consumption, NOT confirmation of network delivery.
-    return native.keyRef.current === native.key && native.valueRef.current === ""
-      && native.imagesRef.current.length === 0;
+    return native.valueRef.current === ""
+      && (!Array.isArray(native.imagesRef?.current) || native.imagesRef.current.length === 0);
   }
+
+  // Capture the last real input before React can briefly reconcile a controlled
+  // textarea back to its previous value. A later edit invalidates the intent.
+  const composerRecentInput = new WeakMap();
+  let composerInputRevision = 0;
+  addManagedListener(document, "input", (event) => {
+    const textarea = event.target;
+    if (!textarea?.matches?.("textarea.chat-input-textarea")) return;
+    const native = readNativeComposerDraft();
+    if (native?.textarea === textarea) {
+      composerRecentInput.set(textarea, {
+        text: textarea.value, owner: native.key, at: Date.now(),
+        revision: ++composerInputRevision,
+      });
+    }
+  }, true);
 
   function rollbackAnnotationSubmission(intent) {
     if (!intent.snapshot || intent.accepted) return;
@@ -35700,24 +39899,46 @@
       keyRef: native.keyRef, route: getCurrentSessionId(),
       images: JSON.stringify(native.imagesRef.current),
       snapshot: annotationSnapshot || null, annotationSession,
+      inputRevision: composerRecentInput.get(textarea)?.revision ?? null,
+      sourceMarkdownEnabled: isPluginEnabled("composer-markdown-format"),
+      startedAt: performance.now(),
     };
     composerSubmissionInFlight = intent;
 
     // Keep the user's body untouched while waiting. Stage the outbound quote
     // payload only in the dispatch turn, not in a draft that navigation can save.
-    intent.frame = requestAnimationFrame(async () => {
+    const attemptNativeSubmission = async () => {
+      let deferred = false;
+      const deferUntilNativeCommit = () => {
+        if (performance.now() - intent.startedAt >= 240) {
+          showToast("回车未发送，草稿已保留，请重试");
+          return;
+        }
+        deferred = true;
+        intent.frame = requestAnimationFrame(attemptNativeSubmission);
+      };
       try {
         let current = readNativeComposerDraft();
         const originalText = intent.snapshot ? intent.body : expectedText;
-        const pluginActive = isPluginEnabled(intent.snapshot ? "quick-quote" : "composer-markdown-format");
+        const pluginActive = intent.snapshot ? isPluginEnabled("quick-quote")
+          : (!intent.sourceMarkdownEnabled || isPluginEnabled("composer-markdown-format"));
+        const currentRev = composerRecentInput.get(textarea)?.revision ?? null;
         if (composerSubmissionInFlight !== intent || !pluginActive
           || !current || current.key !== expectedOwner || current.textarea !== textarea
           || current.keyRef !== intent.keyRef || current.keyRef.current !== expectedOwner
           || current.fieldset.disabled || current.pendingRef.current > 0
           || getCurrentSessionId() !== intent.route || isComposingInput
-          || current.valueRef.current !== originalText || textarea.value !== originalText
+          || currentRev !== intent.inputRevision
           || JSON.stringify(current.imagesRef.current) !== intent.images) return;
         if (!expectedText.trim() && !current.imagesRef.current.length) return;
+        // React can render a stale controlled value between a fast input and
+        // Enter. Wait only for the exact, unchanged draft to commit; never send
+        // a newer edit or a different session's draft.
+        if (current.valueRef.current !== originalText || textarea.value !== originalText) {
+          if (intent.snapshot || (textarea.value && textarea.value !== originalText)) return;
+          deferUntilNativeCommit();
+          return;
+        }
         if (intent.snapshot) {
           const items = listAnnotations();
           if (!intent.snapshot.every(saved => items.some(item => item.id === saved.id
@@ -35732,10 +39953,17 @@
             || current.textarea !== textarea || getCurrentSessionId() !== intent.route
             || !isPluginEnabled("quick-quote") || current.fieldset.disabled || current.pendingRef.current > 0
             || current.valueRef.current !== expectedText || textarea.value !== expectedText
-            || JSON.stringify(current.imagesRef.current) !== intent.images) return;
+            || JSON.stringify(current.imagesRef.current) !== intent.images) {
+            deferUntilNativeCommit();
+            return;
+          }
         }
         const button = getAnnotationSendButtons(textarea).find((b) => determineSendKindFromButton(b) === kind);
-        if (!button || button.disabled) return;
+        if (!button) return;
+        if (button.disabled) {
+          deferUntilNativeCommit();
+          return;
+        }
         const preDispatchSnapshot = nativeDraftSnapshot(current);
         if (preDispatchSnapshot) {
           const outboundSnap = intent.snapshot ? { ...preDispatchSnapshot, value: intent.body || "" } : preDispatchSnapshot;
@@ -35746,8 +39974,7 @@
           });
         }
         intent.phase = "dispatched";
-        intent.accepted = await invokeNativeComposerButton(button, current,
-          intent.snapshot ? () => rollbackAnnotationSubmission(intent) : null);
+        intent.accepted = await invokeNativeComposerButton(button, current);
         if (!intent.accepted) return;
         const cardAfterDispatch = (readNativeComposerDraft()?.textarea || textarea)?.closest?.('.pi-enh-cursor-composer, fieldset > div[style*="max-width"]');
         if (cardAfterDispatch) {
@@ -35757,14 +39984,25 @@
           }
         }
         if (intent.snapshot) consumeAnnotationSnapshot(intent.snapshot, intent.annotationSession);
+        submittedDraftKeys.add(intent.owner);
         removePersistedDraft(intent.owner);
+        const sub = pendingDraftSubmissions.get(intent.owner);
+        if (sub) {
+          sub.accepted = true;
+        }
+        const oldCtx = nativeDraftContexts.get(intent.keyRef);
+        if (oldCtx && oldCtx.key === intent.owner) {
+          oldCtx.initialized = true;
+          oldCtx.lastSaved = EMPTY_DRAFT_SIGNATURE;
+        }
         syncNativeComposerDraft(false);
         const committed = readNativeComposerDraft();
         if (committed && committed.key === intent.owner && getCurrentSessionId() === intent.route
           && committed.valueRef.current === "" && committed.imagesRef.current.length === 0) {
           if (!instantlyClearComposerSurface(committed.textarea, intent.owner)) {
             requestAnimationFrame(() => {
-              if (!isPluginEnabled(intent.snapshot ? "quick-quote" : "composer-markdown-format")) return;
+              if (intent.snapshot ? !isPluginEnabled("quick-quote")
+                : (intent.sourceMarkdownEnabled && !isPluginEnabled("composer-markdown-format"))) return;
               const rafNative = readNativeComposerDraft();
               if (rafNative && rafNative.key === intent.owner && getCurrentSessionId() === intent.route
                 && rafNative.valueRef.current === "" && rafNative.imagesRef.current.length === 0) {
@@ -35778,11 +40016,14 @@
         console.warn("[Pi Web] Native composer submission was not completed", error);
         showToast("提交未完成，输入与引用已保留");
       } finally {
-        rollbackAnnotationSubmission(intent);
-        if (composerSubmissionInFlight === intent) composerSubmissionInFlight = null;
-        if (intent.snapshot) syncAnnotationComposer();
+        if (!deferred) {
+          rollbackAnnotationSubmission(intent);
+          if (composerSubmissionInFlight === intent) composerSubmissionInFlight = null;
+          if (intent.snapshot) syncAnnotationComposer();
+        }
       }
-    });
+    };
+    intent.frame = requestAnimationFrame(attemptNativeSubmission);
     return true;
   }
 
@@ -35882,13 +40123,18 @@
       node.getBoundingClientRect().height > 0);
   }
 
+  function isComposerRunningForEnter(textarea) {
+    // The styling marker may remain for a render after a turn finishes. Native
+    // send/followup controls are the authority for this editor's key semantics.
+    const kinds = getAnnotationSendButtons(textarea).map(determineSendKindFromButton);
+    if (kinds.includes("followup") || kinds.includes("steer")) return true;
+    if (kinds.includes("send")) return false;
+    return isChatSessionRunning();
+  }
+
   function handleComposerSmartKeyDown(event, textarea) {
     if (isComposerCompletionKey(event, textarea)) return false;
-    const isRunning = Boolean(
-      document.querySelector('fieldset button[title*="停止"], fieldset button:has(svg rect[x="1.5"])') ||
-      document.querySelector('fieldset div[style*="align-self: flex-end"]:has(button), fieldset .pi-enh-running-group, fieldset .pi-enh-has-running-controls') ||
-      (typeof isChatSessionRunning === "function" && isChatSessionRunning())
-    );
+    const isRunning = isComposerRunningForEnter(textarea);
 
     if (isRunning && event.key === "Enter" && !event.shiftKey) {
       if (event.isComposing || isComposingInput || event.keyCode === 229) return false;
@@ -35922,11 +40168,19 @@
         rawText = textarea.value || "";
       }
 
+      const hasQuotes = isPluginEnabled("quick-quote") && typeof listAnnotations === "function" && listAnnotations().length > 0;
+      const annotationSnapshot = hasQuotes ? listAnnotations() : null;
+      const bodyText = rawText;
+      const finalText = hasQuotes ? serializeAnnotations(bodyText) : rawText;
+
       dispatchComposerNativeSubmission({
         kind,
         textarea,
         expectedOwner: currentOwner,
-        expectedText: rawText
+        expectedText: finalText,
+        annotationSnapshot,
+        annotationBody: bodyText,
+        annotationSession: typeof getAnnotationSessionId === "function" ? getAnnotationSessionId() : (getCurrentSessionId() || "draft"),
       });
 
       return true;
@@ -36420,6 +40674,8 @@
 
         /* 格式化切换小药丸 (✨ 格式化 / 📝 纯文本) - 优雅融入底栏工具条 */
         .pi-enh-format-toggle-btn {
+          width: max-content !important;
+          white-space: nowrap !important;
           height: 28px !important;
           padding: 0 9px !important;
           border-radius: 7px !important;
@@ -36636,10 +40892,27 @@
           updateFormattedViewMode(!isFormattedViewMode);
         }
       };
+      let contentStateRaf = null;
+      let lastHasContent = false;
       const onInput = () => {
         syncComposerTextareaAutoHeight(textarea);
         const card = textarea.closest('fieldset > div[style*="max-width"]');
-        updateCardContentState(card, textarea);
+        if (!card) return;
+        const val = textarea.value || "";
+        const nowHasContent = val.trim().length > 0;
+        if (nowHasContent !== lastHasContent) {
+          lastHasContent = nowHasContent;
+          if (contentStateRaf) {
+            cancelAnimationFrame(contentStateRaf);
+            contentStateRaf = null;
+          }
+          updateCardContentState(card, textarea);
+        } else if (!contentStateRaf) {
+          contentStateRaf = requestAnimationFrame(() => {
+            contentStateRaf = null;
+            updateCardContentState(card, textarea);
+          });
+        }
       };
       textarea.addEventListener("paste", handleComposerMarkdownPaste, true);
       textarea.addEventListener("keydown", onKeyDown);
@@ -36735,7 +41008,11 @@
   }
 
   function removeComposerMarkdownFormat() {
-    if (!composerSubmissionInFlight?.snapshot) cancelComposerNativeSubmission();
+    // Routine cleanup while Markdown is disabled must not cancel an ordinary
+    // textarea Enter submission; only an intent begun in this editor is ours.
+    if (composerSubmissionInFlight?.sourceMarkdownEnabled && !composerSubmissionInFlight.snapshot) {
+      cancelComposerNativeSubmission();
+    }
     composerFormatTextareaCleanup?.();
     composerFormatTextareaCleanup = null;
     isComposingInput = false;
@@ -36947,13 +41224,17 @@
   // 3.55.3 Composer Modes (Codex Style Goal & Plan Modes)
   // ==========================================
   const COMPOSER_MODES_STYLE_ID = "pi-enh-composer-modes-style";
-  composerModesStateMap = new Map(); // sessionId -> { mode: "normal"|"plan"|"goal", goal?: string }
+  composerModesStateMap = new Map(); // sessionId -> { mode: "normal"|"plan"|"goal", goal?: string, pausePending?: boolean, paused?: boolean }
   let composerModeSwitching = false;
+  let composerGoalBarEl = null;
+  let isGoalActionRunning = false;
   pendingNewComposerMode = null; // {mode, project, sessionId?}; never a server success claim
   let composerAddMenuEl = null;
+  let composerAddMenuContext = null;
   let composerModesEventsBound = false;
   let lastObservedModesSessionId = null;
   let composerModeFetchToken = 0;
+  let lastComposerGoalMismatchKey = null;
 
   const SVG_ADD_ICON = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>`;
   // SVG 目标：同心圆右上缺口 + 向右上箭头的截图形态
@@ -36986,7 +41267,120 @@
     }
   }
 
+  let pendingComposerNavOverride = null; // { mode: "new" | "session", sessionId: string | null, fromUrlSessionId: string | null, until: number }
+  let lastTrackedModeUrlSessionId = undefined;
+  let lastTrackedModeNativeDraftKey = undefined;
+  let syntheticUrlSessionForNewDraft = null; // { sessionId: string, whileDraftKey: string | null }
+
+  function readComposerNativeDraftKey() {
+    try {
+      const textarea = findComposerTextarea();
+      const fieldset = textarea?.closest?.("fieldset");
+      if (!fieldset || !fieldset.isConnected) return null;
+      let owner = typeof committedComposerFiber === "function" ? committedComposerFiber(fieldset) : null;
+      for (let depth = 0; owner && depth < 12; depth++, owner = owner.return) {
+        const dk = owner.memoizedProps?.draftKey;
+        if (typeof dk === "string" && dk.length > 0) {
+          return dk;
+        }
+      }
+    } catch (e) {}
+    return null;
+  }
+
+  function isNewSessionWelcomeDomVisible() {
+    try {
+      const brandLogo = document.querySelector?.('img[src*="apple-touch-icon"]');
+      if (!brandLogo) return false;
+      const rect = brandLogo.getBoundingClientRect?.();
+      if (!rect || rect.width <= 0 || rect.height <= 0) return false;
+      const msgs = document.querySelectorAll?.('div[data-message-role], [data-entry-id]');
+      return !msgs || msgs.length === 0;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function getEffectiveComposerSessionId() {
+    const urlSessionId = typeof getCurrentSessionId === "function" ? getCurrentSessionId() : null;
+    const nativeDraftKey = readComposerNativeDraftKey();
+
+    const urlChanged = lastTrackedModeUrlSessionId !== undefined && urlSessionId !== lastTrackedModeUrlSessionId;
+    const draftKeyChanged = lastTrackedModeNativeDraftKey !== undefined && nativeDraftKey !== lastTrackedModeNativeDraftKey;
+
+    if (draftKeyChanged && nativeDraftKey) {
+      if (syntheticUrlSessionForNewDraft && syntheticUrlSessionForNewDraft.whileDraftKey !== nativeDraftKey) {
+        syntheticUrlSessionForNewDraft = null;
+      }
+    }
+    if (urlChanged) {
+      if (urlSessionId && nativeDraftKey && nativeDraftKey.startsWith("new:") && !draftKeyChanged) {
+        syntheticUrlSessionForNewDraft = { sessionId: urlSessionId, whileDraftKey: nativeDraftKey };
+      } else if (!urlSessionId) {
+        syntheticUrlSessionForNewDraft = null;
+      }
+    }
+
+    lastTrackedModeUrlSessionId = urlSessionId;
+    lastTrackedModeNativeDraftKey = nativeDraftKey;
+
+    // 1. 捕获阶段点击「新建会话」或「侧边栏其他会话」后的瞬时零延迟覆盖（在 Next.js URL 异步更新完成前生效）
+    if (pendingComposerNavOverride) {
+      if (Date.now() < pendingComposerNavOverride.until) {
+        if (pendingComposerNavOverride.mode === "new") {
+          if (!urlSessionId) {
+            pendingComposerNavOverride = null;
+            return null;
+          }
+          if (urlSessionId === pendingComposerNavOverride.fromUrlSessionId) {
+            return null;
+          }
+          pendingComposerNavOverride = null;
+        } else if (pendingComposerNavOverride.mode === "session" && pendingComposerNavOverride.sessionId) {
+          if (urlSessionId === pendingComposerNavOverride.sessionId) {
+            pendingComposerNavOverride = null;
+            return urlSessionId;
+          }
+          if (urlSessionId === pendingComposerNavOverride.fromUrlSessionId) {
+            return pendingComposerNavOverride.sessionId;
+          }
+          pendingComposerNavOverride = null;
+        }
+      } else {
+        pendingComposerNavOverride = null;
+      }
+    }
+
+    // 2. 在同一个欢迎页草稿下主动通过 replaceState / __PI_ENH_SET_COMPOSER_MODE_STATE__ 绑定的会话 ID
+    if (
+      syntheticUrlSessionForNewDraft &&
+      syntheticUrlSessionForNewDraft.sessionId &&
+      urlSessionId === syntheticUrlSessionForNewDraft.sessionId &&
+      (!nativeDraftKey || nativeDraftKey === syntheticUrlSessionForNewDraft.whileDraftKey)
+    ) {
+      return syntheticUrlSessionForNewDraft.sessionId;
+    }
+
+    // 3. 原生 ChatInput React Fiber 的实时 draftKey（第 0ms 同步反映新建会话 "new:..." 或目标会话 ID，杜绝 URL 滞后串台）
+    if (typeof nativeDraftKey === "string" && nativeDraftKey) {
+      if (nativeDraftKey.startsWith("new:")) {
+        return null;
+      }
+      return nativeDraftKey;
+    }
+
+    // 4. 若无 Fiber draftKey 但页面明确处于新建会话欢迎页，且无合成绑定，则绝不继承滞后的旧 URL sessionId
+    if (isNewSessionWelcomeDomVisible() && !syntheticUrlSessionForNewDraft) {
+      return null;
+    }
+
+    return urlSessionId;
+  }
+
   function ensureComposerModesStyle() {
+    if (typeof document !== "undefined" && document.documentElement) {
+      document.documentElement.setAttribute("data-pi-composer-modes-active", "true");
+    }
     let style = document.getElementById(COMPOSER_MODES_STYLE_ID);
     if (!style) {
       style = document.createElement("style");
@@ -37265,6 +41659,361 @@
         .pi-enh-composer-modes-disabled-notice button:hover {
           background: color-mix(in srgb, var(--warning, #f59e0b) 50%, transparent) !important;
         }
+
+        /* 阻断原生底栏 raw composer-modes JSON 首次闪现：仅在插件激活时隐藏未清洗 raw，清洗后或插件停用时立即还原可见 */
+        html[data-pi-composer-modes-active="true"] .extension-status-line[aria-label*='"version":1'] .extension-status-text,
+        html[data-pi-composer-modes-active="true"] .extension-status-line[title*='"version":1'] .extension-status-text {
+          visibility: hidden !important;
+        }
+
+        /* 底栏 Flex 左右分流与紧凑高度保护（方案 A：左侧紧凑胶囊，右侧系统状态常驻） */
+        html[data-pi-composer-modes-active="true"] .extension-status-line {
+          display: flex !important;
+          align-items: center !important;
+          justify-content: space-between !important;
+          gap: 12px !important;
+          min-height: 28px !important;
+          max-height: 36px !important;
+          padding: 4px 12px !important;
+          box-sizing: border-box !important;
+          overflow: visible !important;
+        }
+        html[data-pi-composer-modes-active="true"] .extension-status-text {
+          margin-left: auto !important;
+          white-space: nowrap !important;
+          overflow: hidden !important;
+          text-overflow: ellipsis !important;
+          flex-shrink: 1 !important;
+          text-align: right !important;
+          line-height: 1.4 !important;
+          font-size: 11px !important;
+        }
+
+        /* fieldset 的浏览器默认 min-inline-size:min-content 不得被长目标文本撑宽 */
+        fieldset:has(> .pi-enh-composer-goal-bar) {
+          min-width: 0 !important;
+          width: 100% !important;
+          max-width: 100% !important;
+          box-sizing: border-box !important;
+        }
+        /* 输入框正上方独立目标管理横条（与下方居中输入卡片严格同宽同左对齐） */
+        .pi-enh-composer-goal-bar {
+          display: flex !important;
+          align-items: center !important;
+          justify-content: flex-start !important;
+          gap: 8px !important;
+          width: 100% !important;
+          max-width: var(--chat-content-max-width, 820px) !important;
+          box-sizing: border-box !important;
+          margin: 0 auto 6px auto !important;
+          padding: 0 2px !important;
+          min-height: 28px !important;
+          user-select: none !important;
+          transition: opacity 0.15s ease !important;
+        }
+
+        /* 目标紧凑胶囊（位于输入卡片正上方同列，嵌入播放/暂停图标按钮） */
+        .pi-enh-composer-goal-pill {
+          display: inline-flex !important;
+          align-items: center !important;
+          gap: 6px !important;
+          flex: 0 1 auto !important;
+          min-width: 0 !important;
+          max-width: 100% !important;
+          height: 24px !important;
+          padding: 0 4px 0 10px !important;
+          border-radius: 12px !important;
+          background: color-mix(in srgb, var(--accent, #a4c2f4) 14%, transparent) !important;
+          border: 1px solid color-mix(in srgb, var(--accent, #a4c2f4) 30%, transparent) !important;
+          color: var(--text, #e8e8e8) !important;
+          font-size: 11.5px !important;
+          font-family: var(--font-mono, monospace) !important;
+          line-height: 1 !important;
+          cursor: pointer !important;
+          box-sizing: border-box !important;
+          transition: background 0.15s ease, border-color 0.15s ease !important;
+        }
+        .pi-enh-composer-goal-pill:hover {
+          background: color-mix(in srgb, var(--accent, #a4c2f4) 22%, transparent) !important;
+          border-color: color-mix(in srgb, var(--accent, #a4c2f4) 50%, transparent) !important;
+        }
+        .pi-enh-composer-goal-pill[data-status="paused"] {
+          background: color-mix(in srgb, var(--border, #666666) 20%, transparent) !important;
+          border-color: color-mix(in srgb, var(--border, #666666) 45%, transparent) !important;
+          opacity: 0.88 !important;
+        }
+        .pi-enh-composer-goal-pill[data-status="pending"] {
+          background: color-mix(in srgb, #f59e0b 16%, transparent) !important;
+          border-color: color-mix(in srgb, #f59e0b 42%, transparent) !important;
+        }
+
+        .pi-enh-goal-pill-icon {
+          flex-shrink: 0 !important;
+          display: inline-flex !important;
+          align-items: center !important;
+        }
+        .pi-enh-goal-pill-status {
+          flex-shrink: 0 !important;
+          font-weight: 600 !important;
+          color: var(--accent, #a4c2f4) !important;
+        }
+        .pi-enh-composer-goal-pill[data-status="paused"] .pi-enh-goal-pill-status {
+          color: var(--text-dim, #999999) !important;
+        }
+        .pi-enh-composer-goal-pill[data-status="pending"] .pi-enh-goal-pill-status {
+          color: #f59e0b !important;
+        }
+
+        .pi-enh-goal-pill-text {
+          white-space: nowrap !important;
+          overflow: hidden !important;
+          text-overflow: ellipsis !important;
+          min-width: 0 !important;
+          flex: 0 1 auto !important;
+          color: var(--text, #e8e8e8) !important;
+          opacity: 0.95 !important;
+        }
+
+        /* 目标累计运行计时器（显示在播放/暂停按钮左侧） */
+        .pi-enh-goal-pill-timer {
+          display: inline-flex !important;
+          align-items: center !important;
+          flex-shrink: 0 !important;
+          white-space: nowrap !important;
+          font-size: 10.5px !important;
+          line-height: 1 !important;
+          font-variant-numeric: tabular-nums !important;
+          font-family: var(--font-mono, monospace) !important;
+          opacity: 0.82 !important;
+          color: var(--text-muted, #a0a0a0) !important;
+          margin: 0 1px 0 2px !important;
+          letter-spacing: -0.2px !important;
+        }
+        .pi-enh-composer-goal-pill[data-status="paused"] .pi-enh-goal-pill-timer {
+          opacity: 0.65 !important;
+          color: var(--text-dim, #888888) !important;
+        }
+        .pi-enh-composer-goal-pill[data-status="pending"] .pi-enh-goal-pill-timer {
+          color: #f59e0b !important;
+          opacity: 0.9 !important;
+        }
+
+        /* 胶囊内物理嵌入的类似音乐播放器暂停/播放图标按钮 */
+        .pi-enh-composer-goal-btn {
+          display: inline-flex !important;
+          align-items: center !important;
+          justify-content: center !important;
+          width: 18px !important;
+          height: 18px !important;
+          min-width: 18px !important;
+          padding: 0 !important;
+          margin: 0 0 0 2px !important;
+          border-radius: 9px !important;
+          border: 1px solid transparent !important;
+          background: color-mix(in srgb, var(--accent, #a4c2f4) 18%, transparent) !important;
+          color: var(--accent, #a4c2f4) !important;
+          cursor: pointer !important;
+          box-sizing: border-box !important;
+          flex-shrink: 0 !important;
+          line-height: 1 !important;
+          transition: all 0.15s ease !important;
+        }
+        .pi-enh-composer-goal-btn:hover {
+          background: color-mix(in srgb, var(--accent, #a4c2f4) 36%, transparent) !important;
+          border-color: color-mix(in srgb, var(--accent, #a4c2f4) 55%, transparent) !important;
+          color: var(--text, #ffffff) !important;
+        }
+        .pi-enh-composer-goal-btn:focus-visible {
+          outline: 2px solid var(--accent, #a4c2f4) !important;
+          outline-offset: 1px !important;
+        }
+        .pi-enh-composer-goal-btn:disabled {
+          opacity: 0.45 !important;
+          cursor: not-allowed !important;
+        }
+        .pi-enh-composer-goal-btn[aria-busy="true"] {
+          opacity: 0.65 !important;
+          cursor: wait !important;
+        }
+        .pi-enh-composer-goal-btn.pi-enh-goal-btn-resume {
+          background: color-mix(in srgb, var(--accent, #a4c2f4) 22%, transparent) !important;
+          border-color: color-mix(in srgb, var(--accent, #a4c2f4) 50%, transparent) !important;
+          color: var(--accent, #a4c2f4) !important;
+        }
+        .pi-enh-composer-goal-btn.pi-enh-goal-btn-resume:hover {
+          background: color-mix(in srgb, var(--accent, #a4c2f4) 38%, transparent) !important;
+        }
+        .pi-enh-composer-goal-btn.pi-enh-goal-btn-cancel {
+          background: color-mix(in srgb, #f59e0b 22%, transparent) !important;
+          border-color: color-mix(in srgb, #f59e0b 50%, transparent) !important;
+          color: #f59e0b !important;
+        }
+        .pi-enh-composer-goal-btn.pi-enh-goal-btn-cancel:hover {
+          background: color-mix(in srgb, #f59e0b 38%, transparent) !important;
+          border-color: color-mix(in srgb, #f59e0b 70%, transparent) !important;
+        }
+
+        /* 浅色主题自适应 */
+        html[data-theme="light"] .pi-enh-composer-goal-pill {
+          background: color-mix(in srgb, var(--accent, #1d4ed8) 10%, transparent) !important;
+          border-color: color-mix(in srgb, var(--accent, #1d4ed8) 25%, transparent) !important;
+          color: var(--text, #1e293b) !important;
+        }
+        html[data-theme="light"] .pi-enh-composer-goal-pill:hover {
+          background: color-mix(in srgb, var(--accent, #1d4ed8) 18%, transparent) !important;
+        }
+        html[data-theme="light"] .pi-enh-composer-goal-pill[data-status="paused"] {
+          background: color-mix(in srgb, #64748b 12%, transparent) !important;
+          border-color: color-mix(in srgb, #64748b 30%, transparent) !important;
+        }
+        html[data-theme="light"] .pi-enh-composer-goal-pill[data-status="pending"] {
+          background: color-mix(in srgb, #d97706 12%, transparent) !important;
+          border-color: color-mix(in srgb, #d97706 35%, transparent) !important;
+        }
+        html[data-theme="light"] .pi-enh-goal-pill-timer {
+          color: var(--text-muted, #64748b) !important;
+        }
+        html[data-theme="light"] .pi-enh-composer-goal-pill[data-status="paused"] .pi-enh-goal-pill-timer {
+          color: var(--text-dim, #94a3b8) !important;
+        }
+        html[data-theme="light"] .pi-enh-composer-goal-pill[data-status="pending"] .pi-enh-goal-pill-timer {
+          color: #d97706 !important;
+        }
+        html[data-theme="light"] .pi-enh-composer-goal-btn {
+          background: color-mix(in srgb, var(--accent, #1d4ed8) 14%, transparent) !important;
+          color: var(--accent, #1d4ed8) !important;
+        }
+        html[data-theme="light"] .pi-enh-composer-goal-btn:hover {
+          background: color-mix(in srgb, var(--accent, #1d4ed8) 26%, transparent) !important;
+          border-color: color-mix(in srgb, var(--accent, #1d4ed8) 50%, transparent) !important;
+        }
+        html[data-theme="light"] .pi-enh-composer-goal-btn.pi-enh-goal-btn-cancel {
+          background: color-mix(in srgb, #d97706 16%, transparent) !important;
+          border-color: color-mix(in srgb, #d97706 45%, transparent) !important;
+          color: #d97706 !important;
+        }
+
+        /* 左侧目标/计划胶囊徽章（Badge） */
+        .pi-enh-status-goal-badge {
+          display: inline-flex !important;
+          align-items: center !important;
+          gap: 5px !important;
+          max-width: min(65%, 520px) !important;
+          height: 22px !important;
+          padding: 0 8px !important;
+          border-radius: 11px !important;
+          background: color-mix(in srgb, var(--accent, #a4c2f4) 14%, transparent) !important;
+          border: 1px solid color-mix(in srgb, var(--accent, #a4c2f4) 32%, transparent) !important;
+          color: var(--text, #e8e8e8) !important;
+          font-size: 11px !important;
+          font-family: var(--font-mono, monospace) !important;
+          line-height: 1 !important;
+          cursor: pointer !important;
+          user-select: none !important;
+          flex-shrink: 0 !important;
+          box-sizing: border-box !important;
+          transition: background 0.15s ease, border-color 0.15s ease, transform 0.12s ease !important;
+        }
+        .pi-enh-status-goal-badge:hover {
+          background: color-mix(in srgb, var(--accent, #a4c2f4) 22%, transparent) !important;
+          border-color: color-mix(in srgb, var(--accent, #a4c2f4) 52%, transparent) !important;
+          transform: translateY(-1px) !important;
+        }
+        .pi-enh-goal-badge-icon {
+          flex-shrink: 0 !important;
+          font-size: 11px !important;
+          line-height: 1 !important;
+        }
+        .pi-enh-goal-badge-label {
+          flex-shrink: 0 !important;
+          font-weight: 600 !important;
+          color: var(--accent, #a4c2f4) !important;
+        }
+        .pi-enh-goal-badge-text {
+          white-space: nowrap !important;
+          overflow: hidden !important;
+          text-overflow: ellipsis !important;
+          min-width: 0 !important;
+          color: var(--text, #e8e8e8) !important;
+          opacity: 0.92 !important;
+        }
+
+        /* 悬停富文本 Tooltip 卡片（方案 A 浮层） */
+        .pi-enh-goal-tooltip-card {
+          position: fixed !important;
+          z-index: 10000 !important;
+          max-width: min(520px, 86vw) !important;
+          max-height: min(340px, 45dvh) !important;
+          background: color-mix(in srgb, var(--bg-panel, #242424) 94%, var(--bg, #1a1a1a)) !important;
+          backdrop-filter: blur(16px) !important;
+          -webkit-backdrop-filter: blur(16px) !important;
+          border: 1px solid color-mix(in srgb, var(--border, #454545) 80%, var(--accent, #a4c2f4)) !important;
+          border-radius: 8px !important;
+          box-shadow: 0 16px 36px rgba(0, 0, 0, 0.4), 0 2px 8px rgba(0, 0, 0, 0.2) !important;
+          color: var(--text, #e8e8e8) !important;
+          font-size: 12px !important;
+          line-height: 1.55 !important;
+          padding: 10px 14px !important;
+          box-sizing: border-box !important;
+          overflow-y: auto !important;
+          pointer-events: auto !important;
+          opacity: 0;
+          transform: translateY(4px);
+          transition: opacity 0.15s ease-out, transform 0.15s ease-out !important;
+        }
+        .pi-enh-goal-tooltip-card.is-visible {
+          opacity: 1 !important;
+          transform: translateY(0) !important;
+        }
+        .pi-enh-goal-tooltip-header {
+          display: flex !important;
+          align-items: center !important;
+          justify-content: space-between !important;
+          gap: 8px !important;
+          padding-bottom: 6px !important;
+          margin-bottom: 8px !important;
+          border-bottom: 1px solid color-mix(in srgb, var(--border, #454545) 60%, transparent) !important;
+        }
+        .pi-enh-goal-tooltip-title {
+          font-weight: 600 !important;
+          color: var(--accent, #a4c2f4) !important;
+          font-size: 12px !important;
+          display: flex !important;
+          align-items: center !important;
+          gap: 6px !important;
+        }
+        .pi-enh-goal-tooltip-hint {
+          font-size: 10px !important;
+          color: var(--text-dim, #a4a4a4) !important;
+        }
+        .pi-enh-goal-tooltip-body {
+          color: var(--text, #e8e8e8) !important;
+          font-size: 12px !important;
+          line-height: 1.6 !important;
+        }
+        .pi-enh-goal-tooltip-body blockquote {
+          margin: 6px 0 !important;
+          padding: 4px 10px !important;
+          border-left: 3px solid var(--accent, #a4c2f4) !important;
+          background: color-mix(in srgb, var(--accent, #a4c2f4) 8%, transparent) !important;
+          border-radius: 0 4px 4px 0 !important;
+          color: var(--text, #e8e8e8) !important;
+          font-size: 11.5px !important;
+        }
+        .pi-enh-goal-tooltip-body strong {
+          font-weight: 700 !important;
+          color: var(--text, #ffffff) !important;
+        }
+        .pi-enh-goal-tooltip-body code {
+          font-family: var(--font-mono, monospace) !important;
+          font-size: 11px !important;
+          padding: 1px 4px !important;
+          border-radius: 3px !important;
+          background: color-mix(in srgb, var(--text, #fff) 10%, transparent) !important;
+        }
+        .pi-enh-goal-tooltip-body p {
+          margin: 4px 0 !important;
+        }
       `;
       document.head.appendChild(style);
     }
@@ -37280,31 +42029,44 @@
       try { composerAddMenuEl.remove(); } catch (e) {}
       composerAddMenuEl = null;
     }
-    const addBtn = document.querySelector(".pi-enh-composer-add-btn");
-    if (addBtn) { addBtn.classList.remove("active"); addBtn.setAttribute("aria-expanded", "false"); }
+    if (composerAddMenuContext?.addBtn) {
+      try {
+        composerAddMenuContext.addBtn.classList.remove("active");
+        composerAddMenuContext.addBtn.setAttribute("aria-expanded", "false");
+      } catch (e) {}
+    }
+    composerAddMenuContext = null;
+    const addBtns = document.querySelectorAll(".pi-enh-composer-add-btn");
+    addBtns.forEach((btn) => {
+      btn.classList.remove("active");
+      btn.setAttribute("aria-expanded", "false");
+    });
+  }
+
+  function positionComposerAddMenu() {
+    if (!composerAddMenuEl || !composerAddMenuContext) return;
+    const { card, addBtn } = composerAddMenuContext;
+    if (!card || !card.isConnected || (addBtn && !addBtn.isConnected)) {
+      closeComposerAddMenu();
+      return;
+    }
+    const cardRect = card.getBoundingClientRect();
+    const menuRect = composerAddMenuEl.getBoundingClientRect();
+    composerAddMenuEl.style.left = Math.max(8, Math.min(cardRect.left, window.innerWidth - menuRect.width - 8)) + "px";
+    composerAddMenuEl.style.top = Math.max(8, cardRect.top >= menuRect.height + 16 ? cardRect.top - menuRect.height - 8 : Math.min(cardRect.bottom + 8, window.innerHeight - menuRect.height - 8)) + "px";
   }
 
   function openComposerAddMenu(card, addBtn) {
     closeComposerAddMenu();
     if (!card || !addBtn) return;
 
-    const sessionId = getCurrentSessionId();
+    const sessionId = getEffectiveComposerSessionId();
     const currentMode = getSessionComposerMode(sessionId);
 
     const menu = document.createElement("div");
     menu.className = "pi-enh-composer-add-menu";
     menu.setAttribute("role", "menu");
     menu.setAttribute("aria-label", "输入框模式与附件菜单");
-
-    // 视口边界自适应：若上方空间不足 160px 且下方空间充足，向下展开；否则向上展开
-    const cardRect = card.getBoundingClientRect();
-    if (cardRect.top < 160 && (window.innerHeight - cardRect.bottom) >= 160) {
-      menu.style.bottom = "auto";
-      menu.style.top = "calc(100% + 8px)";
-    } else {
-      menu.style.bottom = "calc(100% + 8px)";
-      menu.style.top = "auto";
-    }
 
     // 1. 添加附件入口
     const attachItem = document.createElement("button");
@@ -37375,10 +42137,9 @@
     // Portal outside the composer stacking context: native new-chat logo must never overlap the menu.
     document.body.appendChild(menu);
     menu.style.bottom = "auto";
-    const menuRect = menu.getBoundingClientRect();
-    menu.style.left = Math.max(8, Math.min(cardRect.left, window.innerWidth - menuRect.width - 8)) + "px";
-    menu.style.top = Math.max(8, cardRect.top >= menuRect.height + 16 ? cardRect.top - menuRect.height - 8 : Math.min(cardRect.bottom + 8, window.innerHeight - menuRect.height - 8)) + "px";
     composerAddMenuEl = menu;
+    composerAddMenuContext = { card, addBtn, openWidth: window.innerWidth };
+    positionComposerAddMenu();
     addBtn.classList.add("active");
     addBtn.setAttribute("aria-expanded", "true");
   }
@@ -37419,7 +42180,7 @@
 
   async function requestSwitchComposerMode(targetMode, targetSessionId) {
     if (!["normal", "plan", "goal"].includes(targetMode)) return false;
-    const sessionId = targetSessionId || getCurrentSessionId();
+    const sessionId = targetSessionId || getEffectiveComposerSessionId();
     if (!sessionId) {
       pendingNewComposerMode = targetMode === "normal" ? null : {mode: targetMode, project: getCurrentProjectStatusKey()};
       syncComposerModes();
@@ -37518,8 +42279,21 @@
 
       // 真实生效后，才更新本地会话模式状态
       composerModeFetchToken++;
-      composerModesStateMap.set(sessionId, { mode: realMode, goal: parsed?.goal });
+      const updatedSwitchState = {
+        mode: realMode,
+        goal: parsed?.goal,
+        pausePending: Boolean(parsed?.pausePending),
+        paused: Boolean(parsed?.paused),
+      };
+      if (typeof parsed?.goalElapsedMs === "number") {
+        updatedSwitchState.goalElapsedMs = parsed.goalElapsedMs;
+      }
+      if (typeof parsed?.goalActiveSinceMs === "number") {
+        updatedSwitchState.goalActiveSinceMs = parsed.goalActiveSinceMs;
+      }
+      composerModesStateMap.set(sessionId, updatedSwitchState);
       syncComposerModes();
+      syncComposerGoalBar();
       return true;
     } catch (err) {
       showToast("切换模式发生异常，请检查网络", null, 3000);
@@ -37568,7 +42342,7 @@
           return;
         }
 
-        const sid = getCurrentSessionId();
+        const sid = getEffectiveComposerSessionId();
         const currentMode = getSessionComposerMode(sid);
         const target = currentMode === "plan" ? "normal" : "plan";
         void requestSwitchComposerMode(target);
@@ -37585,14 +42359,32 @@
         method: "GET",
         cache: "no-store",
       });
-      if (token !== composerModeFetchToken || getCurrentSessionId() !== sessionId) return;
+      if (token !== composerModeFetchToken || getEffectiveComposerSessionId() !== sessionId) return;
       if (!res.ok) return;
       const data = await res.json().catch(() => null);
       if (data && data.running === false && !data.state) return;
-      const parsed = parseExtensionStatus(data?.state || data, "composer-modes");
+      const stateObj = data?.state || (data && typeof data === "object" && "extensionStatuses" in data ? data : null);
+      const parsed = parseExtensionStatus(stateObj || data, "composer-modes");
       if (parsed?.mode) {
-        composerModesStateMap.set(sessionId, { mode: parsed.mode, goal: parsed.goal });
+        const updatedQueryState = {
+          mode: parsed.mode,
+          goal: parsed.goal,
+          pausePending: Boolean(parsed.pausePending),
+          paused: Boolean(parsed.paused),
+        };
+        if (typeof parsed.goalElapsedMs === "number") {
+          updatedQueryState.goalElapsedMs = parsed.goalElapsedMs;
+        }
+        if (typeof parsed.goalActiveSinceMs === "number") {
+          updatedQueryState.goalActiveSinceMs = parsed.goalActiveSinceMs;
+        }
+        composerModesStateMap.set(sessionId, updatedQueryState);
         syncComposerModes();
+        syncComposerGoalBar();
+      } else if (stateObj && Array.isArray(stateObj.extensionStatuses)) {
+        composerModesStateMap.set(sessionId, { mode: "normal" });
+        syncComposerModes();
+        syncComposerGoalBar();
       }
     } catch (e) {}
   }
@@ -37605,6 +42397,10 @@
     "mode",
     "goal",
     "toolsBeforePlan",
+    "pausePending",
+    "paused",
+    "goalElapsedMs",
+    "goalActiveSinceMs",
   ]);
   const composerModesTextNodeMap = new Map(); // TextNode -> { raw: string, formatted: string }
   const composerModesAttrMap = new Map(); // Element -> Map<attrName, { raw: string, formatted: string }>
@@ -37658,6 +42454,161 @@
     return blocks;
   }
 
+  const SVG_STATUS_GOAL_ICON = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;"><circle cx="12" cy="12" r="10"></circle><circle cx="12" cy="12" r="6"></circle><circle cx="12" cy="12" r="2"></circle></svg>`;
+  const SVG_STATUS_PLAN_ICON = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;"><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"></path><rect x="8" y="2" width="8" height="4" rx="1" ry="1"></rect></svg>`;
+  const SVG_GOAL_PAUSE_ICON = `<svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor" class="pi-enh-goal-icon-pause" aria-hidden="true"><rect x="3" y="2.5" width="3.5" height="11" rx="1.2"></rect><rect x="9.5" y="2.5" width="3.5" height="11" rx="1.2"></rect></svg>`;
+  const SVG_GOAL_PLAY_ICON = `<svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor" class="pi-enh-goal-icon-play" aria-hidden="true"><path d="M4.5 2.8c0-.6.7-1 1.2-.7l8 4.7c.5.3.5 1.1 0 1.4l-8 4.7c-.5.3-1.2-.1-1.2-.7V2.8z"></path></svg>`;
+
+  function sanitizeGoalInlineText(text) {
+    if (!text || typeof text !== "string") return "";
+    let s = text.trim();
+    // 0. 处理可能的字面转义 \n
+    s = s.replace(/\\n/g, "\n");
+    // 1. 去除引用符号 > 与 HTML 转义的 &gt;
+    s = s.replace(/^[ \t]*>[ \t]*/gm, "");
+    s = s.replace(/^[ \t]*&gt;[ \t]*/gm, "");
+    // 2. 去除粗体、斜体、删除线
+    s = s.replace(/\*\*([^*]+)\*\*/g, "$1");
+    s = s.replace(/\*([^*]+)\*/g, "$1");
+    s = s.replace(/__([^_]+)__/g, "$1");
+    s = s.replace(/_([^_]+)_/g, "$1");
+    s = s.replace(/~~([^~]+)~~/g, "$1");
+    // 3. 去除行内代码反引号
+    s = s.replace(/`([^`]+)`/g, "$1");
+    // 4. 去除标题前缀 #
+    s = s.replace(/^[ \t]*#{1,6}[ \t]+/gm, "");
+    // 5. 将换行符转为空格
+    s = s.replace(/\r?\n+/g, " ");
+    // 6. 再次清理换行后连接处可能残留的 > 与 &gt;
+    s = s.replace(/[ \t]+(?:>|&gt;)[ \t]*/g, " ");
+    // 7. 合并多余空白
+    s = s.replace(/\s{2,}/g, " ");
+    return s.trim();
+  }
+
+  function escapeGoalHtml(str) {
+    if (!str || typeof str !== "string") return "";
+    return str
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
+  }
+
+  function renderGoalMarkdownHtml(rawText) {
+    if (!rawText || typeof rawText !== "string") return "";
+    const normalized = rawText.replace(/\\n/g, "\n");
+    const lines = normalized.split(/\r?\n/);
+    const htmlBlocks = [];
+    let currentQuoteLines = [];
+
+    function flushQuote() {
+      if (!currentQuoteLines.length) return;
+      const quoteContent = currentQuoteLines.map(line => formatInlineMd(line)).join("<br>");
+      htmlBlocks.push(`<blockquote>${quoteContent}</blockquote>`);
+      currentQuoteLines = [];
+    }
+
+    function formatInlineMd(line) {
+      let escaped = escapeGoalHtml(line);
+      escaped = escaped.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+      escaped = escaped.replace(/`([^`]+)`/g, "<code>$1</code>");
+      return escaped;
+    }
+
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      const trimmed = line.trim();
+      if (!trimmed) {
+        flushQuote();
+        continue;
+      }
+      if (/^[ \t]*&gt;|^[ \t]*>/.test(line)) {
+        const quoteText = line.replace(/^[ \t]*&gt;[ \t]?|^[ \t]*>[ \t]?/, "");
+        currentQuoteLines.push(quoteText);
+      } else {
+        flushQuote();
+        htmlBlocks.push(`<p>${formatInlineMd(line)}</p>`);
+      }
+    }
+    flushQuote();
+    return htmlBlocks.join("");
+  }
+
+  let activeGoalTooltipEl = null;
+  let goalTooltipHideTimer = null;
+
+  function showGoalTooltip(anchorEl, goalRawText, title = "当前目标 (Goal)") {
+    if (goalTooltipHideTimer) {
+      clearTimeout(goalTooltipHideTimer);
+      goalTooltipHideTimer = null;
+    }
+    if (!anchorEl || !anchorEl.isConnected || !goalRawText) return;
+
+    if (!activeGoalTooltipEl) {
+      activeGoalTooltipEl = document.createElement("div");
+      activeGoalTooltipEl.className = "pi-enh-goal-tooltip-card";
+      activeGoalTooltipEl.addEventListener("mouseenter", () => {
+        if (goalTooltipHideTimer) {
+          clearTimeout(goalTooltipHideTimer);
+          goalTooltipHideTimer = null;
+        }
+      });
+      activeGoalTooltipEl.addEventListener("mouseleave", () => {
+        scheduleHideGoalTooltip();
+      });
+      document.body.appendChild(activeGoalTooltipEl);
+    }
+
+    const renderedHtml = renderGoalMarkdownHtml(goalRawText);
+    activeGoalTooltipEl.innerHTML = `
+      <div class="pi-enh-goal-tooltip-header">
+        <span class="pi-enh-goal-tooltip-title">${SVG_STATUS_GOAL_ICON} ${escapeGoalHtml(title)}</span>
+        <span class="pi-enh-goal-tooltip-hint">悬停查看详情</span>
+      </div>
+      <div class="pi-enh-goal-tooltip-body">
+        ${renderedHtml}
+      </div>
+    `;
+
+    const rect = anchorEl.getBoundingClientRect();
+    const tooltipWidth = Math.min(520, window.innerWidth - 24);
+    let left = rect.left;
+    if (left + tooltipWidth > window.innerWidth - 12) {
+      left = Math.max(12, window.innerWidth - 12 - tooltipWidth);
+    }
+    left = Math.max(12, left);
+
+    activeGoalTooltipEl.style.width = `${tooltipWidth}px`;
+    activeGoalTooltipEl.style.left = `${left}px`;
+    const tooltipHeight = activeGoalTooltipEl.offsetHeight || 160;
+    let top = rect.top - tooltipHeight - 6;
+    if (top < 10) {
+      top = rect.bottom + 6;
+    }
+    activeGoalTooltipEl.style.top = `${top}px`;
+    activeGoalTooltipEl.classList.add("is-visible");
+  }
+
+  function scheduleHideGoalTooltip(delayMs = 180) {
+    if (goalTooltipHideTimer) clearTimeout(goalTooltipHideTimer);
+    goalTooltipHideTimer = setTimeout(() => {
+      hideGoalTooltip();
+    }, delayMs);
+  }
+
+  function hideGoalTooltip() {
+    if (goalTooltipHideTimer) {
+      clearTimeout(goalTooltipHideTimer);
+      goalTooltipHideTimer = null;
+    }
+    if (activeGoalTooltipEl) {
+      try { activeGoalTooltipEl.remove(); } catch (e) {}
+      activeGoalTooltipEl = null;
+    }
+  }
+
   function cleanupStatusText(text) {
     if (!text || typeof text !== "string") return "";
     let s = text.trim();
@@ -37705,7 +42656,7 @@
 
       hasMatchedMode = true;
       let replacement = "";
-      if (options.hideAll) {
+      if (options.hideAll || options.stripForBadge) {
         replacement = "";
       } else if (parsed.mode === "normal") {
         replacement = options.normalLabel ?? "";
@@ -37713,7 +42664,8 @@
         replacement = options.planLabel ?? "计划模式";
       } else if (parsed.mode === "goal") {
         if (parsed.goal && typeof parsed.goal === "string" && parsed.goal.trim()) {
-          replacement = options.goalPrefix ? `${options.goalPrefix}${parsed.goal.trim()}` : `目标: ${parsed.goal.trim()}`;
+          const cleanGoal = sanitizeGoalInlineText(parsed.goal);
+          replacement = options.goalPrefix ? `${options.goalPrefix}${cleanGoal}` : `目标: ${cleanGoal}`;
         } else {
           replacement = options.goalLabel ?? "目标模式";
         }
@@ -37729,111 +42681,575 @@
     return cleanupStatusText(result);
   }
 
-  function syncComposerModesBottomStatus() {
+  // ==========================================
+  // 3.55.3.1.5 输入框正上方独立目标管理横条与暂停/继续控制
+  // ==========================================
+  let goalTimerInterval = null;
+  let goalTimerAnchor = null; // { baseMs: number, startPerf: number, sessionId: string }
+
+  function formatGoalDuration(totalMs) {
+    const totalSeconds = Math.max(0, Math.floor(totalMs / 1000));
+    const hours = Math.floor(totalSeconds / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    const seconds = totalSeconds % 60;
+    const pad = (n) => (n < 10 ? "0" + n : String(n));
+    if (hours > 0) {
+      return `${hours}:${pad(minutes)}:${pad(seconds)}`;
+    }
+    return `${pad(minutes)}:${pad(seconds)}`;
+  }
+
+  function clearGoalTimer() {
+    if (goalTimerInterval) {
+      clearInterval(goalTimerInterval);
+      goalTimerInterval = null;
+    }
+    goalTimerAnchor = null;
+  }
+
+  function removeComposerGoalBar() {
+    clearGoalTimer();
+    hideGoalTooltip();
+    if (composerGoalBarEl) {
+      try { composerGoalBarEl.remove(); } catch (e) {}
+      composerGoalBarEl = null;
+    }
+    if (typeof document !== "undefined" && typeof document.querySelectorAll === "function") {
+      document.querySelectorAll(".pi-enh-composer-goal-bar").forEach((el) => {
+        try { el.remove(); } catch (e) {}
+      });
+    }
+  }
+
+  async function handleComposerGoalAction(action, targetSessionId, btnEl) {
+    if (isGoalActionRunning) return;
+    const sid = targetSessionId || (typeof getEffectiveComposerSessionId === "function" ? getEffectiveComposerSessionId() : getCurrentSessionId());
+    if (!sid) return;
+
+    isGoalActionRunning = true;
+    if (btnEl) {
+      btnEl.disabled = true;
+      btnEl.setAttribute("aria-busy", "true");
+    }
+
+    try {
+      // 0. 检查后端扩展命令是否已注册，防止旧会话尚未加载扩展时将 /composer-goal 当作普通用户消息发给模型
+      const cmdRes = await window.fetch(`/api/agent/${encodeURIComponent(sid)}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ type: "get_commands" }),
+      });
+      if (!cmdRes.ok) {
+        showToast("无法获取会话命令列表，已拒绝发送目标控制指令", null, 2500);
+        return false;
+      }
+      const cmdData = await cmdRes.json().catch(() => null);
+      if (cmdData && cmdData.success === false) {
+        showToast("获取会话命令列表失败，已拒绝发送目标控制指令", null, 2500);
+        return false;
+      }
+      const commands = cmdData?.data?.commands || cmdData?.commands || [];
+      const hasComposerGoal = Array.isArray(commands) && commands.some(
+        (c) => c?.name === "composer-goal" || c?.name === "/composer-goal"
+      );
+      if (!hasComposerGoal) {
+        showToast("该会话未加载 composer-goal 命令，需等待空闲后输入 /reload 重新加载", null, 4000);
+        return false;
+      }
+
+      // 1. 发送真实 POST 扩展命令（/composer-goal pause|resume 在忙碌中亦被允许）
+      const promptRes = await window.fetch(`/api/agent/${encodeURIComponent(sid)}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ type: "prompt", message: `/composer-goal ${action}` }),
+      });
+
+      if (!promptRes.ok) {
+        showToast("目标控制请求失败，请稍后重试", null, 2500);
+        return false;
+      }
+      const promptData = await promptRes.json().catch(() => null);
+      if (promptData && promptData.success === false) {
+        showToast(`目标控制被拒绝: ${promptData.error || "未知原因"}`, null, 3000);
+        return false;
+      }
+
+      // 2. 回读对应会话状态确认（必须读取真实扩展状态，绝不伪造成功）
+      const postStateRes = await window.fetch(`/api/agent/${encodeURIComponent(sid)}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ type: "get_state" }),
+      });
+
+      if (!postStateRes.ok) {
+        showToast("回读会话状态失败，未更新目标状态", null, 2500);
+        return false;
+      }
+
+      const postStateData = await postStateRes.json().catch(() => null);
+      const parsed = parseExtensionStatus(postStateData, "composer-modes");
+
+      if (!parsed || parsed.version !== 1 || parsed.mode !== "goal" || postStateData?.success === false) {
+        showToast("回读状态异常或目标模式已改变，操作未确认", null, 3000);
+        return false;
+      }
+
+      const newPending = Boolean(parsed.pausePending);
+      const newPaused = Boolean(parsed.paused);
+
+      if (action === "pause" && !newPending && !newPaused) {
+        showToast("暂停未生效，请检查会话状态", null, 3000);
+        return false;
+      }
+      if (action === "resume" && (newPending || newPaused)) {
+        showToast("恢复未生效，请重试", null, 3000);
+        return false;
+      }
+
+      // 3. 真实确认后更新本地会话模式映射
+      const prev = composerModesStateMap.get(sid) || {};
+      const updatedActionState = {
+        ...prev,
+        mode: parsed.mode || "goal",
+        goal: parsed.goal || prev.goal,
+        pausePending: newPending,
+        paused: newPaused,
+      };
+      if (typeof parsed?.goalElapsedMs === "number") {
+        updatedActionState.goalElapsedMs = parsed.goalElapsedMs;
+      }
+      if (typeof parsed?.goalActiveSinceMs === "number") {
+        updatedActionState.goalActiveSinceMs = parsed.goalActiveSinceMs;
+      } else {
+        delete updatedActionState.goalActiveSinceMs;
+      }
+      composerModesStateMap.set(sid, updatedActionState);
+
+      // 4. 刷新目标独立行
+      syncComposerGoalBar();
+      syncComposerModesBottomStatus();
+      return true;
+    } catch (e) {
+      showToast("操作发生异常，请检查网络", null, 3000);
+      return false;
+    } finally {
+      isGoalActionRunning = false;
+      if (btnEl && btnEl.isConnected) {
+        btnEl.disabled = false;
+        btnEl.removeAttribute("aria-busy");
+      }
+    }
+  }
+
+  function syncComposerGoalBar() {
     if (!isPluginEnabled("composer-modes")) {
-      restoreComposerModesBottomStatus();
+      clearGoalTimer();
+      removeComposerGoalBar();
       return;
     }
 
-    // 1. 清理已断开连接的节点与元素，杜绝内存泄漏
-    for (const [node] of composerModesTextNodeMap) {
-      if (!node.isConnected) {
-        composerModesTextNodeMap.delete(node);
-      }
-    }
-    for (const [el] of composerModesAttrMap) {
-      if (!el.isConnected) {
-        composerModesAttrMap.delete(el);
-      }
+    const sessionId = typeof getEffectiveComposerSessionId === "function" ? getEffectiveComposerSessionId() : getCurrentSessionId();
+    const sessionState = sessionId ? composerModesStateMap.get(sessionId) : null;
+    const isGoalMode = sessionState?.mode === "goal";
+    const rawGoal = (isGoalMode && sessionState?.goal) ? String(sessionState.goal).trim() : "";
+
+    if (!isGoalMode || !rawGoal) {
+      clearGoalTimer();
+      removeComposerGoalBar();
+      return;
     }
 
-    // 2. 状态行根节点定位（优先整体状态行，避免重复处理；normal空状态绝不隐藏整行，保留其它扩展）
-    const lines = document.querySelectorAll(
-      '.extension-status-line[role="status"], .extension-status-line'
+    const textarea = findComposerTextarea();
+    const card = textarea?.closest('fieldset > div[style*="max-width"]');
+    if (!card || !card.parentElement) {
+      clearGoalTimer();
+      removeComposerGoalBar();
+      return;
+    }
+
+    const isPaused = Boolean(sessionState?.paused);
+    const isPending = Boolean(sessionState?.pausePending);
+    const statusKey = isPaused ? "paused" : (isPending ? "pending" : "active");
+    const cleanGoal = sanitizeGoalInlineText(rawGoal);
+
+    let bar = composerGoalBarEl;
+    const isConnectedAtCorrectPos = Boolean(
+      bar?.isConnected && bar.parentElement === card.parentElement && bar.nextElementSibling === card
     );
-    const roots = lines.length > 0
-      ? Array.from(lines)
-      : Array.from(document.querySelectorAll('.extension-status-text'));
+    if (!isConnectedAtCorrectPos) {
+      clearGoalTimer();
+      removeComposerGoalBar();
+      bar = document.createElement("div");
+      bar.className = "pi-enh-composer-goal-bar";
+      bar.setAttribute("role", "region");
+      bar.setAttribute("aria-label", "当前目标管理");
+      card.parentElement.insertBefore(bar, card);
+      composerGoalBarEl = bar;
+    }
 
-    if (!roots.length) return;
+    const hasTiming = typeof sessionState?.goalElapsedMs === "number";
+    const elapsedBase = hasTiming ? sessionState.goalElapsedMs : 0;
+    const activeSince = typeof sessionState?.goalActiveSinceMs === "number" ? sessionState.goalActiveSinceMs : null;
 
-    for (const root of roots) {
-      if (!root.isConnected) continue;
+    // 签名包含关键静态状态字段，不包含每秒累加的瞬时秒数，防止每秒重建 DOM 导致焦点跳动
+    const barSignature = `${sessionId}|${rawGoal}|${statusKey}|${hasTiming ? 1 : 0}|${elapsedBase}|${activeSince ?? ""}`;
+    const signatureChanged = bar.dataset.renderSignature !== barSignature;
 
-      // 3. TreeWalker 遍历具体 Text 节点并修改 nodeValue，保留所有 React 原生元素和 ANSI span
-      if (typeof document.createTreeWalker === "function") {
-        const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null);
-        let node = walker.nextNode();
-        while (node) {
-          if (node.isConnected) {
-            const current = node.nodeValue || "";
-            const record = composerModesTextNodeMap.get(node);
+    if (signatureChanged) {
+      bar.dataset.renderSignature = barSignature;
+      bar.dataset.sessionId = sessionId;
 
-            // 若当前内容正是我们格式化的文本且 React 未写入新状态，跳过
-            if (record && current === record.formatted) {
-              // no-op
-            } else {
-              // 全新节点或 React 更新写入了新内容，以当前文本作为 raw 基准
-              const raw = current;
-              const formatted = formatComposerModesStatusText(raw);
-              if (formatted !== raw) {
-                composerModesTextNodeMap.set(node, { raw, formatted });
-                node.nodeValue = formatted;
-              } else if (record) {
-                composerModesTextNodeMap.delete(node);
-              }
-            }
-          }
-          node = walker.nextNode();
-        }
+      let statusLabel = "目标:";
+      let tooltipTitle = "当前目标 (推进中)";
+      let actionType = "pause";
+      let actionBtnClass = "pi-enh-goal-btn-pause";
+      let actionIconSvg = SVG_GOAL_PAUSE_ICON;
+      let actionBtnTitle = "当前任务完成后暂停目标";
+      let actionBtnLabel = "当前任务完成后暂停目标";
+
+      if (isPaused) {
+        statusLabel = "目标 (已暂停):";
+        tooltipTitle = "当前目标 (已暂停)";
+        actionType = "resume";
+        actionBtnClass = "pi-enh-goal-btn-resume";
+        actionIconSvg = SVG_GOAL_PLAY_ICON;
+        actionBtnTitle = "继续目标";
+        actionBtnLabel = "继续目标";
+      } else if (isPending) {
+        statusLabel = "目标 (等待暂停):";
+        tooltipTitle = "当前目标 (等待当前任务完成后暂停)";
+        actionType = "resume";
+        actionBtnClass = "pi-enh-goal-btn-cancel";
+        actionIconSvg = SVG_GOAL_PLAY_ICON;
+        actionBtnTitle = "取消待暂停";
+        actionBtnLabel = "取消待暂停";
       }
 
-      // 4. 属性清洗（title 与 aria-label 避免向用户悬停露出原始 JSON，同样条件式存储）
-      const elementsWithAttrs = [];
-      if (root.hasAttribute?.("title") || root.hasAttribute?.("aria-label")) {
-        elementsWithAttrs.push(root);
-      }
-      if (typeof root.querySelectorAll === "function") {
-        const children = root.querySelectorAll("[title], [aria-label]");
-        for (let i = 0; i < children.length; i++) {
-          elementsWithAttrs.push(children[i]);
-        }
+      let initialDurationMs = elapsedBase;
+      if (hasTiming && !isPaused && activeSince !== null) {
+        initialDurationMs += Math.max(0, Date.now() - activeSince);
       }
 
-      for (const el of elementsWithAttrs) {
-        if (!el.isConnected) continue;
-        let attrMap = composerModesAttrMap.get(el);
+      const timerHtml = hasTiming
+        ? `<span class="pi-enh-goal-pill-timer" aria-label="目标累计运行时间" title="目标累计运行时间">${formatGoalDuration(initialDurationMs)}</span>`
+        : "";
 
-        for (const attrName of ["title", "aria-label"]) {
-          if (!el.hasAttribute(attrName)) continue;
-          const current = el.getAttribute(attrName) || "";
-          const record = attrMap?.get(attrName);
+      bar.innerHTML = `
+        <div class="pi-enh-composer-goal-pill" data-status="${statusKey}" tabindex="0" role="status" aria-label="${escapeGoalHtml(tooltipTitle)}: ${escapeGoalHtml(cleanGoal)}">
+          <span class="pi-enh-goal-pill-icon">${SVG_STATUS_GOAL_ICON}</span>
+          <span class="pi-enh-goal-pill-status">${escapeGoalHtml(statusLabel)}</span>
+          <span class="pi-enh-goal-pill-text">${escapeGoalHtml(cleanGoal)}</span>
+          ${timerHtml}
+          <button type="button" class="pi-enh-composer-goal-btn ${actionBtnClass}" aria-label="${escapeGoalHtml(actionBtnLabel)}" title="${escapeGoalHtml(actionBtnTitle)}">
+            ${actionIconSvg}
+          </button>
+        </div>
+      `;
 
-          if (record && current === record.formatted) {
-            continue;
+      const pillEl = bar.querySelector(".pi-enh-composer-goal-pill");
+      if (pillEl) {
+        pillEl.onmouseenter = () => {
+          showGoalTooltip(pillEl, rawGoal, tooltipTitle);
+        };
+        pillEl.onmouseleave = () => {
+          scheduleHideGoalTooltip();
+        };
+        pillEl.onclick = (e) => {
+          if (e.target && e.target.closest(".pi-enh-composer-goal-btn")) return;
+          showGoalTooltip(pillEl, rawGoal, tooltipTitle);
+        };
+      }
+
+      const btnEl = bar.querySelector(".pi-enh-composer-goal-btn");
+      if (btnEl) {
+        btnEl.addEventListener("click", (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          void handleComposerGoalAction(actionType, sessionId, btnEl);
+        });
+      }
+
+      // 状态变动时重新锚定单调计时器基线
+      if (hasTiming && !isPaused && activeSince !== null) {
+        const startPerf = typeof performance !== "undefined" && typeof performance.now === "function" ? performance.now() : Date.now();
+        goalTimerAnchor = {
+          baseMs: initialDurationMs,
+          startPerf,
+          sessionId,
+        };
+      }
+    }
+
+    // 维持/刷新单调计时器
+    const isTimerRunning = hasTiming && !isPaused && activeSince !== null;
+    if (isTimerRunning) {
+      if (!goalTimerAnchor || goalTimerAnchor.sessionId !== sessionId) {
+        const initialDurationMs = elapsedBase + Math.max(0, Date.now() - activeSince);
+        const startPerf = typeof performance !== "undefined" && typeof performance.now === "function" ? performance.now() : Date.now();
+        goalTimerAnchor = {
+          baseMs: initialDurationMs,
+          startPerf,
+          sessionId,
+        };
+      }
+
+      if (!goalTimerInterval) {
+        goalTimerInterval = setInterval(() => {
+          if (!goalTimerAnchor) {
+            clearGoalTimer();
+            return;
           }
-
-          const raw = current;
-          const formatted = formatComposerModesStatusText(raw);
-          if (formatted !== raw) {
-            if (!attrMap) {
-              attrMap = new Map();
-              composerModesAttrMap.set(el, attrMap);
-            }
-            attrMap.set(attrName, { raw, formatted });
-            el.setAttribute(attrName, formatted);
-          } else if (record) {
-            attrMap.delete(attrName);
-            if (attrMap.size === 0) {
-              composerModesAttrMap.delete(el);
-            }
+          const currentEffectiveSid = typeof getEffectiveComposerSessionId === "function" ? getEffectiveComposerSessionId() : getCurrentSessionId();
+          if (!currentEffectiveSid || currentEffectiveSid !== goalTimerAnchor.sessionId) {
+            clearGoalTimer();
+            removeComposerGoalBar();
+            return;
           }
+          const timerSpan = composerGoalBarEl?.querySelector(".pi-enh-goal-pill-timer");
+          if (!timerSpan || !timerSpan.isConnected) {
+            clearGoalTimer();
+            return;
+          }
+          const curPerf = typeof performance !== "undefined" && typeof performance.now === "function" ? performance.now() : Date.now();
+          const deltaMs = Math.max(0, curPerf - goalTimerAnchor.startPerf);
+          timerSpan.textContent = formatGoalDuration(goalTimerAnchor.baseMs + deltaMs);
+        }, 1000);
+      }
+    } else {
+      clearGoalTimer();
+      if (hasTiming) {
+        const timerSpan = bar.querySelector(".pi-enh-goal-pill-timer");
+        if (timerSpan) {
+          timerSpan.textContent = formatGoalDuration(elapsedBase);
         }
       }
     }
   }
 
+  let isCleaningComposerModesStatus = false;
+
+  function syncComposerModesBottomStatus() {
+    if (!isPluginEnabled("composer-modes")) {
+      restoreComposerModesBottomStatus();
+      return;
+    }
+    if (isCleaningComposerModesStatus) return;
+    isCleaningComposerModesStatus = true;
+    try {
+      ensureComposerModesStatusObserver();
+
+      // 1. 清理已断开连接的节点与元素，杜绝内存泄漏
+      for (const [node] of composerModesTextNodeMap) {
+        if (!node.isConnected) {
+          composerModesTextNodeMap.delete(node);
+        }
+      }
+      for (const [el] of composerModesAttrMap) {
+        if (!el.isConnected) {
+          composerModesAttrMap.delete(el);
+        }
+      }
+
+      // 2. 状态行根节点定位（优先整体状态行，避免重复处理；normal空状态绝不隐藏整行，保留其它扩展）
+      const lines = document.querySelectorAll(
+        '.extension-status-line[role="status"], .extension-status-line'
+      );
+      const roots = lines.length > 0
+        ? Array.from(lines)
+        : Array.from(document.querySelectorAll('.extension-status-text'));
+
+      if (!roots.length) return;
+
+      for (const root of roots) {
+        if (!root.isConnected) continue;
+
+        // 提取并维护左侧目标胶囊（Badge）
+        let activeGoalInfo = null;
+        let activePlanInfo = null;
+
+        const allText = root.textContent || "";
+        let jsonBlocks = extractTopLevelJsonBlocks(allText);
+
+        // 若当前 DOM 文本已被 TreeWalker 清洗，从记录的 raw 文本中恢复检测模式，避免 MutationObserver 重复触发时误删 Badge
+        if (!jsonBlocks.length) {
+          for (const [node, record] of composerModesTextNodeMap) {
+            if (node.isConnected && root.contains(node) && record.raw) {
+              const rawBlocks = extractTopLevelJsonBlocks(record.raw);
+              if (rawBlocks.length) {
+                jsonBlocks = rawBlocks;
+                break;
+              }
+            }
+          }
+        }
+
+        for (let bi = 0; bi < jsonBlocks.length; bi++) {
+          try {
+            const p = JSON.parse(jsonBlocks[bi].raw);
+            if (p && p.version === 1) {
+              if (p.mode === "goal" && p.goal && typeof p.goal === "string" && p.goal.trim()) {
+                activeGoalInfo = p;
+                const currentSid = typeof getEffectiveComposerSessionId === "function"
+                  ? getEffectiveComposerSessionId()
+                  : (typeof getCurrentSessionId === "function" ? getCurrentSessionId() : null);
+                if (currentSid) {
+                  const prev = composerModesStateMap.get(currentSid);
+                  // 仅当会话状态映射已为 goal 且 goal 文本与 p.goal 一致时，才从底栏 status 更新暂停状态；
+                  // 防止会话切换瞬间残留的旧状态栏 raw JSON 将旧 goal 污染写入新会话缓存，缓存不一致时以真实回读为准
+                  if (prev && prev.mode === "goal" && prev.goal === p.goal) {
+                    const nextPending = Boolean(p.pausePending);
+                    const nextPaused = Boolean(p.paused);
+                    const nextElapsed = typeof p.goalElapsedMs === "number" ? p.goalElapsedMs : undefined;
+                    const nextActiveSince = typeof p.goalActiveSinceMs === "number" ? p.goalActiveSinceMs : undefined;
+                    if (
+                      Boolean(prev.pausePending) !== nextPending ||
+                      Boolean(prev.paused) !== nextPaused ||
+                      prev.goalElapsedMs !== nextElapsed ||
+                      prev.goalActiveSinceMs !== nextActiveSince
+                    ) {
+                      const updatedBottomState = {
+                        ...prev,
+                        mode: "goal",
+                        goal: p.goal,
+                        pausePending: nextPending,
+                        paused: nextPaused,
+                      };
+                      if (nextElapsed !== undefined) {
+                        updatedBottomState.goalElapsedMs = nextElapsed;
+                      } else {
+                        delete updatedBottomState.goalElapsedMs;
+                      }
+                      if (nextActiveSince !== undefined) {
+                        updatedBottomState.goalActiveSinceMs = nextActiveSince;
+                      } else {
+                        delete updatedBottomState.goalActiveSinceMs;
+                      }
+                      composerModesStateMap.set(currentSid, updatedBottomState);
+                      syncComposerGoalBar();
+                    }
+                  } else {
+                    const mismatchKey = `${currentSid}|${p.goal}`;
+                    if (lastComposerGoalMismatchKey !== mismatchKey) {
+                      lastComposerGoalMismatchKey = mismatchKey;
+                      void querySessionModeState(currentSid);
+                    }
+                  }
+                }
+              } else if (p.mode === "plan") {
+                activePlanInfo = p;
+              }
+            }
+          } catch (e) {}
+        }
+
+        if (!activeGoalInfo && !activePlanInfo) {
+          const currentSid = typeof getEffectiveComposerSessionId === "function"
+            ? getEffectiveComposerSessionId()
+            : (typeof getCurrentSessionId === "function" ? getCurrentSessionId() : null);
+          const sessionState = currentSid ? composerModesStateMap.get(currentSid) : null;
+          if (sessionState?.mode === "goal" && sessionState?.goal?.trim()) {
+            activeGoalInfo = sessionState;
+          } else if (sessionState?.mode === "plan") {
+            activePlanInfo = sessionState;
+          }
+        }
+
+        // 底栏不再放置目标胶囊，如有遗留一律清除，将底栏空间完全留给 LSP / Mail 扩展
+        const isStatusLine = root.classList?.contains("extension-status-line");
+        const statusLineEl = isStatusLine ? root : root.closest?.(".extension-status-line");
+
+        if (statusLineEl && statusLineEl.isConnected && typeof statusLineEl.querySelector === "function") {
+          const badgeEl = statusLineEl.querySelector(".pi-enh-status-goal-badge");
+          if (badgeEl) {
+            badgeEl.remove();
+          }
+        }
+
+        // 3. TreeWalker 遍历具体 Text 节点并修改 nodeValue，保留所有 React 原生元素和 ANSI span
+        if (typeof document.createTreeWalker === "function") {
+          const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null);
+          let node = walker.nextNode();
+          while (node) {
+            if (node.isConnected) {
+              if (!node.parentElement?.closest?.(".pi-enh-status-goal-badge")) {
+                const current = node.nodeValue || "";
+                const record = composerModesTextNodeMap.get(node);
+
+                // 若当前内容正是我们格式化的文本且 React 未写入新状态，跳过
+                if (record && current === record.formatted) {
+                  // no-op
+                } else {
+                  // 全新节点或 React 更新写入了新内容，以当前文本作为 raw 基准；底栏彻底清洗 composer-modes 文本留给其它扩展
+                  const raw = current;
+                  const formatted = formatComposerModesStatusText(raw, { stripForBadge: true });
+                  if (formatted !== raw) {
+                    composerModesTextNodeMap.set(node, { raw, formatted });
+                    node.nodeValue = formatted;
+                  } else if (record) {
+                    composerModesTextNodeMap.delete(node);
+                  }
+                }
+              }
+            }
+            node = walker.nextNode();
+          }
+        }
+
+        // 4. 属性清洗（title 与 aria-label 避免向用户悬停露出原始 JSON，同样条件式存储）
+        const elementsWithAttrs = [];
+        if (root.hasAttribute?.("title") || root.hasAttribute?.("aria-label")) {
+          elementsWithAttrs.push(root);
+        }
+        if (typeof root.querySelectorAll === "function") {
+          const children = root.querySelectorAll("[title], [aria-label]");
+          for (let i = 0; i < children.length; i++) {
+            elementsWithAttrs.push(children[i]);
+          }
+        }
+
+        for (const el of elementsWithAttrs) {
+          if (!el.isConnected) continue;
+          let attrMap = composerModesAttrMap.get(el);
+
+          for (const attrName of ["title", "aria-label"]) {
+            if (!el.hasAttribute(attrName)) continue;
+            const current = el.getAttribute(attrName) || "";
+            const record = attrMap?.get(attrName);
+
+            if (record && current === record.formatted) {
+              continue;
+            }
+
+            const raw = current;
+            const formatted = formatComposerModesStatusText(raw);
+            if (formatted !== raw) {
+              if (!attrMap) {
+                attrMap = new Map();
+                composerModesAttrMap.set(el, attrMap);
+              }
+              attrMap.set(attrName, { raw, formatted });
+              el.setAttribute(attrName, formatted);
+            } else if (record) {
+              attrMap.delete(attrName);
+              if (attrMap.size === 0) {
+                composerModesAttrMap.delete(el);
+              }
+            }
+          }
+        }
+      }
+    } finally {
+      isCleaningComposerModesStatus = false;
+    }
+  }
+
   function restoreComposerModesBottomStatus() {
+    hideGoalTooltip();
+    if (typeof document !== "undefined" && typeof document.querySelectorAll === "function") {
+      document.querySelectorAll(".pi-enh-status-goal-badge").forEach(el => {
+        try { el.remove(); } catch (e) {}
+      });
+    }
     if (composerModesStatusObserver) {
       try { composerModesStatusObserver.disconnect(); } catch (e) {}
       composerModesStatusObserver = null;
@@ -37861,11 +43277,176 @@
   }
 
   function ensureComposerModesStatusObserver() {
-    // 复用全局已有 scheduleDomSync / runAllSyncOperations 统一调度，
-    // 避免独立 MutationObserver 追踪内部 ANSI span 造成的祖先失效或无限 DOM 循环
+    if (!isPluginEnabled("composer-modes")) {
+      if (composerModesStatusObserver) {
+        try { composerModesStatusObserver.disconnect(); } catch (e) {}
+        composerModesStatusObserver = null;
+      }
+      return;
+    }
+    if (composerModesStatusObserver) return;
+    if (typeof MutationObserver !== "function") return;
+
+    composerModesStatusObserver = new MutationObserver((mutations) => {
+      if (isCleaningComposerModesStatus) return;
+      let shouldSync = false;
+      for (let i = 0; i < mutations.length; i++) {
+        const m = mutations[i];
+        if (m.type === "childList") {
+          const target = m.target;
+
+          // 彻底忽略本插件自身徽章、目标横条与浮层卡片的变动，防止自触发
+          if (
+            target?.classList?.contains("pi-enh-status-goal-badge") ||
+            target?.classList?.contains("pi-enh-goal-tooltip-card") ||
+            target?.classList?.contains("pi-enh-composer-goal-bar") ||
+            target?.closest?.(".pi-enh-status-goal-badge, .pi-enh-goal-tooltip-card, .pi-enh-composer-goal-bar")
+          ) {
+            continue;
+          }
+          let isOurOwnChange = false;
+          for (let j = 0; j < m.addedNodes.length; j++) {
+            const an = m.addedNodes[j];
+            if (an.nodeType === 1 && (an.classList?.contains("pi-enh-status-goal-badge") || an.classList?.contains("pi-enh-goal-tooltip-card") || an.classList?.contains("pi-enh-composer-goal-bar"))) {
+              isOurOwnChange = true;
+              break;
+            }
+          }
+          for (let j = 0; j < m.removedNodes.length; j++) {
+            const rn = m.removedNodes[j];
+            if (rn.nodeType === 1 && (rn.classList?.contains("pi-enh-status-goal-badge") || rn.classList?.contains("pi-enh-goal-tooltip-card") || rn.classList?.contains("pi-enh-composer-goal-bar"))) {
+              isOurOwnChange = true;
+              break;
+            }
+          }
+          if (isOurOwnChange) continue;
+
+          // 1. 检查目标容器是否为 status 相关（React 更新 status-text 内部 childList TextNode）
+          if (
+            target && target.nodeType === 1 &&
+            (target.classList?.contains("extension-status-text") ||
+             target.classList?.contains("extension-status-line") ||
+             target.classList?.contains("extension-status-shelf") ||
+             target.closest?.(".extension-status-shelf, .extension-status-line"))
+          ) {
+            shouldSync = true;
+            break;
+          }
+
+          // 2. 检查新增节点：仅检查 relevant class，严禁在普通消息节点做昂贵 querySelector
+          for (let j = 0; j < m.addedNodes.length; j++) {
+            const node = m.addedNodes[j];
+            if (node.nodeType === 1) {
+              const cl = node.classList;
+              if (
+                cl?.contains("extension-status-shelf") ||
+                cl?.contains("extension-status-line") ||
+                cl?.contains("extension-status-text")
+              ) {
+                shouldSync = true;
+                break;
+              }
+              // 仅当整块新建挂载 chat-content 容器时才扫描内部状态栏
+              if (cl?.contains("chat-content") && node.querySelector?.(".extension-status-shelf, .extension-status-line, .extension-status-text")) {
+                shouldSync = true;
+                break;
+              }
+            }
+          }
+        } else if (m.type === "characterData") {
+          const parent = m.target.parentElement;
+          if (parent?.closest?.(".extension-status-shelf, .extension-status-line")) {
+            shouldSync = true;
+          }
+        }
+        if (shouldSync) break;
+      }
+      if (shouldSync) {
+        syncComposerModesBottomStatus();
+        syncComposerGoalBar();
+      }
+    });
+
+    try {
+      const root = document.documentElement || document.body;
+      if (root) {
+        composerModesStatusObserver.observe(root, {
+          childList: true,
+          subtree: true,
+          characterData: true,
+        });
+      }
+    } catch (e) {}
+  }
+
+  function handleComposerModesResize() {
+    if (!composerAddMenuEl) return;
+    const currentWidth = window.innerWidth;
+    // 宽度发生变化（如横竖屏切换或拉伸窗口）：合理关闭菜单
+    if (composerAddMenuContext && typeof composerAddMenuContext.openWidth === "number" && composerAddMenuContext.openWidth !== currentWidth) {
+      closeComposerAddMenu();
+      return;
+    }
+    // 视口高度发生变化（如移动端虚拟键盘收起/弹出）：保持菜单打开，重新计算定位以紧贴 composer
+    positionComposerAddMenu();
+    if (typeof window.requestAnimationFrame === "function") {
+      window.requestAnimationFrame(() => {
+        if (composerAddMenuEl) positionComposerAddMenu();
+      });
+    }
   }
 
   function handleComposerModesDocClick(e) {
+    const target = e.target;
+    if (target && typeof target.closest === "function" && isPluginEnabled("composer-modes")) {
+      const btnOrLink = target.closest("button, a");
+      if (btnOrLink) {
+        const title = String(btnOrLink.getAttribute("title") || "");
+        const ariaLabel = String(btnOrLink.getAttribute("aria-label") || "");
+        const text = String(btnOrLink.textContent || "").replace(/\s+/g, " ").trim();
+        const isNewSessionBtn =
+          title.includes("新建会话") ||
+          title.includes("New session") ||
+          ariaLabel.includes("新建会话") ||
+          ariaLabel.includes("New session") ||
+          text === "新建" ||
+          text === "+ 新建" ||
+          text === "New" ||
+          text === "+ New" ||
+          btnOrLink.hasAttribute("data-pi-enh-new-session");
+        if (isNewSessionBtn) {
+          const urlSid = typeof getCurrentSessionId === "function" ? getCurrentSessionId() : null;
+          pendingComposerNavOverride = { mode: "new", sessionId: null, fromUrlSessionId: urlSid, until: Date.now() + 5000 };
+          syntheticUrlSessionForNewDraft = null;
+          pendingNewComposerMode = null;
+          clearGoalTimer();
+          removeComposerGoalBar();
+          syncComposerModes();
+        }
+      }
+      const sessionRow = target.closest("[data-pi-enh-session-id], [data-session-id], a[href*='session=']");
+      if (sessionRow && !target.closest(".pi-enh-session-menu-btn, .pi-enh-archived-checkbox, input[type='checkbox']")) {
+        let clickedSid = sessionRow.getAttribute("data-pi-enh-session-id") || sessionRow.getAttribute("data-session-id") || null;
+        if (!clickedSid && sessionRow.tagName === "A") {
+          const href = sessionRow.getAttribute("href") || "";
+          const m = href.match(/[?&]session=([^&#]+)/);
+          if (m) {
+            try { clickedSid = decodeURIComponent(m[1]); } catch (err) {}
+          }
+        }
+        if (clickedSid) {
+          const curSid = getEffectiveComposerSessionId();
+          if (clickedSid !== curSid) {
+            const urlSid = typeof getCurrentSessionId === "function" ? getCurrentSessionId() : null;
+            pendingComposerNavOverride = { mode: "session", sessionId: clickedSid, fromUrlSessionId: urlSid, until: Date.now() + 5000 };
+            syntheticUrlSessionForNewDraft = null;
+            syncComposerGoalBar();
+            syncComposerModes();
+          }
+        }
+      }
+    }
+
     const addBtn = e.target.closest?.(".pi-enh-composer-add-btn");
     if (addBtn && isPluginEnabled("composer-modes")) {
       const card = addBtn.closest(".pi-enh-cursor-composer") || addBtn.closest("fieldset > div");
@@ -37885,6 +43466,15 @@
     if (e.key === "Escape" && composerAddMenuEl) {
       closeComposerAddMenu();
     }
+    if (e.ctrlKey && e.altKey && (e.key === "n" || e.key === "N") && isPluginEnabled("composer-modes")) {
+      const urlSid = typeof getCurrentSessionId === "function" ? getCurrentSessionId() : null;
+      pendingComposerNavOverride = { mode: "new", sessionId: null, fromUrlSessionId: urlSid, until: Date.now() + 5000 };
+      syntheticUrlSessionForNewDraft = null;
+      pendingNewComposerMode = null;
+      clearGoalTimer();
+      removeComposerGoalBar();
+      syncComposerModes();
+    }
   }
 
   function bindComposerModesEvents() {
@@ -37893,7 +43483,10 @@
       window.addEventListener("keydown", handleComposerModesKeydown, true);
       document.addEventListener("click", handleComposerModesDocClick, true);
       document.addEventListener("keydown", handleComposerModesDocKeydown, true);
-      window.addEventListener("resize", closeComposerAddMenu);
+      window.addEventListener("resize", handleComposerModesResize);
+      if (window.visualViewport) {
+        window.visualViewport.addEventListener("resize", handleComposerModesResize);
+      }
     }
   }
 
@@ -37902,17 +43495,21 @@
       window.removeEventListener("keydown", handleComposerModesKeydown, true);
       document.removeEventListener("click", handleComposerModesDocClick, true);
       document.removeEventListener("keydown", handleComposerModesDocKeydown, true);
-      window.removeEventListener("resize", closeComposerAddMenu);
+      window.removeEventListener("resize", handleComposerModesResize);
+      if (window.visualViewport) {
+        window.visualViewport.removeEventListener("resize", handleComposerModesResize);
+      }
       composerModesEventsBound = false;
     }
   }
 
   function syncComposerModes() {
-    const observedId = getCurrentSessionId();
+    const observedId = getEffectiveComposerSessionId();
     if (observedId !== lastObservedModesSessionId) {
       lastObservedModesSessionId = observedId;
       closeComposerAddMenu();
       if (pendingNewComposerMode?.sessionId && pendingNewComposerMode.sessionId !== observedId) pendingNewComposerMode = null;
+      syncComposerGoalBar();
       if (observedId) void querySessionModeState(observedId);
     }
     if (!isPluginEnabled("composer-modes")) {
@@ -37921,12 +43518,20 @@
     }
 
     ensureComposerModesStyle();
+    ensureComposerModesStatusObserver();
+    bindComposerModesEvents();
     document.querySelectorAll(".pi-enh-composer-modes-disabled-notice").forEach(el => el.remove());
 
     const textarea = findComposerTextarea();
-    if (!textarea) return;
+    if (!textarea) {
+      syncComposerGoalBar();
+      return;
+    }
     const card = textarea.closest(".pi-enh-cursor-composer") || textarea.closest("fieldset > div") || textarea.parentElement?.parentElement;
-    if (!card) return;
+    if (!card) {
+      syncComposerGoalBar();
+      return;
+    }
 
     if (card.style && getComputedStyle(card).position === "static") {
       card.style.position = "relative";
@@ -37939,7 +43544,7 @@
     }
     if (!leftContainer) return;
 
-    const sessionId = getCurrentSessionId();
+    const sessionId = getEffectiveComposerSessionId();
     if (pendingNewComposerMode && pendingNewComposerMode.project !== getCurrentProjectStatusKey()) pendingNewComposerMode = null;
 
     const currentMode = getSessionComposerMode(sessionId);
@@ -38016,6 +43621,9 @@
 
     // 5. 原生底栏状态清洗（隐藏或人性化本模式 JSON，保留其他扩展状态）
     syncComposerModesBottomStatus();
+
+    // 6. 输入框上方独立目标管理胶囊横条同步
+    syncComposerGoalBar();
   }
 
   async function requestExitModeWithVerification(sessionId) {
@@ -38051,6 +43659,9 @@
   }
 
   function removeComposerModes(options = {}) {
+    if (typeof document !== "undefined" && document.documentElement) {
+      document.documentElement.removeAttribute("data-pi-composer-modes-active");
+    }
     closeComposerAddMenu();
     document.querySelectorAll('.pi-enh-composer-add-btn[data-pi-enh-mode-owned="true"]').forEach((el) => {
       try { el.remove(); } catch (e) {}
@@ -38064,10 +43675,11 @@
     }
     unbindComposerModesEvents();
     restoreComposerModesBottomStatus();
+    removeComposerGoalBar();
 
     // 安全不变量：禁用仅关闭常规 UI 增强，严禁自动恢复写权限。
     // 若后台仍处于 plan 或 goal 激活模式，必须保留简明状态提醒条与回读退出按钮，不可在关闭时默默失去状态
-    const currentSessionId = getCurrentSessionId();
+    const currentSessionId = getEffectiveComposerSessionId();
     const currentMode = getSessionComposerMode(currentSessionId);
     if ((currentMode === "plan" || currentMode === "goal") && currentSessionId && !options.forceCleanNotice) {
       const card = textarea?.closest?.(".pi-enh-cursor-composer") || textarea?.closest?.("fieldset");
@@ -38114,15 +43726,27 @@
   window.__PI_ENH_GET_COMPOSER_MODE__ = getSessionComposerMode;
   window.__PI_ENH_SWITCH_COMPOSER_MODE__ = requestSwitchComposerMode;
   window.__PI_ENH_GET_CURRENT_SESSION_ID__ = getCurrentSessionId;
+  window.__PI_ENH_GET_EFFECTIVE_COMPOSER_SESSION_ID__ = getEffectiveComposerSessionId;
   window.__PI_ENH_FORMAT_COMPOSER_MODES_STATUS_TEXT__ = formatComposerModesStatusText;
   window.__PI_ENH_SYNC_COMPOSER_MODES_BOTTOM_STATUS__ = syncComposerModesBottomStatus;
   window.__PI_ENH_RESTORE_COMPOSER_MODES_BOTTOM_STATUS__ = restoreComposerModesBottomStatus;
   window.__PI_ENH_COMPOSER_MODES_TEXT_NODE_MAP__ = composerModesTextNodeMap;
   window.__PI_ENH_COMPOSER_MODES_ATTR_MAP__ = composerModesAttrMap;
   window.__PI_ENH_SET_COMPOSER_MODE_STATE__ = (sessionId, state) => {
+    pendingComposerNavOverride = null;
+    if (sessionId) {
+      syntheticUrlSessionForNewDraft = {
+        sessionId,
+        whileDraftKey: readComposerNativeDraftKey(),
+      };
+    }
     composerModesStateMap.set(sessionId, state);
     syncComposerModes();
+    syncComposerGoalBar();
   };
+  window.__PI_ENH_SYNC_COMPOSER_GOAL_BAR__ = syncComposerGoalBar;
+  window.__PI_ENH_REMOVE_COMPOSER_GOAL_BAR__ = removeComposerGoalBar;
+  window.__PI_ENH_HANDLE_COMPOSER_GOAL_ACTION__ = handleComposerGoalAction;
 
   // ==========================================
   // 3.55.4 At-Mention Plugins & Workflow Directives (@ 提及聚焦插件与目标计划)
@@ -38486,8 +44110,10 @@
   function extractAtMentionMatch(textarea) {
     if (!textarea) return null;
     const text = textarea.value || "";
+    if (text.indexOf("@") === -1) return null;
     const cursor = typeof textarea.selectionStart === "number" ? textarea.selectionStart : text.length;
     const textBefore = text.slice(0, cursor);
+    if (textBefore.indexOf("@") === -1) return null;
     const match = /(?:^|\s)@([^\s]*)$/.exec(textBefore);
     if (!match) return null;
     const query = match[1] || "";
@@ -38758,7 +44384,9 @@
     activeAtTextarea = textarea;
     const match = extractAtMentionMatch(textarea);
     if (!match) {
-      closeAtMentionMenu();
+      if (currentAtMatch || atMentionMenuEl) {
+        closeAtMentionMenu();
+      }
       return;
     }
     currentAtMatch = match;
@@ -38878,15 +44506,21 @@
   window.__PI_ENH_EXTRACT_AT_MATCH__ = extractAtMentionMatch;
 
   // ==========================================
-  // 3.56 Image Double Click Preview (全站图片双击弹窗预览)
+  // 3.56 Image Preview (历史消息单击预览，其余图片双击预览)
   // ==========================================
   function isEligibleDblClickImage(el) {
     if (!el || !el.tagName || el.tagName.toLowerCase() !== "img") return false;
+    if (isComposerAttachmentImage(el)) return false;
     let p = el.parentElement;
     while (p) {
       const tag = p.tagName ? p.tagName.toLowerCase() : "";
-      if (tag === "dialog" || tag === "button" || tag === "pre" || tag === "code") {
+      if (tag === "dialog" || tag === "pre" || tag === "code") {
         return false;
+      }
+      if (tag === "button") {
+        if (p !== el.parentElement || !isNativeImagePreviewTrigger(p)) {
+          return false;
+        }
       }
       const cls = p.className || "";
       if (typeof cls === "string" && (
@@ -38972,10 +44606,18 @@
     };
   }
 
+  function isHistoryMessageImageTarget(target) {
+    return Boolean(target?.closest?.("[data-message-role], .chat-message, [data-message-id]"));
+  }
+
   function handleImageDblClick(event) {
     if (!isPluginEnabled("image-dblclick-preview")) return;
-    const target = event.target;
-    if (!isEligibleDblClickImage(target)) return;
+    const rawTarget = event.target;
+    if (!rawTarget) return;
+    const enclosingButton = rawTarget.closest ? rawTarget.closest("button") : null;
+    if (enclosingButton && !isNativeImagePreviewTrigger(enclosingButton)) return;
+    const target = unwrapNativeImagePreviewTarget(rawTarget);
+    if (!isEligibleDblClickImage(target) || isHistoryMessageImageTarget(target)) return;
 
     if (typeof event.preventDefault === "function") event.preventDefault();
     if (typeof event.stopPropagation === "function") event.stopPropagation();
@@ -38986,13 +44628,7 @@
       alt: target.alt || target.getAttribute?.("alt") || "图片预览",
     };
 
-    openComposerImageZoomModal(
-      currentItem.src,
-      currentItem.alt,
-      null,
-      gallery,
-      { autoEdit: false }
-    );
+    openComposerImageZoomModal(currentItem.src, currentItem.alt, null, gallery, { autoEdit: false });
     if (activeZoomDialog) {
       activeZoomDialog.__isDblClickPreview = true;
     }
@@ -39000,11 +44636,15 @@
 
   function handleImageMouseOver(event) {
     if (!isPluginEnabled("image-dblclick-preview")) return;
-    const target = event.target;
+    const rawTarget = event.target;
+    if (!rawTarget) return;
+    const enclosingButton = rawTarget.closest ? rawTarget.closest("button") : null;
+    if (enclosingButton && !isNativeImagePreviewTrigger(enclosingButton)) return;
+    const target = unwrapNativeImagePreviewTarget(rawTarget);
     if (isEligibleDblClickImage(target)) {
       target.classList?.add("pi-enh-dblclick-zoomable");
       const inPanel = Boolean(target.closest?.("#file-panel, .right-panel-container, [data-panel='file']"));
-      const hint = inPanel ? "点击全屏预览" : "双击全屏预览";
+      const hint = isHistoryMessageImageTarget(target) ? "单击全屏预览" : inPanel ? "点击全屏预览" : "双击全屏预览";
       if (!target.hasAttribute || !target.hasAttribute("title") || target.getAttribute("title") === "" || target.getAttribute("title").includes("全屏预览")) {
         target.setAttribute?.("title", hint);
       }
@@ -39013,7 +44653,11 @@
 
   function handleImageClick(event) {
     if (!isPluginEnabled("image-dblclick-preview")) return;
-    const target = event.target;
+    const rawTarget = event.target;
+    if (!rawTarget) return;
+    const enclosingButton = rawTarget.closest ? rawTarget.closest("button") : null;
+    if (enclosingButton && !isNativeImagePreviewTrigger(enclosingButton)) return;
+    const target = unwrapNativeImagePreviewTarget(rawTarget);
     if (!isEligibleDblClickImage(target)) return;
 
     // 重点：如果在右侧文件浏览窗口内部，单击立即打开大图全屏预览！
@@ -39038,6 +44682,35 @@
       if (activeZoomDialog) {
         activeZoomDialog.__isDblClickPreview = true;
       }
+      return;
+    }
+
+    if (isHistoryMessageImageTarget(target)) {
+      if (typeof event.preventDefault === "function") event.preventDefault();
+      if (typeof event.stopPropagation === "function") event.stopPropagation();
+
+      const gallery = collectGalleryImages(target);
+      const currentItem = gallery.items[gallery.initialIndex] || {
+        src: target.currentSrc || target.src || target.getAttribute?.("src") || "",
+        alt: target.alt || target.getAttribute?.("alt") || "图片预览",
+      };
+      openComposerImageZoomModal(
+        currentItem.src,
+        currentItem.alt,
+        null,
+        gallery,
+        { autoEdit: false, allowAddToConversation: true }
+      );
+      if (activeZoomDialog) {
+        activeZoomDialog.__isDblClickPreview = true;
+      }
+      return;
+    }
+
+    // 保留非历史原生 ImagePreview 的点击行为，确保双击插件关闭/卸载时仍可使用原生预览。
+    if (isNativeImagePreviewTrigger(target.parentElement)) {
+      if (typeof event.preventDefault === "function") event.preventDefault();
+      if (typeof event.stopPropagation === "function") event.stopPropagation();
     }
   }
 
@@ -39048,7 +44721,7 @@
       if (isEligibleDblClickImage(img)) {
         img.classList?.add("pi-enh-dblclick-zoomable");
         const inPanel = Boolean(img.closest?.("#file-panel, .right-panel-container, [data-panel='file']"));
-        const hint = inPanel ? "点击全屏预览" : "双击全屏预览";
+        const hint = isHistoryMessageImageTarget(img) ? "单击全屏预览" : inPanel ? "点击全屏预览" : "双击全屏预览";
         if (!img.hasAttribute || !img.hasAttribute("title") || img.getAttribute("title") === "" || img.getAttribute("title").includes("全屏预览")) {
           img.setAttribute?.("title", hint);
         }
@@ -39312,11 +44985,16 @@
 
       /* 1. 宽屏分屏模式 (>= 960px)：右侧面板脱离默认 position:static，赋予独立的相对定位与高层级 */
       @media (min-width: 960px) {
-        #file-panel.right-panel-container,
-        .right-panel-container {
+        #file-panel.right-panel-container:not(.right-panel-full-width),
+        .right-panel-container:not(.right-panel-full-width) {
           position: relative !important;
           z-index: 100 !important;
           background: var(--bg) !important;
+        }
+        /* 补偿 #file-panel 左边框 1px；保持外层固定宽度与开关动画不变 */
+        #file-panel.right-panel-container:not(.right-panel-full-width) > * {
+          width: calc(var(--right-panel-width, clamp(360px, 42vw, 640px)) - 1px);
+          min-width: 299px;
         }
       }
 
@@ -39680,11 +45358,25 @@
 
     const native = readNativeComposerDraft();
     if (native && !assembledAttachments) {
+      let expectedText = textarea.value || "";
+      if (!expectedText && target === textarea && native.valueRef.current === "") {
+        const recent = composerRecentInput.get(textarea);
+        if (recent?.owner === native.key && recent.text.trim()
+          && Date.now() - recent.at < 240) expectedText = recent.text;
+      }
+      const hasQuotes = isPluginEnabled("quick-quote") && typeof listAnnotations === "function" && listAnnotations().length > 0;
+      const annotationSnapshot = hasQuotes ? listAnnotations() : null;
+      const bodyText = expectedText;
+      const finalText = hasQuotes ? serializeAnnotations(bodyText) : expectedText;
+
       return dispatchComposerNativeSubmission({
         kind: "send",
         textarea,
         expectedOwner: native.key,
-        expectedText: textarea.value || "",
+        expectedText: finalText,
+        annotationSnapshot,
+        annotationBody: bodyText,
+        annotationSession: typeof getAnnotationSessionId === "function" ? getAnnotationSessionId() : (getCurrentSessionId() || "draft"),
       });
     }
 
@@ -39736,7 +45428,7 @@
       if (e.isComposing || e.keyCode === 229) return;
 
       // 拼音选词刚结束 120ms 缓冲期内，阻止意外回车并吞噬
-      if (Date.now() - lastCompositionEndTime < 120) {
+      if (Date.now() - lastCompositionEndTime < 120 && !lastCompositionKeyReleased) {
         if (typeof e.preventDefault === "function") e.preventDefault();
         if (typeof e.stopPropagation === "function") e.stopPropagation();
         if (typeof e.stopImmediatePropagation === "function") e.stopImmediatePropagation();
@@ -39767,40 +45459,38 @@
 
     // 正在输入法拼音组字中，放行给输入法
     if (e.isComposing || isComposingInput || e.keyCode === 229) return;
-    if (Date.now() - lastCompositionEndTime < 120) return;
+    if (Date.now() - lastCompositionEndTime < 120 && !lastCompositionKeyReleased) return;
 
     const target = e.target;
     if (!isChatComposerTextarea(target)) return;
 
-    // 检查是否处于原生 React ChatInput 的 640px 窄屏盲区：
-    // 当 window.innerWidth <= 640 时，上游 React useIsMobile() 误将桌面窄屏判为手机，
-    // 导致原生 sendShortcut 失效并变成普通换行！
-    // 此时电脑端增强逻辑主动兜底触发发送，杜绝窄屏/分屏下的回车失效！
-    const isNarrowViewport = typeof window !== "undefined" && window.innerWidth <= 640;
-    if (isNarrowViewport) {
-      const isRunning = Boolean(
-        document.querySelector('fieldset button[title*="停止"], fieldset button:has(svg rect[x="1.5"])') ||
-        document.querySelector('fieldset div[style*="align-self: flex-end"]:has(button), fieldset .pi-enh-running-group, fieldset .pi-enh-has-running-controls') ||
-        (typeof isChatSessionRunning === "function" && isChatSessionRunning())
-      );
+    // 编辑器补全菜单需要先消费 Enter；其它桌面端普通 Enter 由此显式发送，
+    // 避免原生 ChatInput 在不同浏览器/视口下把 Enter 当作换行或不触发提交。
+    if (typeof isComposerCompletionKey === "function" && isComposerCompletionKey(e, target)) return;
 
-      // 若处于运行态，交给运行态 smartKeyDown 处理（按 Enter 加入队列 followup）
-      if (isRunning) {
-        return;
-      }
+    const isRunning = isComposerRunningForEnter(findComposerTextarea());
 
-      // 空闲状态：主动触发发送！
-      if (typeof e.preventDefault === "function") e.preventDefault();
-      if (typeof e.stopPropagation === "function") e.stopPropagation();
-      if (typeof e.stopImmediatePropagation === "function") e.stopImmediatePropagation();
+    // 运行态保留原生 Enter 后续消息行为；空闲桌面端统一主动发送。
+    if (isRunning) return;
 
-      triggerDesktopComposerSend(target);
-    }
-    // 正常宽屏电脑端：原生 React 会正确识别 !isMobile 并执行 handleSend()，自然放行即可。
+    if (typeof e.preventDefault === "function") e.preventDefault();
+    if (typeof e.stopPropagation === "function") e.stopPropagation();
+    if (typeof e.stopImmediatePropagation === "function") e.stopImmediatePropagation();
+
+    triggerDesktopComposerSend(target);
   }
 
   addManagedListener(document, "compositionend", () => {
     lastCompositionEndTime = Date.now();
+    lastCompositionKeyReleased = false;
+  }, true);
+  addManagedListener(document, "keyup", (event) => {
+    // Confirmation keyup closes the IME keystroke. A distinct next Enter is a
+    // deliberate send/newline even inside the short accidental-send buffer.
+    if (Date.now() - lastCompositionEndTime < 120
+      && (event.key === "Enter" || event.key === " " || /^[1-9]$/.test(event.key))) {
+      lastCompositionKeyReleased = true;
+    }
   }, true);
 
   addManagedListener(document, "keydown", handleMobileEnterKeydown, true);
@@ -40621,7 +46311,7 @@
       if (activeEl && (activeEl.id === "session-search-input" || activeEl.closest?.("#session-search-input"))) {
         try { activeEl.blur(); } catch (e) {}
       }
-      const composer = document.querySelector(".chat-input-textarea, textarea.chat-input, textarea");
+      const composer = Array.from(document.querySelectorAll(".pi-enh-formatted-composer, .chat-input-textarea, textarea.chat-input, textarea")).find((el) => el.offsetWidth > 0 && el.offsetHeight > 0 && getComputedStyle(el).visibility !== "hidden");
       if (composer) {
         try { composer.focus(); } catch (e) {}
       }
@@ -41545,6 +47235,112 @@
   });
 
   // ==========================================
+  // 新建会话光标自动聚焦输入框 (New Session Autofocus - 根本级架构支持双态编辑器与防失焦)
+  // ==========================================
+  function findActiveComposerEditable() {
+    // 1. 优先查找当前可见的格式化富文本编辑器 (.pi-enh-formatted-composer)
+    const formatted = document.querySelector(".pi-enh-formatted-composer");
+    if (formatted && formatted.isConnected && window.getComputedStyle(formatted).display !== "none") {
+      return formatted;
+    }
+    // 2. 其次查找原生可见的 textarea 输入框
+    const ta = findComposerTextarea();
+    if (ta && ta.isConnected && window.getComputedStyle(ta).display !== "none") {
+      return ta;
+    }
+    return formatted || ta || null;
+  }
+
+  function focusComposerEditable({ force = false } = {}) {
+    const el = findActiveComposerEditable();
+    if (!el || !el.isConnected) return false;
+    if (window.getComputedStyle(el).display === "none") return false;
+
+    const active = document.activeElement;
+    if (!force && active && active !== document.body && active !== el) {
+      const isOther = (active.tagName === "INPUT" || active.tagName === "TEXTAREA" || active.isContentEditable) &&
+                      !active.closest("fieldset, form, .chat-input-textarea, .pi-enh-formatted-composer, .pi-enh-cursor-composer");
+      if (isOther) return false;
+    }
+
+    try {
+      el.focus({ preventScroll: true });
+      if (el.tagName === "TEXTAREA") {
+        const len = el.value ? el.value.length : 0;
+        el.setSelectionRange(len, len);
+      } else if (el.isContentEditable && window.getSelection) {
+        const sel = window.getSelection();
+        if (sel) {
+          sel.selectAllChildren(el);
+          sel.collapseToEnd();
+        }
+      }
+      return document.activeElement === el;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  let newSessionFocusGuardUntil = 0;
+
+  function triggerNewSessionComposerFocus() {
+    newSessionFocusGuardUntil = performance.now() + 650;
+    let frameCount = 0;
+    const maxFrames = 15;
+    const poll = () => {
+      frameCount++;
+      const focused = focusComposerEditable({ force: true });
+      if (focused || frameCount >= maxFrames || isDisposed) return;
+      requestAnimationFrame(poll);
+    };
+    requestAnimationFrame(poll);
+  }
+
+  function isNewSessionButton(target) {
+    if (!target || typeof target.closest !== "function") return false;
+    const btn = target.closest("button, a, [role='button']");
+    if (!btn) return false;
+    const title = (btn.getAttribute("title") || "").trim();
+    const aria = (btn.getAttribute("aria-label") || "").trim();
+    const text = (btn.textContent || "").trim();
+    if (/新建会话|New session/i.test(title) || /新建会话|New session/i.test(aria)) return true;
+    if (/^(?:\+\s*)?(?:新建|New)$/i.test(text) && btn.closest(".sidebar-container, aside, div[style*='borderBottom']")) return true;
+    return false;
+  }
+
+  // 点击新建按钮触发聚焦与守卫
+  addManagedListener(document, "click", (e) => {
+    if (isNewSessionButton(e.target)) {
+      triggerNewSessionComposerFocus();
+    }
+  }, true);
+
+  // 全局新建会话快捷键
+  addManagedListener(document, "keydown", (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.altKey && (e.key === "n" || e.key === "N")) {
+      triggerNewSessionComposerFocus();
+    }
+  }, true);
+
+  // 防 React 重渲染/路由切换瞬态导致的失焦丢失
+  addManagedListener(document, "focusout", () => {
+    if (performance.now() < newSessionFocusGuardUntil) {
+      queueMicrotask(() => {
+        if (document.activeElement === document.body) {
+          focusComposerEditable({ force: true });
+        }
+      });
+    }
+  }, true);
+
+  // 用户打字时立即解除守卫，不干扰日常输入
+  addManagedListener(document, "input", () => {
+    newSessionFocusGuardUntil = 0;
+  }, true);
+
+  window.__PI_ENH_FOCUS_COMPOSER__ = focusComposerEditable;
+
+  // ==========================================
   // 3. Task Total Duration & Turn Usage Tooltips (点击展开耗时拆解与消耗明细气泡)
   // ==========================================
   durationTooltip = null;
@@ -41713,7 +47509,10 @@
   function recordActiveTurnStart(sessionId, startTime, entryId = null, authoritative = false) {
     if (!sessionId || !startTime || startTime <= 0) return;
     const existing = activeSessionTurns.get(sessionId);
-    if (existing && existing.authoritative && !authoritative) {
+    // Ordinary composer/steering submissions only provide a provisional hint.
+    // Once a turn has a start, never move it forward until a new agent_start
+    // explicitly establishes an independent turn (or metrics calibrate it).
+    if (existing && !authoritative) {
       return;
     }
     const validStartTime = Math.min(startTime, Date.now());
@@ -41761,6 +47560,18 @@
 
     if (type === "agent_start") {
       liveStepSpeeds.delete(sessionId);
+      // SSE agent_start is the only explicit boundary for a new independent
+      // turn. Invalidate both the per-session authoritative cache and the
+      // current-page fallback so the stopwatch cannot inherit an old turn.
+      clearActiveTurn(sessionId);
+      if (sessionId === getCurrentSessionId()) {
+        activeTurnStartTime = null;
+        activeTurnEntryId = null;
+        recordActiveTurnStart(sessionId, now, null, false);
+        // The provisional `now` start is replaced by the new user timestamp
+        // when session metrics arrive; start calibration immediately.
+        scheduleCurrentSessionMetrics(0);
+      }
       scheduleModelSpeedSync();
       return;
     }
@@ -42083,30 +47894,73 @@
     const entryIds = Array.isArray(context.entryIds) ? context.entryIds : [];
 
     function parseTime(t) {
-      if (typeof t === "number") return t;
+      if (typeof t === "number") return isFinite(t) ? t : 0;
       if (!t) return 0;
       const parsed = Date.parse(t);
-      return isNaN(parsed) ? 0 : parsed;
+      return isNaN(parsed) || !isFinite(parsed) ? 0 : parsed;
     }
 
-    // Assistant message timestamps mark request start; persisted tree-entry
-    // timestamps mark completion. The latter is required for elapsed time.
-    const entryCompletionTimes = new Map();
-    const treeStack = [data.tree];
-    while (treeStack.length > 0) {
-      const node = treeStack.pop();
-      if (!node || typeof node !== "object") continue;
-      if (Array.isArray(node)) {
-        for (const child of node) treeStack.push(child);
-        continue;
+    function extractCompletedAt(msg) {
+      if (!msg || typeof msg.completedAt === "undefined") return 0;
+      const parsed = parseTime(msg.completedAt);
+      return (typeof parsed === "number" && isFinite(parsed) && parsed > 0) ? parsed : 0;
+    }
+
+    let entryCompletionTimes = null;
+
+    function getTreeEntryCompletionTime(targetId) {
+      if (!targetId) return 0;
+      if (entryCompletionTimes === null) {
+        entryCompletionTimes = new Map();
+        if (data && data.tree) {
+          const visited = new Set();
+          const stack = [data.tree];
+          while (stack.length > 0) {
+            const current = stack.pop();
+            if (!current || typeof current !== "object") continue;
+            if (visited.has(current)) continue;
+            visited.add(current);
+
+            if (Array.isArray(current)) {
+              for (let i = 0; i < current.length; i++) {
+                const item = current[i];
+                if (item && typeof item === "object") stack.push(item);
+              }
+              continue;
+            }
+
+            const outerTime = parseTime(current.timestamp);
+
+            const isCurrentMsg = !current.type || current.type === "message";
+            if (current.id && isCurrentMsg && outerTime > 0) {
+              entryCompletionTimes.set(current.id, outerTime);
+            }
+
+            if (current.entry && typeof current.entry === "object") {
+              const entry = current.entry;
+              const entryId = entry.id || current.id;
+              const entryTime = parseTime(entry.timestamp) || outerTime;
+              const isEntryMsg = entry.type ? entry.type === "message" : isCurrentMsg;
+              if (entryId && isEntryMsg && entryTime > 0) {
+                entryCompletionTimes.set(entryId, entryTime);
+              }
+            }
+
+            const children = current.children;
+            if (children) {
+              if (Array.isArray(children)) {
+                for (let i = 0; i < children.length; i++) {
+                  const child = children[i];
+                  if (child && typeof child === "object") stack.push(child);
+                }
+              } else if (typeof children === "object") {
+                stack.push(children);
+              }
+            }
+          }
+        }
       }
-      if (node.type === "message" && node.id) {
-        const completionTime = parseTime(node.timestamp);
-        if (completionTime > 0) entryCompletionTimes.set(node.id, completionTime);
-      }
-      for (const value of Object.values(node)) {
-        if (value && typeof value === "object") treeStack.push(value);
-      }
+      return entryCompletionTimes.get(targetId) || 0;
     }
 
     function extractText(content) {
@@ -42194,7 +48048,7 @@
     function finalizeTurn(isAtTurnBoundary = false) {
       const targetAMsg = lastAMsg || (isAtTurnBoundary ? latestAMsgInTurn : null);
       const targetAEntryId = lastAEntryId || (isAtTurnBoundary ? latestAEntryIdInTurn : null);
-      const targetModel = targetAMsg?.model || (targetAMsg?.message && targetAMsg.message.model) || turnUsage.model || (data.info && data.info.model) || "";
+      const targetModel = targetAMsg?.model || (targetAMsg?.message && targetAMsg.message.model) || turnUsage.model || "";
       turnUsage.model = targetModel;
 
       if (turnUsage.subagent && turnUsage.subagent.callCount > 0 && turnUsage.subagent.totalTokens > 0) {
@@ -42212,8 +48066,12 @@
 
       if (initialUMsg && targetAMsg && targetAEntryId) {
         const uTime = parseTime(initialUMsg.timestamp);
-        const aTime = parseTime(targetAMsg.timestamp);
-        const fTime = (firstAMsg && parseTime(firstAMsg.timestamp)) || aTime;
+        const aStartTime = parseTime(targetAMsg.timestamp);
+        const aCompletedAt = extractCompletedAt(targetAMsg);
+        const hasCompletedAt = aCompletedAt > 0 && isFinite(aCompletedAt) && aCompletedAt >= aStartTime;
+        const aTime = hasCompletedAt ? aCompletedAt : aStartTime;
+        const durationSource = hasCompletedAt ? "completedAt" : "timestamp";
+        const fTime = (firstAMsg && parseTime(firstAMsg.timestamp)) || aStartTime;
         if (uTime && aTime && aTime >= uTime) {
           const totalSec = Math.max(1, Math.round((aTime - uTime) / 1000));
           const pausedSec = Math.max(0, Math.round(accumulatedPausedMs / 1000));
@@ -42230,6 +48088,7 @@
             toolEntryIds: [...toolEntryIds],
             uTime,
             aTime,
+            durationSource,
             turnUsage: { ...turnUsage, model: targetModel },
             lastStepUsage: (targetAMsg.usage || lastStepUsage) ? { ...(targetAMsg.usage || lastStepUsage), model: targetAMsg?.model || targetModel } : null,
           });
@@ -42237,8 +48096,12 @@
       } else if (!initialUMsg && targetAMsg && targetAEntryId && turnUsage.stepCount > 0) {
         // 兜底保障：当历史由于极端截断未包含 user 起点消息时，依然为终态 assistant 消息记录多步执行耗时与累计 Token/费用
         const fTime = (firstAMsg && parseTime(firstAMsg.timestamp)) || 0;
-        const aTime = parseTime(targetAMsg.timestamp) || Date.now();
-        const totalSec = (fTime && aTime >= fTime) ? Math.max(1, Math.round((aTime - fTime) / 1000)) : 1;
+        const aStartTime = parseTime(targetAMsg.timestamp);
+        const aCompletedAt = extractCompletedAt(targetAMsg);
+        const hasCompletedAt = aCompletedAt > 0 && isFinite(aCompletedAt) && aCompletedAt >= aStartTime;
+        const aTime = hasCompletedAt ? aCompletedAt : aStartTime;
+        const durationSource = hasCompletedAt ? "completedAt" : "timestamp";
+        const totalSec = (fTime > 0 && aTime >= fTime) ? Math.max(1, Math.round((aTime - fTime) / 1000)) : 1;
         setKnownTurnMetric(targetAEntryId, {
           totalSec,
           activeSec: totalSec,
@@ -42250,6 +48113,7 @@
           toolEntryIds: [...toolEntryIds],
           uTime: fTime || aTime,
           aTime,
+          durationSource,
           turnUsage: { ...turnUsage, model: targetModel },
           lastStepUsage: (targetAMsg.usage || lastStepUsage) ? { ...(targetAMsg.usage || lastStepUsage), model: targetAMsg?.model || targetModel } : null,
           isTruncatedTurn: true,
@@ -42280,7 +48144,11 @@
           steerCount += 1;
         } else if (isResumeAfterAbort) {
           interruptCount += 1;
-          const abortTime = parseTime(lastAbortedAMsg.timestamp);
+          const abortStartTime = parseTime(lastAbortedAMsg.timestamp);
+          const abortCompletedAt = extractCompletedAt(lastAbortedAMsg);
+          const abortTime = (abortCompletedAt > 0 && isFinite(abortCompletedAt) && abortCompletedAt >= abortStartTime)
+            ? abortCompletedAt
+            : abortStartTime;
           if (msgTime > abortTime && abortTime > 0) {
             accumulatedPausedMs += (msgTime - abortTime);
           }
@@ -42339,7 +48207,14 @@
           turnUsage.model = msgModel;
         }
         const assistantStartedAt = parseTime(msg.timestamp);
-        const assistantCompletedAt = entryId ? (entryCompletionTimes.get(entryId) || 0) : 0;
+        const stepCompletedAt = extractCompletedAt(msg);
+        let assistantCompletedAt = (stepCompletedAt > 0 && isFinite(stepCompletedAt) && stepCompletedAt >= assistantStartedAt) ? stepCompletedAt : 0;
+        if (!assistantCompletedAt && entryId && msg.usage && (msg.usage.output || 0) > 0 && assistantStartedAt > 0) {
+          const fallbackEnd = getTreeEntryCompletionTime(entryId);
+          if (fallbackEnd > 0 && isFinite(fallbackEnd) && fallbackEnd >= assistantStartedAt) {
+            assistantCompletedAt = fallbackEnd;
+          }
+        }
         if (entryId && msg.usage && (msg.usage.output || 0) > 0 && assistantStartedAt > 0 && assistantCompletedAt - assistantStartedAt >= 100) {
           setKnownStepSpeed(entryId, {
             output: msg.usage.output,
@@ -42398,7 +48273,7 @@
         let matchedMainModel = callId ? toolCallToMainModel.get(callId) : null;
         let isFallbackMainModel = false;
         if (!matchedMainModel) {
-          matchedMainModel = turnUsage.model || (data.info && data.info.model) || "";
+          matchedMainModel = turnUsage.model || "";
           isFallbackMainModel = true;
         }
 
@@ -42482,6 +48357,10 @@
     const enabled = isPluginEnabled("task-tool-auto-collapse");
     if (document.documentElement) {
       document.documentElement.classList.toggle("pi-enh-tool-collapse-active", enabled);
+      document.documentElement.classList.toggle(
+        "pi-enh-chat-running",
+        Boolean(typeof isChatSessionRunning === "function" && isChatSessionRunning())
+      );
     }
   }
 
@@ -42692,6 +48571,43 @@
     aggregateOrphanProcessSteps();
   }
 
+  function hasPendingToolCollapse() {
+    if (!isPluginEnabled("task-tool-auto-collapse")) return false;
+    if (window.__PI_ENH_NATIVE_PROCESS_COLLAPSE__ === 1) return false;
+
+    const scroll = getChatScrollContainer() || document.querySelector(".chat-content");
+    if (!scroll) return false;
+
+    // 仅在当前会话聊天区内检查实际未折叠目标，杜绝全局遍历
+    const buttons = scroll.querySelectorAll("button");
+    for (const button of buttons) {
+      if (isNativeProcessGroupToggle(button) && !button.hasAttribute(TASK_TOOL_AUTO_COLLAPSE_MARKER)) {
+        if (button.getAttribute("aria-expanded") === "true") return true;
+      }
+      if (isNativeToolCardToggle(button)) {
+        const toolCard = button.parentElement?.parentElement;
+        if (toolCard && !toolCard.hasAttribute(TASK_TOOL_AUTO_COLLAPSE_MARKER)) {
+          if ((toolCard.children?.length || 0) > 1) return true;
+        }
+      }
+    }
+
+    // 孤立纯过程消息检查实际未折叠目标，严禁根据普通 assistant 条数盲判
+    if (typeof isChatSessionRunning === "function" && isChatSessionRunning()) return false;
+    const orphanCandidates = scroll.querySelectorAll('div[data-message-role="assistant"]:not([data-pi-enh-orphan-grouped])');
+    for (const msg of orphanCandidates) {
+      if (msg.closest('[data-pi-enh-orphan-grouped="true"]')) continue;
+      const row = msg.parentElement?.getAttribute("data-entry-id") === msg.getAttribute("data-entry-id") ? msg.parentElement : msg;
+      if (row && window.getComputedStyle(row).display === "none") continue;
+      if (isPureProcessAssistantMessage(msg)) {
+        return true;
+      }
+    }
+    return false;
+  }
+  window.__PI_ENH_HAS_PENDING_TOOL_COLLAPSE__ = hasPendingToolCollapse;
+  window.__PI_ENH_FORCE_TOOL_COLLAPSE__ = syncAllTaskToolAutoCollapse;
+
   // ==========================================
   // 孤立纯过程消息吸附聚合器 (Orphan Process Aggregator)
   // ==========================================
@@ -42705,6 +48621,15 @@
 
   function isPureProcessAssistantMessage(el) {
     if (!el || el.getAttribute("data-message-role") !== "assistant") return false;
+    if (el.querySelector('[role="alert"]')) return false;
+    const blockContainer = el.querySelector('div[style*="flex-direction: column"]');
+    if (blockContainer) {
+      const blocks = Array.from(blockContainer.children);
+      if (blocks.length > 0) {
+        const lastIdx = blocks.findLastIndex(hasNativeProcessBlock);
+        return lastIdx === blocks.length - 1;
+      }
+    }
     const textNode = el.querySelector('[data-message-text="true"]');
     return !textNode?.textContent?.trim() && hasNativeProcessBlock(el);
   }
@@ -42713,6 +48638,7 @@
     if (!orphanOriginalDisplay.has(node)) return;
     node.style.display = orphanOriginalDisplay.get(node);
     node.removeAttribute("data-pi-enh-orphan-grouped");
+    node.removeAttribute("data-pi-enh-orphan-expanded");
     orphanOriginalDisplay.delete(node);
   }
 
@@ -42764,11 +48690,12 @@
         } else if (group.length && row.getAttribute("role") === "alert" && /websocket|error|failed|network/i.test(row.textContent || "")) {
           group.push(row);
         } else {
-          // Keep the answer and its footer visible; fold only known process blocks
-          // before its first text block, including deferred thinking on the final entry.
-          const text = message?.querySelector('[data-message-text="true"]');
-          const blocks = text ? Array.from(text.parentElement.children) : [];
-          const prefix = blocks.slice(0, blocks.indexOf(text)).filter(hasNativeProcessBlock);
+          // Keep the final answer and its footer visible; fold all blocks up to and
+          // including the last process block (matching native React eI() processBlocks).
+          const blockContainer = message?.querySelector('div[style*="flex-direction: column"]');
+          const blocks = blockContainer ? Array.from(blockContainer.children) : [];
+          const lastProcessIdx = blocks.findLastIndex(hasNativeProcessBlock);
+          const prefix = lastProcessIdx >= 0 ? blocks.slice(0, lastProcessIdx + 1) : [];
           if (prefix.length) { anchorRow ||= row; group.push(...prefix); stepCount++; }
           flush();
         }
@@ -42820,6 +48747,8 @@
         const arrow = toggle.querySelector(".pi-enh-orphan-arrow");
         if (arrow) arrow.textContent = next ? "⌃" : "⌄";
         for (const item of bar.__boundOrphanNodes || []) {
+          if (next) item.setAttribute("data-pi-enh-orphan-expanded", "true");
+          else item.removeAttribute("data-pi-enh-orphan-expanded");
           item.style.display = next ? (orphanOriginalDisplay.get(item) || "") : "none";
         }
       });
@@ -42838,6 +48767,8 @@
     for (const item of nodes) {
       if (!orphanOriginalDisplay.has(item)) orphanOriginalDisplay.set(item, item.style.display || "");
       if (!item.hasAttribute("data-pi-enh-orphan-grouped")) item.setAttribute("data-pi-enh-orphan-grouped", "true");
+      if (isExpanded) item.setAttribute("data-pi-enh-orphan-expanded", "true");
+      else item.removeAttribute("data-pi-enh-orphan-expanded");
       const display = isExpanded ? orphanOriginalDisplay.get(item) : "none";
       if (item.style.display !== display) item.style.display = display;
     }
@@ -42883,6 +48814,10 @@
         state.hasMore = false;
       }
       if (keep.length === context.entryIds.length) return response;
+      if (keep.length === 0 && context.hasMore) {
+        state.cursor = context.oldestEntryId;
+        return response;
+      }
       return createCachedResponse({ ...data, context: {
         ...context, messages: keep.map(index => context.messages[index]),
         entryIds: keep.map(index => context.entryIds[index]),
@@ -42926,6 +48861,24 @@
   }
 
   let minimapNavigationScrollGuard = null;
+  let minimapNativeRevealScrollBlock = null;
+
+  function clearNativeMinimapRevealScrollBlock() {
+    const block = minimapNativeRevealScrollBlock;
+    if (!block) return;
+    minimapNativeRevealScrollBlock = null;
+    if (block.timer !== null) clearManagedTimeout(block.timer);
+  }
+
+  function suppressNativeMinimapRevealScroll(scroll) {
+    clearNativeMinimapRevealScrollBlock();
+    if (!scroll) return;
+    const block = { scroll, timer: null, expiresAt: Date.now() + 2200 };
+    minimapNativeRevealScrollBlock = block;
+    block.timer = addManagedTimeout(() => {
+      if (minimapNativeRevealScrollBlock === block) clearNativeMinimapRevealScrollBlock();
+    }, 2200);
+  }
 
   function clearMinimapNavigationScrollGuard() {
     const guard = minimapNavigationScrollGuard;
@@ -42943,6 +48896,10 @@
     const wrapped = function (...args) {
       const options = args[0];
       const maxTop = Math.max(0, this.scrollHeight - this.clientHeight);
+      if (this === scroll && minimapNativeRevealScrollBlock?.scroll === scroll &&
+          Date.now() < minimapNativeRevealScrollBlock.expiresAt && options?.behavior === "smooth") {
+        return;
+      }
       if (this === scroll && options?.behavior === "smooth" && Number(options.top) >= maxTop - 30 && maxTop > 120) {
         clearMinimapNavigationScrollGuard(); // Explicitly returning to the tail should re-enable live follow.
       }
@@ -42961,6 +48918,7 @@
   }
 
   activeCleanups.push(clearMinimapNavigationScrollGuard);
+  activeCleanups.push(clearNativeMinimapRevealScrollBlock);
 
   function releaseHistoryTailForMinimapNavigation() {
     blurComposerForMinimapNavigation();
@@ -42982,6 +48940,7 @@
       cancelActiveScrollRestore("minimap-navigation");
     }
     cancelHistoryScrollRestore();
+    cancelVirtualHistoryAnchor?.("minimap-navigation");
     // Stream updates can race the smooth first-turn jump while React still
     // considers the viewport attached to the tail. Ignore only its automatic
     // bottom-follow calls for this navigation; explicit smooth bottom clicks
@@ -43173,17 +49132,441 @@
     }
   }
 
+  // ==========================================
+  // Virtual History Scroll Anchor Stabilization (虚拟滚动前插阅读锚点纠偏)
+  // ==========================================
+  let activeVirtualHistoryAnchor = null;
+  let historyExpandGestureSeq = 0;
+  let historyExpandConsumedSeq = 0;
+  let historyExpandSessionId = null;
+
+  function markHistoryExpandUserGesture() {
+    const sid = typeof getCurrentSessionId === "function" ? getCurrentSessionId() : null;
+    if (sid !== historyExpandSessionId) {
+      historyExpandSessionId = sid;
+      historyExpandConsumedSeq = 0;
+    }
+    historyExpandGestureSeq++;
+  }
+
+  addManagedListener(window, "wheel", (e) => {
+    if (e.deltaY < 0 && e.target?.closest?.(".chat-content")) {
+      markHistoryExpandUserGesture();
+    }
+  }, { capture: true, passive: true });
+  addManagedListener(window, "touchmove", (e) => {
+    if (e.target?.closest?.(".chat-content")) {
+      markHistoryExpandUserGesture();
+    }
+  }, { capture: true, passive: true });
+  addManagedListener(window, "pointerdown", (e) => {
+    if (e.target?.closest?.(".chat-content")) {
+      markHistoryExpandUserGesture();
+    }
+  }, { capture: true, passive: true });
+  addManagedListener(window, "keydown", (e) => {
+    if (["ArrowUp", "PageUp", "Home"].includes(e.key)) {
+      markHistoryExpandUserGesture();
+    }
+  }, { capture: true, passive: true });
+
+  // 阻断无新用户上滚手势时的原生 IntersectionObserver 重建连环触发：
+  // 每次分页加载完成后 oldestEntryId 更新会导致 React 重建 IntersectionObserver，
+  // 若刚加载的一页因全部折叠只有 0~28px 高，顶部 sentinel 仍露在视口内，会引发无限连环拉取与往返跳动。
+  let lastSentinelIntersectionTime = 0;
+  if (typeof window !== "undefined" && typeof window.IntersectionObserver === "function" && !window.IntersectionObserver.__piEnhHistoryGuardWrapped) {
+    const NativeIntersectionObserver = window.IntersectionObserver;
+    const WrappedIntersectionObserver = function (callback, options) {
+      let isChatHistorySentinelObserver = false;
+      const wrappedCallback = function (entries, observer) {
+        if (isChatHistorySentinelObserver && isPluginEnabled("history-scroll-stability")) {
+          const currentSid = typeof getCurrentSessionId === "function" ? getCurrentSessionId() : null;
+          if (currentSid !== historyExpandSessionId) {
+            historyExpandSessionId = currentSid;
+            historyExpandConsumedSeq = 0;
+          }
+          const now = Date.now();
+          const scroll = typeof getChatScrollContainer === "function" ? getChatScrollContainer() : document.querySelector(".chat-content .overflow-y-auto");
+          const isNearTop = !scroll || scroll.scrollTop <= 160;
+          const hasUnconsumedGesture = historyExpandGestureSeq > historyExpandConsumedSeq;
+          const isThrottled = (now - lastSentinelIntersectionTime < 500);
+
+          // 仅在短时间内频繁震荡（小于500ms）且无新用户手势时进行去抖阻断；
+          // 当用户真实处于顶部区域（isNearTop）或有用户手势时，必须放行交集事件，绝不误杀正常触顶自动加载！
+          if (isThrottled && !hasUnconsumedGesture) {
+            const nonIntersecting = entries.filter((entry) => !entry.isIntersecting);
+            if (nonIntersecting.length === 0) return;
+            return callback.call(this, nonIntersecting, observer);
+          }
+          if (entries.some((entry) => entry.isIntersecting)) {
+            lastSentinelIntersectionTime = now;
+            historyExpandConsumedSeq = historyExpandGestureSeq;
+          }
+        }
+        return callback.call(this, entries, observer);
+      };
+      const instance = new NativeIntersectionObserver(wrappedCallback, options);
+      const origObserve = instance.observe;
+      instance.observe = function (target, ...rest) {
+        if (target && target.tagName === "BUTTON" && typeof target.closest === "function" && target.closest(".chat-content")) {
+          isChatHistorySentinelObserver = true;
+        }
+        return origObserve.call(this, target, ...rest);
+      };
+      return instance;
+    };
+    WrappedIntersectionObserver.prototype = NativeIntersectionObserver.prototype;
+    Object.setPrototypeOf(WrappedIntersectionObserver, NativeIntersectionObserver);
+    WrappedIntersectionObserver.__piEnhHistoryGuardWrapped = true;
+    window.IntersectionObserver = WrappedIntersectionObserver;
+    activeCleanups.push(() => {
+      if (window.IntersectionObserver === WrappedIntersectionObserver) {
+        window.IntersectionObserver = NativeIntersectionObserver;
+      }
+    });
+  }
+
+  function cancelVirtualHistoryAnchor(reason = "cancelled") {
+    const task = activeVirtualHistoryAnchor;
+    if (!task) return;
+    activeVirtualHistoryAnchor = null;
+    if (task.rafId !== null) {
+      window.cancelAnimationFrame?.(task.rafId);
+      task.rafId = null;
+    }
+    if (task.prePaintObserver) {
+      try { task.prePaintObserver.disconnect(); } catch {}
+      task.prePaintObserver = null;
+    }
+    task.cleanupListeners?.();
+  }
+
+  function reconcileVirtualHistoryAnchorNow(task) {
+    if (!task || task !== activeVirtualHistoryAnchor) return false;
+    const scroll = task.scroll;
+    if (!scroll || scroll.isConnected === false) return false;
+    const currentFirst = scroll.querySelector("[data-entry-id]");
+    const currentFirstId = currentFirst?.getAttribute("data-entry-id");
+    if (!task.prepended) {
+      if (currentFirstId && currentFirstId !== task.initialFirstId) {
+        task.prepended = true;
+        task.prependedAt = performance.now();
+      } else {
+        return false;
+      }
+    }
+    if (isPluginEnabled("task-tool-auto-collapse")) {
+      try { syncAllTaskToolAutoCollapse(); } catch {}
+    }
+    if (isPluginEnabled("compaction-auto-collapse") && typeof syncCompactionCards === "function") {
+      try { syncCompactionCards(); } catch {}
+    }
+    let targetNode = null;
+    if (task.anchorNode &&
+        task.anchorNode.isConnected !== false &&
+        task.anchorNode.getAttribute?.("data-entry-id") === task.anchorEntryId &&
+        (typeof scroll.contains === "function" ? scroll.contains(task.anchorNode) : true)) {
+      targetNode = task.anchorNode;
+    }
+    if (!targetNode && task.anchorEntryId) {
+      if (typeof CSS !== "undefined" && typeof CSS.escape === "function") {
+        try {
+          targetNode = scroll.querySelector(`[data-entry-id="${CSS.escape(task.anchorEntryId)}"]`);
+        } catch {}
+      }
+      if (!targetNode) {
+        const candidates = typeof scroll.querySelectorAll === "function"
+          ? scroll.querySelectorAll("[data-entry-id]")
+          : [];
+        for (let i = 0; i < candidates.length; i++) {
+          if (candidates[i]?.getAttribute?.("data-entry-id") === task.anchorEntryId) {
+            targetNode = candidates[i];
+            break;
+          }
+        }
+      }
+      if (targetNode) task.anchorNode = targetNode;
+    }
+    if (!targetNode || typeof targetNode.getBoundingClientRect !== "function") return false;
+    const targetRect = targetNode.getBoundingClientRect();
+    if (targetRect.height <= 0) return false;
+    const viewportRect = scroll.getBoundingClientRect();
+    const currentOffset = targetRect.top - viewportRect.top;
+    const delta = currentOffset - task.initialOffset;
+    if (Math.abs(delta) > 0.5) {
+      scroll.scrollTop += delta;
+      return true;
+    }
+    return false;
+  }
+
+  function bindVirtualAnchorUserGestures(task) {
+    const scroll = task.scroll;
+    if (!scroll || typeof scroll.addEventListener !== "function") return;
+    const cancelOwned = (reason) => {
+      if (activeVirtualHistoryAnchor === task) {
+        cancelVirtualHistoryAnchor(reason);
+      }
+    };
+    const onWheel = (e) => {
+      // 触发加载的同一次上滚惯性事件（尚未 prepend 或刚 prepend 120ms 内仍在向上滚）不能杀死锚点保护
+      if (!task.prepended && (e?.deltaY ?? 0) <= 0 && scroll.scrollTop <= 24) return;
+      if (task.prepended && (e?.deltaY ?? 0) <= 0 && (performance.now() - (task.prependedAt || 0)) < 120) return;
+      cancelOwned("user-wheel");
+    };
+    const onTouchStart = () => cancelOwned("user-touchstart");
+    const onPointerDown = () => cancelOwned("user-pointerdown");
+    const onPointerMove = (e) => {
+      if (e.buttons) cancelOwned("user-pointermove-drag");
+    };
+    const onKeyDown = (e) => {
+      if (["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(e.key)) {
+        cancelOwned("user-keydown");
+      }
+    };
+
+    scroll.addEventListener("wheel", onWheel, { passive: true });
+    scroll.addEventListener("touchstart", onTouchStart, { passive: true });
+    scroll.addEventListener("pointerdown", onPointerDown, { passive: true });
+    scroll.addEventListener("pointermove", onPointerMove, { passive: true });
+    window.addEventListener?.("keydown", onKeyDown, { passive: true });
+
+    task.cleanupListeners = () => {
+      scroll.removeEventListener("wheel", onWheel);
+      scroll.removeEventListener("touchstart", onTouchStart);
+      scroll.removeEventListener("pointerdown", onPointerDown);
+      scroll.removeEventListener("pointermove", onPointerMove);
+      window.removeEventListener?.("keydown", onKeyDown);
+      task.cleanupListeners = null;
+    };
+  }
+
+  function triggerVirtualHistoryAnchor(task) {
+    if (!task || task !== activeVirtualHistoryAnchor) return;
+    if (typeof isDisposed !== "undefined" && isDisposed) {
+      cancelVirtualHistoryAnchor("disposed");
+      return;
+    }
+    const currentSid = typeof getCurrentSessionId === "function" ? getCurrentSessionId() : null;
+    const currentScroll = typeof getChatScrollContainer === "function" ? getChatScrollContainer() : null;
+    if (!isPluginEnabled("session-virtual-scroll") ||
+        !currentSid || currentSid !== task.sessionId ||
+        !currentScroll || currentScroll !== task.scroll ||
+        currentScroll.isConnected === false) {
+      cancelVirtualHistoryAnchor("task-invalidated-before-trigger");
+      return;
+    }
+
+    const startTime = performance.now();
+    let stableStartTime = null;
+
+    const step = () => {
+      if (task !== activeVirtualHistoryAnchor) return;
+      if (typeof isDisposed !== "undefined" && isDisposed) {
+        cancelVirtualHistoryAnchor("disposed");
+        return;
+      }
+      const sid = typeof getCurrentSessionId === "function" ? getCurrentSessionId() : null;
+      const scr = typeof getChatScrollContainer === "function" ? getChatScrollContainer() : null;
+      if (!isPluginEnabled("session-virtual-scroll") ||
+          !sid || sid !== task.sessionId ||
+          !scr || scr !== task.scroll ||
+          scr.isConnected === false) {
+        cancelVirtualHistoryAnchor("task-invalidated-during-step");
+        return;
+      }
+
+      const now = performance.now();
+      // 1500ms 有界超时
+      if (now - startTime > 1500) {
+        cancelVirtualHistoryAnchor("timeout-1500ms");
+        return;
+      }
+
+      // 必须观察真实 prepend（首 ID 变化）后才纠偏，不能提前 stable 退出
+      if (!task.prepended) {
+        const currentFirst = task.scroll.querySelector("[data-entry-id]");
+        const currentFirstId = currentFirst?.getAttribute("data-entry-id");
+        if (currentFirstId && currentFirstId !== task.initialFirstId) {
+          task.prepended = true;
+          task.prependedAt = now;
+        } else {
+          task.rafId = window.requestAnimationFrame(step);
+          return;
+        }
+      }
+
+      // 观察到 prepend，按同 entryId 实际 offset 差调整 scrollTop，不按总高
+      // 优先缓存捕获的 anchor 节点，失效才用 CSS.escape 安全查找或等价安全方法
+      let targetNode = null;
+      if (task.anchorNode &&
+          task.anchorNode.isConnected !== false &&
+          task.anchorNode.getAttribute?.("data-entry-id") === task.anchorEntryId &&
+          (typeof task.scroll.contains === "function" ? task.scroll.contains(task.anchorNode) : true)) {
+        targetNode = task.anchorNode;
+      }
+      if (!targetNode && task.anchorEntryId) {
+        if (typeof CSS !== "undefined" && typeof CSS.escape === "function") {
+          try {
+            targetNode = task.scroll.querySelector(`[data-entry-id="${CSS.escape(task.anchorEntryId)}"]`);
+          } catch {}
+        }
+        if (!targetNode) {
+          const candidates = typeof task.scroll.querySelectorAll === "function"
+            ? task.scroll.querySelectorAll("[data-entry-id]")
+            : [];
+          for (let i = 0; i < candidates.length; i++) {
+            if (candidates[i]?.getAttribute?.("data-entry-id") === task.anchorEntryId) {
+              targetNode = candidates[i];
+              break;
+            }
+          }
+        }
+        if (targetNode) {
+          task.anchorNode = targetNode;
+        }
+      }
+
+      if (!targetNode || typeof targetNode.getBoundingClientRect !== "function") {
+        cancelVirtualHistoryAnchor("anchor-node-lost");
+        return;
+      }
+
+      const targetRect = targetNode.getBoundingClientRect();
+      if (targetRect.height <= 0) {
+        task.rafId = window.requestAnimationFrame(step);
+        return;
+      }
+
+      const viewportRect = task.scroll.getBoundingClientRect();
+      const currentOffset = targetRect.top - viewportRect.top;
+      const delta = currentOffset - task.initialOffset;
+
+      if (Math.abs(delta) > 0.5) {
+        task.scroll.scrollTop += delta;
+        stableStartTime = null; // 产生补偿调整，重置稳定窗口
+      } else {
+        if (stableStartTime === null) {
+          stableStartTime = now;
+        } else if (now - stableStartTime >= 200) {
+          // 至少 200ms 持续稳定，正常完成
+          cancelVirtualHistoryAnchor("stable-settled");
+          return;
+        }
+      }
+
+      task.rafId = window.requestAnimationFrame(step);
+    };
+
+    task.rafId = window.requestAnimationFrame(step);
+  }
+
+  function isSameOriginHistoryUrl(url) {
+    if (!url) return false;
+    try {
+      return new URL(url, window.location.origin).origin === window.location.origin;
+    } catch {
+      return false;
+    }
+  }
+
   // Native IntersectionObserver/minimap loads do not call the enhancement loader.
   // Observe the actual paginated GET too, including the body read and HTTP errors.
   function beginHistoryPageRequest(url, input, init) {
-    if (!isPluginEnabled("history-scroll-stability") || extractSessionIdFromUrl(url) !== getCurrentSessionId() ||
-        !/\/context\?/.test(url) || !/[?&]before=/.test(url) || /[?&]metricsOnly=/.test(url) ||
-        String(init?.method || input?.method || "GET").toUpperCase() !== "GET") return null;
+    if (!isSameOriginHistoryUrl(url)) return null;
+    const method = String(init?.method || input?.method || "GET").toUpperCase();
+    if (method !== "GET") return null;
+    const reqSid = extractSessionIdFromUrl(url);
+    const currentSid = typeof getCurrentSessionId === "function" ? getCurrentSessionId() : null;
+    if (!reqSid || !currentSid || reqSid !== currentSid) return null;
+    if (!/\/context\?/.test(url) || !/[?&]before=/.test(url) || /[?&]metricsOnly=/.test(url)) return null;
+
+    const stabilityEnabled = isPluginEnabled("history-scroll-stability");
+    const virtualEnabled = isPluginEnabled("session-virtual-scroll");
+    if (!stabilityEnabled && !virtualEnabled) return null;
+
+    historyExpandSessionId = currentSid;
+    historyExpandConsumedSeq = historyExpandGestureSeq;
+
+    let virtualTask = null;
+    if (virtualEnabled) {
+      cancelVirtualHistoryAnchor("new-page-request");
+      const scroll = typeof getChatScrollContainer === "function" ? getChatScrollContainer() : null;
+      if (scroll && typeof scroll.getBoundingClientRect === "function") {
+        const viewport = scroll.getBoundingClientRect();
+        const entries = Array.from(scroll.querySelectorAll("[data-entry-id]"));
+        const anchor = entries.find((node) => {
+          const rect = node.getBoundingClientRect();
+          return rect.height > 0 && rect.bottom > viewport.top && rect.top < viewport.bottom;
+        });
+        const firstEntry = entries[0];
+        const initialFirstId = firstEntry ? firstEntry.getAttribute("data-entry-id") : null;
+        if (anchor) {
+          const anchorEntryId = anchor.getAttribute("data-entry-id");
+          const initialOffset = anchor.getBoundingClientRect().top - viewport.top;
+          virtualTask = {
+            sessionId: currentSid,
+            scroll,
+            anchorNode: anchor,
+            anchorEntryId,
+            initialOffset,
+            initialFirstId,
+            prepended: false,
+            prependedAt: 0,
+            rafId: null,
+            prePaintObserver: null,
+            cleanupListeners: null,
+          };
+          activeVirtualHistoryAnchor = virtualTask;
+          bindVirtualAnchorUserGestures(virtualTask);
+          if (typeof MutationObserver === "function") {
+            try {
+              const obs = new MutationObserver(() => {
+                if (activeVirtualHistoryAnchor === virtualTask) {
+                  reconcileVirtualHistoryAnchorNow(virtualTask);
+                }
+              });
+              obs.observe(scroll, { childList: true, subtree: true });
+              virtualTask.prePaintObserver = obs;
+            } catch {}
+          }
+        }
+      }
+    }
+
+    if (!stabilityEnabled) {
+      return {
+        init,
+        async finish(response, error) {
+          try {
+            if (error || !response?.ok) {
+              if (virtualTask && virtualTask === activeVirtualHistoryAnchor) {
+                cancelVirtualHistoryAnchor("request-failed");
+              }
+              return;
+            }
+            if (virtualTask && virtualTask === activeVirtualHistoryAnchor) {
+              triggerVirtualHistoryAnchor(virtualTask);
+            }
+          } catch (e) {
+            if (virtualTask && virtualTask === activeVirtualHistoryAnchor) {
+              cancelVirtualHistoryAnchor("finish-error");
+            }
+          }
+        },
+      };
+    }
+
     // React may start paging before the 800ms enhancement sync has bound the DOM.
     // Bind now without recursively starting a second pagination request.
     if (!historyScrollBinding || historyScrollBinding.sessionId !== getCurrentSessionId()) syncHistoryScrollStability(true);
     const binding = historyScrollBinding;
-    if (!binding) return null;
+    if (!binding) {
+      if (virtualTask && virtualTask === activeVirtualHistoryAnchor) {
+        cancelVirtualHistoryAnchor("binding-failed");
+      }
+      return null;
+    }
     // Earlier-history prepends own the reading anchor. Never let a queued tail
     // follow override that restore, including when a short transcript is both
     // at the top and at the bottom.
@@ -43207,30 +49590,60 @@
     return {
       init: controller ? { ...init, signal: controller.signal } : init,
       async finish(response, error) {
-        window.clearTimeout?.(token.slow);
-        window.clearTimeout?.(token.timeout);
-        originalSignal?.removeEventListener?.("abort", abort);
-        binding.requests.delete(token);
-        if (binding !== historyScrollBinding || binding.sessionId !== getCurrentSessionId()) return;
-        if (originalSignal?.aborted) {
-          if (!binding.requests.size) showHistoryFeedback(binding, "idle");
-          return;
-        }
-        if (error || !response?.ok) {
-          binding.blockAuto = true;
-          const reason = token.timedOut ? "加载超时" : response ? `加载失败（HTTP ${response.status}）` : "连接失败";
-          showHistoryFeedback(binding, "error", `${reason}，请下拉重试`);
-        } else if (!binding.requests.size) {
-          // Let React commit and its native anchor restore before another auto page.
-          binding.retryAfter = Date.now() + 450;
-          let context;
-          try { context = (await response.clone().json())?.context; } catch { /* Show failure; native parser still owns the response. */ }
-          if (binding !== historyScrollBinding) return;
-          if (!Array.isArray(context?.messages) || !Array.isArray(context?.entryIds)) {
+        try {
+          window.clearTimeout?.(token.slow);
+          window.clearTimeout?.(token.timeout);
+          originalSignal?.removeEventListener?.("abort", abort);
+          binding.requests.delete(token);
+          if (binding !== historyScrollBinding || binding.sessionId !== getCurrentSessionId()) {
+            if (virtualTask && virtualTask === activeVirtualHistoryAnchor) {
+              if (!error && response?.ok && !originalSignal?.aborted) triggerVirtualHistoryAnchor(virtualTask);
+              else cancelVirtualHistoryAnchor("request-invalid-after-binding-change");
+            }
+            return;
+          }
+          if (originalSignal?.aborted) {
+            if (!binding.requests.size) showHistoryFeedback(binding, "idle");
+            if (virtualTask && virtualTask === activeVirtualHistoryAnchor) cancelVirtualHistoryAnchor("signal-aborted");
+            return;
+          }
+          if (error || !response?.ok) {
             binding.blockAuto = true;
-            showHistoryFeedback(binding, "error", "加载数据异常，请下拉重试");
-          } else if (context?.hasMore === false) showHistoryFeedback(binding, "end", "已到最早消息");
-          else showHistoryFeedback(binding, "success", "已加载更早消息");
+            const reason = token.timedOut ? "加载超时" : response ? `加载失败（HTTP ${response.status}）` : "连接失败";
+            showHistoryFeedback(binding, "error", `${reason}，请下拉重试`);
+            if (virtualTask && virtualTask === activeVirtualHistoryAnchor) cancelVirtualHistoryAnchor("request-failed");
+            return;
+          }
+          if (!binding.requests.size) {
+            // 立即启动锚点帧守护，不等待 response.clone().json() 造成帧滞后
+            if (virtualTask && virtualTask === activeVirtualHistoryAnchor) {
+              triggerVirtualHistoryAnchor(virtualTask);
+            }
+            // Let React commit and its native anchor restore before another auto page.
+            binding.retryAfter = Date.now() + 450;
+            let context;
+            try { context = (await response.clone().json())?.context; } catch { /* Show failure; native parser still owns the response. */ }
+            if (binding !== historyScrollBinding) {
+              if (virtualTask && virtualTask === activeVirtualHistoryAnchor) {
+                if (!originalSignal?.aborted && Array.isArray(context?.messages) && Array.isArray(context?.entryIds)) triggerVirtualHistoryAnchor(virtualTask);
+                else cancelVirtualHistoryAnchor("invalid-context-after-binding-change");
+              }
+              return;
+            }
+            if (!Array.isArray(context?.messages) || !Array.isArray(context?.entryIds)) {
+              binding.blockAuto = true;
+              showHistoryFeedback(binding, "error", "加载数据异常，请下拉重试");
+              if (virtualTask && virtualTask === activeVirtualHistoryAnchor) cancelVirtualHistoryAnchor("invalid-context");
+              return;
+            }
+            if (context?.hasMore === false) showHistoryFeedback(binding, "end", "已到最早消息");
+            else showHistoryFeedback(binding, "success", "已加载更早消息");
+          }
+        } catch (e) {
+          if (virtualTask && virtualTask === activeVirtualHistoryAnchor) {
+            cancelVirtualHistoryAnchor("finish-exception");
+          }
+          throw e;
         }
       },
     };
@@ -43259,9 +49672,50 @@
     for (const button of binding.scroll.querySelectorAll?.(".pi-enh-history-load-earlier") || []) button.remove();
   }
 
+  const HISTORY_SENTINEL_STYLE_ID = "pi-enh-history-sentinel-styles";
+  const HISTORY_SENTINEL_STYLE_CONTENT = `
+    .chat-content button[data-pi-enh-history-sentinel="true"] {
+      display: inline-flex !important;
+      align-items: center !important;
+      justify-content: center !important;
+      gap: 6px !important;
+      margin: 10px auto 16px auto !important;
+      padding: 8px 20px !important;
+      min-height: 38px !important;
+      border-radius: 999px !important;
+      border: 1px solid color-mix(in srgb, var(--accent, #60a5fa) 45%, transparent) !important;
+      background: color-mix(in srgb, var(--accent, #60a5fa) 12%, var(--bg-panel, #242424)) !important;
+      color: var(--text, #e8e8e8) !important;
+      font-size: 13px !important;
+      font-weight: 500 !important;
+      line-height: 1.5 !important;
+      cursor: pointer !important;
+      transition: all 0.15s ease !important;
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12) !important;
+      touch-action: manipulation !important;
+    }
+    .chat-content button[data-pi-enh-history-sentinel="true"]:hover {
+      background: color-mix(in srgb, var(--accent, #60a5fa) 24%, var(--bg-hover, #2e2e2e)) !important;
+      border-color: var(--accent, #60a5fa) !important;
+    }
+    .chat-content button[data-pi-enh-history-sentinel="true"]:active {
+      transform: scale(0.96) !important;
+    }
+  `;
+
+  function ensureHistorySentinelStyles() {
+    if (typeof document === "undefined") return;
+    if (document.getElementById(HISTORY_SENTINEL_STYLE_ID)) return;
+    const style = document.createElement("style");
+    style.id = HISTORY_SENTINEL_STYLE_ID;
+    style.textContent = HISTORY_SENTINEL_STYLE_CONTENT;
+    (document.head || document.documentElement).appendChild(style);
+  }
+
   function syncHistoryScrollStability(suppressAuto = false) {
     const scroll = getChatScrollContainer();
     if (!isPluginEnabled("history-scroll-stability") || !scroll) { cleanupHistoryScrollStability(); return; }
+    ensureHistorySentinelStyles();
     const sessionId = getCurrentSessionId();
     if (historyScrollBinding && (historyScrollBinding.scroll !== scroll || historyScrollBinding.sessionId !== sessionId)) cleanupHistoryScrollStability();
     if (!historyScrollBinding) {
@@ -43281,11 +49735,13 @@
         if (binding !== historyScrollBinding || binding.pending || binding.requests.size || !isPluginEnabled("history-scroll-stability")) return Promise.resolve(false);
         const state = window.__PI_ENH_GET_HISTORY_STATE__?.();
         if (state?.sessionId && state.sessionId !== sessionId) return Promise.resolve(false);
-        if (!state?.hasEarlierMessages) {
+        const hasMore = Boolean(state?.hasEarlierMessages || state?.hasLocalEarlier);
+        if (!hasMore) {
           if (source !== "auto") showHistoryFeedback(binding, "end", "已到最早消息");
           return Promise.resolve(false);
         }
-        if (typeof window.__PI_ENH_LOAD_EARLIER__ !== "function") {
+        const sentinel = binding.sentinel || scroll.querySelector(".py-3.text-center");
+        if (typeof window.__PI_ENH_LOAD_EARLIER__ !== "function" && (!sentinel || typeof sentinel.click !== "function")) {
           if (source !== "auto") showHistoryFeedback(binding, "error", "历史加载尚未就绪，请稍后下拉重试");
           return Promise.resolve(false);
         }
@@ -43309,10 +49765,20 @@
         showHistoryFeedback(binding, "loading", "正在加载更早消息…");
         return Promise.resolve().then(() => {
           if (binding !== historyScrollBinding || sessionId !== getCurrentSessionId()) return false;
-          const historyStep = typeof isMobileEnvironment === "function" && isMobileEnvironment() ? 30 : 50;
-          return window.__PI_ENH_LOAD_EARLIER__(historyStep, `chat-${source}`);
+          const historyStep = typeof isMobileEnvironment === "function" && isMobileEnvironment() ? 50 : 80;
+          if (typeof window.__PI_ENH_LOAD_EARLIER__ === "function") {
+            return window.__PI_ENH_LOAD_EARLIER__(historyStep, `chat-${source}`);
+          }
+          if (sentinel && typeof sentinel.click === "function") {
+            sentinel.click();
+            return true;
+          }
+          return false;
         }).then((loaded) => {
           if (binding !== historyScrollBinding || binding.blockAuto) return loaded;
+          if (loaded === false && sentinel && typeof sentinel.click === "function" && (state?.hasLocalEarlier || sentinel.offsetParent !== null)) {
+            try { sentinel.click(); loaded = true; } catch {}
+          }
           if (loaded === false && getHistoryPageKey(window.__PI_ENH_GET_HISTORY_STATE__?.()) === pageKey) {
             binding.autoPageKey = null;
             binding.retryAfter = Date.now() + 400;
@@ -43342,9 +49808,15 @@
         });
       };
       binding.maybeAutoLoad = () => {
+        const currentSid = getCurrentSessionId();
+        if (currentSid !== historyExpandSessionId || historyExpandGestureSeq <= historyExpandConsumedSeq) {
+          return false;
+        }
         const sentinel = binding.sentinel || scroll.querySelector(".py-3.text-center");
         const state = window.__PI_ENH_GET_HISTORY_STATE__?.();
-        if (binding.pull || binding.blockAuto || !sentinel || !state?.hasEarlierMessages || !isHistorySentinelVisible(scroll, sentinel)) return false;
+        const hasMore = Boolean(state?.hasEarlierMessages || state?.hasLocalEarlier);
+        if (binding.pull || binding.blockAuto || !sentinel || !hasMore || !isHistorySentinelVisible(scroll, sentinel)) return false;
+        historyExpandConsumedSeq = historyExpandGestureSeq;
         binding.load("auto", getHistoryPageKey(state));
         return true;
       };
@@ -43358,19 +49830,43 @@
         scroll.style.removeProperty("--pi-history-pull");
         scroll.classList.remove("pi-enh-history-pulling");
       };
+      const findScrollableSubContainer = (target, root) => {
+        let el = target && typeof target === "object" ? (target.parentElement !== undefined ? target : target.parentElement) : null;
+        while (el && el !== root && el !== document.body && el !== document.documentElement) {
+          if (el.scrollHeight > el.clientHeight + 1) {
+            const style = window.getComputedStyle?.(el);
+            const oy = style?.overflowY;
+            if (oy === "auto" || oy === "scroll" || oy === "overlay") return el;
+          }
+          el = el.parentElement;
+        }
+        return null;
+      };
       listen("touchstart", (event) => {
         markHistoryTailGesture(binding);
         cancelHistoryScrollRestore();
         if (event.touches?.length !== 1 || scroll.scrollTop > 0 ||
             event.target?.closest?.("input, textarea, button, a, select, pre, [contenteditable=true], [data-minimap-preview-box]")) return;
+        const subScroll = findScrollableSubContainer(event.target, scroll);
+        if (subScroll && subScroll.scrollTop > 1) return;
         const touch = event.touches[0];
-        binding.pull = { x: touch.clientX, y: touch.clientY, distance: 0 };
+        binding.pull = { x: touch.clientX, y: touch.clientY, distance: 0, subScroll };
       });
       listen("touchmove", (event) => {
         const pull = binding.pull;
         if (!pull) return;
         if (event.touches?.length !== 1) { resetPull(); showHistoryFeedback(binding, binding.pending || binding.requests.size ? "loading" : "idle", "正在加载更早消息…"); return; }
         const touch = event.touches[0], dy = touch.clientY - pull.y, dx = touch.clientX - pull.x;
+        if (pull.subScroll) {
+          if (dy > 0 && pull.subScroll.scrollTop > 1) {
+            resetPull();
+            return;
+          }
+          if (dy < 0 && pull.subScroll.scrollTop < pull.subScroll.scrollHeight - pull.subScroll.clientHeight - 1) {
+            resetPull();
+            return;
+          }
+        }
         if (scroll.scrollTop > 0 || Math.abs(dx) > Math.abs(dy) || dy < 0) {
           resetPull();
           if (["pull", "armed"].includes(binding.phase)) showHistoryFeedback(binding, "idle");
@@ -43383,14 +49879,14 @@
         scroll.classList.add("pi-enh-history-pulling");
         if (binding.pending || binding.requests.size) {
           showHistoryFeedback(binding, binding.phase === "slow" ? "slow" : "loading", binding.phase === "slow" ? "响应较慢，仍在加载…" : "正在加载更早消息…");
-        } else showHistoryFeedback(binding, pull.distance >= 60 ? "armed" : "pull", pull.distance >= 60 ? "松开加载更早消息" : "下拉加载更早消息");
+        } else showHistoryFeedback(binding, pull.distance >= 36 ? "armed" : "pull", pull.distance >= 36 ? "松开加载更早消息" : "下拉加载更早消息");
       }, false);
       listen("touchend", () => {
         const pull = binding.pull;
         resetPull();
         if (!pull) return;
         if (binding.pending || binding.requests.size) return;
-        if (pull.distance >= 60) binding.load("pull");
+        if (pull.distance >= 36) binding.load("pull");
         else if (["pull", "armed"].includes(binding.phase)) showHistoryFeedback(binding, "idle");
       });
       listen("touchcancel", () => {
@@ -43412,7 +49908,8 @@
     const sentinel = scroll.querySelector(".py-3.text-center");
     const state = window.__PI_ENH_GET_HISTORY_STATE__?.();
     for (const button of scroll.querySelectorAll?.(".pi-enh-history-load-earlier") || []) button.remove();
-    if (!sentinel || !state?.hasEarlierMessages) {
+    const hasMore = Boolean(state?.hasEarlierMessages || state?.hasLocalEarlier);
+    if (!sentinel || !hasMore) {
       binding.observer?.disconnect?.();
       binding.observer = null;
       binding.sentinel?.removeAttribute?.("data-pi-enh-history-sentinel");
@@ -43427,9 +49924,15 @@
       sentinel.setAttribute("data-pi-enh-history-sentinel", "true");
       sentinel.style.cursor = "pointer";
       sentinel.setAttribute("title", "轻点或下拉加载更早消息");
+      if (!sentinel.querySelector(".pi-enh-sentinel-badge")) {
+        sentinel.innerHTML = `<span class="pi-enh-sentinel-badge"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right: 5px; flex-shrink: 0; display: inline-block; vertical-align: -1.5px;"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l3 2"/></svg>加载更早历史消息 (轻点或下拉加载)</span>`;
+      }
       if (!sentinel.__piClickHandlerAttached) {
         sentinel.__piClickHandlerAttached = true;
-        sentinel.addEventListener("click", () => {
+        sentinel.addEventListener("click", (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          markHistoryExpandUserGesture();
           binding.load("gesture");
         });
       }
@@ -43558,6 +50061,279 @@
       el.removeAttribute("data-user-expanded");
       el.style.display = "";
     }
+  }
+
+  // ==========================================
+  // 3.7.1. Pi-Mail Peer Message Auto-Collapse Plugin (pi-mail 协作消息自动折叠)
+  // ==========================================
+  const PI_MAIL_COLLAPSE_STYLE_ID = "pi-enh-pi-mail-collapse-style";
+  const PI_MAIL_COLLAPSE_STYLE_CONTENT = `
+    .pi-enh-pi-mail-header {
+      cursor: pointer;
+      user-select: none;
+      transition: background 0.12s ease;
+    }
+    .pi-enh-pi-mail-header:hover {
+      filter: brightness(0.97);
+    }
+    .pi-enh-pi-mail-header .pi-enh-pi-mail-native-title {
+      display: none;
+    }
+    .pi-enh-pi-mail-summary {
+      display: inline-block;
+      color: var(--text-dim);
+      font-size: 11px;
+      line-height: 1.4;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      max-width: 100%;
+      flex: 1 1 auto;
+      min-width: 0;
+      margin: 0 4px;
+    }
+    .pi-enh-pi-mail-toggle-btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 20px;
+      height: 20px;
+      padding: 0;
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      background: var(--bg);
+      color: var(--text-muted);
+      cursor: pointer;
+      flex-shrink: 0;
+      margin-left: auto;
+      transition: transform 0.15s ease, background 0.12s ease;
+    }
+    .pi-enh-pi-mail-toggle-btn:hover {
+      background: var(--bg-hover);
+      color: var(--text);
+    }
+    .pi-enh-pi-mail-toggle-btn:focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 1px;
+    }
+    .pi-enh-pi-mail-arrow {
+      transition: transform 0.15s ease;
+      display: block;
+    }
+    .pi-enh-pi-mail-toggle-btn[aria-expanded="true"] .pi-enh-pi-mail-arrow,
+    .pi-enh-pi-mail-header[data-user-expanded="true"] .pi-enh-pi-mail-arrow {
+      transform: rotate(180deg);
+    }
+  `;
+
+  function ensurePiMailCollapseStyles() {
+    const existing = document.getElementById(PI_MAIL_COLLAPSE_STYLE_ID);
+    if (existing) {
+      if (existing.textContent !== PI_MAIL_COLLAPSE_STYLE_CONTENT) {
+        existing.textContent = PI_MAIL_COLLAPSE_STYLE_CONTENT;
+      }
+      return;
+    }
+    const style = document.createElement("style");
+    style.id = PI_MAIL_COLLAPSE_STYLE_ID;
+    style.textContent = PI_MAIL_COLLAPSE_STYLE_CONTENT;
+    (document.head || document.documentElement).appendChild(style);
+  }
+
+  function removePiMailCollapseStyles() {
+    const el = document.getElementById(PI_MAIL_COLLAPSE_STYLE_ID);
+    if (el) el.remove();
+  }
+
+  function syncPiMailActiveState() {
+    const enabled = isPluginEnabled("pi-mail-auto-collapse");
+    if (document.documentElement) {
+      document.documentElement.classList.toggle("pi-enh-pi-mail-collapse-active", enabled);
+    }
+    if (enabled) {
+      ensurePiMailCollapseStyles();
+    } else {
+      removePiMailCollapseStyles();
+    }
+  }
+
+  // 记录用户主动展开的邮件指纹，保障 React 重绘或同一会话流式更新时不强占用户已展开状态
+  const userExpandedMailKeys = new Set();
+
+  function syncPiMailCards() {
+    syncPiMailActiveState();
+    const enabled = isPluginEnabled("pi-mail-auto-collapse");
+    if (!enabled) {
+      removePiMailEnhancements();
+      return;
+    }
+
+    const chatContent = document.querySelector(".chat-content");
+    if (!chatContent) return;
+
+    const allSpans = chatContent.querySelectorAll("span");
+    for (const s of allSpans) {
+      if ((s.textContent || "").trim() !== "pi-mail") continue;
+      const header = s.parentElement;
+      if (!header) continue;
+
+      const body = header.nextElementSibling;
+      if (!body) continue;
+
+      // 契约：只在正文包含 '<pi_mail source="peer-session"' 的卡片适用
+      const rawText = body.textContent || "";
+      if (!rawText.includes('<pi_mail source="peer-session"')) continue;
+
+      const cardBox = header.parentElement;
+      if (!cardBox) continue;
+
+      const idMatch = rawText.match(/message_id="([^"]+)"/);
+      const mailKey = idMatch ? idMatch[1] : rawText.slice(0, 80);
+
+      const footer = body.nextElementSibling;
+
+      header.classList.add("pi-enh-pi-mail-header");
+      body.classList.add("pi-enh-pi-mail-body");
+      if (footer) footer.classList.add("pi-enh-pi-mail-footer");
+      s.classList.add("pi-enh-pi-mail-native-title");
+
+      let summarySpan = header.querySelector(".pi-enh-pi-mail-summary");
+      if (!summarySpan) {
+        summarySpan = document.createElement("span");
+        summarySpan.className = "pi-enh-pi-mail-summary";
+        summarySpan.textContent = "协作消息 · 已收到";
+        summarySpan.setAttribute("title", "协作消息 · 已收到");
+        s.insertAdjacentElement("afterend", summarySpan);
+      } else {
+        if (summarySpan.textContent !== "协作消息 · 已收到") {
+          summarySpan.textContent = "协作消息 · 已收到";
+          summarySpan.setAttribute("title", "协作消息 · 已收到");
+        }
+      }
+
+      let toggleBtn = header.querySelector(".pi-enh-pi-mail-toggle-btn");
+      if (!toggleBtn) {
+        toggleBtn = document.createElement("button");
+        toggleBtn.type = "button";
+        toggleBtn.className = "pi-enh-pi-mail-toggle-btn";
+        toggleBtn.setAttribute("aria-expanded", "false");
+        toggleBtn.setAttribute("title", "展开/收起协作消息");
+        toggleBtn.setAttribute("aria-label", "展开/收起协作消息");
+        toggleBtn.innerHTML = `<svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" class="pi-enh-pi-mail-arrow"><polyline points="2 3.5 5 6.5 8 3.5"></polyline></svg>`;
+
+        const hasAutoMargin = Array.from(header.children).some(
+          (c) => c !== toggleBtn && (c.style?.marginLeft === "auto" || c.style?.marginInlineStart === "auto")
+        );
+        if (!hasAutoMargin) {
+          toggleBtn.style.marginLeft = "auto";
+        }
+        header.appendChild(toggleBtn);
+
+        const handleToggle = (e) => {
+          if (e) {
+            e.stopPropagation();
+            if (typeof e.preventDefault === "function") e.preventDefault();
+          }
+          const isCurrentExpanded = toggleBtn.getAttribute("aria-expanded") === "true";
+          const next = !isCurrentExpanded;
+          toggleBtn.setAttribute("aria-expanded", next ? "true" : "false");
+          const arrow = toggleBtn.querySelector(".pi-enh-pi-mail-arrow");
+          if (arrow) arrow.style.transform = next ? "rotate(180deg)" : "none";
+          if (next) {
+            userExpandedMailKeys.add(mailKey);
+            header.setAttribute("data-user-expanded", "true");
+            header.classList.remove("pi-enh-pi-mail-collapsed");
+            body.style.display = "";
+            if (footer) footer.style.display = "";
+          } else {
+            userExpandedMailKeys.delete(mailKey);
+            header.setAttribute("data-user-expanded", "false");
+            header.classList.add("pi-enh-pi-mail-collapsed");
+            body.style.display = "none";
+            if (footer) footer.style.display = "none";
+          }
+        };
+
+        toggleBtn.addEventListener("click", handleToggle);
+
+        if (header._piEnhPiMailHeaderClick) {
+          try {
+            header.removeEventListener("click", header._piEnhPiMailHeaderClick);
+          } catch (err) {}
+          header._piEnhPiMailHeaderClick = null;
+        }
+
+        const handleHeaderClick = (e) => {
+          if (e.target === toggleBtn || toggleBtn.contains(e.target)) return;
+          if (e.target.closest && e.target.closest("button, a, input")) return;
+          handleToggle(e);
+        };
+        header._piEnhPiMailHeaderClick = handleHeaderClick;
+        header.addEventListener("click", handleHeaderClick);
+      }
+
+      const isExpanded = header.getAttribute("data-user-expanded") === "true" || userExpandedMailKeys.has(mailKey);
+
+      toggleBtn.setAttribute("aria-expanded", isExpanded ? "true" : "false");
+      const arrow = toggleBtn.querySelector(".pi-enh-pi-mail-arrow");
+      if (arrow) arrow.style.transform = isExpanded ? "rotate(180deg)" : "none";
+
+      if (isExpanded) {
+        header.setAttribute("data-user-expanded", "true");
+        header.classList.remove("pi-enh-pi-mail-collapsed");
+        if (body.style.display !== "") body.style.display = "";
+        if (footer && footer.style.display !== "") footer.style.display = "";
+      } else {
+        header.setAttribute("data-user-expanded", "false");
+        header.classList.add("pi-enh-pi-mail-collapsed");
+        if (body.style.display !== "none") body.style.display = "none";
+        if (footer && footer.style.display !== "none") footer.style.display = "none";
+      }
+    }
+  }
+
+  function removePiMailEnhancements() {
+    userExpandedMailKeys.clear();
+    removePiMailCollapseStyles();
+    if (document.documentElement) {
+      document.documentElement.classList.remove("pi-enh-pi-mail-collapse-active");
+    }
+    for (const title of document.querySelectorAll(".pi-enh-pi-mail-native-title")) {
+      title.classList.remove("pi-enh-pi-mail-native-title");
+      title.style.display = "";
+    }
+    for (const btn of document.querySelectorAll(".pi-enh-pi-mail-toggle-btn")) {
+      btn.remove();
+    }
+    for (const span of document.querySelectorAll(".pi-enh-pi-mail-summary")) {
+      span.remove();
+    }
+    for (const el of document.querySelectorAll(".pi-enh-pi-mail-header")) {
+      if (el._piEnhPiMailHeaderClick) {
+        try {
+          el.removeEventListener("click", el._piEnhPiMailHeaderClick);
+        } catch (err) {}
+        el._piEnhPiMailHeaderClick = null;
+      }
+      el.classList.remove("pi-enh-pi-mail-header", "pi-enh-pi-mail-collapsed");
+      el.removeAttribute("data-user-expanded");
+    }
+    for (const el of document.querySelectorAll(".pi-enh-pi-mail-body")) {
+      el.classList.remove("pi-enh-pi-mail-body");
+      el.style.display = "";
+    }
+    for (const el of document.querySelectorAll(".pi-enh-pi-mail-footer")) {
+      el.classList.remove("pi-enh-pi-mail-footer");
+      el.style.display = "";
+    }
+  }
+
+  activeCleanups.push(removePiMailEnhancements);
+
+  if (typeof window !== "undefined") {
+    window.__PI_ENH_SYNC_PI_MAIL_ACTIVE_STATE__ = syncPiMailActiveState;
+    window.__PI_ENH_SYNC_PI_MAIL_CARDS__ = syncPiMailCards;
+    window.__PI_ENH_REMOVE_PI_MAIL_ENHANCEMENTS__ = removePiMailEnhancements;
   }
 
   function getCurrentSessionId() {
@@ -43805,7 +50581,7 @@
   }
 
   function formatModelDisplayName(rawModel) {
-    if (!rawModel || rawModel === "默认模型" || rawModel === "unknown") return "GPT-6 Astra";
+    if (!rawModel || rawModel === "默认模型" || rawModel === "unknown" || rawModel === "未知") return "未知模型";
     const clean = stripProviderPrefix(rawModel);
     const m = clean.toLowerCase().trim();
     if (m === "gpt-6-astra") return "GPT-6 Astra";
@@ -44523,6 +51299,18 @@
     return chunkHtmls.join(' <span class="pi-enh-usage-dot">·</span> ');
   }
 
+  function clearTurnUsageBadge(usageEl) {
+    const raw = usageEl.getAttribute("data-pi-enh-raw-usage");
+    if (raw !== null && usageEl.textContent !== raw) usageEl.textContent = raw;
+    for (const attr of ["data-pi-enh-raw-usage", "data-pi-enh-rendered-text", "data-turn-usage", "data-last-step-usage"]) {
+      usageEl.removeAttribute(attr);
+    }
+    usageEl.classList?.remove("pi-enh-usage-badge");
+    if ((usageEl.getAttribute("title") || "").includes("回合真实消耗")) usageEl.removeAttribute("title");
+    if (usageEl.style?.cursor === "pointer") usageEl.style.removeProperty("cursor");
+    if (usageTooltip?.__currentBadge === usageEl) hideUsageTooltip();
+  }
+
   function syncAllUsageBadges() {
     const enabled = isPluginEnabled("turn-usage-total");
     const assistantMsgs = document.querySelectorAll('div[data-message-role="assistant"]');
@@ -44537,15 +51325,7 @@
       if (!usageEl) continue;
 
       if (!enabled) {
-        const raw = usageEl.getAttribute("data-pi-enh-raw-usage");
-        if (raw !== null) {
-          if (usageEl.textContent !== raw) usageEl.textContent = raw;
-          usageEl.removeAttribute("data-pi-enh-raw-usage");
-          usageEl.removeAttribute("data-pi-enh-rendered-text");
-          usageEl.removeAttribute("data-turn-usage");
-          usageEl.removeAttribute("data-last-step-usage");
-          if (usageEl.classList && usageEl.classList.remove) usageEl.classList.remove("pi-enh-usage-badge");
-        }
+        clearTurnUsageBadge(usageEl);
         continue;
       }
 
@@ -44554,31 +51334,9 @@
       let turnUsage = metrics?.turnUsage || null;
       let lastStepUsage = metrics?.lastStepUsage || null;
 
-      // 如果 metrics 暂未命中，尝试从原生 DOM 文本中解析兜底用量数据
+      // 无完整权威 metrics 时必须保留原生 DOM 文本，绝不伪造“回合真实总计”，绝不回退当前 composer/Gemini 模型
       if (!turnUsage) {
-        const text = usageEl.textContent || "";
-        const m = text.match(/([\d,]+)\s*in\s*·\s*([\d,]+)\s*out/i);
-        if (m) {
-          const inTokens = parseInt(m[1].replace(/,/g, ""), 10) || 0;
-          const outTokens = parseInt(m[2].replace(/,/g, ""), 10) || 0;
-          const currentSession = getCurrentSessionId() ? knownSessionsMap.get(getCurrentSessionId()) : null;
-          const targetModel = currentSession?.model || "gemini-3.8-flash-high";
-          turnUsage = {
-            input: inTokens,
-            output: outTokens,
-            cacheRead: 0,
-            cacheWrite: 0,
-            totalTokens: inTokens + outTokens,
-            cost: 0,
-            stepCount: 1,
-            toolStepCount: 0,
-            model: targetModel,
-          };
-          lastStepUsage = { ...turnUsage };
-        }
-      }
-
-      if (!turnUsage) {
+        clearTurnUsageBadge(usageEl);
         continue;
       }
 
@@ -44663,6 +51421,363 @@
     }
   }
 
+  // ==========================================
+  // 对话轮次序号 (Turn Number Indicator)
+  // ==========================================
+  function clearAllTurnNumberBadges() {
+    if (typeof document === "undefined" || !document.querySelectorAll) return;
+    const badges = document.querySelectorAll(".pi-enh-turn-number-badge");
+    for (let i = 0; i < badges.length; i++) {
+      badges[i].remove();
+    }
+  }
+
+  function syncAllTurnNumberBadges() {
+    if (!isPluginEnabled("turn-number-indicator")) {
+      clearAllTurnNumberBadges();
+      return;
+    }
+
+    const userMsgs = findUserMessages();
+    if (!userMsgs || userMsgs.length === 0) {
+      clearAllTurnNumberBadges();
+      return;
+    }
+
+    let offset = 0;
+    try {
+      if (typeof readMinimapHistoryState === "function") {
+        const historyState = readMinimapHistoryState(userMsgs.length);
+        if (historyState && Number.isFinite(historyState.totalTurns) && historyState.totalTurns > userMsgs.length) {
+          offset = historyState.totalTurns - userMsgs.length;
+        }
+      }
+    } catch (e) {}
+
+    for (let i = 0; i < userMsgs.length; i++) {
+      const msg = userMsgs[i];
+      const turnNumber = offset + i + 1;
+      const timeSpan = findTimestampElement(msg);
+      if (!timeSpan || !timeSpan.parentElement) continue;
+
+      const parent = timeSpan.parentElement;
+      let badge = null;
+      const prev = timeSpan.previousElementSibling;
+      if (prev && prev.classList && prev.classList.contains("pi-enh-turn-number-badge")) {
+        badge = prev;
+      } else {
+        badge = parent.querySelector(".pi-enh-turn-number-badge");
+      }
+
+      const badgeText = `#${turnNumber}`;
+      const badgeTitle = `第 ${turnNumber} 轮对话`;
+
+      if (!badge) {
+        badge = document.createElement("span");
+        badge.className = "pi-enh-turn-number-badge";
+        badge.textContent = badgeText;
+        badge.setAttribute("title", badgeTitle);
+        badge.setAttribute("data-turn-number", String(turnNumber));
+
+        if (timeSpan.style && timeSpan.style.marginLeft === "auto") {
+          timeSpan.style.marginLeft = "0";
+          badge.style.marginLeft = "auto";
+        }
+        parent.insertBefore(badge, timeSpan);
+      } else {
+        if (badge.nextElementSibling !== timeSpan) {
+          parent.insertBefore(badge, timeSpan);
+        }
+        if (timeSpan.style && timeSpan.style.marginLeft === "auto") {
+          timeSpan.style.marginLeft = "0";
+          badge.style.marginLeft = "auto";
+        }
+        if (badge.textContent !== badgeText) {
+          badge.textContent = badgeText;
+        }
+        if (badge.getAttribute("title") !== badgeTitle) {
+          badge.setAttribute("title", badgeTitle);
+        }
+        if (badge.getAttribute("data-turn-number") !== String(turnNumber)) {
+          badge.setAttribute("data-turn-number", String(turnNumber));
+        }
+      }
+    }
+  }
+
+  // ==========================================
+  // Pi Coding Agent 上游更新检查与轻量提示 (https://github.com/earendil-works/pi)
+  // ==========================================
+  const PI_AGENT_UPDATE_STORAGE_KEY = "pi_enh_agent_update_cache_v2";
+  const PI_AGENT_UPDATE_CACHE_TTL = 6 * 3600 * 1000;
+  const PI_AGENT_OFFICIAL_REPO = "https://github.com/earendil-works/pi";
+
+  function parseSemVer(v) {
+    if (!v) return null;
+    const clean = String(v).replace(/^v/i, "").trim();
+    const m = /^(\d+)\.(\d+)\.(\d+)/.exec(clean);
+    if (!m) return null;
+    return [Number(m[1]), Number(m[2]), Number(m[3])];
+  }
+
+  function isNewerSemVer(latest, current) {
+    const l = parseSemVer(latest);
+    const c = parseSemVer(current);
+    if (!l || !c) return false;
+    for (let i = 0; i < 3; i++) {
+      if (l[i] > c[i]) return true;
+      if (l[i] < c[i]) return false;
+    }
+    return false;
+  }
+
+  function ensurePiAgentUpdateStyle() {
+    if (document.getElementById("pi-enh-agent-update-style")) return;
+    const style = document.createElement("style");
+    style.id = "pi-enh-agent-update-style";
+    style.textContent = `
+      .pi-enh-agent-update-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 3.5px;
+        margin-left: 6px;
+        padding: 1px 7px 1px 6px;
+        border-radius: 9999px;
+        font-size: 10px;
+        font-weight: 600;
+        font-family: var(--font-mono, monospace);
+        background: rgba(16, 185, 129, 0.12);
+        color: #10b981;
+        border: 1px solid rgba(16, 185, 129, 0.35);
+        text-decoration: none;
+        cursor: pointer;
+        line-height: 1.35;
+        vertical-align: middle;
+        transition: all 0.18s ease;
+        box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05);
+        flex-shrink: 0;
+      }
+      .pi-enh-agent-update-badge:hover {
+        background: rgba(16, 185, 129, 0.22);
+        border-color: rgba(16, 185, 129, 0.6);
+        color: #059669;
+        transform: translateY(-0.5px);
+        text-decoration: none;
+        box-shadow: 0 2px 5px rgba(16, 185, 129, 0.2);
+      }
+      .pi-enh-agent-update-dot {
+        width: 5px;
+        height: 5px;
+        border-radius: 50%;
+        background: #10b981;
+        box-shadow: 0 0 5px rgba(16, 185, 129, 0.9);
+        animation: pi-enh-agent-dot-pulse 2s infinite ease-in-out;
+        flex-shrink: 0;
+      }
+      @keyframes pi-enh-agent-dot-pulse {
+        0%, 100% { opacity: 0.55; transform: scale(0.9); }
+        50% { opacity: 1; transform: scale(1.15); box-shadow: 0 0 8px rgba(16, 185, 129, 1); }
+      }
+    `;
+    document.head.appendChild(style);
+  }
+
+  function getPiAgentUpdateState() {
+    if (!window.__PI_AGENT_UPDATE_STATE__) {
+      const currentVer = (typeof window !== "undefined" && window.__PI_OFFICIAL_AGENT_VERSION__) || "0.87.1";
+      window.__PI_AGENT_UPDATE_STATE__ = {
+        currentVersion: currentVer,
+        latestVersion: null,
+        updateAvailable: false,
+        releaseUrl: `${PI_AGENT_OFFICIAL_REPO}/releases`,
+        checkedAt: 0,
+        isChecking: false,
+        error: null,
+      };
+      try {
+        const raw = localStorage.getItem(PI_AGENT_UPDATE_STORAGE_KEY);
+        if (raw) {
+          const cached = JSON.parse(raw);
+          if (cached && cached.latestVersion && cached.checkedAt) {
+            if (Date.now() - cached.checkedAt <= PI_AGENT_UPDATE_CACHE_TTL && cached.currentVersion === currentVer) {
+              window.__PI_AGENT_UPDATE_STATE__.latestVersion = cached.latestVersion;
+              window.__PI_AGENT_UPDATE_STATE__.updateAvailable = Boolean(cached.updateAvailable);
+              window.__PI_AGENT_UPDATE_STATE__.releaseUrl = cached.releaseUrl || `${PI_AGENT_OFFICIAL_REPO}/releases/tag/v${cached.latestVersion}`;
+              window.__PI_AGENT_UPDATE_STATE__.checkedAt = cached.checkedAt;
+            }
+          }
+        }
+      } catch (e) {}
+    }
+    return window.__PI_AGENT_UPDATE_STATE__;
+  }
+
+  let piAgentCheckInFlight = null;
+
+  async function checkPiAgentUpdate(force = false) {
+    const state = getPiAgentUpdateState();
+    if (piAgentCheckInFlight) return piAgentCheckInFlight;
+
+    if (!force && state.latestVersion && state.checkedAt && Date.now() - state.checkedAt <= PI_AGENT_UPDATE_CACHE_TTL) {
+      return state;
+    }
+
+    state.isChecking = true;
+    state.error = null;
+
+    piAgentCheckInFlight = (async () => {
+      try {
+        let latestVer = null;
+        // 策略 0: 旧部署可读取宿主生成的更新清单；原生独立包不依赖宿主专属资产。
+        if (window.__PI_ENH_NATIVE_STATE_API__ !== true) {
+        try {
+          const ctrl = new AbortController();
+          const tid = setTimeout(() => ctrl.abort(), 2000);
+          const resp = await fetch("/pi-agent-update-manifest.json?t=" + Date.now(), {
+            signal: ctrl.signal,
+            cache: "no-store",
+          });
+          clearTimeout(tid);
+          if (resp && resp.ok) {
+            const json = await resp.json();
+            if (json && typeof json.latestVersion === "string" && json.latestVersion.trim()) {
+              latestVer = json.latestVersion.trim();
+            }
+          }
+        } catch (e) {}
+
+        }
+
+        // 策略 1: 访问 npm registry（CORS 开放、全球 CDN、无限额）
+        try {
+          const ctrl = new AbortController();
+          const tid = setTimeout(() => ctrl.abort(), 4000);
+          const resp = await fetch("https://registry.npmjs.org/@earendil-works/pi-coding-agent/latest", {
+            signal: ctrl.signal,
+            cache: "no-store",
+          });
+          clearTimeout(tid);
+          if (resp && resp.ok) {
+            const json = await resp.json();
+            if (json && typeof json.version === "string" && json.version.trim()) {
+              const npmVer = json.version.trim();
+              if (!latestVer || isNewerSemVer(npmVer, latestVer)) {
+                latestVer = npmVer;
+              }
+            }
+          }
+        } catch (e) {}
+
+        // 策略 2: 备用访问 GitHub releases/latest API
+        try {
+          const ctrl = new AbortController();
+          const tid = setTimeout(() => ctrl.abort(), 4000);
+          const resp = await fetch("https://api.github.com/repos/earendil-works/pi/releases/latest", {
+            signal: ctrl.signal,
+            cache: "no-store",
+            headers: { Accept: "application/vnd.github.v3+json" },
+          });
+          clearTimeout(tid);
+          if (resp && resp.ok) {
+            const json = await resp.json();
+            const tag = (json && typeof json.tag_name === "string" ? json.tag_name : "").replace(/^v/i, "").trim();
+            if (tag && (!latestVer || isNewerSemVer(tag, latestVer))) {
+              latestVer = tag;
+            }
+          }
+        } catch (e) {}
+
+        if (latestVer) {
+          state.latestVersion = latestVer;
+          state.updateAvailable = isNewerSemVer(latestVer, state.currentVersion);
+          state.releaseUrl = `${PI_AGENT_OFFICIAL_REPO}/releases/tag/v${latestVer}`;
+          state.checkedAt = Date.now();
+          try {
+            localStorage.setItem(PI_AGENT_UPDATE_STORAGE_KEY, JSON.stringify({
+              currentVersion: state.currentVersion,
+              latestVersion: state.latestVersion,
+              updateAvailable: state.updateAvailable,
+              releaseUrl: state.releaseUrl,
+              checkedAt: state.checkedAt,
+            }));
+          } catch (e) {}
+        } else {
+          // 未获取到版本时（网络超时或离线），记录冷却时间戳，避免高频重试阻塞主线程
+          state.checkedAt = Date.now();
+        }
+      } catch (err) {
+        state.error = err instanceof Error ? err.message : String(err);
+        state.checkedAt = Date.now();
+      } finally {
+        state.isChecking = false;
+        piAgentCheckInFlight = null;
+        // 关键防护：仅在成功探测到新版本时才触发 DOM 同步，失败/无变化时静默，杜绝死循环风暴
+        if (state.latestVersion && typeof scheduleDomSync === "function") {
+          scheduleDomSync();
+        }
+      }
+      return state;
+    })();
+
+    return piAgentCheckInFlight;
+  }
+
+  window.__PI_ENH_CHECK_AGENT_UPDATE__ = checkPiAgentUpdate;
+
+  function syncPiAgentUpdateBadge(el, officialPiVer) {
+    if (!el) return;
+    ensurePiAgentUpdateStyle();
+    const enabled = isPluginEnabled("pi-agent-update-notice");
+    const state = getPiAgentUpdateState();
+
+    if (enabled && !state.latestVersion && !state.isChecking && !state.checkedAt) {
+      checkPiAgentUpdate(false);
+    }
+
+    const existingBadge = el.querySelector(".pi-enh-agent-update-badge");
+
+    const curVer = officialPiVer || state.currentVersion;
+    const isNewer = Boolean(
+      state.latestVersion && curVer && isNewerSemVer(state.latestVersion, curVer)
+    );
+
+    if (!enabled || !state.updateAvailable || !isNewer) {
+      if (existingBadge) {
+        existingBadge.style.display = "none";
+        existingBadge.remove();
+      }
+      return;
+    }
+
+    if (!existingBadge) {
+      el.style.display = "inline-flex";
+      el.style.alignItems = "center";
+      el.style.gap = "2px";
+      el.style.flexWrap = "nowrap";
+
+      const badge = document.createElement("a");
+      badge.className = "pi-enh-agent-update-badge";
+      badge.target = "_blank";
+      badge.rel = "noopener noreferrer";
+      badge.href = state.releaseUrl;
+      badge.title = `Pi Agent 上游新版本 v${state.latestVersion} 发布，点击查看 Release 说明`;
+      badge.innerHTML = `
+        <span class="pi-enh-agent-update-dot"></span>
+        <span>Update: v${state.latestVersion}</span>
+        <svg width="9" height="9" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M7 17L17 7M17 7H7M17 7V17"/></svg>
+      `;
+      el.appendChild(badge);
+    } else {
+      if ((existingBadge.getAttribute("href") || "") !== state.releaseUrl) {
+        existingBadge.href = state.releaseUrl;
+      }
+      const labelSpan = existingBadge.querySelector("span:nth-child(2)");
+      if (labelSpan && labelSpan.textContent !== `Update: v${state.latestVersion}`) {
+        labelSpan.textContent = `Update: v${state.latestVersion}`;
+      }
+    }
+  }
+
   function syncStandaloneVersionDom() {
     try {
       const spans = document.querySelectorAll("span");
@@ -44679,6 +51794,7 @@
           } else if (/^pi\s+$/i.test(prefix)) {
             const targetPiVer = `v${officialPiVer}`;
             if (inner.textContent !== targetPiVer) inner.textContent = targetPiVer;
+            syncPiAgentUpdateBadge(el, officialPiVer);
           }
         }
       }
@@ -44692,12 +51808,14 @@
       executeSyncStep(syncStandaloneVersionDom);
       executeSyncStep(syncWorkspacePickerHover);
       executeSyncStep(syncAllDurationBadges);
+      executeSyncStep(syncAllTurnNumberBadges);
       executeSyncStep(syncAllUsageBadges);
       executeSyncStep(syncAllModelSpeedBadges);
       executeSyncStep(syncAllTaskToolAutoCollapse);
       executeSyncStep(syncSubagentDispatchCards);
       executeSyncStep(syncHistoryScrollStability);
       executeSyncStep(syncCompactionCards);
+      executeSyncStep(syncPiMailCards);
       executeSyncStep(syncModelScopeWarnings);
       executeSyncStep(hideQuickActionAnalysisCards);
       executeSyncStep(syncQuickActionButtons);
@@ -44720,6 +51838,7 @@
       executeSyncStep(syncSessionColorEffects);
       executeSyncStep(syncSessionTags);
       executeSyncStep(syncSessionOdooAddons);
+      executeSyncStep(syncSessionSectionHeaders);
       executeSyncStep(syncSessionSearchTagFilterBar);
       executeSyncStep(highlightSearchResultsKeywords);
       executeSyncStep(syncSearchResultsArchivedDecoration);
@@ -44741,6 +51860,7 @@
       executeSyncStep(syncSearchButtonHint);
       executeSyncStep(syncStreamingThinkingGuard);
       executeSyncStep(syncMarkdownViewerMode);
+      executeSyncStep(syncExcelViewerMode);
       executeSyncStep(checkAndAutoRecoverAccessDenied);
     });
   }
@@ -44748,6 +51868,8 @@
   window.__PI_ENH_RUN_ALL_SYNC_OPERATIONS__ = runAllSyncOperations;
   window.__PI_ENH_EXECUTE_SYNC_STEP__ = executeSyncStep;
   window.__PI_ENH_SYNC_OPERATION_ERRORS__ = syncOperationErrors;
+  window.__PI_ENH_SYNC_TURN_NUMBERS__ = syncAllTurnNumberBadges;
+  window.__PI_ENH_CLEAR_TURN_NUMBERS__ = clearAllTurnNumberBadges;
 
   setProjectStatusMonitoring(isPluginEnabled("project-status-indicator"));
   addManagedListener(window, "online", () => {
@@ -44758,6 +51880,7 @@
   });
   addManagedListener(window, "resize", () => {
     syncSessionItemCompact();
+    syncMinimapEnhancements();
     if (document.querySelector(".settings-dialog-header, .settings-section-tabs")) {
       syncSettingsDialogEnhancements();
     }
@@ -44966,6 +52089,12 @@
       if (isPluginEnabled("session-model-label")) {
         syncSessionModelLabels();
       }
+      if (typeof syncComposerModes === "function") {
+        syncComposerModes();
+      }
+      if (typeof syncComposerQueuePanel === "function") {
+        syncComposerQueuePanel();
+      }
       scheduleCurrentSessionMetrics(0);
       try {
         const urlArg = args[2];
@@ -45020,7 +52149,22 @@
   }
 
   function syncSessionVirtualScroll() {
+    if (typeof isDisposed !== "undefined" && isDisposed) {
+      cancelVirtualHistoryAnchor?.("disposed");
+      return;
+    }
     const enabled = isPluginEnabled("session-virtual-scroll");
+    if (!enabled) {
+      cancelVirtualHistoryAnchor?.("virtual-scroll-disabled");
+    } else if (activeVirtualHistoryAnchor) {
+      const currentSid = typeof getCurrentSessionId === "function" ? getCurrentSessionId() : null;
+      const currentScroll = typeof getChatScrollContainer === "function" ? getChatScrollContainer() : null;
+      if (!currentSid || currentSid !== activeVirtualHistoryAnchor.sessionId ||
+          !currentScroll || currentScroll !== activeVirtualHistoryAnchor.scroll ||
+          currentScroll.isConnected === false) {
+        cancelVirtualHistoryAnchor?.("session-or-container-changed");
+      }
+    }
     if (typeof document !== "undefined" && document.documentElement) {
       if (enabled) {
         document.documentElement.classList.add("pi-enh-virtual-scroll-active");
@@ -45030,6 +52174,7 @@
     }
   }
   syncSessionVirtualScroll();
+  activeCleanups.push(() => cancelVirtualHistoryAnchor?.("module-cleanup"));
 
   // ==========================================
   // Directory Picker Modal Enhancement (选择目录弹窗悬停与新增文件夹)
@@ -45342,9 +52487,12 @@
   const MINIMAP_DEFAULT_STEP_TURNS = 5;
   const MINIMAP_MIN_TURNS = 1;
   const MINIMAP_MAX_TURNS = 50;
+  const MINIMAP_MIN_PRELOAD_TURNS = 3;
+  const MINIMAP_FAST_PRELOAD_TAIL = 100;
+  const MINIMAP_MAX_INITIAL_ATTEMPTS = 10;
   const MINIMAP_INITIAL_TURNS_STORAGE_KEY = "pi-enh-minimap-initial-turns";
   const MINIMAP_STEP_TURNS_STORAGE_KEY = "pi-enh-minimap-step-turns";
-  const MINIMAP_HISTORY_FETCH_TAIL = 250;
+  const MINIMAP_HISTORY_FETCH_TAIL = 50;
   // Native ChatMinimap may replay its centering effect after a navigation. Keep
   // the selected preview card anchored only for that short race window.
   const MINIMAP_PREVIEW_SCROLL_GUARD_MS = 1800;
@@ -45389,10 +52537,15 @@
   }
 
   function createMinimapDisplayState(history) {
+    const configuredTurns = getMinimapHistorySettings().initialTurns;
+    const targetTurns = Math.min(history.totalTurns, Math.max(MINIMAP_MIN_PRELOAD_TURNS, configuredTurns));
     return {
-      targetTurns: Math.min(history.totalTurns, getMinimapHistorySettings().initialTurns),
+      targetTurns,
       lastTotalTurns: history.totalTurns,
       requestedLoadedTurns: -1,
+      loadError: false,
+      initialAttempts: 0,
+      lastObservedTurnCount: 0,
     };
   }
 
@@ -45420,6 +52573,7 @@
 
   function closeMinimapPreview() {
     minimapClosedByUser = true;
+    removeMinimapMobileNavigator();
     if (typeof window.__PI_ENH_CLOSE_MINIMAP__ === "function") {
       try {
         window.__PI_ENH_CLOSE_MINIMAP__();
@@ -45748,8 +52902,28 @@
     const loadedTurnCount = loadedItems.length;
     const history = readMinimapHistoryState(loadedTurnCount);
     const displayState = minimapHistoryDisplayState.get(history.sessionId) || createMinimapDisplayState(history);
+
+    // 确保初始至少提前加载最近 3 轮对话
+    const minPreload = Math.min(history.totalTurns, Math.max(MINIMAP_MIN_PRELOAD_TURNS, getMinimapHistorySettings().initialTurns));
+    if (displayState.targetTurns < minPreload) {
+      displayState.targetTurns = minPreload;
+    }
+
     if (loadedTurnCount >= displayState.targetTurns || !history.hasEarlierMessages) return false;
-    if (source === "initial" && displayState.requestedLoadedTurns === loadedTurnCount) return false;
+
+    // 如果当前轮次数相比上一次记录有所增加，重置空转计数
+    if (loadedTurnCount > (displayState.lastObservedTurnCount || 0)) {
+      displayState.initialAttempts = 0;
+      displayState.lastObservedTurnCount = loadedTurnCount;
+    }
+
+    // 针对 initial 来源的防死循环熔断保护（最多允许连续 10 次同轮空转尝试）
+    if (source === "initial") {
+      displayState.initialAttempts = (displayState.initialAttempts || 0) + 1;
+      if (displayState.initialAttempts > MINIMAP_MAX_INITIAL_ATTEMPTS) {
+        return false;
+      }
+    }
 
     const loader = window.__PI_ENH_LOAD_EARLIER__;
     if (typeof loader !== "function") return false;
@@ -45758,10 +52932,27 @@
     minimapHistoryDisplayState.set(history.sessionId, displayState);
     autoLoadEarlierTriggered = true;
     syncMinimapEnhancements();
-    Promise.resolve(loader(MINIMAP_HISTORY_FETCH_TAIL, source))
-      .catch(() => false)
+
+    // 当已加载轮次不足 3 轮时，采用 100 entries 的自适应步长，迅速跨越大量工具调用
+    const fetchTail = (source === "initial" && loadedTurnCount < MINIMAP_MIN_PRELOAD_TURNS)
+      ? MINIMAP_FAST_PRELOAD_TAIL
+      : MINIMAP_HISTORY_FETCH_TAIL;
+
+    Promise.resolve()
+      .then(() => loader(fetchTail, source))
+      .then((res) => {
+        if (res === false) {
+          displayState.loadError = true;
+        } else {
+          displayState.loadError = false;
+        }
+      })
+      .catch(() => {
+        displayState.loadError = true;
+      })
       .finally(() => {
         autoLoadEarlierTriggered = false;
+        minimapHistoryDisplayState.set(history.sessionId, displayState);
         addManagedTimeout(syncMinimapEnhancements, 80);
       });
     return true;
@@ -45776,9 +52967,14 @@
     const history = readMinimapHistoryState(turns.length);
     const displayState = minimapHistoryDisplayState.get(history.sessionId) || createMinimapDisplayState(history);
     const visibleTurns = Math.min(turns.length, displayState.targetTurns);
-    if (visibleTurns >= history.totalTurns) return false;
+    if (visibleTurns >= history.totalTurns && !history.hasEarlierMessages && !displayState.loadError) return false;
 
-    displayState.targetTurns = Math.min(history.totalTurns, visibleTurns + getMinimapHistorySettings().stepTurns);
+    displayState.loadError = false;
+    const stepTurns = getMinimapHistorySettings().stepTurns;
+    const maxPossibleTurns = history.totalTurns > turns.length
+      ? history.totalTurns
+      : (history.hasEarlierMessages ? turns.length + stepTurns : turns.length);
+    displayState.targetTurns = Math.min(maxPossibleTurns, visibleTurns + stepTurns);
     displayState.lastTotalTurns = history.totalTurns;
     displayState.requestedLoadedTurns = -1;
     minimapHistoryDisplayState.set(history.sessionId, displayState);
@@ -45790,12 +52986,41 @@
     return requestMinimapHistoryForTarget(source);
   }
 
+  function expandLoadedMinimapTurns() {
+    if (!isPluginEnabled("minimap-full-nav")) return false;
+    const previewBox = document.querySelector("[data-minimap-preview-box]");
+    if (!previewBox) return false;
+    const turns = Array.from(previewBox.querySelectorAll("[data-minimap-preview-index]"));
+    const loadedCount = turns.length;
+    if (loadedCount <= 0) return false;
+
+    const history = readMinimapHistoryState(loadedCount);
+    const displayState = minimapHistoryDisplayState.get(history.sessionId) || createMinimapDisplayState(history);
+
+    if (displayState.targetTurns >= loadedCount) {
+      return false;
+    }
+
+    displayState.targetTurns = loadedCount;
+    displayState.lastTotalTurns = history.totalTurns;
+    displayState.requestedLoadedTurns = loadedCount;
+    displayState.loadError = false;
+    minimapHistoryDisplayState.set(history.sessionId, displayState);
+    syncMinimapEnhancements();
+    return true;
+  }
+
   let isRailDotNavigating = false;
   const MINIMAP_STYLE_ID = "pi-enh-minimap-style";
   const MINIMAP_STYLE_CONTENT = `
       [data-minimap-preview-box] {
         box-sizing: border-box !important;
         padding-top: 68px !important;
+      }
+
+      .pi-enh-minimap-header {
+        cursor: pointer !important;
+        user-select: none !important;
       }
 
       /* 每一轮次会话段落底纹与边框卡片化 (Paragraph Background & Cards) */
@@ -45861,6 +53086,14 @@
         font-weight: 600 !important;
       }
 
+      /* 会话导航绝对序号覆盖：使用 ::before 渲染绝对序号，同时隐藏原生序号子 span，保留原生 badge 子树与 React DOM 结构 */
+      [data-minimap-preview-box] [data-pi-enh-minimap-number]::before {
+        content: attr(data-pi-enh-minimap-number);
+      }
+      [data-minimap-preview-box] [data-pi-enh-minimap-number] > span[aria-hidden="true"] {
+        display: none !important;
+      }
+
       /* 视觉引导动态微光呼吸脉冲动画 (Pulse Highlight Glow) - 仅在当前激活且带动画类的唯一卡片上生效 */
       @keyframes pi-minimap-guide-pulse {
         0% {
@@ -45882,6 +53115,21 @@
       }
 
       /* 移动端边缘触控与拖拽滑动条优化 (Touch Scrubbing Fast Navigation) */
+      /* 用户提问跳转落地 2.2s 柔和背景微光动画 */
+      @keyframes piEnhMinimapUserGlow {
+        0% {
+          background-color: var(--bg-selected, rgba(255, 255, 255, 0.08));
+        }
+        100% {
+          background-color: transparent;
+        }
+      }
+
+      .pi-enh-minimap-user-glow {
+        animation: piEnhMinimapUserGlow 2.2s cubic-bezier(0.16, 1, 0.3, 1) forwards !important;
+        border-radius: 8px !important;
+      }
+
       [data-minimap-node-index] {
         touch-action: none !important;
         user-select: none !important;
@@ -45898,6 +53146,7 @@
         border-color: var(--accent, #a4c2f4) !important;
         box-shadow: 0 0 0 2px var(--bg-panel), 0 0 8px color-mix(in srgb, var(--accent, #a4c2f4) 55%, transparent) !important;
       }
+
   `;
 
   function ensureMinimapStyles() {
@@ -45916,6 +53165,332 @@
   function removeMinimapStyles() {
     const el = document.getElementById(MINIMAP_STYLE_ID);
     if (el) el.remove();
+  }
+
+  function computeAccurateMinimapScrollTop(targetRect, containerRect, currentScrollTop, viewportOffset = 16) {
+    if (!targetRect || !containerRect) return 0;
+    const scrollTop = Number.isFinite(currentScrollTop) ? currentScrollTop : 0;
+    const offset = Number.isFinite(viewportOffset) ? viewportOffset : 16;
+    return Math.max(0, targetRect.top - containerRect.top + scrollTop - offset);
+  }
+
+  function normalizeMessageFingerprint(text) {
+    if (!text) return "";
+    return String(text)
+      .replace(/\s+/g, " ")
+      .replace(/[\.|\…]+$/g, "")
+      .trim();
+  }
+
+  function findTargetUserMessageElement(turnEl, nodeIndex, userBtn) {
+    const userMsgs = typeof findUserMessages === "function"
+      ? findUserMessages()
+      : (typeof document !== "undefined" && typeof document.querySelectorAll === "function"
+          ? Array.from(document.querySelectorAll('[data-message-role="user"], [data-pi-enh-role="user"]'))
+          : []);
+    if (!userMsgs || userMsgs.length === 0) return null;
+
+    const btn = userBtn || (turnEl && typeof turnEl.querySelector === "function"
+      ? turnEl.querySelector("[data-minimap-preview-user], button")
+      : null);
+    const userTextEl = btn && typeof btn.querySelector === "function"
+      ? (btn.querySelector("[class*='userText']") || btn)
+      : btn;
+    const previewFingerprint = normalizeMessageFingerprint(userTextEl?.textContent || userTextEl?.innerText || "");
+
+    // Minimap indices cover all loaded turns; the chat DOM may render only a tail window.
+    const previewBox = turnEl?.closest?.("[data-minimap-preview-box]");
+    const previewTurnCount = previewBox?.querySelectorAll?.("[data-minimap-preview-index]")?.length || userMsgs.length;
+    const renderedTailOffset = Math.max(0, previewTurnCount - userMsgs.length);
+    const mappedIndex = nodeIndex - renderedTailOffset;
+    const matchesFingerprint = (message) => {
+      const text = normalizeMessageFingerprint(message?.textContent || "");
+      if (!previewFingerprint) return false;
+      if (text.includes(previewFingerprint)) return true;
+      const prefix = previewFingerprint.slice(0, 48);
+      return prefix.length >= 8 && text.includes(prefix);
+    };
+    if (mappedIndex >= 0 && mappedIndex < userMsgs.length && matchesFingerprint(userMsgs[mappedIndex])) {
+      return userMsgs[mappedIndex];
+    }
+    if (nodeIndex >= 0 && nodeIndex < userMsgs.length && matchesFingerprint(userMsgs[nodeIndex])) {
+      return userMsgs[nodeIndex];
+    }
+
+    // 2. 文本指纹遍历匹配（应对主视口顶部懒加载/虚拟列表导致的索引偏移）
+    if (previewFingerprint) {
+      const matches = userMsgs.filter(matchesFingerprint);
+      if (matches.length === 1) return matches[0];
+      const prefix = previewFingerprint.replace(/[\.|\…|\s]+$/g, "").slice(0, 15);
+      if (prefix.length >= 2) {
+        for (let i = 0; i < userMsgs.length; i++) {
+          const msg = userMsgs[i];
+          const msgText = normalizeMessageFingerprint(msg.textContent || "");
+          const prefixMatches = userMsgs.filter((candidate) =>
+            normalizeMessageFingerprint(candidate.textContent || "").includes(prefix)
+          );
+          if (msgText.includes(prefix) && prefixMatches.length === 1) {
+            return msg;
+          }
+        }
+      }
+    }
+
+    // Ambiguous or clipped messages must use native history reveal rather than a guessed index.
+    return null;
+  }
+
+  function applyUserTurnHighlightGlow(targetEl) {
+    if (!targetEl || !targetEl.classList || typeof targetEl.classList.add !== "function") return;
+    targetEl.classList.remove("pi-enh-minimap-user-glow");
+    if (typeof targetEl.offsetWidth === "number") void targetEl.offsetWidth;
+    targetEl.classList.add("pi-enh-minimap-user-glow");
+    addManagedTimeout(() => {
+      targetEl.classList.remove("pi-enh-minimap-user-glow");
+    }, 2300);
+  }
+
+  let minimapNavigationAnchorGuard = null;
+  let dispatchingNativeMinimapRevealClick = false;
+
+  function clearMinimapNavigationAnchorGuard() {
+    const guard = minimapNavigationAnchorGuard;
+    if (!guard) return;
+    minimapNavigationAnchorGuard = null;
+    if (guard.timeout !== null) clearManagedTimeout(guard.timeout);
+    if (guard.settleFrame !== null) guard.cancelFrame(guard.settleFrame);
+    if (guard.correctionFrame !== null) guard.cancelFrame(guard.correctionFrame);
+    guard.resizeObserver?.disconnect?.();
+    guard.mutationObserver?.disconnect?.();
+    for (const [type, handler, options] of guard.listeners) {
+      guard.scroll.removeEventListener(type, handler, options);
+    }
+  }
+
+  function startMinimapNavigationAnchorGuard(scrollEl, resolveTarget) {
+    clearMinimapNavigationAnchorGuard();
+    if (!scrollEl || typeof resolveTarget !== "function") return null;
+    const requestFrame = typeof window.requestAnimationFrame === "function"
+      ? window.requestAnimationFrame.bind(window)
+      : (callback) => addManagedTimeout(callback, 16);
+    const cancelFrame = typeof window.cancelAnimationFrame === "function"
+      ? window.cancelAnimationFrame.bind(window)
+      : clearManagedTimeout;
+    const guard = {
+      scroll: scrollEl,
+      resolveTarget,
+      requestFrame,
+      cancelFrame,
+      startedAt: Date.now(),
+      settled: false,
+      lastTop: Number.isFinite(scrollEl.scrollTop) ? scrollEl.scrollTop : 0,
+      stableFrames: 0,
+      settleFrame: null,
+      correctionFrame: null,
+      timeout: null,
+      resizeObserver: null,
+      mutationObserver: null,
+      listeners: [],
+      glowApplied: false,
+    };
+    minimapNavigationAnchorGuard = guard;
+
+    const scheduleCorrection = () => {
+      if (minimapNavigationAnchorGuard !== guard || !guard.settled || guard.correctionFrame !== null) return;
+      guard.correctionFrame = requestFrame(() => {
+        guard.correctionFrame = null;
+        if (minimapNavigationAnchorGuard !== guard || !guard.settled) return;
+        let target = null;
+        try { target = guard.resolveTarget(); } catch (e) {}
+        if (!target || target.isConnected === false) return;
+        const containerRect = scrollEl.getBoundingClientRect();
+        const targetRect = target.getBoundingClientRect();
+        const delta = targetRect.top - containerRect.top - 16;
+        if (Math.abs(delta) <= 6) return;
+        const nextTop = computeAccurateMinimapScrollTop(targetRect, containerRect, scrollEl.scrollTop, 16);
+        if (Math.abs(nextTop - scrollEl.scrollTop) >= 4) scrollEl.scrollTop = nextTop;
+        if (!guard.glowApplied) {
+          guard.glowApplied = true;
+          applyUserTurnHighlightGlow(target);
+        }
+      });
+    };
+
+    const markSettled = () => {
+      if (minimapNavigationAnchorGuard !== guard) return;
+      guard.settled = true;
+      if (guard.settleFrame !== null) guard.cancelFrame(guard.settleFrame);
+      guard.settleFrame = null;
+      scheduleCorrection();
+    };
+
+    const pollForScrollSettle = () => {
+      guard.settleFrame = null;
+      if (minimapNavigationAnchorGuard !== guard || guard.settled) return;
+      const nextTop = Number.isFinite(scrollEl.scrollTop) ? scrollEl.scrollTop : 0;
+      if (Date.now() - guard.startedAt >= 90 && Math.abs(nextTop - guard.lastTop) < 1) guard.stableFrames += 1;
+      else guard.stableFrames = 0;
+      guard.lastTop = nextTop;
+      if (guard.stableFrames >= 3) {
+        markSettled();
+        return;
+      }
+      guard.settleFrame = requestFrame(pollForScrollSettle);
+    };
+
+    const onScroll = () => {
+      if (!guard.settled) guard.stableFrames = 0;
+      else scheduleCorrection();
+    };
+    const onUserInteraction = () => clearMinimapNavigationAnchorGuard();
+    const listen = (type, handler, options) => {
+      scrollEl.addEventListener(type, handler, options);
+      guard.listeners.push([type, handler, options]);
+    };
+    listen("scroll", onScroll, { passive: true });
+    listen("scrollend", markSettled, { passive: true });
+    listen("wheel", onUserInteraction, { passive: true });
+    listen("touchstart", onUserInteraction, { passive: true });
+    listen("pointerdown", onUserInteraction, { passive: true });
+    listen("keydown", onUserInteraction, { passive: true });
+
+    const Resize = window.ResizeObserver;
+    if (typeof Resize === "function") {
+      guard.resizeObserver = new Resize(scheduleCorrection);
+      guard.resizeObserver.observe(scrollEl);
+      for (const child of scrollEl.children) guard.resizeObserver.observe(child);
+      const target = resolveTarget();
+      if (target) guard.resizeObserver.observe(target);
+    }
+
+    const Mutation = window.MutationObserver;
+    if (typeof Mutation === "function") {
+      guard.mutationObserver = new Mutation((records) => {
+        if (guard.resizeObserver) {
+          for (const record of records) {
+            for (const node of record.addedNodes || []) {
+              if (node.nodeType !== 1) continue;
+              if (node.matches?.("[data-entry-id]")) guard.resizeObserver.observe(node);
+              for (const entry of node.querySelectorAll?.("[data-entry-id]") || []) guard.resizeObserver.observe(entry);
+            }
+          }
+        }
+        scheduleCorrection();
+      });
+      guard.mutationObserver.observe(scrollEl, { childList: true, subtree: true, characterData: true });
+    }
+
+    guard.timeout = addManagedTimeout(() => {
+      if (minimapNavigationAnchorGuard === guard) clearMinimapNavigationAnchorGuard();
+    }, 2300);
+    guard.settleFrame = requestFrame(pollForScrollSettle);
+    return guard;
+  }
+
+  activeCleanups.push(clearMinimapNavigationAnchorGuard);
+
+  function performAccurateMinimapScroll(targetEl, scrollEl, resolveTarget) {
+    if (!targetEl || !scrollEl) return false;
+    clearNativeMinimapRevealScrollBlock();
+    blurComposerForMinimapNavigation();
+    cancelVirtualHistoryAnchor?.("minimap-navigation");
+    guardMinimapNavigationFromAutoFollow(scrollEl);
+
+    const targetResolver = resolveTarget || (() => targetEl.isConnected === false ? null : targetEl);
+    const guard = startMinimapNavigationAnchorGuard(scrollEl, targetResolver);
+    const containerRect = scrollEl.getBoundingClientRect();
+    const targetRect = targetEl.getBoundingClientRect();
+    const exactTop = computeAccurateMinimapScrollTop(targetRect, containerRect, scrollEl.scrollTop, 16);
+    if (typeof scrollEl.scrollTo === "function") scrollEl.scrollTo({ top: exactTop, behavior: "smooth" });
+    else scrollEl.scrollTop = exactTop;
+
+    if (guard) guard.glowApplied = true;
+    applyUserTurnHighlightGlow(targetEl);
+    return true;
+  }
+
+  function scrollToMinimapUserTurnAccurately(turnEl, nodeIndex, userBtn) {
+    const scrollEl = (typeof getChatScrollContainer === "function" ? getChatScrollContainer() : null) ||
+      document.querySelector(".chat-content .overflow-y-auto") ||
+      document.querySelector(".chat-content [class*='overflow-y-auto']");
+    if (!scrollEl) return false;
+
+    let targetIndex = typeof nodeIndex === "number" ? nodeIndex : -1;
+    if (targetIndex < 0 && turnEl && typeof turnEl.getAttribute === "function") {
+      const rawIdx = turnEl.getAttribute("data-minimap-preview-index");
+      if (rawIdx !== null && rawIdx !== "") targetIndex = parseInt(rawIdx, 10);
+    }
+    const btn = userBtn || (turnEl && typeof turnEl.querySelector === "function"
+      ? turnEl.querySelector("[data-minimap-preview-user], button")
+      : null);
+
+    const resolveTarget = () => findTargetUserMessageElement(turnEl, targetIndex, btn);
+    const targetEl = resolveTarget();
+    if (targetEl) return performAccurateMinimapScroll(targetEl, scrollEl, resolveTarget);
+    if (!btn || typeof btn.click !== "function") return false;
+
+    blurComposerForMinimapNavigation();
+    guardMinimapNavigationFromAutoFollow(scrollEl);
+    clearNativeMinimapRevealScrollBlock();
+    suppressNativeMinimapRevealScroll(scrollEl);
+    startMinimapNavigationAnchorGuard(scrollEl, resolveTarget);
+    dispatchingNativeMinimapRevealClick = true;
+    try { btn.click(); } catch (e) {
+      clearMinimapNavigationAnchorGuard();
+      clearNativeMinimapRevealScrollBlock();
+      return false;
+    } finally {
+      dispatchingNativeMinimapRevealClick = false;
+    }
+    return true;
+  }
+
+  function isMinimapAssistantTarget(target) {
+    if (!target || typeof target.closest !== "function") return false;
+    if (target.closest("[data-minimap-preview-user]")) return false;
+    const assistantContainer = target.closest("[data-minimap-preview-assistant], [data-preview-heading-index], [class*='assistantOutline'], [class*='outlineItem'], [class*='assistant']");
+    if (!assistantContainer) return false;
+    if (typeof assistantContainer.hasAttribute === "function" && assistantContainer.hasAttribute("data-minimap-preview-index")) return false;
+    return true;
+  }
+
+  function dispatchMinimapTurnClick(event, previewBox) {
+    if (!isPluginEnabled("minimap-full-nav")) return;
+    if (isRailDotNavigating || dispatchingNativeMinimapRevealClick) return;
+    if (event.__piMinimapTurnHandled) return;
+    const target = event.target;
+    if (!target) return;
+
+    // 1. 如果在顶部工具栏内（加载更早轮次、标题栏），不关闭也不拦截
+    if (target.closest("[data-pi-enh-minimap-toolbar], .pi-enh-minimap-toolbar, [data-pi-enh-minimap-load-earlier]")) {
+      return;
+    }
+
+    // 2. 检查是否在某轮会话卡片内
+    const turnEl = target.closest("[data-minimap-preview-index]");
+    if (!turnEl || (previewBox && !previewBox.contains(turnEl))) return;
+
+    // 3. 判断点击的是否是助手大纲、助手小标题或助手跳转按钮（A）
+    if (isMinimapAssistantTarget(target)) {
+      event.__piMinimapTurnHandled = true;
+      releaseHistoryTailForMinimapNavigation();
+      animateCloseMinimapPreview();
+      return;
+    }
+
+    // 4. 点击的是卡片上半部分提问按钮（[data-minimap-preview-user]）或卡片空白处
+    event.__piMinimapTurnHandled = true;
+    if (event.cancelable) event.preventDefault();
+    event.stopPropagation();
+
+    const rawIdx = turnEl.getAttribute("data-minimap-preview-index");
+    const nodeIndex = rawIdx !== null && rawIdx !== "" ? parseInt(rawIdx, 10) : -1;
+    const userBtn = target.closest("[data-minimap-preview-user]") ||
+                    turnEl.querySelector("[data-minimap-preview-user], button");
+
+    releaseHistoryTailForMinimapNavigation();
+    scrollToMinimapUserTurnAccurately(turnEl, nodeIndex, userBtn);
+    animateCloseMinimapPreview();
   }
 
   function ensureMinimapInteractions(previewBox) {
@@ -46063,60 +53638,33 @@
     };
 
     bindings.handleClick = (event) => {
-      if (!isPluginEnabled("minimap-full-nav")) return;
-      if (isRailDotNavigating) return;
-      const target = event.target;
-      if (!target) return;
-
-      // 1. 点击顶部工具栏（加载更早轮次按钮、标题栏）时，不关闭
-      if (target.closest("[data-pi-enh-minimap-toolbar], .pi-enh-minimap-toolbar, [data-pi-enh-minimap-load-earlier]")) {
-        return;
-      }
-
-      // 2. 检查是否点击在某轮会话卡片内
-      const turnEl = target.closest("[data-minimap-preview-index]");
-      if (!turnEl || !previewBox.contains(turnEl)) return;
-
-      // 3. 判断是否直接点击在按钮上
-      const itemBtn = target.closest("button");
-      if (!itemBtn) {
-        // 用户点击了轮次内的非按钮区域（如序号数字 span、卡片空白边距）
-        // 自动帮用户触发该轮次的用户提问按钮，实现精准跳转并联动关闭
-        const userBtn = turnEl.querySelector("[data-minimap-preview-user], button");
-        if (userBtn && typeof userBtn.click === "function") {
-          releaseHistoryTailForMinimapNavigation();
-          userBtn.click();
-          return;
-        }
-        return;
-      }
-
-      // 4. 用户点击了跳转项（用户提问 / 助手大纲 / 助手跳跃 A 等按钮）
-      // 执行平滑向右滑出关闭会话导航抽屉
-      releaseHistoryTailForMinimapNavigation();
-      animateCloseMinimapPreview();
+      dispatchMinimapTurnClick(event, previewBox);
     };
 
     listen("touchstart", bindings.handleTouchStart, { passive: true });
     listen("touchmove", bindings.handleTouchMove, { passive: false });
     listen("touchend", bindings.handleTouchEnd, { passive: true });
     listen("touchcancel", () => resetSwipeGesture(true), { passive: true });
-    listen("click", bindings.handleClick, { capture: true, passive: true });
+    listen("click", bindings.handleClick, { capture: true, passive: false });
     previewBox.__piEnhMinimapBindings = bindings;
     return bindings;
   }
 
   function resolveMinimapDisplayState(history) {
     let displayState = minimapHistoryDisplayState.get(history.sessionId);
+    const configuredInitialTurns = getMinimapHistorySettings().initialTurns;
+    const minPreload = Math.min(history.totalTurns, Math.max(MINIMAP_MIN_PRELOAD_TURNS, configuredInitialTurns));
     if (!displayState || history.totalTurns < displayState.lastTotalTurns) {
       displayState = createMinimapDisplayState(history);
     } else if (history.totalTurns > displayState.lastTotalTurns) {
-      const configuredInitialTurns = getMinimapHistorySettings().initialTurns;
       displayState.targetTurns = Math.max(
         displayState.targetTurns,
-        Math.min(history.totalTurns, configuredInitialTurns),
+        minPreload,
       );
       displayState.lastTotalTurns = history.totalTurns;
+    }
+    if (displayState.targetTurns < minPreload) {
+      displayState.targetTurns = minPreload;
     }
     displayState.targetTurns = Math.max(0, Math.min(history.totalTurns, displayState.targetTurns));
     minimapHistoryDisplayState.set(history.sessionId, displayState);
@@ -46186,19 +53734,133 @@
     };
   }
 
+  function computeMinimapHistoryButtonState(params) {
+    const {
+      totalTurns = 0,
+      loadedTurns = 0,
+      visibleTurns = 0,
+      hasEarlierMessages = false,
+      loading = false,
+      loadError = false,
+      stepTurns = 5,
+    } = params;
+
+    const hiddenLoadedTurns = Math.max(0, loadedTurns - visibleTurns);
+    const serverRemainingTurns = Math.max(0, totalTurns - loadedTurns);
+    const hasServerEarlier = Boolean(hasEarlierMessages || serverRemainingTurns > 0);
+
+    if (loading && (hiddenLoadedTurns > 0 || hasServerEarlier)) {
+      return {
+        label: "⏳ 正在加载…",
+        disabled: true,
+        isLoading: true,
+        ariaLabel: "正在加载更早轮次…",
+        title: "正在加载更早轮次…",
+        hiddenLoadedTurns,
+        serverRemainingTurns,
+        hasServerEarlier,
+      };
+    }
+
+    if (loadError && hiddenLoadedTurns === 0 && hasServerEarlier) {
+      const errLabel = serverRemainingTurns > 0
+        ? `⚠️ 加载失败，点击重试 (还有 ${serverRemainingTurns} 轮未加载)`
+        : "⚠️ 加载失败，点击重试";
+      return {
+        label: errLabel,
+        disabled: false,
+        isLoading: false,
+        ariaLabel: "加载更早历史失败，点击重试",
+        title: "加载更早历史失败，点击重试",
+        hiddenLoadedTurns,
+        serverRemainingTurns,
+        hasServerEarlier,
+      };
+    }
+
+    if (hiddenLoadedTurns > 0) {
+      const nextTurns = Math.min(stepTurns, hiddenLoadedTurns);
+      let label = "";
+      if (hasServerEarlier) {
+        label = serverRemainingTurns > 0
+          ? `还有 ${hiddenLoadedTurns} 轮未显示 · 另有 ${serverRemainingTurns} 轮待加载`
+          : `还有 ${hiddenLoadedTurns} 轮未显示 · 另有更早历史待加载`;
+      } else {
+        label = `还有 ${hiddenLoadedTurns} 轮未显示`;
+      }
+      return {
+        label,
+        disabled: false,
+        isLoading: false,
+        ariaLabel: `显示更早 ${nextTurns} 轮，还有 ${hiddenLoadedTurns} 轮未显示`,
+        title: `点击、滚轮向上或触屏下拉可显示更早 ${nextTurns} 轮`,
+        hiddenLoadedTurns,
+        serverRemainingTurns,
+        hasServerEarlier,
+      };
+    }
+
+    if (hasServerEarlier) {
+      const label = serverRemainingTurns > 0
+        ? `还有 ${serverRemainingTurns} 轮未加载`
+        : "加载更早历史";
+      return {
+        label,
+        disabled: false,
+        isLoading: false,
+        ariaLabel: `加载更早 ${stepTurns} 轮，从服务器获取更早历史`,
+        title: `点击、滚轮向上或触屏下拉可加载更早 ${stepTurns} 轮`,
+        hiddenLoadedTurns: 0,
+        serverRemainingTurns,
+        hasServerEarlier,
+      };
+    }
+
+    const label = `已显示全部 ${totalTurns || loadedTurns} 轮`;
+    return {
+      label,
+      disabled: true,
+      isLoading: false,
+      ariaLabel: label,
+      title: label,
+      hiddenLoadedTurns: 0,
+      serverRemainingTurns: 0,
+      hasServerEarlier: false,
+    };
+  }
+
   if (typeof window !== "undefined") {
     window.__PI_ENH_MINIMAP_HELPERS__ = {
       evaluateMinimapMotionIntent,
       computeMinimapTurnClipping,
+      computeMinimapHistoryButtonState,
+      expandLoadedMinimapTurns,
+      computeAccurateMinimapScrollTop,
+      normalizeMessageFingerprint,
+      findTargetUserMessageElement,
+      scrollToMinimapUserTurnAccurately,
+      isMinimapAssistantTarget,
+      dispatchMinimapTurnClick,
     };
+  }
+
+  function isMinimapMobileViewport() {
+    return (typeof isMobileEnvironment === "function" && isMobileEnvironment()) ||
+      (typeof window !== "undefined" && Number(window.innerWidth) <= 640);
+  }
+
+  function removeMinimapMobileNavigator() {
+    if (typeof document === "undefined") return;
+    for (const root of document.querySelectorAll(".pi-enh-mobile-minimap-root")) root.remove();
   }
 
   function syncMinimapEnhancements() {
     const enabled = isPluginEnabled("minimap-full-nav");
-    const previewBox = document.querySelector("[data-minimap-preview-box]");
+    let previewBox = document.querySelector("[data-minimap-preview-box]");
     const nodes = Array.from(document.querySelectorAll("[data-minimap-node-index]"));
 
     if (!enabled) {
+      removeMinimapMobileNavigator();
       cancelMinimapCloseAnimation();
       removeMinimapStyles();
       for (const toolbar of document.querySelectorAll(".pi-enh-minimap-toolbar")) toolbar.remove();
@@ -46207,6 +53869,12 @@
         for (const turn of previewBox.querySelectorAll("[data-minimap-preview-index]")) {
           turn.style.display = "";
         }
+        for (const el of previewBox.querySelectorAll("[data-pi-enh-minimap-number]")) {
+          el.removeAttribute("data-pi-enh-minimap-number");
+        }
+      }
+      for (const el of document.querySelectorAll("[data-pi-enh-minimap-number]")) {
+        el.removeAttribute("data-pi-enh-minimap-number");
       }
       if (activeMinimapPreviewBox && activeMinimapPreviewBox !== previewBox) {
         detachMinimapInteractions(activeMinimapPreviewBox);
@@ -46217,8 +53885,14 @@
       return;
     }
 
-    // 首次预览前安装 CSS 和 rail listeners
+    // The mobile-only floating question navigator is intentionally removed; retain the desktop minimap.
     ensureMinimapStyles();
+    if (isMinimapMobileViewport()) {
+      removeMinimapMobileNavigator();
+      return;
+    }
+    removeMinimapMobileNavigator();
+    previewBox = document.querySelector("[data-minimap-preview-box]");
     ensureRailActiveDotClickGuard();
 
     let history = { sessionId: getCurrentSessionId() || "current", totalTurns: 0, hasEarlierMessages: false };
@@ -46240,13 +53914,14 @@
         autoLoadEarlierTriggered = false;
       }
       syncCollapsedMinimapNodes(nodes);
-      if (
-        loadedTurnCount < displayState.targetTurns &&
+      const needsInitialPreload = loadedTurnCount < displayState.targetTurns &&
         history.hasEarlierMessages &&
         !autoLoadEarlierTriggered &&
-        displayState.requestedLoadedTurns !== loadedTurnCount &&
-        typeof window.__PI_ENH_LOAD_EARLIER__ === "function"
-      ) {
+        !displayState.loadError &&
+        (displayState.initialAttempts || 0) < MINIMAP_MAX_INITIAL_ATTEMPTS &&
+        typeof window.__PI_ENH_LOAD_EARLIER__ === "function";
+
+      if (needsInitialPreload) {
         addManagedTimeout(() => requestMinimapHistoryForTarget("initial"), 0);
       }
       return;
@@ -46378,6 +54053,14 @@
         }
         const header = document.createElement("div");
         header.className = "pi-enh-minimap-header";
+        header.setAttribute("title", "双击可展开当前已加载的全部轮次");
+        const onHeaderDblClick = (event) => {
+          event.stopPropagation();
+          event.preventDefault();
+          expandLoadedMinimapTurns();
+        };
+        header.addEventListener("dblclick", onHeaderDblClick);
+        bindings.toolbarListeners.push(["dblclick", onHeaderDblClick, undefined]);
         const loadEarlier = document.createElement("button");
         loadEarlier.className = "pi-enh-minimap-load-earlier";
         loadEarlier.setAttribute("type", "button");
@@ -46402,21 +54085,26 @@
         const focusLabel = focusTurnNumber === null ? "" : ` · 定位第 ${focusTurnNumber} 轮`;
         const headerHtml = `<span>会话导航</span><span class="pi-enh-minimap-header-badge">💬 共 ${history.totalTurns} 轮 · 已显示 ${visibleTurns} 轮${focusLabel}</span>`;
         if (header.innerHTML !== headerHtml) header.innerHTML = headerHtml;
+        if (!header.getAttribute("title")) header.setAttribute("title", "双击可展开当前已加载的全部轮次");
       }
 
       const loadEarlier = toolbar?.querySelector(".pi-enh-minimap-load-earlier");
       if (loadEarlier) {
-        const remainingTurns = Math.max(0, history.totalTurns - visibleTurns);
-        const loading = autoLoadEarlierTriggered && remainingTurns > 0;
-        const label = remainingTurns > 0
-          ? (loading ? "⏳ 正在加载…" : `还有 ${remainingTurns} 轮未加载`)
-          : `已加载全部 ${history.totalTurns} 轮`;
-        if (loadEarlier.textContent !== label) loadEarlier.textContent = label;
-        loadEarlier.disabled = loading || remainingTurns === 0;
-        loadEarlier.classList[loading ? "add" : "remove"]("is-loading");
-        const stepTurns = getMinimapHistorySettings().stepTurns;
-        loadEarlier.setAttribute("aria-label", remainingTurns > 0 ? `加载更早 ${stepTurns} 轮，还有 ${remainingTurns} 轮未加载` : label);
-        loadEarlier.setAttribute("title", remainingTurns > 0 ? `点击、滚轮向上或触屏下拉可加载更早 ${stepTurns} 轮` : label);
+        const buttonState = computeMinimapHistoryButtonState({
+          totalTurns: history.totalTurns,
+          loadedTurns: loadedTurnCount,
+          visibleTurns,
+          hasEarlierMessages: history.hasEarlierMessages,
+          loading: autoLoadEarlierTriggered,
+          loadError: Boolean(displayState.loadError),
+          stepTurns: getMinimapHistorySettings().stepTurns,
+        });
+
+        if (loadEarlier.textContent !== buttonState.label) loadEarlier.textContent = buttonState.label;
+        loadEarlier.disabled = buttonState.disabled;
+        loadEarlier.classList[buttonState.isLoading ? "add" : "remove"]("is-loading");
+        loadEarlier.setAttribute("aria-label", buttonState.ariaLabel);
+        loadEarlier.setAttribute("title", buttonState.title);
       }
 
       for (let i = 0; i < turns.length; i++) {
@@ -46426,9 +54114,11 @@
         const localIndex = idxAttr !== null && Number.isFinite(parseInt(idxAttr, 10)) ? parseInt(idxAttr, 10) : i;
         const realIndex = absoluteOffset + localIndex + 1;
         const numEl = turn.firstElementChild;
-        if (numEl && (numEl.getAttribute("aria-hidden") === "true" || (numEl.className && numEl.className.includes("number")))) {
+        if (numEl && (numEl.getAttribute("aria-hidden") === "true" || (numEl.className && String(numEl.className).includes("number")))) {
           const expected = String(realIndex);
-          if (numEl.textContent !== expected) numEl.textContent = expected;
+          if (numEl.getAttribute("data-pi-enh-minimap-number") !== expected) {
+            numEl.setAttribute("data-pi-enh-minimap-number", expected);
+          }
         }
       }
 
@@ -46442,13 +54132,14 @@
       }
       bindings.hasInitializedLayout = true;
 
-      if (
-        loadedTurnCount < displayState.targetTurns &&
+      const needsInitialPreloadInPreview = loadedTurnCount < displayState.targetTurns &&
         history.hasEarlierMessages &&
         !autoLoadEarlierTriggered &&
-        displayState.requestedLoadedTurns !== loadedTurnCount &&
-        typeof window.__PI_ENH_LOAD_EARLIER__ === "function"
-      ) {
+        !displayState.loadError &&
+        (displayState.initialAttempts || 0) < MINIMAP_MAX_INITIAL_ATTEMPTS &&
+        typeof window.__PI_ENH_LOAD_EARLIER__ === "function";
+
+      if (needsInitialPreloadInPreview) {
         addManagedTimeout(() => requestMinimapHistoryForTarget("initial"), 0);
       }
     }
@@ -46885,49 +54576,19 @@
   function ensureMinimapGlobalClickListener() {
     if (minimapGlobalClickListener) return;
     minimapGlobalClickListener = (event) => {
-      if (!isPluginEnabled("minimap-full-nav")) return;
-      if (isRailDotNavigating) return;
-      const target = event.target;
-      if (!target) return;
-
-      // 必须在会话导航 previewBox 内部
-      const previewBox = target.closest("[data-minimap-preview-box]");
+      const previewBox = event.target?.closest?.("[data-minimap-preview-box]");
       if (!previewBox) return;
-
-      // 1. 如果在顶部工具栏内（加载更早轮次、标题栏），绝不关闭
-      if (target.closest("[data-pi-enh-minimap-toolbar], .pi-enh-minimap-toolbar, [data-pi-enh-minimap-load-earlier]")) {
-        return;
-      }
-
-      // 2. 检查是否在某轮会话卡片内
-      const turnEl = target.closest("[data-minimap-preview-index]");
-      if (!turnEl || !previewBox.contains(turnEl)) return;
-
-      // 3. 判断是否直接点击在按钮上
-      const itemBtn = target.closest("button");
-      if (!itemBtn) {
-        // 用户点击了轮次内的非按钮区域（如序号数字 span、卡片空白边距）
-        // 自动帮用户触发该轮次的用户提问按钮，实现精准跳转并联动关闭
-        const userBtn = turnEl.querySelector("[data-minimap-preview-user], button");
-        if (userBtn && typeof userBtn.click === "function") {
-          releaseHistoryTailForMinimapNavigation();
-          userBtn.click();
-          return;
-        }
-        return;
-      }
-
-      // 4. 用户点击了跳转内容项（用户提问 / 助手大纲标题 / 助手跳跃 A / 段落等）
-      // 执行平滑向右滑出关闭会话导航抽屉
-      releaseHistoryTailForMinimapNavigation();
-      animateCloseMinimapPreview();
+      dispatchMinimapTurnClick(event, previewBox);
     };
-    document.addEventListener("click", minimapGlobalClickListener, { capture: true, passive: true });
+    document.addEventListener("click", minimapGlobalClickListener, { capture: true, passive: false });
   }
 
   ensureMinimapGlobalClickListener();
 
   activeCleanups.push(() => {
+    clearMinimapNavigationAnchorGuard();
+    clearNativeMinimapRevealScrollBlock();
+    removeMinimapMobileNavigator();
     detachMinimapInteractions(activeMinimapPreviewBox);
     activeMinimapPreviewBox = null;
     autoLoadEarlierTriggered = false;
@@ -46941,6 +54602,9 @@
     minimapHistoryDisplayState.clear();
     for (const toolbar of document.querySelectorAll(".pi-enh-minimap-toolbar")) toolbar.remove();
     for (const turn of document.querySelectorAll("[data-minimap-preview-index]")) turn.style.display = "";
+    for (const el of document.querySelectorAll("[data-pi-enh-minimap-number]")) {
+      el.removeAttribute("data-pi-enh-minimap-number");
+    }
     for (const node of document.querySelectorAll("[data-minimap-node-index]")) restoreNativeMinimapNode(node);
   });
 
@@ -46979,7 +54643,10 @@
     return document.querySelector(".chat-content .relative.shrink-0");
   }
 
+  let cancelScrollBottomConvergence = null;
+
   function removeScrollBottomButton() {
+    if (cancelScrollBottomConvergence) cancelScrollBottomConvergence();
     if (scrollBottomBtn) {
       scrollBottomBtn.remove();
       scrollBottomBtn = null;
@@ -47037,23 +54704,51 @@
         }
       }
     }
+    if (cancelScrollBottomConvergence) cancelScrollBottomConvergence();
     const container = getChatScrollContainer();
     if (!container) return;
-    try {
-      if (typeof container.scrollTo === "function") {
-        container.scrollTo({
-          top: container.scrollHeight,
-          behavior: "smooth",
-        });
-      } else {
-        container.scrollTop = container.scrollHeight;
+
+    // content-visibility and pending history pages can change scrollHeight after
+    // a click. A single smooth-scroll target then stops short of the real end.
+    // This click-owned correction expires quickly and yields to any user input.
+    const controller = new AbortController();
+    const startedAt = performance.now();
+    let lastShiftAt = startedAt;
+    let lastHeight = -1;
+    let frame = null;
+    const finish = () => {
+      if (frame !== null) cancelAnimationFrame(frame);
+      controller.abort();
+      if (cancelScrollBottomConvergence === finish) cancelScrollBottomConvergence = null;
+    };
+    cancelScrollBottomConvergence = finish;
+    for (const type of ["wheel", "touchstart", "pointerdown", "keydown"]) {
+      document.addEventListener(type, finish, { capture: true, passive: true, signal: controller.signal });
+    }
+    const align = () => {
+      if (cancelScrollBottomConvergence !== finish) return;
+      if (!container.isConnected || !isPluginEnabled("scroll-to-bottom") ||
+          getCurrentSessionId() !== currentSid || getChatScrollContainer() !== container) {
+        finish();
+        return;
       }
-    } catch (e) {
-      container.scrollTop = container.scrollHeight;
-    }
-    if (scrollBottomBtn) {
-      scrollBottomBtn.classList.remove("visible");
-    }
+      const now = performance.now();
+      const height = container.scrollHeight;
+      const target = Math.max(0, height - container.clientHeight);
+      if (height !== lastHeight || Math.abs(container.scrollTop - target) > 1) {
+        lastShiftAt = now;
+        lastHeight = height;
+        try { container.scrollTo({ top: target, behavior: "instant" }); }
+        catch (_) { container.scrollTop = target; }
+      }
+      if (scrollBottomBtn) scrollBottomBtn.classList.remove("visible");
+      if (now - startedAt >= 2000 || now - lastShiftAt >= 250) {
+        finish();
+        return;
+      }
+      frame = requestAnimationFrame(align);
+    };
+    align();
   }
 
   function syncScrollBottomPosition() {
@@ -47256,6 +54951,11 @@
     const sid = targetSessionId || currentUrlSid;
     if (!sid) return false;
 
+    // 新会话的原生首屏仍可能从尾页→未折叠历史→折叠终态多次重排。
+    // 在快照/静态占位交接前，禁止把过渡态 scrollTop 误存为该会话的旧阅读记忆。
+    const handover = document.querySelector(".pi-enh-session-snapshot-overlay, .pi-enh-session-loading-placeholder");
+    if (handover?.getAttribute("data-target-session-id") === sid) return false;
+
     if (activeScrollRestoreState && activeScrollRestoreState.sessionId === sid && !activeScrollRestoreState.completed) {
       return false;
     }
@@ -47335,9 +55035,16 @@
     }
   }
 
+  let lastCompletedRestoreSid = null;
+
   function cancelActiveScrollRestore(reason = "") {
     if (!activeScrollRestoreState) return;
     const state = activeScrollRestoreState;
+    if (reason === "timeout-or-stable" && state.contentReady && state.anchorAligned) {
+      lastCompletedRestoreSid = state.sessionId;
+    } else {
+      lastCompletedRestoreSid = null;
+    }
     if (state.rafId) {
       cancelAnimationFrame(state.rafId);
       state.rafId = null;
@@ -47356,6 +55063,21 @@
     }
     const curScroll = getChatScrollContainer();
     if (curScroll) {
+      if (reason === "timeout-or-stable" && state.record && !state.record.isAtBottom && state.record.anchorEntryId) {
+        try {
+          const anchorNode = curScroll.querySelector(`[data-entry-id="${CSS.escape(state.record.anchorEntryId)}"]`);
+          if (anchorNode && typeof anchorNode.getBoundingClientRect === "function") {
+            const viewport = curScroll.getBoundingClientRect();
+            const rect = anchorNode.getBoundingClientRect();
+            if (rect.height > 0) {
+              const delta = (rect.top - viewport.top) - state.record.anchorOffset;
+              if (Math.abs(delta) > 0.5 && Math.abs(delta) < 80) {
+                curScroll.scrollTop += delta;
+              }
+            }
+          }
+        } catch (e) {}
+      }
       unhookScrollContainerScrollTo(curScroll);
     }
     if (typeof document !== "undefined" && document.documentElement) {
@@ -47376,22 +55098,26 @@
     if (sessionScrollGestureListenersAttached) return;
     sessionScrollGestureListenersAttached = true;
     const handleGesture = (e) => {
-      if (!activeScrollRestoreState || activeScrollRestoreState.completed) return;
       if (isChatReadingEventTarget(e.target)) {
-        cancelActiveScrollRestore("user-gesture");
+        lastCompletedRestoreSid = null;
+        if (activeScrollRestoreState && !activeScrollRestoreState.completed) {
+          cancelActiveScrollRestore("user-gesture");
+        }
       }
     };
     for (const type of ["wheel", "touchstart", "touchmove", "pointerdown", "mousedown"]) {
       listenSessionScrollGesture(type, handleGesture);
     }
     listenSessionScrollGesture("keydown", (e) => {
-      if (!activeScrollRestoreState || activeScrollRestoreState.completed) return;
       if (["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(e.key)) {
         const active = document.activeElement;
         if (active && (active.tagName === "TEXTAREA" || active.tagName === "INPUT" || active.isContentEditable)) {
           return;
         }
-        cancelActiveScrollRestore("user-gesture");
+        lastCompletedRestoreSid = null;
+        if (activeScrollRestoreState && !activeScrollRestoreState.completed) {
+          cancelActiveScrollRestore("user-gesture");
+        }
       }
     });
   }
@@ -47443,6 +55169,8 @@
     if (!newSessionId) return;
     initialScrollRestoreAttempted = true;
 
+    // 新会话切换开始必须清零上一次的完成标记，防止旧会话状态误报就绪
+    lastCompletedRestoreSid = null;
     cancelActiveScrollRestore("switch-session");
 
     const record = sessionScrollMemory.get(newSessionId);
@@ -47456,6 +55184,8 @@
       document.documentElement.classList.add("pi-enh-scroll-restoring");
     }
 
+    let domBatchDirty = true;
+
     const restoreState = {
       sessionId: newSessionId,
       record,
@@ -47464,6 +55194,8 @@
       lastHeight: 0,
       contentReady: false,
       anchorFound: false,
+      anchorAligned: false,
+      stableFrameCount: 0,
       completed: false,
       rafId: null,
       resizeObserver: null,
@@ -47484,6 +55216,12 @@
 
       const scroll = getChatScrollContainer();
       if (!scroll) return false;
+
+      // 仅在 DOM 新批次有结构变化时同步折叠一次，避免每个 rAF 全量无脑重扫
+      if (isPluginEnabled("task-tool-auto-collapse") && domBatchDirty) {
+        domBatchDirty = false;
+        try { syncAllTaskToolAutoCollapse(); } catch (e) {}
+      }
 
       hookScrollContainerScrollTo(scroll);
 
@@ -47565,6 +55303,12 @@
 
       if (shifted || layoutChanged) {
         restoreState.lastShiftTime = Date.now();
+        restoreState.stableFrameCount = 0;
+      } else {
+        restoreState.stableFrameCount = (restoreState.stableFrameCount || 0) + 1;
+      }
+      if (applied && (targetRecord.isAtBottom || restoreState.anchorFound || (targetRecord.scrollTop > 0 && Math.abs(scroll.scrollTop - targetRecord.scrollTop) < 40))) {
+        restoreState.anchorAligned = true;
       }
 
       return applied;
@@ -47586,6 +55330,7 @@
       if (!restoreState.resizeObserver && typeof ResizeObserver !== "undefined") {
         restoreState.resizeObserver = new ResizeObserver(() => {
           if (activeScrollRestoreState === restoreState && !restoreState.completed) {
+            domBatchDirty = true;
             alignReadingPosition();
           }
         });
@@ -47598,6 +55343,7 @@
       if (!restoreState.mutationObserver && typeof MutationObserver !== "undefined") {
         restoreState.mutationObserver = new MutationObserver(() => {
           if (activeScrollRestoreState === restoreState && !restoreState.completed) {
+            domBatchDirty = true;
             alignReadingPosition();
           }
         });
@@ -47630,7 +55376,14 @@
       }
 
       const quietTime = Date.now() - restoreState.lastShiftTime;
-      if (elapsed < 1800 || (elapsed < 3500 && quietTime < 300)) {
+      const hasPendingCollapse = typeof hasPendingToolCollapse === "function" && hasPendingToolCollapse();
+      const isLayoutStable = restoreState.contentReady &&
+                             restoreState.anchorAligned &&
+                             !hasPendingCollapse &&
+                             ((restoreState.stableFrameCount || 0) >= 2 || quietTime >= 160);
+
+      // 保持原有最少 1800ms 保护直到最后布局稳定，最大可酌情延长至 4500ms，不可在 1800ms 前被 stableFrameCount 提前终止
+      if (elapsed < 1800 || (!isLayoutStable && elapsed < 4500)) {
         restoreState.rafId = requestAnimationFrame(tick);
       } else {
         cancelActiveScrollRestore("timeout-or-stable");
@@ -47639,6 +55392,56 @@
 
     restoreState.rafId = requestAnimationFrame(tick);
   }
+
+  function isSessionScrollRestoreReady(sid) {
+    if (!sid) return false;
+    if (!isPluginEnabled("session-scroll-restore")) return false;
+    loadPersistedSessionScrollMemory();
+    // 首次访问尚无阅读记忆，无需等待一个永远不会启动的恢复任务。
+    if (!sessionScrollMemory.has(sid)) return true;
+    if (document.documentElement && document.documentElement.classList.contains("pi-enh-scroll-restoring")) {
+      return false;
+    }
+    if (activeScrollRestoreState && !activeScrollRestoreState.completed) {
+      return false;
+    }
+    if (lastCompletedRestoreSid !== sid) {
+      return false;
+    }
+
+    const record = sessionScrollMemory.get(sid);
+    const scroll = getChatScrollContainer();
+    if (!scroll) return false;
+
+    // 实际核对目标锚点 offset 或贴底距离，不能只信标记
+    if (record.isAtBottom) {
+      const distToBottom = scroll.scrollHeight - scroll.clientHeight - scroll.scrollTop;
+      return distToBottom <= 25;
+    }
+
+    if (record.anchorEntryId) {
+      try {
+        const anchorNode = scroll.querySelector(`[data-entry-id="${CSS.escape(record.anchorEntryId)}"]`);
+        if (!anchorNode || typeof anchorNode.getBoundingClientRect !== "function") return false;
+        const rect = anchorNode.getBoundingClientRect();
+        if (rect.height <= 0) return false;
+        const viewport = scroll.getBoundingClientRect();
+        const currentOffset = rect.top - viewport.top;
+        const delta = Math.abs(currentOffset - record.anchorOffset);
+        return delta <= 25;
+      } catch (e) {
+        return false;
+      }
+    }
+
+    if (record.scrollTop > 0) {
+      return Math.abs(scroll.scrollTop - record.scrollTop) <= 40;
+    }
+
+    return true;
+  }
+  window.__PI_ENH_IS_SCROLL_RESTORE_READY__ = isSessionScrollRestoreReady;
+  window.__PI_ENH_IS_SCROLL_RESTORING__ = isSessionScrollRestoring;
 
   function handleSessionSwitchPreflight(targetSid) {
     if (!targetSid) return;
@@ -47683,6 +55486,12 @@
     if (currentSid && targetSid && targetSid !== currentSid) {
       captureSessionScrollPosition(currentSid);
       persistSessionScrollMemory();
+      const targetRecord = sessionScrollMemory.get(targetSid);
+      if (targetRecord && !targetRecord.isAtBottom) {
+        if (typeof document !== "undefined" && document.documentElement) {
+          document.documentElement.classList.add("pi-enh-scroll-restoring");
+        }
+      }
     }
   }
 
@@ -48788,6 +56597,408 @@
     lastObsidianViewerPath = null;
   }
 
+  // ==========================================================================
+  // Excel Sheet Interactive Preview (Excel 在线交互表格预览)
+  // ==========================================================================
+  let activeExcelViewerPath = null;
+  let excelUserExplicitSourcePaths = new Set();
+  let excelWorkbookCache = new Map(); // path -> { workbook, activeSheet, searchQuery, loading, error }
+  let cachedInlineXlsx = null;
+
+  function ensureXlsxEngine() {
+    if (typeof window !== "undefined" && window.XLSX && typeof window.XLSX.read === "function") {
+      return window.XLSX;
+    }
+    if (cachedInlineXlsx) return cachedInlineXlsx;
+    try {
+      var globalTarget = typeof window !== "undefined" ? window : (typeof globalThis !== "undefined" ? globalThis : this);
+      var exports, module, define;
+      var window = globalTarget;
+      /*! xlsx.js (C) 2013-present SheetJS -- http://sheetjs.com */
+var XLSX={};function make_xlsx_lib(e){e.version="0.20.3";var r=1200,t=1252;var a;var n=[874,932,936,949,950,1250,1251,1252,1253,1254,1255,1256,1257,1258,1e4];var i={0:1252,1:65001,2:65001,77:1e4,128:932,129:949,130:1361,134:936,136:950,161:1253,162:1254,163:1258,177:1255,178:1256,186:1257,204:1251,222:874,238:1250,255:1252,69:6969};var s=function(e){if(n.indexOf(e)==-1)return;t=i[0]=e};function l(){s(1252)}var o=function(e){r=e;s(e)};function c(){o(1200);l()}function f(e){var r=[];for(var t=0,a=e.length;t<a;++t)r[t]=e.charCodeAt(t);return r}function u(e){var r=[];for(var t=0;t<e.length>>1;++t)r[t]=String.fromCharCode(e.charCodeAt(2*t)+(e.charCodeAt(2*t+1)<<8));return r.join("")}function h(e){var r=[];for(var t=0;t<e.length>>1;++t)r[t]=String.fromCharCode(e[2*t]+(e[2*t+1]<<8));return r.join("")}function d(e){var r=[];for(var t=0;t<e.length>>1;++t)r[t]=String.fromCharCode(e.charCodeAt(2*t+1)+(e.charCodeAt(2*t)<<8));return r.join("")}var p=function(e){var r=e.charCodeAt(0),t=e.charCodeAt(1);if(r==255&&t==254)return u(e.slice(2));if(r==254&&t==255)return d(e.slice(2));if(r==65279)return e.slice(1);return e};var m=function Dc(e){return String.fromCharCode(e)};var v=function Oc(e){return String.fromCharCode(e)};function g(e){a=e;o=function(e){r=e;s(e)};p=function(e){if(e.charCodeAt(0)===255&&e.charCodeAt(1)===254){return a.utils.decode(1200,f(e.slice(2)))}return e};m=function n(e){if(r===1200)return String.fromCharCode(e);return a.utils.decode(r,[e&255,e>>8])[0]};v=function i(e){return a.utils.decode(t,[e])[0]};va()}var b=null;var w=true;var k="ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=";function y(e){var r="";var t=0,a=0,n=0,i=0,s=0,l=0,o=0;for(var c=0;c<e.length;){t=e.charCodeAt(c++);i=t>>2;a=e.charCodeAt(c++);s=(t&3)<<4|a>>4;n=e.charCodeAt(c++);l=(a&15)<<2|n>>6;o=n&63;if(isNaN(a)){l=o=64}else if(isNaN(n)){o=64}r+=k.charAt(i)+k.charAt(s)+k.charAt(l)+k.charAt(o)}return r}function x(e){var r="";var t=0,a=0,n=0,i=0,s=0,l=0,o=0;for(var c=0;c<e.length;){t=e.charCodeAt(c++);if(t>255)t=95;i=t>>2;a=e.charCodeAt(c++);if(a>255)a=95;s=(t&3)<<4|a>>4;n=e.charCodeAt(c++);if(n>255)n=95;l=(a&15)<<2|n>>6;o=n&63;if(isNaN(a)){l=o=64}else if(isNaN(n)){o=64}r+=k.charAt(i)+k.charAt(s)+k.charAt(l)+k.charAt(o)}return r}function C(e){var r="";var t=0,a=0,n=0,i=0,s=0,l=0,o=0;for(var c=0;c<e.length;){t=e[c++];i=t>>2;a=e[c++];s=(t&3)<<4|a>>4;n=e[c++];l=(a&15)<<2|n>>6;o=n&63;if(isNaN(a)){l=o=64}else if(isNaN(n)){o=64}r+=k.charAt(i)+k.charAt(s)+k.charAt(l)+k.charAt(o)}return r}function S(e){var r="";var t=0,a=0,n=0,i=0,s=0,l=0,o=0;if(e.slice(0,5)=="data:"){var c=e.slice(0,1024).indexOf(";base64,");if(c>-1)e=e.slice(c+8)}e=e.replace(/[^\w\+\/\=]/g,"");for(var c=0;c<e.length;){i=k.indexOf(e.charAt(c++));s=k.indexOf(e.charAt(c++));t=i<<2|s>>4;r+=String.fromCharCode(t);l=k.indexOf(e.charAt(c++));a=(s&15)<<4|l>>2;if(l!==64){r+=String.fromCharCode(a)}o=k.indexOf(e.charAt(c++));n=(l&3)<<6|o;if(o!==64){r+=String.fromCharCode(n)}}return r}var _=function(){return typeof Buffer!=="undefined"&&typeof undefined!=="undefined"&&typeof{}!=="undefined"&&!!{}.node}();var A=function(){if(typeof Buffer!=="undefined"){var e=!Buffer.from;if(!e)try{Buffer.from("foo","utf8")}catch(r){e=true}return e?function(e,r){return r?new Buffer(e,r):new Buffer(e)}:Buffer.from.bind(Buffer)}return function(){}}();var T=function(){if(typeof Buffer==="undefined")return false;var e=A([65,0]);if(!e)return false;var r=e.toString("utf16le");return r.length==1}();function E(e){if(_)return Buffer.alloc?Buffer.alloc(e):new Buffer(e);return typeof Uint8Array!="undefined"?new Uint8Array(e):new Array(e)}function F(e){if(_)return Buffer.allocUnsafe?Buffer.allocUnsafe(e):new Buffer(e);return typeof Uint8Array!="undefined"?new Uint8Array(e):new Array(e)}var D=function Nc(e){if(_)return A(e,"binary");return e.split("").map(function(e){return e.charCodeAt(0)&255})};function O(e){if(typeof ArrayBuffer==="undefined")return D(e);var r=new ArrayBuffer(e.length),t=new Uint8Array(r);for(var a=0;a!=e.length;++a)t[a]=e.charCodeAt(a)&255;return r}function N(e){if(Array.isArray(e))return e.map(function(e){return String.fromCharCode(e)}).join("");var r=[];for(var t=0;t<e.length;++t)r[t]=String.fromCharCode(e[t]);return r.join("")}function M(e){if(typeof Uint8Array==="undefined")throw new Error("Unsupported");return new Uint8Array(e)}function I(e){if(typeof ArrayBuffer=="undefined")throw new Error("Unsupported");if(e instanceof ArrayBuffer)return I(new Uint8Array(e));var r=new Array(e.length);for(var t=0;t<e.length;++t)r[t]=e[t];return r}var P=_?function(e){return Buffer.concat(e.map(function(e){return Buffer.isBuffer(e)?e:A(e)}))}:function(e){if(typeof Uint8Array!=="undefined"){var r=0,t=0;for(r=0;r<e.length;++r)t+=e[r].length;var a=new Uint8Array(t);var n=0;for(r=0,t=0;r<e.length;t+=n,++r){n=e[r].length;if(e[r]instanceof Uint8Array)a.set(e[r],t);else if(typeof e[r]=="string")a.set(new Uint8Array(D(e[r])),t);else a.set(new Uint8Array(e[r]),t)}return a}return[].concat.apply([],e.map(function(e){return Array.isArray(e)?e:[].slice.call(e)}))};function R(e){var r=[],t=0,a=e.length+250;var n=E(e.length+255);for(var i=0;i<e.length;++i){var s=e.charCodeAt(i);if(s<128)n[t++]=s;else if(s<2048){n[t++]=192|s>>6&31;n[t++]=128|s&63}else if(s>=55296&&s<57344){s=(s&1023)+64;var l=e.charCodeAt(++i)&1023;n[t++]=240|s>>8&7;n[t++]=128|s>>2&63;n[t++]=128|l>>6&15|(s&3)<<4;n[t++]=128|l&63}else{n[t++]=224|s>>12&15;n[t++]=128|s>>6&63;n[t++]=128|s&63}if(t>a){r.push(n.slice(0,t));t=0;n=E(65535);a=65530}}r.push(n.slice(0,t));return P(r)}var L=/\u0000/g,U=/[\u0001-\u0006]/g;function B(e){var r="",t=e.length-1;while(t>=0)r+=e.charAt(t--);return r}function z(e,r){var t=""+e;return t.length>=r?t:xr("0",r-t.length)+t}function W(e,r){var t=""+e;return t.length>=r?t:xr(" ",r-t.length)+t}function j(e,r){var t=""+e;return t.length>=r?t:t+xr(" ",r-t.length)}function H(e,r){var t=""+Math.round(e);return t.length>=r?t:xr("0",r-t.length)+t}function V(e,r){var t=""+e;return t.length>=r?t:xr("0",r-t.length)+t}var X=Math.pow(2,32);function G(e,r){if(e>X||e<-X)return H(e,r);var t=Math.round(e);return V(t,r)}function Y(e,r){r=r||0;return e.length>=7+r&&(e.charCodeAt(r)|32)===103&&(e.charCodeAt(r+1)|32)===101&&(e.charCodeAt(r+2)|32)===110&&(e.charCodeAt(r+3)|32)===101&&(e.charCodeAt(r+4)|32)===114&&(e.charCodeAt(r+5)|32)===97&&(e.charCodeAt(r+6)|32)===108}var J=[["Sun","Sunday"],["Mon","Monday"],["Tue","Tuesday"],["Wed","Wednesday"],["Thu","Thursday"],["Fri","Friday"],["Sat","Saturday"]];var Z=[["J","Jan","January"],["F","Feb","February"],["M","Mar","March"],["A","Apr","April"],["M","May","May"],["J","Jun","June"],["J","Jul","July"],["A","Aug","August"],["S","Sep","September"],["O","Oct","October"],["N","Nov","November"],["D","Dec","December"]];function K(e){if(!e)e={};e[0]="General";e[1]="0";e[2]="0.00";e[3]="#,##0";e[4]="#,##0.00";e[9]="0%";e[10]="0.00%";e[11]="0.00E+00";e[12]="# ?/?";e[13]="# ??/??";e[14]="m/d/yy";e[15]="d-mmm-yy";e[16]="d-mmm";e[17]="mmm-yy";e[18]="h:mm AM/PM";e[19]="h:mm:ss AM/PM";e[20]="h:mm";e[21]="h:mm:ss";e[22]="m/d/yy h:mm";e[37]="#,##0 ;(#,##0)";e[38]="#,##0 ;[Red](#,##0)";e[39]="#,##0.00;(#,##0.00)";e[40]="#,##0.00;[Red](#,##0.00)";e[45]="mm:ss";e[46]="[h]:mm:ss";e[47]="mmss.0";e[48]="##0.0E+0";e[49]="@";e[56]='"上午/下午 "hh"時"mm"分"ss"秒 "';return e}var q={0:"General",1:"0",2:"0.00",3:"#,##0",4:"#,##0.00",9:"0%",10:"0.00%",11:"0.00E+00",12:"# ?/?",13:"# ??/??",14:"m/d/yy",15:"d-mmm-yy",16:"d-mmm",17:"mmm-yy",18:"h:mm AM/PM",19:"h:mm:ss AM/PM",20:"h:mm",21:"h:mm:ss",22:"m/d/yy h:mm",37:"#,##0 ;(#,##0)",38:"#,##0 ;[Red](#,##0)",39:"#,##0.00;(#,##0.00)",40:"#,##0.00;[Red](#,##0.00)",45:"mm:ss",46:"[h]:mm:ss",47:"mmss.0",48:"##0.0E+0",49:"@",56:'"上午/下午 "hh"時"mm"分"ss"秒 "'};var Q={5:37,6:38,7:39,8:40,23:0,24:0,25:0,26:0,27:14,28:14,29:14,30:14,31:14,50:14,51:14,52:14,53:14,54:14,55:14,56:14,57:14,58:14,59:1,60:2,61:3,62:4,67:9,68:10,69:12,70:13,71:14,72:14,73:15,74:16,75:17,76:20,77:21,78:22,79:45,80:46,81:47,82:0};var ee={5:'"$"#,##0_);\\("$"#,##0\\)',63:'"$"#,##0_);\\("$"#,##0\\)',6:'"$"#,##0_);[Red]\\("$"#,##0\\)',64:'"$"#,##0_);[Red]\\("$"#,##0\\)',7:'"$"#,##0.00_);\\("$"#,##0.00\\)',65:'"$"#,##0.00_);\\("$"#,##0.00\\)',8:'"$"#,##0.00_);[Red]\\("$"#,##0.00\\)',66:'"$"#,##0.00_);[Red]\\("$"#,##0.00\\)',41:'_(* #,##0_);_(* \\(#,##0\\);_(* "-"_);_(@_)',42:'_("$"* #,##0_);_("$"* \\(#,##0\\);_("$"* "-"_);_(@_)',43:'_(* #,##0.00_);_(* \\(#,##0.00\\);_(* "-"??_);_(@_)',44:'_("$"* #,##0.00_);_("$"* \\(#,##0.00\\);_("$"* "-"??_);_(@_)'};function re(e,r,t){var a=e<0?-1:1;var n=e*a;var i=0,s=1,l=0;var o=1,c=0,f=0;var u=Math.floor(n);while(c<r){u=Math.floor(n);l=u*s+i;f=u*c+o;if(n-u<5e-8)break;n=1/(n-u);i=s;s=l;o=c;c=f}if(f>r){if(c>r){f=o;l=i}else{f=c;l=s}}if(!t)return[0,a*l,f];var h=Math.floor(a*l/f);return[h,a*l-h*f,f]}function te(e){var r=e.toPrecision(16);if(r.indexOf("e")>-1){var t=r.slice(0,r.indexOf("e"));t=t.indexOf(".")>-1?t.slice(0,t.slice(0,2)=="0."?17:16):t.slice(0,15)+xr("0",t.length-15);return t+r.slice(r.indexOf("e"))}var a=r.indexOf(".")>-1?r.slice(0,r.slice(0,2)=="0."?17:16):r.slice(0,15)+xr("0",r.length-15);return Number(a)}function ae(e,r,t){if(e>2958465||e<0)return null;e=te(e);var a=e|0,n=Math.floor(86400*(e-a)),i=0;var s=[];var l={D:a,T:n,u:86400*(e-a)-n,y:0,m:0,d:0,H:0,M:0,S:0,q:0};if(Math.abs(l.u)<1e-6)l.u=0;if(r&&r.date1904)a+=1462;if(l.u>.9999){l.u=0;if(++n==86400){l.T=n=0;++a;++l.D}}if(a===60){s=t?[1317,10,29]:[1900,2,29];i=3}else if(a===0){s=t?[1317,8,29]:[1900,1,0];i=6}else{if(a>60)--a;var o=new Date(1900,0,1);o.setDate(o.getDate()+a-1);s=[o.getFullYear(),o.getMonth()+1,o.getDate()];i=o.getDay();if(a<60)i=(i+6)%7;if(t)i=fe(o,s)}l.y=s[0];l.m=s[1];l.d=s[2];l.S=n%60;n=Math.floor(n/60);l.M=n%60;n=Math.floor(n/60);l.H=n;l.q=i;return l}function ne(e){return e.indexOf(".")==-1?e:e.replace(/(?:\.0*|(\.\d*[1-9])0+)$/,"$1")}function ie(e){if(e.indexOf("E")==-1)return e;return e.replace(/(?:\.0*|(\.\d*[1-9])0+)[Ee]/,"$1E").replace(/(E[+-])(\d)$/,"$10$2")}function se(e){var r=e<0?12:11;var t=ne(e.toFixed(12));if(t.length<=r)return t;t=e.toPrecision(10);if(t.length<=r)return t;return e.toExponential(5)}function le(e){var r=ne(e.toFixed(11));return r.length>(e<0?12:11)||r==="0"||r==="-0"?e.toPrecision(6):r}function oe(e){if(!isFinite(e))return isNaN(e)?"#NUM!":"#DIV/0!";var r=Math.floor(Math.log(Math.abs(e))*Math.LOG10E),t;if(r>=-4&&r<=-1)t=e.toPrecision(10+r);else if(Math.abs(r)<=9)t=se(e);else if(r===10)t=e.toFixed(10).substr(0,12);else t=le(e);return ne(ie(t.toUpperCase()))}function ce(e,r){switch(typeof e){case"string":return e;case"boolean":return e?"TRUE":"FALSE";case"number":return(e|0)===e?e.toString(10):oe(e);case"undefined":return"";case"object":if(e==null)return"";if(e instanceof Date)return $e(14,dr(e,r&&r.date1904),r);}throw new Error("unsupported value in General format: "+e)}function fe(e,r){r[0]-=581;var t=e.getDay();if(e<60)t=(t+6)%7;return t}function ue(e,r,t,a){var n="",i=0,s=0,l=t.y,o,c=0;switch(e){case 98:l=t.y+543;case 121:switch(r.length){case 1:;case 2:o=l%100;c=2;break;default:o=l%1e4;c=4;break;}break;case 109:switch(r.length){case 1:;case 2:o=t.m;c=r.length;break;case 3:return Z[t.m-1][1];case 5:return Z[t.m-1][0];default:return Z[t.m-1][2];}break;case 100:switch(r.length){case 1:;case 2:o=t.d;c=r.length;break;case 3:return J[t.q][0];default:return J[t.q][1];}break;case 104:switch(r.length){case 1:;case 2:o=1+(t.H+11)%12;c=r.length;break;default:throw"bad hour format: "+r;}break;case 72:switch(r.length){case 1:;case 2:o=t.H;c=r.length;break;default:throw"bad hour format: "+r;}break;case 77:switch(r.length){case 1:;case 2:o=t.M;c=r.length;break;default:throw"bad minute format: "+r;}break;case 115:if(r!="s"&&r!="ss"&&r!=".0"&&r!=".00"&&r!=".000")throw"bad second format: "+r;if(t.u===0&&(r=="s"||r=="ss"))return z(t.S,r.length);if(a>=2)s=a===3?1e3:100;else s=a===1?10:1;i=Math.round(s*(t.S+t.u));if(i>=60*s)i=0;if(r==="s")return i===0?"0":""+i/s;n=z(i,2+a);if(r==="ss")return n.substr(0,2);return"."+n.substr(2,r.length-1);case 90:switch(r){case"[h]":;case"[hh]":o=t.D*24+t.H;break;case"[m]":;case"[mm]":o=(t.D*24+t.H)*60+t.M;break;case"[s]":;case"[ss]":o=((t.D*24+t.H)*60+t.M)*60+(a==0?Math.round(t.S+t.u):t.S);break;default:throw"bad abstime format: "+r;}c=r.length===3?1:2;break;case 101:o=l;c=1;break;}var f=c>0?z(o,c):"";return f}function he(e){var r=3;if(e.length<=r)return e;var t=e.length%r,a=e.substr(0,t);for(;t!=e.length;t+=r)a+=(a.length>0?",":"")+e.substr(t,r);return a}var de=/%/g;function pe(e,r,t){var a=r.replace(de,""),n=r.length-a.length;return Me(e,a,t*Math.pow(10,2*n))+xr("%",n)}function me(e,r,t){var a=r.length-1;while(r.charCodeAt(a-1)===44)--a;return Me(e,r.substr(0,a),t/Math.pow(10,3*(r.length-a)))}function ve(e,r){var t;var a=e.indexOf("E")-e.indexOf(".")-1;if(e.match(/^#+0.0E\+0$/)){if(r==0)return"0.0E+0";else if(r<0)return"-"+ve(e,-r);var n=e.indexOf(".");if(n===-1)n=e.indexOf("E");var i=Math.floor(Math.log(r)*Math.LOG10E)%n;if(i<0)i+=n;t=(r/Math.pow(10,i)).toPrecision(a+1+(n+i)%n);if(t.indexOf("e")===-1){var s=Math.floor(Math.log(r)*Math.LOG10E);if(t.indexOf(".")===-1)t=t.charAt(0)+"."+t.substr(1)+"E+"+(s-t.length+i);else t+="E+"+(s-i);while(t.substr(0,2)==="0."){t=t.charAt(0)+t.substr(2,n)+"."+t.substr(2+n);t=t.replace(/^0+([1-9])/,"$1").replace(/^0+\./,"0.")}t=t.replace(/\+-/,"-")}t=t.replace(/^([+-]?)(\d*)\.(\d*)[Ee]/,function(e,r,t,a){return r+t+a.substr(0,(n+i)%n)+"."+a.substr(i)+"E"})}else t=r.toExponential(a);if(e.match(/E\+00$/)&&t.match(/e[+-]\d$/))t=t.substr(0,t.length-1)+"0"+t.charAt(t.length-1);if(e.match(/E\-/)&&t.match(/e\+/))t=t.replace(/e\+/,"e");return t.replace("e","E")}var ge=/# (\?+)( ?)\/( ?)(\d+)/;function be(e,r,t){var a=parseInt(e[4],10),n=Math.round(r*a),i=Math.floor(n/a);var s=n-i*a,l=a;return t+(i===0?"":""+i)+" "+(s===0?xr(" ",e[1].length+1+e[4].length):W(s,e[1].length)+e[2]+"/"+e[3]+z(l,e[4].length))}function we(e,r,t){return t+(r===0?"":""+r)+xr(" ",e[1].length+2+e[4].length)}var ke=/^#*0*\.([0#]+)/;var ye=/\)[^)]*[0#]/;var xe=/\(###\) ###\\?-####/;function Ce(e){var r="",t;for(var a=0;a!=e.length;++a)switch(t=e.charCodeAt(a)){case 35:break;case 63:r+=" ";break;case 48:r+="0";break;default:r+=String.fromCharCode(t);}return r}function Se(e,r){var t=Math.pow(10,r);return""+Math.round(e*t)/t}function _e(e,r){var t=e-Math.floor(e),a=Math.pow(10,r);if(r<(""+Math.round(t*a)).length)return 0;return Math.round(t*a)}function Ae(e,r){if(r<(""+Math.round((e-Math.floor(e))*Math.pow(10,r))).length){return 1}return 0}function Te(e){if(e<2147483647&&e>-2147483648)return""+(e>=0?e|0:e-1|0);return""+Math.floor(e)}function Ee(e,r,t){if(e.charCodeAt(0)===40&&!r.match(ye)){var a=r.replace(/\( */,"").replace(/ \)/,"").replace(/\)/,"");if(t>=0)return Ee("n",a,t);return"("+Ee("n",a,-t)+")"}if(r.charCodeAt(r.length-1)===44)return me(e,r,t);if(r.indexOf("%")!==-1)return pe(e,r,t);if(r.indexOf("E")!==-1)return ve(r,t);if(r.charCodeAt(0)===36)return"$"+Ee(e,r.substr(r.charAt(1)==" "?2:1),t);var n;var i,s,l,o=Math.abs(t),c=t<0?"-":"";if(r.match(/^00+$/))return c+G(o,r.length);if(r.match(/^[#?]+$/)){n=G(t,0);if(n==="0")n="";return n.length>r.length?n:Ce(r.substr(0,r.length-n.length))+n}if(i=r.match(ge))return be(i,o,c);if(r.match(/^#+0+$/))return c+G(o,r.length-r.indexOf("0"));if(i=r.match(ke)){n=Se(t,i[1].length).replace(/^([^\.]+)$/,"$1."+Ce(i[1])).replace(/\.$/,"."+Ce(i[1])).replace(/\.(\d*)$/,function(e,r){return"."+r+xr("0",Ce(i[1]).length-r.length)});return r.indexOf("0.")!==-1?n:n.replace(/^0\./,".")}r=r.replace(/^#+([0.])/,"$1");if(i=r.match(/^(0*)\.(#*)$/)){return c+Se(o,i[2].length).replace(/\.(\d*[1-9])0*$/,".$1").replace(/^(-?\d*)$/,"$1.").replace(/^0\./,i[1].length?"0.":".")}if(i=r.match(/^#{1,3},##0(\.?)$/))return c+he(G(o,0));if(i=r.match(/^#,##0\.([#0]*0)$/)){return t<0?"-"+Ee(e,r,-t):he(""+(Math.floor(t)+Ae(t,i[1].length)))+"."+z(_e(t,i[1].length),i[1].length)}if(i=r.match(/^#,#*,#0/))return Ee(e,r.replace(/^#,#*,/,""),t);if(i=r.match(/^([0#]+)(\\?-([0#]+))+$/)){n=B(Ee(e,r.replace(/[\\-]/g,""),t));s=0;return B(B(r.replace(/\\/g,"")).replace(/[0#]/g,function(e){return s<n.length?n.charAt(s++):e==="0"?"0":""}))}if(r.match(xe)){n=Ee(e,"##########",t);return"("+n.substr(0,3)+") "+n.substr(3,3)+"-"+n.substr(6)}var f="";if(i=r.match(/^([#0?]+)( ?)\/( ?)([#0?]+)/)){s=Math.min(i[4].length,7);l=re(o,Math.pow(10,s)-1,false);n=""+c;f=Me("n",i[1],l[1]);if(f.charAt(f.length-1)==" ")f=f.substr(0,f.length-1)+"0";n+=f+i[2]+"/"+i[3];f=j(l[2],s);if(f.length<i[4].length)f=Ce(i[4].substr(i[4].length-f.length))+f;n+=f;return n}if(i=r.match(/^# ([#0?]+)( ?)\/( ?)([#0?]+)/)){s=Math.min(Math.max(i[1].length,i[4].length),7);l=re(o,Math.pow(10,s)-1,true);return c+(l[0]||(l[1]?"":"0"))+" "+(l[1]?W(l[1],s)+i[2]+"/"+i[3]+j(l[2],s):xr(" ",2*s+1+i[2].length+i[3].length))}if(i=r.match(/^[#0?]+$/)){n=G(t,0);if(r.length<=n.length)return n;return Ce(r.substr(0,r.length-n.length))+n}if(i=r.match(/^([#0?]+)\.([#0]+)$/)){n=""+t.toFixed(Math.min(i[2].length,10)).replace(/([^0])0+$/,"$1");s=n.indexOf(".");var u=r.indexOf(".")-s,h=r.length-n.length-u;return Ce(r.substr(0,u)+n+r.substr(r.length-h))}if(i=r.match(/^00,000\.([#0]*0)$/)){s=_e(t,i[1].length);return t<0?"-"+Ee(e,r,-t):he(Te(t)).replace(/^\d,\d{3}$/,"0$&").replace(/^\d*$/,function(e){return"00,"+(e.length<3?z(0,3-e.length):"")+e})+"."+z(s,i[1].length)}switch(r){case"###,##0.00":return Ee(e,"#,##0.00",t);case"###,###":;case"##,###":;case"#,###":var d=he(G(o,0));return d!=="0"?c+d:"";case"###,###.00":return Ee(e,"###,##0.00",t).replace(/^0\./,".");case"#,###.00":return Ee(e,"#,##0.00",t).replace(/^0\./,".");default:;}throw new Error("unsupported format |"+r+"|")}function Fe(e,r,t){var a=r.length-1;while(r.charCodeAt(a-1)===44)--a;return Me(e,r.substr(0,a),t/Math.pow(10,3*(r.length-a)))}function De(e,r,t){var a=r.replace(de,""),n=r.length-a.length;return Me(e,a,t*Math.pow(10,2*n))+xr("%",n)}function Oe(e,r){var t;var a=e.indexOf("E")-e.indexOf(".")-1;if(e.match(/^#+0.0E\+0$/)){if(r==0)return"0.0E+0";else if(r<0)return"-"+Oe(e,-r);var n=e.indexOf(".");if(n===-1)n=e.indexOf("E");var i=Math.floor(Math.log(r)*Math.LOG10E)%n;if(i<0)i+=n;t=(r/Math.pow(10,i)).toPrecision(a+1+(n+i)%n);if(!t.match(/[Ee]/)){var s=Math.floor(Math.log(r)*Math.LOG10E);if(t.indexOf(".")===-1)t=t.charAt(0)+"."+t.substr(1)+"E+"+(s-t.length+i);else t+="E+"+(s-i);t=t.replace(/\+-/,"-")}t=t.replace(/^([+-]?)(\d*)\.(\d*)[Ee]/,function(e,r,t,a){return r+t+a.substr(0,(n+i)%n)+"."+a.substr(i)+"E"})}else t=r.toExponential(a);if(e.match(/E\+00$/)&&t.match(/e[+-]\d$/))t=t.substr(0,t.length-1)+"0"+t.charAt(t.length-1);if(e.match(/E\-/)&&t.match(/e\+/))t=t.replace(/e\+/,"e");return t.replace("e","E")}function Ne(e,r,t){if(e.charCodeAt(0)===40&&!r.match(ye)){var a=r.replace(/\( */,"").replace(/ \)/,"").replace(/\)/,"");if(t>=0)return Ne("n",a,t);return"("+Ne("n",a,-t)+")"}if(r.charCodeAt(r.length-1)===44)return Fe(e,r,t);if(r.indexOf("%")!==-1)return De(e,r,t);if(r.indexOf("E")!==-1)return Oe(r,t);if(r.charCodeAt(0)===36)return"$"+Ne(e,r.substr(r.charAt(1)==" "?2:1),t);var n;var i,s,l,o=Math.abs(t),c=t<0?"-":"";if(r.match(/^00+$/))return c+z(o,r.length);if(r.match(/^[#?]+$/)){n=""+t;if(t===0)n="";return n.length>r.length?n:Ce(r.substr(0,r.length-n.length))+n}if(i=r.match(ge))return we(i,o,c);if(r.match(/^#+0+$/))return c+z(o,r.length-r.indexOf("0"));if(i=r.match(ke)){n=(""+t).replace(/^([^\.]+)$/,"$1."+Ce(i[1])).replace(/\.$/,"."+Ce(i[1]));n=n.replace(/\.(\d*)$/,function(e,r){return"."+r+xr("0",Ce(i[1]).length-r.length)});return r.indexOf("0.")!==-1?n:n.replace(/^0\./,".")}r=r.replace(/^#+([0.])/,"$1");if(i=r.match(/^(0*)\.(#*)$/)){return c+(""+o).replace(/\.(\d*[1-9])0*$/,".$1").replace(/^(-?\d*)$/,"$1.").replace(/^0\./,i[1].length?"0.":".")}if(i=r.match(/^#{1,3},##0(\.?)$/))return c+he(""+o);if(i=r.match(/^#,##0\.([#0]*0)$/)){return t<0?"-"+Ne(e,r,-t):he(""+t)+"."+xr("0",i[1].length)}if(i=r.match(/^#,#*,#0/))return Ne(e,r.replace(/^#,#*,/,""),t);if(i=r.match(/^([0#]+)(\\?-([0#]+))+$/)){n=B(Ne(e,r.replace(/[\\-]/g,""),t));s=0;return B(B(r.replace(/\\/g,"")).replace(/[0#]/g,function(e){return s<n.length?n.charAt(s++):e==="0"?"0":""}))}if(r.match(xe)){n=Ne(e,"##########",t);return"("+n.substr(0,3)+") "+n.substr(3,3)+"-"+n.substr(6)}var f="";if(i=r.match(/^([#0?]+)( ?)\/( ?)([#0?]+)/)){s=Math.min(i[4].length,7);l=re(o,Math.pow(10,s)-1,false);n=""+c;f=Me("n",i[1],l[1]);if(f.charAt(f.length-1)==" ")f=f.substr(0,f.length-1)+"0";n+=f+i[2]+"/"+i[3];f=j(l[2],s);if(f.length<i[4].length)f=Ce(i[4].substr(i[4].length-f.length))+f;n+=f;return n}if(i=r.match(/^# ([#0?]+)( ?)\/( ?)([#0?]+)/)){s=Math.min(Math.max(i[1].length,i[4].length),7);l=re(o,Math.pow(10,s)-1,true);return c+(l[0]||(l[1]?"":"0"))+" "+(l[1]?W(l[1],s)+i[2]+"/"+i[3]+j(l[2],s):xr(" ",2*s+1+i[2].length+i[3].length))}if(i=r.match(/^[#0?]+$/)){n=""+t;if(r.length<=n.length)return n;return Ce(r.substr(0,r.length-n.length))+n}if(i=r.match(/^([#0]+)\.([#0]+)$/)){n=""+t.toFixed(Math.min(i[2].length,10)).replace(/([^0])0+$/,"$1");s=n.indexOf(".");var u=r.indexOf(".")-s,h=r.length-n.length-u;return Ce(r.substr(0,u)+n+r.substr(r.length-h))}if(i=r.match(/^00,000\.([#0]*0)$/)){return t<0?"-"+Ne(e,r,-t):he(""+t).replace(/^\d,\d{3}$/,"0$&").replace(/^\d*$/,function(e){return"00,"+(e.length<3?z(0,3-e.length):"")+e})+"."+z(0,i[1].length)}switch(r){case"###,###":;case"##,###":;case"#,###":var d=he(""+o);return d!=="0"?c+d:"";default:if(r.match(/\.[0#?]*$/))return Ne(e,r.slice(0,r.lastIndexOf(".")),t)+Ce(r.slice(r.lastIndexOf(".")));}throw new Error("unsupported format |"+r+"|")}function Me(e,r,t){return(t|0)===t?Ne(e,r,t):Ee(e,r,t)}function Ie(e){var r=[];var t=false;for(var a=0,n=0;a<e.length;++a)switch(e.charCodeAt(a)){case 34:t=!t;break;case 95:;case 42:;case 92:++a;break;case 59:r[r.length]=e.substr(n,a-n);n=a+1;}r[r.length]=e.substr(n);if(t===true)throw new Error("Format |"+e+"| unterminated string ");return r}var Pe=/\[[HhMmSs\u0E0A\u0E19\u0E17]*\]/;function Re(e){var r=0,t="",a="";while(r<e.length){switch(t=e.charAt(r)){case"G":if(Y(e,r))r+=6;r++;break;case'"':for(;e.charCodeAt(++r)!==34&&r<e.length;){}++r;break;case"\\":r+=2;break;case"_":r+=2;break;case"@":++r;break;case"B":;case"b":if(e.charAt(r+1)==="1"||e.charAt(r+1)==="2")return true;case"M":;case"D":;case"Y":;case"H":;case"S":;case"E":;case"m":;case"d":;case"y":;case"h":;case"s":;case"e":;case"g":return true;case"A":;case"a":;case"上":if(e.substr(r,3).toUpperCase()==="A/P")return true;if(e.substr(r,5).toUpperCase()==="AM/PM")return true;if(e.substr(r,5).toUpperCase()==="上午/下午")return true;++r;break;case"[":a=t;while(e.charAt(r++)!=="]"&&r<e.length)a+=e.charAt(r);if(a.match(Pe))return true;break;case".":;case"0":;case"#":while(r<e.length&&("0#?.,E+-%".indexOf(t=e.charAt(++r))>-1||t=="\\"&&e.charAt(r+1)=="-"&&"0#".indexOf(e.charAt(r+2))>-1)){}break;case"?":while(e.charAt(++r)===t){}break;case"*":++r;if(e.charAt(r)==" "||e.charAt(r)=="*")++r;break;case"(":;case")":++r;break;case"1":;case"2":;case"3":;case"4":;case"5":;case"6":;case"7":;case"8":;case"9":while(r<e.length&&"0123456789".indexOf(e.charAt(++r))>-1){}break;case" ":++r;break;default:++r;break;}}return false}function Le(e,r,t,a){var n=[],i="",s=0,l="",o="t",c,f,u;var h="H";while(s<e.length){switch(l=e.charAt(s)){case"G":if(!Y(e,s))throw new Error("unrecognized character "+l+" in "+e);n[n.length]={t:"G",v:"General"};s+=7;break;case'"':for(i="";(u=e.charCodeAt(++s))!==34&&s<e.length;)i+=String.fromCharCode(u);n[n.length]={t:"t",v:i};++s;break;case"\\":var d=e.charAt(++s),p=d==="("||d===")"?d:"t";n[n.length]={t:p,v:d};++s;break;case"_":n[n.length]={t:"t",v:" "};s+=2;break;case"@":n[n.length]={t:"T",v:r};++s;break;case"B":;case"b":if(e.charAt(s+1)==="1"||e.charAt(s+1)==="2"){if(c==null){c=ae(r,t,e.charAt(s+1)==="2");if(c==null)return""}n[n.length]={t:"X",v:e.substr(s,2)};o=l;s+=2;break};case"M":;case"D":;case"Y":;case"H":;case"S":;case"E":l=l.toLowerCase();case"m":;case"d":;case"y":;case"h":;case"s":;case"e":;case"g":if(r<0)return"";if(c==null){c=ae(r,t);if(c==null)return""}i=l;while(++s<e.length&&e.charAt(s).toLowerCase()===l)i+=l;if(l==="m"&&o.toLowerCase()==="h")l="M";if(l==="h")l=h;n[n.length]={t:l,v:i};o=l;break;case"A":;case"a":;case"上":var m={t:l,v:l};if(c==null)c=ae(r,t);if(e.substr(s,3).toUpperCase()==="A/P"){if(c!=null)m.v=c.H>=12?e.charAt(s+2):l;m.t="T";h="h";s+=3}else if(e.substr(s,5).toUpperCase()==="AM/PM"){if(c!=null)m.v=c.H>=12?"PM":"AM";m.t="T";s+=5;h="h"}else if(e.substr(s,5).toUpperCase()==="上午/下午"){if(c!=null)m.v=c.H>=12?"下午":"上午";m.t="T";s+=5;h="h"}else{m.t="t";++s}if(c==null&&m.t==="T")return"";n[n.length]=m;o=l;break;case"[":i=l;while(e.charAt(s++)!=="]"&&s<e.length)i+=e.charAt(s);if(i.slice(-1)!=="]")throw'unterminated "[" block: |'+i+"|";if(i.match(Pe)){if(c==null){c=ae(r,t);if(c==null)return""}n[n.length]={t:"Z",v:i.toLowerCase()};o=i.charAt(1)}else if(i.indexOf("$")>-1){i=(i.match(/\$([^-\[\]]*)/)||[])[1]||"$";if(!Re(e))n[n.length]={t:"t",v:i}}break;case".":if(c!=null){i=l;while(++s<e.length&&(l=e.charAt(s))==="0")i+=l;n[n.length]={t:"s",v:i};break};case"0":;case"#":i=l;while(++s<e.length&&"0#?.,E+-%".indexOf(l=e.charAt(s))>-1)i+=l;n[n.length]={t:"n",v:i};break;case"?":i=l;while(e.charAt(++s)===l)i+=l;n[n.length]={t:l,v:i};o=l;break;case"*":++s;if(e.charAt(s)==" "||e.charAt(s)=="*")++s;break;case"(":;case")":n[n.length]={t:a===1?"t":l,v:l};++s;break;case"1":;case"2":;case"3":;case"4":;case"5":;case"6":;case"7":;case"8":;case"9":i=l;while(s<e.length&&"0123456789".indexOf(e.charAt(++s))>-1)i+=e.charAt(s);n[n.length]={t:"D",v:i};break;case" ":n[n.length]={t:l,v:l};++s;break;case"$":n[n.length]={t:"t",v:"$"};++s;break;default:if(",$-+/():!^&'~{}<>=€acfijklopqrtuvwxzP".indexOf(l)===-1)throw new Error("unrecognized character "+l+" in "+e);n[n.length]={t:"t",v:l};++s;break;}}var v=0,g=0,b;for(s=n.length-1,o="t";s>=0;--s){switch(n[s].t){case"h":;case"H":n[s].t=h;o="h";if(v<1)v=1;break;case"s":if(b=n[s].v.match(/\.0+$/)){g=Math.max(g,b[0].length-1);v=4}if(v<3)v=3;case"d":;case"y":;case"e":o=n[s].t;break;case"M":o=n[s].t;if(v<2)v=2;break;case"m":if(o==="s"){n[s].t="M";if(v<2)v=2}break;case"X":break;case"Z":if(v<1&&n[s].v.match(/[Hh]/))v=1;if(v<2&&n[s].v.match(/[Mm]/))v=2;if(v<3&&n[s].v.match(/[Ss]/))v=3;}}var w;switch(v){case 0:break;case 1:;case 2:;case 3:if(c.u>=.5){c.u=0;++c.S}if(c.S>=60){c.S=0;++c.M}if(c.M>=60){c.M=0;++c.H}if(c.H>=24){c.H=0;++c.D;w=ae(c.D);w.u=c.u;w.S=c.S;w.M=c.M;w.H=c.H;c=w}break;case 4:switch(g){case 1:c.u=Math.round(c.u*10)/10;break;case 2:c.u=Math.round(c.u*100)/100;break;case 3:c.u=Math.round(c.u*1e3)/1e3;break;}if(c.u>=1){c.u=0;++c.S}if(c.S>=60){c.S=0;++c.M}if(c.M>=60){c.M=0;++c.H}if(c.H>=24){c.H=0;++c.D;w=ae(c.D);w.u=c.u;w.S=c.S;w.M=c.M;w.H=c.H;c=w}break;}var k="",y;for(s=0;s<n.length;++s){switch(n[s].t){case"t":;case"T":;case" ":;case"D":break;case"X":n[s].v="";n[s].t=";";break;case"d":;case"m":;case"y":;case"h":;case"H":;case"M":;case"s":;case"e":;case"b":;case"Z":n[s].v=ue(n[s].t.charCodeAt(0),n[s].v,c,g);n[s].t="t";break;case"n":;case"?":y=s+1;while(n[y]!=null&&((l=n[y].t)==="?"||l==="D"||(l===" "||l==="t")&&n[y+1]!=null&&(n[y+1].t==="?"||n[y+1].t==="t"&&n[y+1].v==="/")||n[s].t==="("&&(l===" "||l==="n"||l===")")||l==="t"&&(n[y].v==="/"||n[y].v===" "&&n[y+1]!=null&&n[y+1].t=="?"))){n[s].v+=n[y].v;n[y]={v:"",t:";"};++y}k+=n[s].v;s=y-1;break;case"G":n[s].t="t";n[s].v=ce(r,t);break;}}var x="",C,S;if(k.length>0){if(k.charCodeAt(0)==40){C=r<0&&k.charCodeAt(0)===45?-r:r;S=Me("n",k,C)}else{C=r<0&&a>1?-r:r;S=Me("n",k,C);if(C<0&&n[0]&&n[0].t=="t"){S=S.substr(1);n[0].v="-"+n[0].v}}y=S.length-1;var _=n.length;for(s=0;s<n.length;++s)if(n[s]!=null&&n[s].t!="t"&&n[s].v.indexOf(".")>-1){_=s;break}var A=n.length;if(_===n.length&&S.indexOf("E")===-1){for(s=n.length-1;s>=0;--s){if(n[s]==null||"n?".indexOf(n[s].t)===-1)continue;if(y>=n[s].v.length-1){y-=n[s].v.length;n[s].v=S.substr(y+1,n[s].v.length)}else if(y<0)n[s].v="";else{n[s].v=S.substr(0,y+1);y=-1}n[s].t="t";A=s}if(y>=0&&A<n.length)n[A].v=S.substr(0,y+1)+n[A].v}else if(_!==n.length&&S.indexOf("E")===-1){y=S.indexOf(".")-1;for(s=_;s>=0;--s){if(n[s]==null||"n?".indexOf(n[s].t)===-1)continue;f=n[s].v.indexOf(".")>-1&&s===_?n[s].v.indexOf(".")-1:n[s].v.length-1;x=n[s].v.substr(f+1);for(;f>=0;--f){if(y>=0&&(n[s].v.charAt(f)==="0"||n[s].v.charAt(f)==="#"))x=S.charAt(y--)+x}n[s].v=x;n[s].t="t";A=s}if(y>=0&&A<n.length)n[A].v=S.substr(0,y+1)+n[A].v;y=S.indexOf(".")+1;for(s=_;s<n.length;++s){if(n[s]==null||"n?(".indexOf(n[s].t)===-1&&s!==_)continue;f=n[s].v.indexOf(".")>-1&&s===_?n[s].v.indexOf(".")+1:0;x=n[s].v.substr(0,f);for(;f<n[s].v.length;++f){if(y<S.length)x+=S.charAt(y++)}n[s].v=x;n[s].t="t";A=s}}}for(s=0;s<n.length;++s)if(n[s]!=null&&"n?".indexOf(n[s].t)>-1){C=a>1&&r<0&&s>0&&n[s-1].v==="-"?-r:r;n[s].v=Me(n[s].t,n[s].v,C);n[s].t="t"}var T="";for(s=0;s!==n.length;++s)if(n[s]!=null)T+=n[s].v;return T}var Ue=/\[(=|>[=]?|<[>=]?)(-?\d+(?:\.\d*)?)\]/;function Be(e,r){if(r==null)return false;var t=parseFloat(r[2]);switch(r[1]){case"=":if(e==t)return true;break;case">":if(e>t)return true;break;case"<":if(e<t)return true;break;case"<>":if(e!=t)return true;break;case">=":if(e>=t)return true;break;case"<=":if(e<=t)return true;break;}return false}function ze(e,r){var t=Ie(e);var a=t.length,n=t[a-1].indexOf("@");if(a<4&&n>-1)--a;if(t.length>4)throw new Error("cannot find right format for |"+t.join("|")+"|");if(typeof r!=="number")return[4,t.length===4||n>-1?t[t.length-1]:"@"];if(typeof r==="number"&&!isFinite(r))r=0;switch(t.length){case 1:t=n>-1?["General","General","General",t[0]]:[t[0],t[0],t[0],"@"];break;case 2:t=n>-1?[t[0],t[0],t[0],t[1]]:[t[0],t[1],t[0],"@"];break;case 3:t=n>-1?[t[0],t[1],t[0],t[2]]:[t[0],t[1],t[2],"@"];break;case 4:break;}var i=r>0?t[0]:r<0?t[1]:t[2];if(t[0].indexOf("[")===-1&&t[1].indexOf("[")===-1)return[a,i];if(t[0].match(/\[[=<>]/)!=null||t[1].match(/\[[=<>]/)!=null){var s=t[0].match(Ue);var l=t[1].match(Ue);return Be(r,s)?[a,t[0]]:Be(r,l)?[a,t[1]]:[a,t[s!=null&&l!=null?2:1]]}return[a,i]}function $e(e,r,t){if(t==null)t={};var a="";switch(typeof e){case"string":if(e=="m/d/yy"&&t.dateNF)a=t.dateNF;else a=e;break;case"number":if(e==14&&t.dateNF)a=t.dateNF;else a=(t.table!=null?t.table:q)[e];if(a==null)a=t.table&&t.table[Q[e]]||q[Q[e]];if(a==null)a=ee[e]||"General";break;}if(Y(a,0))return ce(r,t);if(r instanceof Date)r=dr(r,t.date1904);var n=ze(a,r);if(Y(n[1]))return ce(r,t);if(r===true)r="TRUE";else if(r===false)r="FALSE";else if(r===""||r==null)return"";else if(isNaN(r)&&n[1].indexOf("0")>-1)return"#NUM!";else if(!isFinite(r)&&n[1].indexOf("0")>-1)return"#DIV/0!";return Le(n[1],r,t,n[0])}function We(e,r){if(typeof r!="number"){r=+r||-1;for(var t=0;t<392;++t){if(q[t]==undefined){if(r<0)r=t;continue}if(q[t]==e){r=t;break}}if(r<0)r=391}q[r]=e;return r}function je(e){for(var r=0;r!=392;++r)if(e[r]!==undefined)We(e[r],r)}function He(){q=K()}var Ve={format:$e,load:We,_table:q,load_table:je,parse_date_code:ae,is_date:Re,get_table:function Mc(){return Ve._table=q}};var Xe={5:'"$"#,##0_);\\("$"#,##0\\)',6:'"$"#,##0_);[Red]\\("$"#,##0\\)',7:'"$"#,##0.00_);\\("$"#,##0.00\\)',8:'"$"#,##0.00_);[Red]\\("$"#,##0.00\\)',23:"General",24:"General",25:"General",26:"General",27:"m/d/yy",28:"m/d/yy",29:"m/d/yy",30:"m/d/yy",31:"m/d/yy",32:"h:mm:ss",33:"h:mm:ss",34:"h:mm:ss",35:"h:mm:ss",36:"m/d/yy",41:'_(* #,##0_);_(* (#,##0);_(* "-"_);_(@_)',42:'_("$"* #,##0_);_("$"* (#,##0);_("$"* "-"_);_(@_)',43:'_(* #,##0.00_);_(* (#,##0.00);_(* "-"??_);_(@_)',44:'_("$"* #,##0.00_);_("$"* (#,##0.00);_("$"* "-"??_);_(@_)',50:"m/d/yy",51:"m/d/yy",52:"m/d/yy",53:"m/d/yy",54:"m/d/yy",55:"m/d/yy",56:"m/d/yy",57:"m/d/yy",58:"m/d/yy",59:"0",60:"0.00",61:"#,##0",62:"#,##0.00",63:'"$"#,##0_);\\("$"#,##0\\)',64:'"$"#,##0_);[Red]\\("$"#,##0\\)',65:'"$"#,##0.00_);\\("$"#,##0.00\\)',66:'"$"#,##0.00_);[Red]\\("$"#,##0.00\\)',67:"0%",68:"0.00%",69:"# ?/?",70:"# ??/??",71:"m/d/yy",72:"m/d/yy",73:"d-mmm-yy",74:"d-mmm",75:"mmm-yy",76:"h:mm",77:"h:mm:ss",78:"m/d/yy h:mm",79:"mm:ss",80:"[h]:mm:ss",81:"mmss.0"};var Ge=/[dD]+|[mM]+|[yYeE]+|[Hh]+|[Ss]+/g;function Ye(e){var r=typeof e=="number"?q[e]:e;r=r.replace(Ge,"(\\d+)");Ge.lastIndex=0;return new RegExp("^"+r+"$");
+}function Je(e,r,t){var a=-1,n=-1,i=-1,s=-1,l=-1,o=-1;(r.match(Ge)||[]).forEach(function(e,r){var c=parseInt(t[r+1],10);switch(e.toLowerCase().charAt(0)){case"y":a=c;break;case"d":i=c;break;case"h":s=c;break;case"s":o=c;break;case"m":if(s>=0)l=c;else n=c;break;}});Ge.lastIndex=0;if(o>=0&&l==-1&&n>=0){l=n;n=-1}var c=(""+(a>=0?a:(new Date).getFullYear())).slice(-4)+"-"+("00"+(n>=1?n:1)).slice(-2)+"-"+("00"+(i>=1?i:1)).slice(-2);if(c.length==7)c="0"+c;if(c.length==8)c="20"+c;var f=("00"+(s>=0?s:0)).slice(-2)+":"+("00"+(l>=0?l:0)).slice(-2)+":"+("00"+(o>=0?o:0)).slice(-2);if(s==-1&&l==-1&&o==-1)return c;if(a==-1&&n==-1&&i==-1)return f;return c+"T"+f}var Ze={"d.m":"d\\.m"};function Ke(e,r){return We(Ze[e]||e,r)}var qe=function(){var e={};e.version="1.2.0";function r(){var e=0,r=new Array(256);for(var t=0;t!=256;++t){e=t;e=e&1?-306674912^e>>>1:e>>>1;e=e&1?-306674912^e>>>1:e>>>1;e=e&1?-306674912^e>>>1:e>>>1;e=e&1?-306674912^e>>>1:e>>>1;e=e&1?-306674912^e>>>1:e>>>1;e=e&1?-306674912^e>>>1:e>>>1;e=e&1?-306674912^e>>>1:e>>>1;e=e&1?-306674912^e>>>1:e>>>1;r[t]=e}return typeof Int32Array!=="undefined"?new Int32Array(r):r}var t=r();function a(e){var r=0,t=0,a=0,n=typeof Int32Array!=="undefined"?new Int32Array(4096):new Array(4096);for(a=0;a!=256;++a)n[a]=e[a];for(a=0;a!=256;++a){t=e[a];for(r=256+a;r<4096;r+=256)t=n[r]=t>>>8^e[t&255]}var i=[];for(a=1;a!=16;++a)i[a-1]=typeof Int32Array!=="undefined"&&typeof n.subarray=="function"?n.subarray(a*256,a*256+256):n.slice(a*256,a*256+256);return i}var n=a(t);var i=n[0],s=n[1],l=n[2],o=n[3],c=n[4];var f=n[5],u=n[6],h=n[7],d=n[8],p=n[9];var m=n[10],v=n[11],g=n[12],b=n[13],w=n[14];function k(e,r){var a=r^-1;for(var n=0,i=e.length;n<i;)a=a>>>8^t[(a^e.charCodeAt(n++))&255];return~a}function y(e,r){var a=r^-1,n=e.length-15,k=0;for(;k<n;)a=w[e[k++]^a&255]^b[e[k++]^a>>8&255]^g[e[k++]^a>>16&255]^v[e[k++]^a>>>24]^m[e[k++]]^p[e[k++]]^d[e[k++]]^h[e[k++]]^u[e[k++]]^f[e[k++]]^c[e[k++]]^o[e[k++]]^l[e[k++]]^s[e[k++]]^i[e[k++]]^t[e[k++]];n+=15;while(k<n)a=a>>>8^t[(a^e[k++])&255];return~a}function x(e,r){var a=r^-1;for(var n=0,i=e.length,s=0,l=0;n<i;){s=e.charCodeAt(n++);if(s<128){a=a>>>8^t[(a^s)&255]}else if(s<2048){a=a>>>8^t[(a^(192|s>>6&31))&255];a=a>>>8^t[(a^(128|s&63))&255]}else if(s>=55296&&s<57344){s=(s&1023)+64;l=e.charCodeAt(n++)&1023;a=a>>>8^t[(a^(240|s>>8&7))&255];a=a>>>8^t[(a^(128|s>>2&63))&255];a=a>>>8^t[(a^(128|l>>6&15|(s&3)<<4))&255];a=a>>>8^t[(a^(128|l&63))&255]}else{a=a>>>8^t[(a^(224|s>>12&15))&255];a=a>>>8^t[(a^(128|s>>6&63))&255];a=a>>>8^t[(a^(128|s&63))&255]}}return~a}e.table=t;e.bstr=k;e.buf=y;e.str=x;return e}();var Qe=function Ic(){var e={};e.version="1.2.2";function r(e,r){var t=e.split("/"),a=r.split("/");for(var n=0,i=0,s=Math.min(t.length,a.length);n<s;++n){if(i=t[n].length-a[n].length)return i;if(t[n]!=a[n])return t[n]<a[n]?-1:1}return t.length-a.length}function t(e){if(e.charAt(e.length-1)=="/")return e.slice(0,-1).indexOf("/")===-1?e:t(e.slice(0,-1));var r=e.lastIndexOf("/");return r===-1?e:e.slice(0,r+1)}function a(e){if(e.charAt(e.length-1)=="/")return a(e.slice(0,-1));var r=e.lastIndexOf("/");return r===-1?e:e.slice(r+1)}function n(e,r){if(typeof r==="string")r=new Date(r);var t=r.getHours();t=t<<6|r.getMinutes();t=t<<5|r.getSeconds()>>>1;e._W(2,t);var a=r.getFullYear()-1980;a=a<<4|r.getMonth()+1;a=a<<5|r.getDate();e._W(2,a)}function i(e){var r=e._R(2)&65535;var t=e._R(2)&65535;var a=new Date;var n=t&31;t>>>=5;var i=t&15;t>>>=4;a.setMilliseconds(0);a.setFullYear(t+1980);a.setMonth(i-1);a.setDate(n);var s=r&31;r>>>=5;var l=r&63;r>>>=6;a.setHours(r);a.setMinutes(l);a.setSeconds(s<<1);return a}function s(e){Fa(e,0);var r={};var t=0;while(e.l<=e.length-4){var a=e._R(2);var n=e._R(2),i=e.l+n;var s={};switch(a){case 21589:{t=e._R(1);if(t&1)s.mtime=e._R(4);if(n>5){if(t&2)s.atime=e._R(4);if(t&4)s.ctime=e._R(4)}if(s.mtime)s.mt=new Date(s.mtime*1e3)}break;case 1:{var l=e._R(4),o=e._R(4);s.usz=o*Math.pow(2,32)+l;l=e._R(4);o=e._R(4);s.csz=o*Math.pow(2,32)+l}break;}e.l=i;r[a]=s}return r}var l;function o(){return l||(l=er)}function c(e,r){if(e[0]==80&&e[1]==75)return Oe(e,r);if((e[0]|32)==109&&(e[1]|32)==105)return ze(e,r);if(e.length<512)throw new Error("CFB file size "+e.length+" < 512");var t=3;var a=512;var n=0;var i=0;var s=0;var l=0;var o=0;var c=[];var p=e.slice(0,512);Fa(p,0);var v=f(p);t=v[0];switch(t){case 3:a=512;break;case 4:a=4096;break;case 0:if(v[1]==0)return Oe(e,r);default:throw new Error("Major Version: Expected 3 or 4 saw "+t);}if(a!==512){p=e.slice(0,a);Fa(p,28)}var w=e.slice(0,a);u(p,t);var k=p._R(4,"i");if(t===3&&k!==0)throw new Error("# Directory Sectors: Expected 0 saw "+k);p.l+=4;s=p._R(4,"i");p.l+=4;p.chk("00100000","Mini Stream Cutoff Size: ");l=p._R(4,"i");n=p._R(4,"i");o=p._R(4,"i");i=p._R(4,"i");for(var y=-1,x=0;x<109;++x){y=p._R(4,"i");if(y<0)break;c[x]=y}var C=h(e,a);m(o,i,C,a,c);var S=g(C,s,c,a);if(s<S.length)S[s].name="!Directory";if(n>0&&l!==R)S[l].name="!MiniFAT";S[c[0]].name="!FAT";S.fat_addrs=c;S.ssz=a;var _={},A=[],T=[],E=[];b(s,S,C,A,n,_,T,l);d(T,E,A);A.shift();var F={FileIndex:T,FullPaths:E};if(r&&r.raw)F.raw={header:w,sectors:C};return F}function f(e){if(e[e.l]==80&&e[e.l+1]==75)return[0,0];e.chk(B,"Header Signature: ");e.l+=16;var r=e._R(2,"u");return[e._R(2,"u"),r]}function u(e,r){var t=9;e.l+=2;switch(t=e._R(2)){case 9:if(r!=3)throw new Error("Sector Shift: Expected 9 saw "+t);break;case 12:if(r!=4)throw new Error("Sector Shift: Expected 12 saw "+t);break;default:throw new Error("Sector Shift: Expected 9 or 12 saw "+t);}e.chk("0600","Mini Sector Shift: ");e.chk("000000000000","Reserved: ")}function h(e,r){var t=Math.ceil(e.length/r)-1;var a=[];for(var n=1;n<t;++n)a[n-1]=e.slice(n*r,(n+1)*r);a[t-1]=e.slice(t*r);return a}function d(e,r,t){var a=0,n=0,i=0,s=0,l=0,o=t.length;var c=[],f=[];for(;a<o;++a){c[a]=f[a]=a;r[a]=t[a]}for(;l<f.length;++l){a=f[l];n=e[a].L;i=e[a].R;s=e[a].C;if(c[a]===a){if(n!==-1&&c[n]!==n)c[a]=c[n];if(i!==-1&&c[i]!==i)c[a]=c[i]}if(s!==-1)c[s]=a;if(n!==-1&&a!=c[a]){c[n]=c[a];if(f.lastIndexOf(n)<l)f.push(n)}if(i!==-1&&a!=c[a]){c[i]=c[a];if(f.lastIndexOf(i)<l)f.push(i)}}for(a=1;a<o;++a)if(c[a]===a){if(i!==-1&&c[i]!==i)c[a]=c[i];else if(n!==-1&&c[n]!==n)c[a]=c[n]}for(a=1;a<o;++a){if(e[a].type===0)continue;l=a;if(l!=c[l])do{l=c[l];r[a]=r[l]+"/"+r[a]}while(l!==0&&-1!==c[l]&&l!=c[l]);c[a]=-1}r[0]+="/";for(a=1;a<o;++a){if(e[a].type!==2)r[a]+="/"}}function p(e,r,t){var a=e.start,n=e.size;var i=[];var s=a;while(t&&n>0&&s>=0){i.push(r.slice(s*I,s*I+I));n-=I;s=ya(t,s*4)}if(i.length===0)return Oa(0);return P(i).slice(0,e.size)}function m(e,r,t,a,n){var i=R;if(e===R){if(r!==0)throw new Error("DIFAT chain shorter than expected")}else if(e!==-1){var s=t[e],l=(a>>>2)-1;if(!s)return;for(var o=0;o<l;++o){if((i=ya(s,o*4))===R)break;n.push(i)}if(r>=1)m(ya(s,a-4),r-1,t,a,n)}}function v(e,r,t,a,n){var i=[],s=[];if(!n)n=[];var l=a-1,o=0,c=0;for(o=r;o>=0;){n[o]=true;i[i.length]=o;s.push(e[o]);var f=t[Math.floor(o*4/a)];c=o*4&l;if(a<4+c)throw new Error("FAT boundary crossed: "+o+" 4 "+a);if(!e[f])break;o=ya(e[f],c)}return{nodes:i,data:Zt([s])}}function g(e,r,t,a){var n=e.length,i=[];var s=[],l=[],o=[];var c=a-1,f=0,u=0,h=0,d=0;for(f=0;f<n;++f){l=[];h=f+r;if(h>=n)h-=n;if(s[h])continue;o=[];var p=[];for(u=h;u>=0;){p[u]=true;s[u]=true;l[l.length]=u;o.push(e[u]);var m=t[Math.floor(u*4/a)];d=u*4&c;if(a<4+d)throw new Error("FAT boundary crossed: "+u+" 4 "+a);if(!e[m])break;u=ya(e[m],d);if(p[u])break}i[h]={nodes:l,data:Zt([o])}}return i}function b(e,r,t,a,n,i,s,l){var o=0,c=a.length?2:0;var f=r[e].data;var u=0,h=0,d;for(;u<f.length;u+=128){var m=f.slice(u,u+128);Fa(m,64);h=m._R(2);d=qt(m,0,h-c);a.push(d);var g={name:d,type:m._R(1),color:m._R(1),L:m._R(4,"i"),R:m._R(4,"i"),C:m._R(4,"i"),clsid:m._R(16),state:m._R(4,"i"),start:0,size:0};var b=m._R(2)+m._R(2)+m._R(2)+m._R(2);if(b!==0)g.ct=w(m,m.l-8);var k=m._R(2)+m._R(2)+m._R(2)+m._R(2);if(k!==0)g.mt=w(m,m.l-8);g.start=m._R(4,"i");g.size=m._R(4,"i");if(g.size<0&&g.start<0){g.size=g.type=0;g.start=R;g.name=""}if(g.type===5){o=g.start;if(n>0&&o!==R)r[o].name="!StreamData"}else if(g.size>=4096){g.storage="fat";if(r[g.start]===undefined)r[g.start]=v(t,g.start,r.fat_addrs,r.ssz);r[g.start].name=g.name;g.content=r[g.start].data.slice(0,g.size)}else{g.storage="minifat";if(g.size<0)g.size=0;else if(o!==R&&g.start!==R&&r[o]){g.content=p(g,r[o].data,(r[l]||{}).data)}}if(g.content)Fa(g.content,0);i[d]=g;s.push(g)}}function w(e,r){return new Date((ka(e,r+4)/1e7*Math.pow(2,32)+ka(e,r)/1e7-11644473600)*1e3)}function k(e,r){o();return c(l.readFileSync(e),r)}function x(e,r){var t=r&&r.type;if(!t){if(_&&Buffer.isBuffer(e))t="buffer"}switch(t||"base64"){case"file":return k(e,r);case"base64":return c(D(S(e)),r);case"binary":return c(D(e),r);}return c(e,r)}function C(e,r){var t=r||{},a=t.root||"Root Entry";if(!e.FullPaths)e.FullPaths=[];if(!e.FileIndex)e.FileIndex=[];if(e.FullPaths.length!==e.FileIndex.length)throw new Error("inconsistent CFB structure");if(e.FullPaths.length===0){e.FullPaths[0]=a+"/";e.FileIndex[0]={name:a,type:5}}if(t.CLSID)e.FileIndex[0].clsid=t.CLSID;T(e)}function T(e){var r="Sh33tJ5";if(Qe.find(e,"/"+r))return;var t=Oa(4);t[0]=55;t[1]=t[3]=50;t[2]=54;e.FileIndex.push({name:r,type:2,content:t,size:4,L:69,R:69,C:69});e.FullPaths.push(e.FullPaths[0]+r);O(e)}function O(e,n){C(e);var i=false,s=false;for(var l=e.FullPaths.length-1;l>=0;--l){var o=e.FileIndex[l];switch(o.type){case 0:if(s)i=true;else{e.FileIndex.pop();e.FullPaths.pop()}break;case 1:;case 2:;case 5:s=true;if(isNaN(o.R*o.L*o.C))i=true;if(o.R>-1&&o.L>-1&&o.R==o.L)i=true;break;default:i=true;break;}}if(!i&&!n)return;var c=new Date(1987,1,19),f=0;var u=Object.create?Object.create(null):{};var h=[];for(l=0;l<e.FullPaths.length;++l){u[e.FullPaths[l]]=true;if(e.FileIndex[l].type===0)continue;h.push([e.FullPaths[l],e.FileIndex[l]])}for(l=0;l<h.length;++l){var d=t(h[l][0]);s=u[d];while(!s){while(t(d)&&!u[t(d)])d=t(d);h.push([d,{name:a(d).replace("/",""),type:1,clsid:$,ct:c,mt:c,content:null}]);u[d]=true;d=t(h[l][0]);s=u[d]}}h.sort(function(e,t){return r(e[0],t[0])});e.FullPaths=[];e.FileIndex=[];for(l=0;l<h.length;++l){e.FullPaths[l]=h[l][0];e.FileIndex[l]=h[l][1]}for(l=0;l<h.length;++l){var p=e.FileIndex[l];var m=e.FullPaths[l];p.name=a(m).replace("/","");p.L=p.R=p.C=-(p.color=1);p.size=p.content?p.content.length:0;p.start=0;p.clsid=p.clsid||$;if(l===0){p.C=h.length>1?1:-1;p.size=0;p.type=5}else if(m.slice(-1)=="/"){for(f=l+1;f<h.length;++f)if(t(e.FullPaths[f])==m)break;p.C=f>=h.length?-1:f;for(f=l+1;f<h.length;++f)if(t(e.FullPaths[f])==t(m))break;p.R=f>=h.length?-1:f;p.type=1}else{if(t(e.FullPaths[l+1]||"")==t(m))p.R=l+1;p.type=2}}}function N(e,r){var t=r||{};if(t.fileType=="mad")return $e(e,t);O(e);switch(t.fileType){case"zip":return Me(e,t);}var a=function(e){var r=0,t=0;for(var a=0;a<e.FileIndex.length;++a){var n=e.FileIndex[a];if(!n.content)continue;var i=n.content.length;if(i>0){if(i<4096)r+=i+63>>6;else t+=i+511>>9}}var s=e.FullPaths.length+3>>2;var l=r+7>>3;var o=r+127>>7;var c=l+t+s+o;var f=c+127>>7;var u=f<=109?0:Math.ceil((f-109)/127);while(c+f+u+127>>7>f)u=++f<=109?0:Math.ceil((f-109)/127);var h=[1,u,f,o,s,t,r,0];e.FileIndex[0].size=r<<6;h[7]=(e.FileIndex[0].start=h[0]+h[1]+h[2]+h[3]+h[4]+h[5])+(h[6]+7>>3);return h}(e);var n=Oa(a[7]<<9);var i=0,s=0;{for(i=0;i<8;++i)n._W(1,z[i]);for(i=0;i<8;++i)n._W(2,0);n._W(2,62);n._W(2,3);n._W(2,65534);n._W(2,9);n._W(2,6);for(i=0;i<3;++i)n._W(2,0);n._W(4,0);n._W(4,a[2]);n._W(4,a[0]+a[1]+a[2]+a[3]-1);n._W(4,0);n._W(4,1<<12);n._W(4,a[3]?a[0]+a[1]+a[2]-1:R);n._W(4,a[3]);n._W(-4,a[1]?a[0]-1:R);n._W(4,a[1]);for(i=0;i<109;++i)n._W(-4,i<a[2]?a[1]+i:-1)}if(a[1]){for(s=0;s<a[1];++s){for(;i<236+s*127;++i)n._W(-4,i<a[2]?a[1]+i:-1);n._W(-4,s===a[1]-1?R:s+1)}}var l=function(e){for(s+=e;i<s-1;++i)n._W(-4,i+1);if(e){++i;n._W(-4,R)}};s=i=0;for(s+=a[1];i<s;++i)n._W(-4,W.DIFSECT);for(s+=a[2];i<s;++i)n._W(-4,W.FATSECT);l(a[3]);l(a[4]);var o=0,c=0;var f=e.FileIndex[0];for(;o<e.FileIndex.length;++o){f=e.FileIndex[o];if(!f.content)continue;c=f.content.length;if(c<4096)continue;f.start=s;l(c+511>>9)}l(a[6]+7>>3);while(n.l&511)n._W(-4,W.ENDOFCHAIN);s=i=0;for(o=0;o<e.FileIndex.length;++o){f=e.FileIndex[o];if(!f.content)continue;c=f.content.length;if(!c||c>=4096)continue;f.start=s;l(c+63>>6)}while(n.l&511)n._W(-4,W.ENDOFCHAIN);for(i=0;i<a[4]<<2;++i){var u=e.FullPaths[i];if(!u||u.length===0){for(o=0;o<17;++o)n._W(4,0);for(o=0;o<3;++o)n._W(4,-1);for(o=0;o<12;++o)n._W(4,0);continue}f=e.FileIndex[i];if(i===0)f.start=f.size?f.start-1:R;var h=i===0&&t.root||f.name;if(h.length>31){console.error("Name "+h+" will be truncated to "+h.slice(0,31));h=h.slice(0,31)}c=2*(h.length+1);n._W(64,h,"utf16le");n._W(2,c);n._W(1,f.type);n._W(1,f.color);n._W(-4,f.L);n._W(-4,f.R);n._W(-4,f.C);if(!f.clsid)for(o=0;o<4;++o)n._W(4,0);else n._W(16,f.clsid,"hex");n._W(4,f.state||0);n._W(4,0);n._W(4,0);n._W(4,0);n._W(4,0);n._W(4,f.start);n._W(4,f.size);n._W(4,0)}for(i=1;i<e.FileIndex.length;++i){f=e.FileIndex[i];if(f.size>=4096){n.l=f.start+1<<9;if(_&&Buffer.isBuffer(f.content)){f.content.copy(n,n.l,0,f.size);n.l+=f.size+511&-512}else{for(o=0;o<f.size;++o)n._W(1,f.content[o]);for(;o&511;++o)n._W(1,0)}}}for(i=1;i<e.FileIndex.length;++i){f=e.FileIndex[i];if(f.size>0&&f.size<4096){if(_&&Buffer.isBuffer(f.content)){f.content.copy(n,n.l,0,f.size);n.l+=f.size+63&-64}else{for(o=0;o<f.size;++o)n._W(1,f.content[o]);for(;o&63;++o)n._W(1,0)}}}if(_){n.l=n.length}else{while(n.l<n.length)n._W(1,0)}return n}function M(e,r){var t=e.FullPaths.map(function(e){return e.toUpperCase()});var a=t.map(function(e){var r=e.split("/");return r[r.length-(e.slice(-1)=="/"?2:1)]});var n=false;if(r.charCodeAt(0)===47){n=true;r=t[0].slice(0,-1)+r}else n=r.indexOf("/")!==-1;var i=r.toUpperCase();var s=n===true?t.indexOf(i):a.indexOf(i);if(s!==-1)return e.FileIndex[s];var l=!i.match(U);i=i.replace(L,"");if(l)i=i.replace(U,"!");for(s=0;s<t.length;++s){if((l?t[s].replace(U,"!"):t[s]).replace(L,"")==i)return e.FileIndex[s];if((l?a[s].replace(U,"!"):a[s]).replace(L,"")==i)return e.FileIndex[s]}return null}var I=64;var R=-2;var B="d0cf11e0a1b11ae1";var z=[208,207,17,224,161,177,26,225];var $="00000000000000000000000000000000";var W={MAXREGSECT:-6,DIFSECT:-4,FATSECT:-3,ENDOFCHAIN:R,FREESECT:-1,HEADER_SIGNATURE:B,HEADER_MINOR_VERSION:"3e00",MAXREGSID:-6,NOSTREAM:-1,HEADER_CLSID:$,EntryTypes:["unknown","storage","stream","lockbytes","property","root"]};function j(e,r,t){o();var a=N(e,t);l.writeFileSync(r,a)}function H(e){var r=new Array(e.length);for(var t=0;t<e.length;++t)r[t]=String.fromCharCode(e[t]);return r.join("")}function V(e,r){var t=N(e,r);switch(r&&r.type||"buffer"){case"file":o();l.writeFileSync(r.filename,t);return t;case"binary":return typeof t=="string"?t:H(t);case"base64":return y(typeof t=="string"?t:H(t));case"buffer":if(_)return Buffer.isBuffer(t)?t:A(t);case"array":return typeof t=="string"?D(t):t;}return t}var X;function G(e){try{var r=e.InflateRaw;var t=new r;t._processChunk(new Uint8Array([3,0]),t._finishFlushFlag);if(t.bytesRead)X=e;else throw new Error("zlib does not expose bytesRead")}catch(a){console.error("cannot use native zlib: "+(a.message||a))}}function Y(e,r){if(!X)return Fe(e,r);var t=X.InflateRaw;var a=new t;var n=a._processChunk(e.slice(e.l),a._finishFlushFlag);e.l+=a.bytesRead;return n}function J(e){return X?X.deflateRawSync(e):ye(e)}var Z=[16,17,18,0,8,7,9,6,10,5,11,4,12,3,13,2,14,1,15];var K=[3,4,5,6,7,8,9,10,11,13,15,17,19,23,27,31,35,43,51,59,67,83,99,115,131,163,195,227,258];var q=[1,2,3,4,5,7,9,13,17,25,33,49,65,97,129,193,257,385,513,769,1025,1537,2049,3073,4097,6145,8193,12289,16385,24577];function Q(e){var r=(e<<1|e<<11)&139536|(e<<5|e<<15)&558144;return(r>>16|r>>8|r)&255}var ee=typeof Uint8Array!=="undefined";var re=ee?new Uint8Array(1<<8):[];for(var te=0;te<1<<8;++te)re[te]=Q(te);function ae(e,r){var t=re[e&255];if(r<=8)return t>>>8-r;t=t<<8|re[e>>8&255];if(r<=16)return t>>>16-r;t=t<<8|re[e>>16&255];return t>>>24-r}function ne(e,r){var t=r&7,a=r>>>3;return(e[a]|(t<=6?0:e[a+1]<<8))>>>t&3}function ie(e,r){var t=r&7,a=r>>>3;return(e[a]|(t<=5?0:e[a+1]<<8))>>>t&7}function se(e,r){var t=r&7,a=r>>>3;return(e[a]|(t<=4?0:e[a+1]<<8))>>>t&15}function le(e,r){var t=r&7,a=r>>>3;return(e[a]|(t<=3?0:e[a+1]<<8))>>>t&31}function oe(e,r){var t=r&7,a=r>>>3;return(e[a]|(t<=1?0:e[a+1]<<8))>>>t&127}function ce(e,r,t){var a=r&7,n=r>>>3,i=(1<<t)-1;var s=e[n]>>>a;if(t<8-a)return s&i;s|=e[n+1]<<8-a;if(t<16-a)return s&i;s|=e[n+2]<<16-a;if(t<24-a)return s&i;s|=e[n+3]<<24-a;return s&i}function fe(e,r,t){var a=r&7,n=r>>>3;if(a<=5)e[n]|=(t&7)<<a;else{e[n]|=t<<a&255;e[n+1]=(t&7)>>8-a}return r+3}function ue(e,r,t){var a=r&7,n=r>>>3;t=(t&1)<<a;e[n]|=t;return r+1}function he(e,r,t){var a=r&7,n=r>>>3;t<<=a;e[n]|=t&255;t>>>=8;e[n+1]=t;return r+8}function de(e,r,t){var a=r&7,n=r>>>3;t<<=a;e[n]|=t&255;t>>>=8;e[n+1]=t&255;e[n+2]=t>>>8;return r+16}function pe(e,r){var t=e.length,a=2*t>r?2*t:r+5,n=0;if(t>=r)return e;if(_){var i=F(a);if(e.copy)e.copy(i);else for(;n<e.length;++n)i[n]=e[n];return i}else if(ee){var s=new Uint8Array(a);if(s.set)s.set(e);else for(;n<t;++n)s[n]=e[n];return s}e.length=a;return e}function me(e){var r=new Array(e);for(var t=0;t<e;++t)r[t]=0;return r}function ve(e,r,t){var a=1,n=0,i=0,s=0,l=0,o=e.length;var c=ee?new Uint16Array(32):me(32);for(i=0;i<32;++i)c[i]=0;for(i=o;i<t;++i)e[i]=0;o=e.length;var f=ee?new Uint16Array(o):me(o);for(i=0;i<o;++i){c[n=e[i]]++;if(a<n)a=n;f[i]=0}c[0]=0;for(i=1;i<=a;++i)c[i+16]=l=l+c[i-1]<<1;for(i=0;i<o;++i){l=e[i];if(l!=0)f[i]=c[l+16]++}var u=0;for(i=0;i<o;++i){u=e[i];if(u!=0){l=ae(f[i],a)>>a-u;for(s=(1<<a+4-u)-1;s>=0;--s)r[l|s<<u]=u&15|i<<4}}return a}var ge=ee?new Uint16Array(512):me(512);var be=ee?new Uint16Array(32):me(32);if(!ee){for(var we=0;we<512;++we)ge[we]=0;for(we=0;we<32;++we)be[we]=0}(function(){var e=[];var r=0;for(;r<32;r++)e.push(5);ve(e,be,32);var t=[];r=0;for(;r<=143;r++)t.push(8);for(;r<=255;r++)t.push(9);for(;r<=279;r++)t.push(7);for(;r<=287;r++)t.push(8);ve(t,ge,288)})();var ke=function Ge(){var e=ee?new Uint8Array(32768):[];var r=0,t=0;for(;r<q.length-1;++r){for(;t<q[r+1];++t)e[t]=r}for(;t<32768;++t)e[t]=29;var a=ee?new Uint8Array(259):[];for(r=0,t=0;r<K.length-1;++r){for(;t<K[r+1];++t)a[t]=r}function n(e,r){var t=0;while(t<e.length){var a=Math.min(65535,e.length-t);var n=t+a==e.length;r._W(1,+n);r._W(2,a);r._W(2,~a&65535);while(a-- >0)r[r.l++]=e[t++]}return r.l}function i(r,t){var n=0;var i=0;var s=ee?new Uint16Array(32768):[];while(i<r.length){var l=Math.min(65535,r.length-i);if(l<10){n=fe(t,n,+!!(i+l==r.length));if(n&7)n+=8-(n&7);t.l=n/8|0;t._W(2,l);t._W(2,~l&65535);while(l-- >0)t[t.l++]=r[i++];n=t.l*8;continue}n=fe(t,n,+!!(i+l==r.length)+2);var o=0;while(l-- >0){var c=r[i];o=(o<<5^c)&32767;var f=-1,u=0;if(f=s[o]){f|=i&~32767;if(f>i)f-=32768;if(f<i)while(r[f+u]==r[i+u]&&u<250)++u}if(u>2){c=a[u];if(c<=22)n=he(t,n,re[c+1]>>1)-1;else{he(t,n,3);n+=5;he(t,n,re[c-23]>>5);n+=3}var h=c<8?0:c-4>>2;if(h>0){de(t,n,u-K[c]);n+=h}c=e[i-f];n=he(t,n,re[c]>>3);n-=3;var d=c<4?0:c-2>>1;if(d>0){de(t,n,i-f-q[c]);n+=d}for(var p=0;p<u;++p){s[o]=i&32767;o=(o<<5^r[i])&32767;++i}l-=u-1}else{if(c<=143)c=c+48;else n=ue(t,n,1);n=he(t,n,re[c]);s[o]=i&32767;++i}}n=he(t,n,0)-1}t.l=(n+7)/8|0;return t.l}return function s(e,r){if(e.length<8)return n(e,r);return i(e,r)}}();function ye(e){var r=Oa(50+Math.floor(e.length*1.1));var t=ke(e,r);return r.slice(0,t)}var xe=ee?new Uint16Array(32768):me(32768);var Ce=ee?new Uint16Array(32768):me(32768);var Se=ee?new Uint16Array(128):me(128);var _e=1,Ae=1;function Te(e,r){var t=le(e,r)+257;r+=5;var a=le(e,r)+1;r+=5;var n=se(e,r)+4;r+=4;var i=0;var s=ee?new Uint8Array(19):me(19);var l=[0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0];var o=1;var c=ee?new Uint8Array(8):me(8);var f=ee?new Uint8Array(8):me(8);var u=s.length;for(var h=0;h<n;++h){s[Z[h]]=i=ie(e,r);if(o<i)o=i;c[i]++;r+=3}var d=0;c[0]=0;for(h=1;h<=o;++h)f[h]=d=d+c[h-1]<<1;for(h=0;h<u;++h)if((d=s[h])!=0)l[h]=f[d]++;var p=0;for(h=0;h<u;++h){p=s[h];if(p!=0){d=re[l[h]]>>8-p;for(var m=(1<<7-p)-1;m>=0;--m)Se[d|m<<p]=p&7|h<<3}}var v=[];o=1;for(;v.length<t+a;){d=Se[oe(e,r)];r+=d&7;switch(d>>>=3){case 16:i=3+ne(e,r);r+=2;d=v[v.length-1];while(i-- >0)v.push(d);break;case 17:i=3+ie(e,r);r+=3;while(i-- >0)v.push(0);break;case 18:i=11+oe(e,r);r+=7;while(i-- >0)v.push(0);break;default:v.push(d);if(o<d)o=d;break;}}var g=v.slice(0,t),b=v.slice(t);for(h=t;h<286;++h)g[h]=0;for(h=a;h<30;++h)b[h]=0;_e=ve(g,xe,286);Ae=ve(b,Ce,30);return r}function Ee(e,r){if(e[0]==3&&!(e[1]&3)){return[E(r),2]}var t=0;var a=0;var n=F(r?r:1<<18);var i=0;var s=n.length>>>0;var l=0,o=0;while((a&1)==0){a=ie(e,t);t+=3;if(a>>>1==0){if(t&7)t+=8-(t&7);var c=e[t>>>3]|e[(t>>>3)+1]<<8;t+=32;if(c>0){if(!r&&s<i+c){n=pe(n,i+c);s=n.length}while(c-- >0){n[i++]=e[t>>>3];t+=8}}continue}else if(a>>1==1){l=9;o=5}else{t=Te(e,t);l=_e;o=Ae}for(;;){if(!r&&s<i+32767){n=pe(n,i+32767);s=n.length}var f=ce(e,t,l);var u=a>>>1==1?ge[f]:xe[f];t+=u&15;u>>>=4;if((u>>>8&255)===0)n[i++]=u;else if(u==256)break;else{u-=257;var h=u<8?0:u-4>>2;if(h>5)h=0;var d=i+K[u];if(h>0){d+=ce(e,t,h);t+=h}f=ce(e,t,o);u=a>>>1==1?be[f]:Ce[f];t+=u&15;u>>>=4;var p=u<4?0:u-2>>1;var m=q[u];if(p>0){m+=ce(e,t,p);t+=p}if(!r&&s<d){n=pe(n,d+100);s=n.length}while(i<d){n[i]=n[i-m];++i}}}}if(r)return[n,t+7>>>3];return[n.slice(0,i),t+7>>>3]}function Fe(e,r){var t=e.slice(e.l||0);var a=Ee(t,r);e.l+=a[1];return a[0]}function De(e,r){if(e){if(typeof console!=="undefined")console.error(r)}else throw new Error(r)}function Oe(e,r){var t=e;Fa(t,0);var a=[],n=[];var i={FileIndex:a,FullPaths:n};C(i,{root:r.root});var l=t.length-4;while((t[l]!=80||t[l+1]!=75||t[l+2]!=5||t[l+3]!=6)&&l>=0)--l;t.l=l+4;t.l+=4;var o=t._R(2);t.l+=6;var c=t._R(4);t.l=c;for(l=0;l<o;++l){t.l+=20;var f=t._R(4);var u=t._R(4);var h=t._R(2);var d=t._R(2);var p=t._R(2);t.l+=8;var m=t._R(4);var v=s(t.slice(t.l+h,t.l+h+d));t.l+=h+d+p;var g=t.l;t.l=m+4;if(v&&v[1]){if((v[1]||{}).usz)u=v[1].usz;if((v[1]||{}).csz)f=v[1].csz}Ne(t,f,u,i,v);t.l=g}return i}function Ne(e,r,t,a,n){e.l+=2;var l=e._R(2);var o=e._R(2);var c=i(e);if(l&8257)throw new Error("Unsupported ZIP encryption");var f=e._R(4);var u=e._R(4);var h=e._R(4);var d=e._R(2);var p=e._R(2);var m="";for(var v=0;v<d;++v)m+=String.fromCharCode(e[e.l++]);if(p){var g=s(e.slice(e.l,e.l+p));if((g[21589]||{}).mt)c=g[21589].mt;if((g[1]||{}).usz)h=g[1].usz;if((g[1]||{}).csz)u=g[1].csz;if(n){if((n[21589]||{}).mt)c=n[21589].mt;if((n[1]||{}).usz)h=n[1].usz;if((n[1]||{}).csz)u=n[1].csz}}e.l+=p;var b=e.slice(e.l,e.l+u);switch(o){case 8:b=Y(e,h);break;case 0:e.l+=u;break;default:throw new Error("Unsupported ZIP Compression method "+o);}var w=false;if(l&8){f=e._R(4);if(f==134695760){f=e._R(4);w=true}u=e._R(4);h=e._R(4)}if(u!=r)De(w,"Bad compressed size: "+r+" != "+u);if(h!=t)De(w,"Bad uncompressed size: "+t+" != "+h);je(a,m,b,{unsafe:true,mt:c})}function Me(e,r){var t=r||{};var a=[],i=[];var s=Oa(1);var l=t.compression?8:0,o=0;var c=false;if(c)o|=8;var f=0,u=0;var h=0,d=0;var p=e.FullPaths[0],m=p,v=e.FileIndex[0];var g=[];var b=0;for(f=1;f<e.FullPaths.length;++f){m=e.FullPaths[f].slice(p.length);v=e.FileIndex[f];if(!v.size||!v.content||Array.isArray(v.content)&&v.content.length==0||m=="Sh33tJ5")continue;var w=h;var k=Oa(m.length);for(u=0;u<m.length;++u)k._W(1,m.charCodeAt(u)&127);k=k.slice(0,k.l);g[d]=typeof v.content=="string"?qe.bstr(v.content,0):qe.buf(v.content,0);var y=typeof v.content=="string"?D(v.content):v.content;if(l==8)y=J(y);s=Oa(30);s._W(4,67324752);s._W(2,20);s._W(2,o);s._W(2,l);if(v.mt)n(s,v.mt);else s._W(4,0);s._W(-4,o&8?0:g[d]);s._W(4,o&8?0:y.length);s._W(4,o&8?0:v.content.length);s._W(2,k.length);s._W(2,0);h+=s.length;a.push(s);h+=k.length;a.push(k);h+=y.length;a.push(y);if(o&8){s=Oa(12);s._W(-4,g[d]);s._W(4,y.length);s._W(4,v.content.length);h+=s.l;a.push(s)}s=Oa(46);s._W(4,33639248);s._W(2,0);s._W(2,20);s._W(2,o);s._W(2,l);s._W(4,0);s._W(-4,g[d]);s._W(4,y.length);s._W(4,v.content.length);s._W(2,k.length);s._W(2,0);s._W(2,0);s._W(2,0);s._W(2,0);s._W(4,0);s._W(4,w);b+=s.l;i.push(s);b+=k.length;i.push(k);++d}s=Oa(22);s._W(4,101010256);s._W(2,0);s._W(2,0);s._W(2,d);s._W(2,d);s._W(4,b);s._W(4,h);s._W(2,0);return P([P(a),P(i),s])}var Ie={htm:"text/html",xml:"text/xml",gif:"image/gif",jpg:"image/jpeg",png:"image/png",mso:"application/x-mso",thmx:"application/vnd.ms-officetheme",sh33tj5:"application/octet-stream"};function Pe(e,r){if(e.ctype)return e.ctype;var t=e.name||"",a=t.match(/\.([^\.]+)$/);if(a&&Ie[a[1]])return Ie[a[1]];if(r){a=(t=r).match(/[\.\\]([^\.\\])+$/);if(a&&Ie[a[1]])return Ie[a[1]]}return"application/octet-stream"}function Re(e){var r=y(e);var t=[];for(var a=0;a<r.length;a+=76)t.push(r.slice(a,a+76));return t.join("\r\n")+"\r\n"}function Le(e){var r=e.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7E-\xFF=]/g,function(e){var r=e.charCodeAt(0).toString(16).toUpperCase();return"="+(r.length==1?"0"+r:r)});r=r.replace(/ $/gm,"=20").replace(/\t$/gm,"=09");if(r.charAt(0)=="\n")r="=0D"+r.slice(1);r=r.replace(/\r(?!\n)/gm,"=0D").replace(/\n\n/gm,"\n=0A").replace(/([^\r\n])\n/gm,"$1=0A");var t=[],a=r.split("\r\n");for(var n=0;n<a.length;++n){var i=a[n];if(i.length==0){t.push("");continue}for(var s=0;s<i.length;){var l=76;var o=i.slice(s,s+l);if(o.charAt(l-1)=="=")l--;else if(o.charAt(l-2)=="=")l-=2;else if(o.charAt(l-3)=="=")l-=3;o=i.slice(s,s+l);s+=l;if(s<i.length)o+="=";t.push(o)}}return t.join("\r\n")}function Ue(e){var r=[];for(var t=0;t<e.length;++t){var a=e[t];while(t<=e.length&&a.charAt(a.length-1)=="=")a=a.slice(0,a.length-1)+e[++t];r.push(a)}for(var n=0;n<r.length;++n)r[n]=r[n].replace(/[=][0-9A-Fa-f]{2}/g,function(e){return String.fromCharCode(parseInt(e.slice(1),16))});return D(r.join("\r\n"))}function Be(e,r,t){var a="",n="",i="",s;var l=0;for(;l<10;++l){var o=r[l];if(!o||o.match(/^\s*$/))break;var c=o.match(/^([^:]*?):\s*([^\s].*)$/);if(c)switch(c[1].toLowerCase()){case"content-location":a=c[2].trim();break;case"content-type":i=c[2].trim();break;case"content-transfer-encoding":n=c[2].trim();break;}}++l;switch(n.toLowerCase()){case"base64":s=D(S(r.slice(l).join("")));break;case"quoted-printable":s=Ue(r.slice(l));break;default:throw new Error("Unsupported Content-Transfer-Encoding "+n);}var f=je(e,a.slice(t.length),s,{unsafe:true});if(i)f.ctype=i}function ze(e,r){if(H(e.slice(0,13)).toLowerCase()!="mime-version:")throw new Error("Unsupported MAD header");var t=r&&r.root||"";var a=(_&&Buffer.isBuffer(e)?e.toString("binary"):H(e)).split("\r\n");var n=0,i="";for(n=0;n<a.length;++n){i=a[n];if(!/^Content-Location:/i.test(i))continue;i=i.slice(i.indexOf("file"));if(!t)t=i.slice(0,i.lastIndexOf("/")+1);if(i.slice(0,t.length)==t)continue;while(t.length>0){t=t.slice(0,t.length-1);t=t.slice(0,t.lastIndexOf("/")+1);if(i.slice(0,t.length)==t)break}}var s=(a[1]||"").match(/boundary="(.*?)"/);if(!s)throw new Error("MAD cannot find boundary");var l="--"+(s[1]||"");var o=[],c=[];var f={FileIndex:o,FullPaths:c};C(f);var u,h=0;for(n=0;n<a.length;++n){var d=a[n];if(d!==l&&d!==l+"--")continue;if(h++)Be(f,a.slice(u,n),t);u=n}return f}function $e(e,r){var t=r||{};var a=t.boundary||"SheetJS";a="------="+a;var n=["MIME-Version: 1.0",'Content-Type: multipart/related; boundary="'+a.slice(2)+'"',"","",""];var i=e.FullPaths[0],s=i,l=e.FileIndex[0];for(var o=1;o<e.FullPaths.length;++o){s=e.FullPaths[o].slice(i.length);l=e.FileIndex[o];if(!l.size||!l.content||s=="Sh33tJ5")continue;s=s.replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7E-\xFF]/g,function(e){return"_x"+e.charCodeAt(0).toString(16)+"_"}).replace(/[\u0080-\uFFFF]/g,function(e){return"_u"+e.charCodeAt(0).toString(16)+"_"});var c=l.content;var f=_&&Buffer.isBuffer(c)?c.toString("binary"):H(c);var u=0,h=Math.min(1024,f.length),d=0;for(var p=0;p<=h;++p)if((d=f.charCodeAt(p))>=32&&d<128)++u;var m=u>=h*4/5;n.push(a);n.push("Content-Location: "+(t.root||"file:///C:/SheetJS/")+s);n.push("Content-Transfer-Encoding: "+(m?"quoted-printable":"base64"));n.push("Content-Type: "+Pe(l,s));n.push("");n.push(m?Le(f):Re(f))}n.push(a+"--\r\n");return n.join("\r\n")}function We(e){var r={};C(r,e);return r}function je(e,r,t,n){var i=n&&n.unsafe;if(!i)C(e);var s=!i&&Qe.find(e,r);if(!s){var l=e.FullPaths[0];if(r.slice(0,l.length)==l)l=r;else{if(l.slice(-1)!="/")l+="/";l=(l+r).replace("//","/")}s={name:a(r),type:2};e.FileIndex.push(s);e.FullPaths.push(l);if(!i)Qe.utils.cfb_gc(e)}s.content=t;s.size=t?t.length:0;if(n){if(n.CLSID)s.clsid=n.CLSID;if(n.mt)s.mt=n.mt;if(n.ct)s.ct=n.ct}return s}function He(e,r){C(e);var t=Qe.find(e,r);if(t)for(var a=0;a<e.FileIndex.length;++a)if(e.FileIndex[a]==t){e.FileIndex.splice(a,1);e.FullPaths.splice(a,1);return true}return false}function Ve(e,r,t){C(e);var n=Qe.find(e,r);if(n)for(var i=0;i<e.FileIndex.length;++i)if(e.FileIndex[i]==n){e.FileIndex[i].name=a(t);e.FullPaths[i]=t;return true}return false}function Xe(e){O(e,true)}e.find=M;e.read=x;e.parse=c;e.write=V;e.writeFile=j;e.utils={cfb_new:We,cfb_add:je,cfb_del:He,cfb_mov:Ve,cfb_gc:Xe,ReadShift:Ca,CheckField:Ea,prep_blob:Fa,bconcat:P,use_zlib:G,_deflateRaw:ye,_inflateRaw:Fe,consts:W};return e}();var er;function rr(e){er=e}function tr(e){if(typeof e==="string")return O(e);if(Array.isArray(e))return M(e);return e}function ar(e,r,t){if(typeof er!=="undefined"&&er.writeFileSync)return t?er.writeFileSync(e,r,t):er.writeFileSync(e,r);if(typeof Deno!=="undefined"){if(t&&typeof r=="string")switch(t){case"utf8":r=new TextEncoder(t).encode(r);break;case"binary":r=O(r);break;default:throw new Error("Unsupported encoding "+t);}return Deno.writeFileSync(e,r)}var a=t=="utf8"?Ot(r):r;if(typeof IE_SaveFile!=="undefined")return IE_SaveFile(a,e);if(typeof Blob!=="undefined"){var n=new Blob([tr(a)],{type:"application/octet-stream"});if(typeof navigator!=="undefined"&&navigator.msSaveBlob)return navigator.msSaveBlob(n,e);if(typeof saveAs!=="undefined")return saveAs(n,e);if(typeof URL!=="undefined"&&typeof document!=="undefined"&&document.createElement&&URL.createObjectURL){var i=URL.createObjectURL(n);if(typeof chrome==="object"&&typeof(chrome.downloads||{}).download=="function"){if(URL.revokeObjectURL&&typeof setTimeout!=="undefined")setTimeout(function(){URL.revokeObjectURL(i)},6e4);return chrome.downloads.download({url:i,filename:e,saveAs:true})}var s=document.createElement("a");if(s.download!=null){s.download=e;s.href=i;document.body.appendChild(s);s.click();document.body.removeChild(s);if(URL.revokeObjectURL&&typeof setTimeout!=="undefined")setTimeout(function(){URL.revokeObjectURL(i)},6e4);return i}}else if(typeof URL!=="undefined"&&!URL.createObjectURL&&typeof chrome==="object"){var l="data:application/octet-stream;base64,"+C(new Uint8Array(tr(a)));return chrome.downloads.download({url:l,filename:e,saveAs:true})}}if(typeof $!=="undefined"&&typeof File!=="undefined"&&typeof Folder!=="undefined")try{var o=File(e);o.open("w");o.encoding="binary";if(Array.isArray(r))r=N(r);
+o.write(r);o.close();return r}catch(c){if(!c.message||c.message.indexOf("onstruct")==-1)throw c}throw new Error("cannot save file "+e)}function nr(e){if(typeof er!=="undefined")return er.readFileSync(e);if(typeof Deno!=="undefined")return Deno.readFileSync(e);if(typeof $!=="undefined"&&typeof File!=="undefined"&&typeof Folder!=="undefined")try{var r=File(e);r.open("r");r.encoding="binary";var t=r.read();r.close();return t}catch(a){if(!a.message||a.message.indexOf("onstruct")==-1)throw a}throw new Error("Cannot access file "+e)}function ir(e){var r=Object.keys(e),t=[];for(var a=0;a<r.length;++a)if(Object.prototype.hasOwnProperty.call(e,r[a]))t.push(r[a]);return t}function sr(e,r){var t=[],a=ir(e);for(var n=0;n!==a.length;++n)if(t[e[a[n]][r]]==null)t[e[a[n]][r]]=a[n];return t}function lr(e){var r=[],t=ir(e);for(var a=0;a!==t.length;++a)r[e[t[a]]]=t[a];return r}function or(e){var r=[],t=ir(e);for(var a=0;a!==t.length;++a)r[e[t[a]]]=parseInt(t[a],10);return r}function cr(e){var r=[],t=ir(e);for(var a=0;a!==t.length;++a){if(r[e[t[a]]]==null)r[e[t[a]]]=[];r[e[t[a]]].push(t[a])}return r}var fr=Date.UTC(1899,11,30,0,0,0);var ur=Date.UTC(1899,11,31,0,0,0);var hr=Date.UTC(1904,0,1,0,0,0);function dr(e,r){var t=e.getTime();var a=(t-fr)/(24*60*60*1e3);if(r){a-=1462;return a<-1402?a-1:a}return a<60?a-1:a}function pr(e){if(e>=60&&e<61)return e;var r=new Date;r.setTime((e>60?e:e+1)*24*60*60*1e3+fr);return r}function mr(e){var r=0,t=0,a=false;var n=e.match(/P([0-9\.]+Y)?([0-9\.]+M)?([0-9\.]+D)?T([0-9\.]+H)?([0-9\.]+M)?([0-9\.]+S)?/);if(!n)throw new Error("|"+e+"| is not an ISO8601 Duration");for(var i=1;i!=n.length;++i){if(!n[i])continue;t=1;if(i>3)a=true;switch(n[i].slice(n[i].length-1)){case"Y":throw new Error("Unsupported ISO Duration Field: "+n[i].slice(n[i].length-1));case"D":t*=24;case"H":t*=60;case"M":if(!a)throw new Error("Unsupported ISO Duration Field: M");else t*=60;case"S":break;}r+=t*parseInt(n[i],10)}return r}var vr=/^(\d+):(\d+)(:\d+)?(\.\d+)?$/;var gr=/^(\d+)-(\d+)-(\d+)$/;var br=/^(\d+)-(\d+)-(\d+)[T ](\d+):(\d+)(:\d+)?(\.\d+)?$/;function wr(e,r){if(e instanceof Date)return e;var t=e.match(vr);if(t)return new Date((r?hr:ur)+((parseInt(t[1],10)*60+parseInt(t[2],10))*60+(t[3]?parseInt(t[3].slice(1),10):0))*1e3+(t[4]?parseInt((t[4]+"000").slice(1,4),10):0));t=e.match(gr);if(t)return new Date(Date.UTC(+t[1],+t[2]-1,+t[3],0,0,0,0));t=e.match(br);if(t)return new Date(Date.UTC(+t[1],+t[2]-1,+t[3],+t[4],+t[5],t[6]&&parseInt(t[6].slice(1),10)||0,t[7]&&parseInt((t[7]+"0000").slice(1,4),10)||0));var a=new Date(e);return a}function kr(e,r){if(_&&Buffer.isBuffer(e)){if(r&&T){if(e[0]==255&&e[1]==254)return Ot(e.slice(2).toString("utf16le"));if(e[1]==254&&e[2]==255)return Ot(d(e.slice(2).toString("binary")))}return e.toString("binary")}if(typeof TextDecoder!=="undefined")try{if(r){if(e[0]==255&&e[1]==254)return Ot(new TextDecoder("utf-16le").decode(e.slice(2)));if(e[0]==254&&e[1]==255)return Ot(new TextDecoder("utf-16be").decode(e.slice(2)))}var t={"€":"","‚":"","ƒ":"","„":"","…":"","†":"","‡":"","ˆ":"","‰":"","Š":"","‹":"","Œ":"","Ž":"","‘":"","’":"","“":"","”":"","•":"","–":"","—":"","˜":"","™":"","š":"","›":"","œ":"","ž":"","Ÿ":""};if(Array.isArray(e))e=new Uint8Array(e);return new TextDecoder("latin1").decode(e).replace(/[€‚ƒ„…†‡ˆ‰Š‹ŒŽ‘’“”•–—˜™š›œžŸ]/g,function(e){return t[e]||e})}catch(a){}var n=[],i=0;try{for(i=0;i<e.length-65536;i+=65536)n.push(String.fromCharCode.apply(0,e.slice(i,i+65536)));n.push(String.fromCharCode.apply(0,e.slice(i)))}catch(a){try{for(;i<e.length-16384;i+=16384)n.push(String.fromCharCode.apply(0,e.slice(i,i+16384)));n.push(String.fromCharCode.apply(0,e.slice(i)))}catch(a){for(;i!=e.length;++i)n.push(String.fromCharCode(e[i]))}}return n.join("")}function yr(e){if(typeof JSON!="undefined"&&!Array.isArray(e))return JSON.parse(JSON.stringify(e));if(typeof e!="object"||e==null)return e;if(e instanceof Date)return new Date(e.getTime());var r={};for(var t in e)if(Object.prototype.hasOwnProperty.call(e,t))r[t]=yr(e[t]);return r}function xr(e,r){var t="";while(t.length<r)t+=e;return t}function Cr(e){var r=Number(e);if(!isNaN(r))return isFinite(r)?r:NaN;if(!/\d/.test(e))return r;var t=1;var a=e.replace(/([\d]),([\d])/g,"$1$2").replace(/[$]/g,"").replace(/[%]/g,function(){t*=100;return""});if(!isNaN(r=Number(a)))return r/t;a=a.replace(/[(]([^()]*)[)]/,function(e,r){t=-t;return r});if(!isNaN(r=Number(a)))return r/t;return r}var Sr=/^(0?\d|1[0-2])(?:|:([0-5]?\d)(?:|(\.\d+)(?:|:([0-5]?\d))|:([0-5]?\d)(|\.\d+)))\s+([ap])m?$/;var _r=/^([01]?\d|2[0-3])(?:|:([0-5]?\d)(?:|(\.\d+)(?:|:([0-5]?\d))|:([0-5]?\d)(|\.\d+)))$/;var Ar=/^(\d+)-(\d+)-(\d+)[T ](\d+):(\d+)(:\d+)(\.\d+)?[Z]?$/;var Tr=new Date("6/9/69 00:00 UTC").valueOf()==-177984e5;function Er(e){if(!e[2])return new Date(Date.UTC(1899,11,31,+e[1]%12+(e[7]=="p"?12:0),0,0,0));if(e[3]){if(e[4])return new Date(Date.UTC(1899,11,31,+e[1]%12+(e[7]=="p"?12:0),+e[2],+e[4],parseFloat(e[3])*1e3));else return new Date(Date.UTC(1899,11,31,e[7]=="p"?12:0,+e[1],+e[2],parseFloat(e[3])*1e3))}else if(e[5])return new Date(Date.UTC(1899,11,31,+e[1]%12+(e[7]=="p"?12:0),+e[2],+e[5],e[6]?parseFloat(e[6])*1e3:0));else return new Date(Date.UTC(1899,11,31,+e[1]%12+(e[7]=="p"?12:0),+e[2],0,0))}function Fr(e){if(!e[2])return new Date(Date.UTC(1899,11,31,+e[1],0,0,0));if(e[3]){if(e[4])return new Date(Date.UTC(1899,11,31,+e[1],+e[2],+e[4],parseFloat(e[3])*1e3));else return new Date(Date.UTC(1899,11,31,0,+e[1],+e[2],parseFloat(e[3])*1e3))}else if(e[5])return new Date(Date.UTC(1899,11,31,+e[1],+e[2],+e[5],e[6]?parseFloat(e[6])*1e3:0));else return new Date(Date.UTC(1899,11,31,+e[1],+e[2],0,0))}var Dr=["january","february","march","april","may","june","july","august","september","october","november","december"];function Or(e){if(Ar.test(e))return e.indexOf("Z")==-1?Ir(new Date(e)):new Date(e);var r=e.toLowerCase();var t=r.replace(/\s+/g," ").trim();var a=t.match(Sr);if(a)return Er(a);a=t.match(_r);if(a)return Fr(a);a=t.match(br);if(a)return new Date(Date.UTC(+a[1],+a[2]-1,+a[3],+a[4],+a[5],a[6]&&parseInt(a[6].slice(1),10)||0,a[7]&&parseInt((a[7]+"0000").slice(1,4),10)||0));var n=new Date(Tr&&e.indexOf("UTC")==-1?e+" UTC":e),i=new Date(NaN);var s=n.getYear(),l=n.getMonth(),o=n.getDate();if(isNaN(o))return i;if(r.match(/jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec/)){r=r.replace(/[^a-z]/g,"").replace(/([^a-z]|^)[ap]m?([^a-z]|$)/,"");if(r.length>3&&Dr.indexOf(r)==-1)return i}else if(r.replace(/[ap]m?/,"").match(/[a-z]/))return i;if(s<0||s>8099||e.match(/[^-0-9:,\/\\\ ]/))return i;return n}var Nr=function(){var e="abacaba".split(/(:?b)/i).length==5;return function r(t,a,n){if(e||typeof a=="string")return t.split(a);var i=t.split(a),s=[i[0]];for(var l=1;l<i.length;++l){s.push(n);s.push(i[l])}return s}}();function Mr(e){return new Date(e.getUTCFullYear(),e.getUTCMonth(),e.getUTCDate(),e.getUTCHours(),e.getUTCMinutes(),e.getUTCSeconds(),e.getUTCMilliseconds())}function Ir(e){return new Date(Date.UTC(e.getFullYear(),e.getMonth(),e.getDate(),e.getHours(),e.getMinutes(),e.getSeconds(),e.getMilliseconds()))}function Pr(e){var r=e.slice(0,1024);var t=r.indexOf("<!DOCTYPE");if(t==-1)return e;var a=e.match(/<[\w]/);if(!a)return e;return e.slice(0,t)+e.slice(a.index)}function Rr(e,r,t){var a=[];var n=e.indexOf(r);while(n>-1){var i=e.indexOf(t,n+r.length);if(i==-1)break;a.push(e.slice(n,i+t.length));n=e.indexOf(r,i+t.length)}return a.length>0?a:null}function Lr(e,r,t){var a=[],n=0;var i=e.indexOf(r);if(i==-1)return e;while(i>-1){a.push(e.slice(n,i));var s=e.indexOf(t,i+r.length);if(s==-1)break;if((i=e.indexOf(r,n=s+t.length))==-1)a.push(e.slice(n))}return a.join("")}var Ur={" ":1,"\t":1,"\r":1,"\n":1,">":1};function Br(e,r){var t=e.indexOf("<"+r),a=r.length+1,n=e.length;while(t>=0&&t<=n-a&&!Ur[e.charAt(t+a)])t=e.indexOf("<"+r,t+1);if(t===-1)return null;var i=e.indexOf(">",t+r.length);if(i===-1)return null;var s="</"+r+">";var l=e.indexOf(s,i);if(l==-1)return null;return[e.slice(t,l+s.length),e.slice(i+1,l)]}var zr=function(){var e={};return function r(t,a){var n=e[a];if(!n)e[a]=n=[new RegExp("<(?:\\w+:)?"+a+"\\b[^<>]*>","g"),new RegExp("</(?:\\w+:)?"+a+">","g")];n[0].lastIndex=n[1].lastIndex=0;var i=n[0].exec(t);if(!i)return null;var s=i.index;var l=n[0].lastIndex;n[1].lastIndex=n[0].lastIndex;i=n[1].exec(t);if(!i)return null;var o=i.index;var c=n[1].lastIndex;return[t.slice(s,c),t.slice(l,o)]}}();var $r=function(){var e={};return function r(t,a){var n=[];var i=e[a];if(!i)e[a]=i=[new RegExp("<(?:\\w+:)?"+a+"\\b[^<>]*>","g"),new RegExp("</(?:\\w+:)?"+a+">","g")];i[0].lastIndex=i[1].lastIndex=0;var s;while(s=i[0].exec(t)){var l=s.index;i[1].lastIndex=i[0].lastIndex;s=i[1].exec(t);if(!s)return null;var o=i[1].lastIndex;n.push(t.slice(l,o));i[0].lastIndex=i[1].lastIndex}return n.length==0?null:n}}();var Wr=function(){var e={};return function r(t,a){var n=[];var i=e[a];if(!i)e[a]=i=[new RegExp("<(?:\\w+:)?"+a+"\\b[^<>]*>","g"),new RegExp("</(?:\\w+:)?"+a+">","g")];i[0].lastIndex=i[1].lastIndex=0;var s;var l=0,o=0;while(s=i[0].exec(t)){l=s.index;n.push(t.slice(o,l));o=l;i[1].lastIndex=i[0].lastIndex;s=i[1].exec(t);if(!s)return null;o=i[1].lastIndex;i[0].lastIndex=i[1].lastIndex}n.push(t.slice(o));return n.length==0?"":n.join("")}}();var jr=function(){var e={};return function r(t,a){var n=[];var i=e[a];if(!i)e[a]=i=[new RegExp("<"+a+"\\b[^<>]*>","ig"),new RegExp("</"+a+">","ig")];i[0].lastIndex=i[1].lastIndex=0;var s;while(s=i[0].exec(t)){var l=s.index;i[1].lastIndex=i[0].lastIndex;s=i[1].exec(t);if(!s)return null;var o=i[1].lastIndex;n.push(t.slice(l,o));i[0].lastIndex=i[1].lastIndex}return n.length==0?null:n}}();function Hr(e){if(!e)return null;if(e.content&&e.type)return kr(e.content,true);if(e.data)return p(e.data);if(e.asNodeBuffer&&_)return p(e.asNodeBuffer().toString("binary"));if(e.asBinary)return p(e.asBinary());if(e._data&&e._data.getContent)return p(kr(Array.prototype.slice.call(e._data.getContent(),0)));return null}function Vr(e){if(!e)return null;if(e.data)return f(e.data);if(e.asNodeBuffer&&_)return e.asNodeBuffer();if(e._data&&e._data.getContent){var r=e._data.getContent();if(typeof r=="string")return f(r);return Array.prototype.slice.call(r)}if(e.content&&e.type)return e.content;return null}function Xr(e){return e&&e.name.slice(-4)===".bin"?Vr(e):Hr(e)}function Gr(e,r){var t=e.FullPaths||ir(e.files);var a=r.toLowerCase().replace(/[\/]/g,"\\"),n=a.replace(/\\/g,"/");for(var i=0;i<t.length;++i){var s=t[i].replace(/^Root Entry[\/]/,"").toLowerCase();if(a==s||n==s)return e.files?e.files[t[i]]:e.FileIndex[i]}return null}function Yr(e,r){var t=Gr(e,r);if(t==null)throw new Error("Cannot find file "+r+" in zip");return t}function Jr(e,r,t){if(!t)return Xr(Yr(e,r));if(!r)return null;try{return Jr(e,r)}catch(a){return null}}function Zr(e,r,t){if(!t)return Hr(Yr(e,r));if(!r)return null;try{return Zr(e,r)}catch(a){return null}}function Kr(e,r,t){if(!t)return Vr(Yr(e,r));if(!r)return null;try{return Kr(e,r)}catch(a){return null}}function qr(e){var r=e.FullPaths||ir(e.files),t=[];for(var a=0;a<r.length;++a)if(r[a].slice(-1)!="/")t.push(r[a].replace(/^Root Entry[\/]/,""));return t.sort()}function Qr(e,r,t){if(e.FullPaths){if(Array.isArray(t)&&typeof t[0]=="string"){t=t.join("")}if(typeof t=="string"){var a;if(_)a=A(t);else a=R(t);return Qe.utils.cfb_add(e,r,a)}Qe.utils.cfb_add(e,r,t)}else e.file(r,t)}function et(){return Qe.utils.cfb_new()}function rt(e,r){switch(r.type){case"base64":return Qe.read(e,{type:"base64"});case"binary":return Qe.read(e,{type:"binary"});case"buffer":;case"array":return Qe.read(e,{type:"buffer"});}throw new Error("Unrecognized type "+r.type)}function tt(e,r){if(e.charAt(0)=="/")return e.slice(1);var t=r.split("/");if(r.slice(-1)!="/")t.pop();var a=e.split("/");while(a.length!==0){var n=a.shift();if(n==="..")t.pop();else if(n!==".")t.push(n)}return t.join("/")}var at='<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\r\n';var nt=/\s([^"\s?>\/]+)\s*=\s*((?:")([^"]*)(?:")|(?:')([^']*)(?:')|([^'">\s]+))/g;var it=/<[\/\?]?[a-zA-Z0-9:_-]+(?:\s+[^"\s?<>\/]+\s*=\s*(?:"[^"]*"|'[^']*'|[^'"<>\s=]+))*\s*[\/\?]?>/gm,st=/<[^<>]*>/g;var lt=at.match(it)?it:st;var ot=/<\w*:/,ct=/<(\/?)\w+:/;function ft(e,r,t){var a={};var n=0,i=0;for(;n!==e.length;++n)if((i=e.charCodeAt(n))===32||i===10||i===13)break;if(!r)a[0]=e.slice(0,n);if(n===e.length)return a;var s=e.match(nt),l=0,o="",c=0,f="",u="",h=1;if(s)for(c=0;c!=s.length;++c){u=s[c].slice(1);for(i=0;i!=u.length;++i)if(u.charCodeAt(i)===61)break;f=u.slice(0,i).trim();while(u.charCodeAt(i+1)==32)++i;h=(n=u.charCodeAt(i+1))==34||n==39?1:0;o=u.slice(i+1+h,u.length-h);for(l=0;l!=f.length;++l)if(f.charCodeAt(l)===58)break;if(l===f.length){if(f.indexOf("_")>0)f=f.slice(0,f.indexOf("_"));a[f]=o;if(!t)a[f.toLowerCase()]=o}else{var d=(l===5&&f.slice(0,5)==="xmlns"?"xmlns":"")+f.slice(l+1);if(a[d]&&f.slice(l-3,l)=="ext")continue;a[d]=o;if(!t)a[d.toLowerCase()]=o}}return a}function ut(e,r,t){var a={};var n=0,i=0;for(;n!==e.length;++n)if((i=e.charCodeAt(n))===32||i===10||i===13)break;if(!r)a[0]=e.slice(0,n);if(n===e.length)return a;var s=e.match(nt),l=0,o="",c=0,f="",u="",h=1;if(s)for(c=0;c!=s.length;++c){u=s[c].slice(1);for(i=0;i!=u.length;++i)if(u.charCodeAt(i)===61)break;f=u.slice(0,i).trim();while(u.charCodeAt(i+1)==32)++i;h=(n=u.charCodeAt(i+1))==34||n==39?1:0;o=u.slice(i+1+h,u.length-h);if(f.indexOf("_")>0)f=f.slice(0,f.indexOf("_"));a[f]=o;if(!t)a[f.toLowerCase()]=o}return a}function ht(e){return e.replace(ct,"<$1")}var dt={"&quot;":'"',"&apos;":"'","&gt;":">","&lt;":"<","&amp;":"&"};var pt=lr(dt);var mt=function(){var e=/&(?:quot|apos|gt|lt|amp|#x?([\da-fA-F]+));/gi,r=/_x([\da-fA-F]{4})_/gi;function t(a){var n=a+"",i=n.indexOf("<![CDATA[");if(i==-1)return n.replace(e,function(e,r){return dt[e]||String.fromCharCode(parseInt(r,e.indexOf("x")>-1?16:10))||e}).replace(r,function(e,r){return String.fromCharCode(parseInt(r,16))});var s=n.indexOf("]]>");return t(n.slice(0,i))+n.slice(i+9,s)+t(n.slice(s+3))}return function a(e,r){var a=t(e);return r?a.replace(/\r\n/g,"\n"):a}}();var vt=/[&<>'"]/g,gt=/[\u0000-\u0008\u000b-\u001f\uFFFE-\uFFFF]/g;function bt(e){var r=e+"";return r.replace(vt,function(e){return pt[e]}).replace(gt,function(e){return"_x"+("000"+e.charCodeAt(0).toString(16)).slice(-4)+"_"})}function wt(e){return bt(e).replace(/ /g,"_x0020_")}var kt=/[\u0000-\u001f]/g;function yt(e){var r=e+"";return r.replace(vt,function(e){return pt[e]}).replace(/\n/g,"<br/>").replace(kt,function(e){return"&#x"+("000"+e.charCodeAt(0).toString(16)).slice(-4)+";"})}function xt(e){var r=e+"";return r.replace(vt,function(e){return pt[e]}).replace(kt,function(e){return"&#x"+e.charCodeAt(0).toString(16).toUpperCase()+";"})}var Ct=function(){var e=/&#(\d+);/g;function r(e,r){return String.fromCharCode(parseInt(r,10))}return function t(a){return a.replace(e,r)}}();function St(e){return e.replace(/(\r\n|[\r\n])/g,"&#10;")}function _t(e){switch(e){case 1:;case true:;case"1":;case"true":return true;case 0:;case false:;case"0":;case"false":return false;}return false}function At(e){var r="",t=0,a=0,n=0,i=0,s=0,l=0;while(t<e.length){a=e.charCodeAt(t++);if(a<128){r+=String.fromCharCode(a);continue}n=e.charCodeAt(t++);if(a>191&&a<224){s=(a&31)<<6;s|=n&63;r+=String.fromCharCode(s);continue}i=e.charCodeAt(t++);if(a<240){r+=String.fromCharCode((a&15)<<12|(n&63)<<6|i&63);continue}s=e.charCodeAt(t++);l=((a&7)<<18|(n&63)<<12|(i&63)<<6|s&63)-65536;r+=String.fromCharCode(55296+(l>>>10&1023));r+=String.fromCharCode(56320+(l&1023))}return r}function Tt(e){var r=E(2*e.length),t,a,n=1,i=0,s=0,l;for(a=0;a<e.length;a+=n){n=1;if((l=e.charCodeAt(a))<128)t=l;else if(l<224){t=(l&31)*64+(e.charCodeAt(a+1)&63);n=2}else if(l<240){t=(l&15)*4096+(e.charCodeAt(a+1)&63)*64+(e.charCodeAt(a+2)&63);n=3}else{n=4;t=(l&7)*262144+(e.charCodeAt(a+1)&63)*4096+(e.charCodeAt(a+2)&63)*64+(e.charCodeAt(a+3)&63);t-=65536;s=55296+(t>>>10&1023);t=56320+(t&1023)}if(s!==0){r[i++]=s&255;r[i++]=s>>>8;s=0}r[i++]=t%256;r[i++]=t>>>8}return r.slice(0,i).toString("ucs2")}function Et(e){return A(e,"binary").toString("utf8")}var Ft="foo bar bazâð£";var Dt=_&&(Et(Ft)==At(Ft)&&Et||Tt(Ft)==At(Ft)&&Tt)||At;var Ot=_?function(e){return A(e,"utf8").toString("binary")}:function(e){var r=[],t=0,a=0,n=0;while(t<e.length){a=e.charCodeAt(t++);switch(true){case a<128:r.push(String.fromCharCode(a));break;case a<2048:r.push(String.fromCharCode(192+(a>>6)));r.push(String.fromCharCode(128+(a&63)));break;case a>=55296&&a<57344:a-=55296;n=e.charCodeAt(t++)-56320+(a<<10);r.push(String.fromCharCode(240+(n>>18&7)));r.push(String.fromCharCode(144+(n>>12&63)));r.push(String.fromCharCode(128+(n>>6&63)));r.push(String.fromCharCode(128+(n&63)));break;default:r.push(String.fromCharCode(224+(a>>12)));r.push(String.fromCharCode(128+(a>>6&63)));r.push(String.fromCharCode(128+(a&63)));}}return r.join("")};var Nt=function(){var e=[["nbsp"," "],["middot","·"],["quot",'"'],["apos","'"],["gt",">"],["lt","<"],["amp","&"]].map(function(e){return[new RegExp("&"+e[0]+";","ig"),e[1]]});return function r(t){var a=t.replace(/^[\t\n\r ]+/,"").replace(/(^|[^\t\n\r ])[\t\n\r ]+$/,"$1").replace(/>\s+/g,">").replace(/\b\s+</g,"<").replace(/[\t\n\r ]+/g," ").replace(/<\s*[bB][rR]\s*\/?>/g,"\n").replace(/<[^<>]*>/g,"");for(var n=0;n<e.length;++n)a=a.replace(e[n][0],e[n][1]);return a}}();var Mt=/<\/?(?:vt:)?variant>/g,It=/<(?:vt:)([^<"'>]*)>([\s\S]*)</;function Pt(e,r){var t=ft(e);var a=$r(e,t.baseType)||[];var n=[];if(a.length!=t.size){if(r.WTF)throw new Error("unexpected vector length "+a.length+" != "+t.size);return n}a.forEach(function(e){var r=e.replace(Mt,"").match(It);if(r)n.push({v:Dt(r[2]),t:r[1]})});return n}var Rt=/(^\s|\s$|\n)/;function Lt(e,r){return"<"+e+(r.match(Rt)?' xml:space="preserve"':"")+">"+r+"</"+e+">"}function Ut(e){return ir(e).map(function(r){return" "+r+'="'+e[r]+'"'}).join("")}function Bt(e,r,t){return"<"+e+(t!=null?Ut(t):"")+(r!=null?(r.match(Rt)?' xml:space="preserve"':"")+">"+r+"</"+e:"/")+">"}function zt(e,r){try{return e.toISOString().replace(/\.\d*/,"")}catch(t){if(r)throw t}return""}function $t(e,r){switch(typeof e){case"string":var t=Bt("vt:lpwstr",bt(e));if(r)t=t.replace(/&quot;/g,"_x0022_");return t;case"number":return Bt((e|0)==e?"vt:i4":"vt:r8",bt(String(e)));case"boolean":return Bt("vt:bool",e?"true":"false");}if(e instanceof Date)return Bt("vt:filetime",zt(e));throw new Error("Unable to serialize "+e)}function Wt(e){if(_&&Buffer.isBuffer(e))return e.toString("utf8");if(typeof e==="string")return e;if(typeof Uint8Array!=="undefined"&&e instanceof Uint8Array)return Dt(N(I(e)));throw new Error("Bad input format: expected Buffer or string")}var jt=/<([\/]?)([^\s?><!\/:"]*:|)([^\s?<>:\/"]+)(?:\s+[^<>=?"'\s]+="[^"]*?")*\s*[\/]?>/gm;var Ht={CORE_PROPS:"http://schemas.openxmlformats.org/package/2006/metadata/core-properties",CUST_PROPS:"http://schemas.openxmlformats.org/officeDocument/2006/custom-properties",EXT_PROPS:"http://schemas.openxmlformats.org/officeDocument/2006/extended-properties",CT:"http://schemas.openxmlformats.org/package/2006/content-types",RELS:"http://schemas.openxmlformats.org/package/2006/relationships",TCMNT:"http://schemas.microsoft.com/office/spreadsheetml/2018/threadedcomments",dc:"http://purl.org/dc/elements/1.1/",dcterms:"http://purl.org/dc/terms/",dcmitype:"http://purl.org/dc/dcmitype/",mx:"http://schemas.microsoft.com/office/mac/excel/2008/main",r:"http://schemas.openxmlformats.org/officeDocument/2006/relationships",sjs:"http://schemas.openxmlformats.org/package/2006/sheetjs/core-properties",vt:"http://schemas.openxmlformats.org/officeDocument/2006/docPropsVTypes",xsi:"http://www.w3.org/2001/XMLSchema-instance",xsd:"http://www.w3.org/2001/XMLSchema"};var Vt=["http://schemas.openxmlformats.org/spreadsheetml/2006/main","http://purl.oclc.org/ooxml/spreadsheetml/main","http://schemas.microsoft.com/office/excel/2006/main","http://schemas.microsoft.com/office/excel/2006/2"];var Xt={o:"urn:schemas-microsoft-com:office:office",x:"urn:schemas-microsoft-com:office:excel",ss:"urn:schemas-microsoft-com:office:spreadsheet",dt:"uuid:C2F41010-65B3-11d1-A29F-00AA00C14882",mv:"http://macVmlSchemaUri",v:"urn:schemas-microsoft-com:vml",html:"http://www.w3.org/TR/REC-html40"};function Gt(e,r){var t=1-2*(e[r+7]>>>7);var a=((e[r+7]&127)<<4)+(e[r+6]>>>4&15);var n=e[r+6]&15;for(var i=5;i>=0;--i)n=n*256+e[r+i];if(a==2047)return n==0?t*Infinity:NaN;if(a==0)a=-1022;else{a-=1023;n+=Math.pow(2,52)}return t*Math.pow(2,a-52)*n}function Yt(e,r,t){var a=(r<0||1/r==-Infinity?1:0)<<7,n=0,i=0;var s=a?-r:r;if(!isFinite(s)){n=2047;i=isNaN(r)?26985:0}else if(s==0)n=i=0;else{n=Math.floor(Math.log(s)/Math.LN2);i=s*Math.pow(2,52-n);if(n<=-1023&&(!isFinite(i)||i<Math.pow(2,52))){n=-1022}else{i-=Math.pow(2,52);n+=1023}}for(var l=0;l<=5;++l,i/=256)e[t+l]=i&255;e[t+6]=(n&15)<<4|i&15;e[t+7]=n>>4|a}var Jt=function(e){var r=[],t=10240;for(var a=0;a<e[0].length;++a)if(e[0][a])for(var n=0,i=e[0][a].length;n<i;n+=t)r.push.apply(r,e[0][a].slice(n,n+t));return r};var Zt=_?function(e){return e[0].length>0&&Buffer.isBuffer(e[0][0])?Buffer.concat(e[0].map(function(e){return Buffer.isBuffer(e)?e:A(e)})):Jt(e)}:Jt;var Kt=function(e,r,t){var a=[];for(var n=r;n<t;n+=2)a.push(String.fromCharCode(ba(e,n)));return a.join("").replace(L,"")};var qt=_?function(e,r,t){if(!Buffer.isBuffer(e)||!T)return Kt(e,r,t);return e.toString("utf16le",r,t).replace(L,"")}:Kt;var Qt=function(e,r,t){var a=[];for(var n=r;n<r+t;++n)a.push(("0"+e[n].toString(16)).slice(-2));return a.join("")};var ea=_?function(e,r,t){return Buffer.isBuffer(e)?e.toString("hex",r,r+t):Qt(e,r,t)}:Qt;var ra=function(e,r,t){var a=[];for(var n=r;n<t;n++)a.push(String.fromCharCode(ga(e,n)));return a.join("")};var ta=_?function Pc(e,r,t){return Buffer.isBuffer(e)?e.toString("utf8",r,t):ra(e,r,t)}:ra;var aa=function(e,r){var t=ka(e,r);return t>0?ta(e,r+4,r+4+t-1):""};var na=aa;var ia=function(e,r){var t=ka(e,r);return t>0?ta(e,r+4,r+4+t-1):""};var sa=ia;var la=function(e,r){var t=2*ka(e,r);return t>0?ta(e,r+4,r+4+t-1):""};var oa=la;var ca=function Rc(e,r){var t=ka(e,r);return t>0?qt(e,r+4,r+4+t):""};var fa=ca;var ua=function(e,r){var t=ka(e,r);return t>0?ta(e,r+4,r+4+t):""};var ha=ua;var da=function(e,r){return Gt(e,r)};var pa=da;var ma=function Lc(e){return Array.isArray(e)||typeof Uint8Array!=="undefined"&&e instanceof Uint8Array};if(_){na=function Uc(e,r){if(!Buffer.isBuffer(e))return aa(e,r);var t=e.readUInt32LE(r);return t>0?e.toString("utf8",r+4,r+4+t-1):""};sa=function Bc(e,r){if(!Buffer.isBuffer(e))return ia(e,r);var t=e.readUInt32LE(r);return t>0?e.toString("utf8",r+4,r+4+t-1):""};oa=function zc(e,r){if(!Buffer.isBuffer(e)||!T)return la(e,r);var t=2*e.readUInt32LE(r);return e.toString("utf16le",r+4,r+4+t-1)};fa=function $c(e,r){if(!Buffer.isBuffer(e)||!T)return ca(e,r);var t=e.readUInt32LE(r);return e.toString("utf16le",r+4,r+4+t)};ha=function Wc(e,r){if(!Buffer.isBuffer(e))return ua(e,r);var t=e.readUInt32LE(r);return e.toString("utf8",r+4,r+4+t)};pa=function jc(e,r){if(Buffer.isBuffer(e))return e.readDoubleLE(r);return da(e,r)};ma=function Hc(e){return Buffer.isBuffer(e)||Array.isArray(e)||typeof Uint8Array!=="undefined"&&e instanceof Uint8Array}}function va(){qt=function(e,r,t){return a.utils.decode(1200,e.slice(r,t)).replace(L,"")};ta=function(e,r,t){return a.utils.decode(65001,e.slice(r,t))};na=function(e,r){var n=ka(e,r);return n>0?a.utils.decode(t,e.slice(r+4,r+4+n-1)):""};sa=function(e,t){var n=ka(e,t);return n>0?a.utils.decode(r,e.slice(t+4,t+4+n-1)):""};oa=function(e,r){var t=2*ka(e,r);return t>0?a.utils.decode(1200,e.slice(r+4,r+4+t-1)):""};fa=function(e,r){var t=ka(e,r);return t>0?a.utils.decode(1200,e.slice(r+4,r+4+t)):""};ha=function(e,r){var t=ka(e,r);return t>0?a.utils.decode(65001,e.slice(r+4,r+4+t)):""}}if(typeof a!=="undefined")va();var ga=function(e,r){return e[r]};var ba=function(e,r){return e[r+1]*(1<<8)+e[r]};var wa=function(e,r){var t=e[r+1]*(1<<8)+e[r];return t<32768?t:(65535-t+1)*-1};var ka=function(e,r){return e[r+3]*(1<<24)+(e[r+2]<<16)+(e[r+1]<<8)+e[r]};var ya=function(e,r){return e[r+3]<<24|e[r+2]<<16|e[r+1]<<8|e[r]};var xa=function(e,r){return e[r]<<24|e[r+1]<<16|e[r+2]<<8|e[r+3]};function Ca(e,t){var n="",i,s,l=[],o,c,f,u;switch(t){case"dbcs":u=this.l;if(_&&Buffer.isBuffer(this)&&T)n=this.slice(this.l,this.l+2*e).toString("utf16le");else for(f=0;f<e;++f){n+=String.fromCharCode(ba(this,u));u+=2}e*=2;break;case"utf8":n=ta(this,this.l,this.l+e);break;case"utf16le":e*=2;n=qt(this,this.l,this.l+e);break;case"wstr":if(typeof a!=="undefined")n=a.utils.decode(r,this.slice(this.l,this.l+2*e));else return Ca.call(this,e,"dbcs");e=2*e;break;case"lpstr-ansi":n=na(this,this.l);e=4+ka(this,this.l);break;case"lpstr-cp":n=sa(this,this.l);e=4+ka(this,this.l);break;case"lpwstr":n=oa(this,this.l);e=4+2*ka(this,this.l);break;case"lpp4":e=4+ka(this,this.l);n=fa(this,this.l);if(e&2)e+=2;break;case"8lpp4":e=4+ka(this,this.l);n=ha(this,this.l);if(e&3)e+=4-(e&3);break;case"cstr":e=0;n="";while((o=ga(this,this.l+e++))!==0)l.push(m(o));n=l.join("");break;case"_wstr":e=0;n="";while((o=ba(this,this.l+e))!==0){l.push(m(o));e+=2}e+=2;n=l.join("");break;case"dbcs-cont":n="";u=this.l;for(f=0;f<e;++f){if(this.lens&&this.lens.indexOf(u)!==-1){o=ga(this,u);this.l=u+1;c=Ca.call(this,e-f,o?"dbcs-cont":"sbcs-cont");return l.join("")+c}l.push(m(ba(this,u)));u+=2}n=l.join("");e*=2;break;case"cpstr":if(typeof a!=="undefined"){n=a.utils.decode(r,this.slice(this.l,this.l+e));break};case"sbcs-cont":n="";u=this.l;for(f=0;f!=e;++f){if(this.lens&&this.lens.indexOf(u)!==-1){o=ga(this,u);this.l=u+1;c=Ca.call(this,e-f,o?"dbcs-cont":"sbcs-cont");return l.join("")+c}l.push(m(ga(this,u)));u+=1}n=l.join("");break;default:switch(e){case 1:i=ga(this,this.l);this.l++;return i;case 2:i=(t==="i"?wa:ba)(this,this.l);this.l+=2;return i;case 4:;case-4:if(t==="i"||(this[this.l+3]&128)===0){i=(e>0?ya:xa)(this,this.l);this.l+=4;return i}else{s=ka(this,this.l);this.l+=4}return s;case 8:;case-8:if(t==="f"){if(e==8)s=pa(this,this.l);else s=pa([this[this.l+7],this[this.l+6],this[this.l+5],this[this.l+4],this[this.l+3],this[this.l+2],this[this.l+1],this[this.l+0]],0);this.l+=8;return s}else e=8;case 16:n=ea(this,this.l,e);break;};}this.l+=e;return n}var Sa=function(e,r,t){e[t]=r&255;e[t+1]=r>>>8&255;e[t+2]=r>>>16&255;e[t+3]=r>>>24&255};var _a=function(e,r,t){e[t]=r&255;e[t+1]=r>>8&255;e[t+2]=r>>16&255;e[t+3]=r>>24&255};var Aa=function(e,r,t){e[t]=r&255;e[t+1]=r>>>8&255};function Ta(e,n,i){var s=0,l=0;if(i==="dbcs"){for(l=0;l!=n.length;++l)Aa(this,n.charCodeAt(l),this.l+2*l);s=2*n.length}else if(i==="sbcs"||i=="cpstr"){if(typeof a!=="undefined"&&t==874){for(l=0;l!=n.length;++l){var o=a.utils.encode(t,n.charAt(l));this[this.l+l]=o[0]}s=n.length}else if(typeof a!=="undefined"&&i=="cpstr"){o=a.utils.encode(r,n);if(o.length==n.length)for(l=0;l<n.length;++l)if(o[l]==0&&n.charCodeAt(l)!=0)o[l]=95;if(o.length==2*n.length)for(l=0;l<n.length;++l)if(o[2*l]==0&&o[2*l+1]==0&&n.charCodeAt(l)!=0)o[2*l]=95;for(l=0;l<o.length;++l)this[this.l+l]=o[l];s=o.length}else{n=n.replace(/[^\x00-\x7F]/g,"_");for(l=0;l!=n.length;++l)this[this.l+l]=n.charCodeAt(l)&255;s=n.length}}else if(i==="hex"){for(;l<e;++l){this[this.l++]=parseInt(n.slice(2*l,2*l+2),16)||0}return this}else if(i==="utf16le"){var c=Math.min(this.l+e,this.length);for(l=0;l<Math.min(n.length,e);++l){var f=n.charCodeAt(l);this[this.l++]=f&255;this[this.l++]=f>>8}while(this.l<c)this[this.l++]=0;return this}else switch(e){case 1:s=1;this[this.l]=n&255;break;case 2:s=2;this[this.l]=n&255;n>>>=8;this[this.l+1]=n&255;break;case 3:s=3;this[this.l]=n&255;n>>>=8;this[this.l+1]=n&255;n>>>=8;this[this.l+2]=n&255;break;case 4:s=4;Sa(this,n,this.l);break;case 8:s=8;if(i==="f"){Yt(this,n,this.l);break};case 16:break;case-4:s=4;_a(this,n,this.l);break;}this.l+=s;return this}function Ea(e,r){var t=ea(this,this.l,e.length>>1);if(t!==e)throw new Error(r+"Expected "+e+" saw "+t);this.l+=e.length>>1}function Fa(e,r){e.l=r;e._R=Ca;e.chk=Ea;e._W=Ta}function Da(e,r){e.l+=r}function Oa(e){var r=E(e);Fa(r,0);return r}function Na(e,r,t){if(!e)return;var a,n,i;Fa(e,e.l||0);var s=e.length,l=0,o=0;while(e.l<s){l=e._R(1);if(l&128)l=(l&127)+((e._R(1)&127)<<7);var c=XLSBRecordEnum[l]||XLSBRecordEnum[65535];a=e._R(1);i=a&127;for(n=1;n<4&&a&128;++n)i+=((a=e._R(1))&127)<<7*n;o=e.l+i;var f=c.f&&c.f(e,i,t);e.l=o;if(r(f,c,l))return}}function Ma(){var e=[],r=_?16384:2048;var t=_&&typeof Oa(r).copy=="function";var a=function f(e){var r=Oa(e);Fa(r,0);return r};var n=a(r);var i=function u(){if(!n)return;if(n.l){if(n.length>n.l){n=n.slice(0,n.l);n.l=n.length}if(n.length>0)e.push(n)}n=null};var s=function h(e){if(n&&e<n.length-n.l)return n;i();return n=a(Math.max(e+1,r))};var l=function d(){i();return P(e)};var o=function(){i();return e};var c=function p(e){i();n=e;if(n.l==null)n.l=n.length;s(r)};return{next:s,push:c,end:l,_bufs:e,end2:o}}function Ia(e,r,t,a){var n=+r,i;if(isNaN(n))return;if(!a)a=XLSBRecordEnum[n].p||(t||[]).length||0;i=1+(n>=128?1:0)+1;if(a>=128)++i;if(a>=16384)++i;if(a>=2097152)++i;var s=e.next(i);if(n<=127)s._W(1,n);else{s._W(1,(n&127)+128);s._W(1,n>>7)}for(var l=0;l!=4;++l){if(a>=128){s._W(1,(a&127)+128);a>>=7}else{s._W(1,a);break}}if(a>0&&ma(t))e.push(t)}function Pa(e,r,t){var a=yr(e);if(r.s){if(a.cRel)a.c+=r.s.c;if(a.rRel)a.r+=r.s.r}else{if(a.cRel)a.c+=r.c;if(a.rRel)a.r+=r.r}if(!t||t.biff<12){while(a.c>=256)a.c-=256;while(a.r>=65536)a.r-=65536}return a}function Ra(e,r,t){var a=yr(e);a.s=Pa(a.s,r.s,t);a.e=Pa(a.e,r.s,t);return a}function La(e,r){if(e.cRel&&e.c<0){e=yr(e);while(e.c<0)e.c+=r>8?16384:256}if(e.rRel&&e.r<0){e=yr(e);while(e.r<0)e.r+=r>8?1048576:r>5?65536:16384}var t=Ja(e);if(!e.cRel&&e.cRel!=null)t=Va(t);if(!e.rRel&&e.rRel!=null)t=$a(t);return t}function Ua(e,r){if(e.s.r==0&&!e.s.rRel){if(e.e.r==(r.biff>=12?1048575:r.biff>=8?65536:16384)&&!e.e.rRel){return(e.s.cRel?"":"$")+Ha(e.s.c)+":"+(e.e.cRel?"":"$")+Ha(e.e.c)}}if(e.s.c==0&&!e.s.cRel){if(e.e.c==(r.biff>=12?16383:255)&&!e.e.cRel){return(e.s.rRel?"":"$")+za(e.s.r)+":"+(e.e.rRel?"":"$")+za(e.e.r)}}return La(e.s,r.biff)+":"+La(e.e,r.biff)}function Ba(e){return parseInt(Wa(e),10)-1}function za(e){return""+(e+1)}function $a(e){return e.replace(/([A-Z]|^)(\d+)$/,"$1$$$2")}function Wa(e){return e.replace(/\$(\d+)$/,"$1")}function ja(e){var r=Xa(e),t=0,a=0;for(;a!==r.length;++a)t=26*t+r.charCodeAt(a)-64;return t-1}function Ha(e){if(e<0)throw new Error("invalid column "+e);var r="";for(++e;e;e=Math.floor((e-1)/26))r=String.fromCharCode((e-1)%26+65)+r;return r}function Va(e){return e.replace(/^([A-Z])/,"$$$1")}function Xa(e){return e.replace(/^\$([A-Z])/,"$1")}function Ga(e){return e.replace(/(\$?[A-Z]*)(\$?\d*)/,"$1,$2").split(",")}function Ya(e){var r=0,t=0;for(var a=0;a<e.length;++a){var n=e.charCodeAt(a);if(n>=48&&n<=57)r=10*r+(n-48);else if(n>=65&&n<=90)t=26*t+(n-64)}return{c:t-1,r:r-1}}function Ja(e){var r=e.c+1;var t="";for(;r;r=(r-1)/26|0)t=String.fromCharCode((r-1)%26+65)+t;return t+(e.r+1)}function Za(e){var r=e.indexOf(":");if(r==-1)return{s:Ya(e),e:Ya(e)};return{s:Ya(e.slice(0,r)),e:Ya(e.slice(r+1))}}function Ka(e,r){if(typeof r==="undefined"||typeof r==="number"){return Ka(e.s,e.e)}if(typeof e!=="string")e=Ja(e);if(typeof r!=="string")r=Ja(r);return e==r?e:e+":"+r}function qa(e){var r=Za(e);return"$"+Ha(r.s.c)+"$"+za(r.s.r)+":$"+Ha(r.e.c)+"$"+za(r.e.r)}function Qa(e,r){if(!e&&!(r&&r.biff<=5&&r.biff>=2))throw new Error("empty sheet name");if(/[^\w\u4E00-\u9FFF\u3040-\u30FF]/.test(e))return"'"+e.replace(/'/g,"''")+"'";return e}function en(e){var r={s:{c:0,r:0},e:{c:0,r:0}};var t=0,a=0,n=0;var i=e.length;for(t=0;a<i;++a){if((n=e.charCodeAt(a)-64)<1||n>26)break;t=26*t+n}r.s.c=--t;for(t=0;a<i;++a){if((n=e.charCodeAt(a)-48)<0||n>9)break;t=10*t+n}r.s.r=--t;if(a===i||n!=10){r.e.c=r.s.c;r.e.r=r.s.r;return r}++a;for(t=0;a!=i;++a){if((n=e.charCodeAt(a)-64)<1||n>26)break;t=26*t+n}r.e.c=--t;for(t=0;a!=i;++a){if((n=e.charCodeAt(a)-48)<0||n>9)break;t=10*t+n}r.e.r=--t;return r}function rn(e,r){var t=e.t=="d"&&r instanceof Date;if(e.z!=null)try{return e.w=$e(e.z,t?dr(r):r);
+}catch(a){}try{return e.w=$e((e.XF||{}).numFmtId||(t?14:0),t?dr(r):r)}catch(a){return""+r}}function tn(e,r,t){if(e==null||e.t==null||e.t=="z")return"";if(e.w!==undefined)return e.w;if(e.t=="d"&&!e.z&&t&&t.dateNF)e.z=t.dateNF;if(e.t=="e")return En[e.v]||e.v;if(r==undefined)return rn(e,e.v);return rn(e,r)}function an(e,r){var t=r&&r.sheet?r.sheet:"Sheet1";var a={};a[t]=e;return{SheetNames:[t],Sheets:a}}function nn(e){var r={};var t=e||{};if(t.dense)r["!data"]=[];return r}function sn(e,r,t){var a=t||{};var n=e?e["!data"]!=null:a.dense;if(b!=null&&n==null)n=b;var i=e||(n?{"!data":[]}:{});if(n&&!i["!data"])i["!data"]=[];var s=0,l=0;if(i&&a.origin!=null){if(typeof a.origin=="number")s=a.origin;else{var o=typeof a.origin=="string"?Ya(a.origin):a.origin;s=o.r;l=o.c}}var c={s:{c:1e7,r:1e7},e:{c:0,r:0}};if(i["!ref"]){var f=en(i["!ref"]);c.s.c=f.s.c;c.s.r=f.s.r;c.e.c=Math.max(c.e.c,f.e.c);c.e.r=Math.max(c.e.r,f.e.r);if(s==-1)c.e.r=s=i["!ref"]?f.e.r+1:0}else{c.s.c=c.e.c=c.s.r=c.e.r=0}var u=[],h=false;for(var d=0;d!=r.length;++d){if(!r[d])continue;if(!Array.isArray(r[d]))throw new Error("aoa_to_sheet expects an array of arrays");var p=s+d;if(n){if(!i["!data"][p])i["!data"][p]=[];u=i["!data"][p]}var m=r[d];for(var v=0;v!=m.length;++v){if(typeof m[v]==="undefined")continue;var g={v:m[v],t:""};var w=l+v;if(c.s.r>p)c.s.r=p;if(c.s.c>w)c.s.c=w;if(c.e.r<p)c.e.r=p;if(c.e.c<w)c.e.c=w;h=true;if(m[v]&&typeof m[v]==="object"&&!Array.isArray(m[v])&&!(m[v]instanceof Date))g=m[v];else{if(Array.isArray(g.v)){g.f=m[v][1];g.v=g.v[0]}if(g.v===null){if(g.f)g.t="n";else if(a.nullError){g.t="e";g.v=0}else if(!a.sheetStubs)continue;else g.t="z"}else if(typeof g.v==="number"){if(isFinite(g.v))g.t="n";else if(isNaN(g.v)){g.t="e";g.v=15}else{g.t="e";g.v=7}}else if(typeof g.v==="boolean")g.t="b";else if(g.v instanceof Date){g.z=a.dateNF||q[14];if(!a.UTC)g.v=Ir(g.v);if(a.cellDates){g.t="d";g.w=$e(g.z,dr(g.v,a.date1904))}else{g.t="n";g.v=dr(g.v,a.date1904);g.w=$e(g.z,g.v)}}else g.t="s"}if(n){if(u[w]&&u[w].z)g.z=u[w].z;u[w]=g}else{var k=Ha(w)+(p+1);if(i[k]&&i[k].z)g.z=i[k].z;i[k]=g}}}if(h&&c.s.c<104e5)i["!ref"]=Ka(c);return i}function ln(e,r){return sn(null,e,r)}var on=2;var cn=3;var fn=11;var un=12;var hn=19;var dn=64;var pn=65;var mn=71;var vn=4108;var gn=4126;var bn=80;var wn=81;var kn=[bn,wn];var yn={1:{n:"CodePage",t:on},2:{n:"Category",t:bn},3:{n:"PresentationFormat",t:bn},4:{n:"ByteCount",t:cn},5:{n:"LineCount",t:cn},6:{n:"ParagraphCount",t:cn},7:{n:"SlideCount",t:cn},8:{n:"NoteCount",t:cn},9:{n:"HiddenCount",t:cn},10:{n:"MultimediaClipCount",t:cn},11:{n:"ScaleCrop",t:fn},12:{n:"HeadingPairs",t:vn},13:{n:"TitlesOfParts",t:gn},14:{n:"Manager",t:bn},15:{n:"Company",t:bn},16:{n:"LinksUpToDate",t:fn},17:{n:"CharacterCount",t:cn},19:{n:"SharedDoc",t:fn},22:{n:"HyperlinksChanged",t:fn},23:{n:"AppVersion",t:cn,p:"version"},24:{n:"DigSig",t:pn},26:{n:"ContentType",t:bn},27:{n:"ContentStatus",t:bn},28:{n:"Language",t:bn},29:{n:"Version",t:bn},255:{},2147483648:{n:"Locale",t:hn},2147483651:{n:"Behavior",t:hn},1919054434:{}};var xn={1:{n:"CodePage",t:on},2:{n:"Title",t:bn},3:{n:"Subject",t:bn},4:{n:"Author",t:bn},5:{n:"Keywords",t:bn},6:{n:"Comments",t:bn},7:{n:"Template",t:bn},8:{n:"LastAuthor",t:bn},9:{n:"RevNumber",t:bn},10:{n:"EditTime",t:dn},11:{n:"LastPrinted",t:dn},12:{n:"CreatedDate",t:dn},13:{n:"ModifiedDate",t:dn},14:{n:"PageCount",t:cn},15:{n:"WordCount",t:cn},16:{n:"CharCount",t:cn},17:{n:"Thumbnail",t:mn},18:{n:"Application",t:bn},19:{n:"DocSecurity",t:cn},255:{},2147483648:{n:"Locale",t:hn},2147483651:{n:"Behavior",t:hn},1919054434:{}};var Cn={1:"US",2:"CA",3:"",7:"RU",20:"EG",30:"GR",31:"NL",32:"BE",33:"FR",34:"ES",36:"HU",39:"IT",41:"CH",43:"AT",44:"GB",45:"DK",46:"SE",47:"NO",48:"PL",49:"DE",52:"MX",55:"BR",61:"AU",64:"NZ",66:"TH",81:"JP",82:"KR",84:"VN",86:"CN",90:"TR",105:"JS",213:"DZ",216:"MA",218:"LY",351:"PT",354:"IS",358:"FI",420:"CZ",886:"TW",961:"LB",962:"JO",963:"SY",964:"IQ",965:"KW",966:"SA",971:"AE",972:"IL",974:"QA",981:"IR",65535:"US"};var Sn=[null,"solid","mediumGray","darkGray","lightGray","darkHorizontal","darkVertical","darkDown","darkUp","darkGrid","darkTrellis","lightHorizontal","lightVertical","lightDown","lightUp","lightGrid","lightTrellis","gray125","gray0625"];function _n(e){return e.map(function(e){return[e>>16&255,e>>8&255,e&255]})}var An=_n([0,16777215,16711680,65280,255,16776960,16711935,65535,0,16777215,16711680,65280,255,16776960,16711935,65535,8388608,32768,128,8421376,8388736,32896,12632256,8421504,10066431,10040166,16777164,13434879,6684774,16744576,26316,13421823,128,16711935,16776960,65535,8388736,8388608,32896,255,52479,13434879,13434828,16777113,10079487,16751052,13408767,16764057,3368703,3394764,10079232,16763904,16750848,16737792,6710937,9868950,13158,3381606,13056,3355392,10040064,10040166,3355545,3355443,0,16777215,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]);var Tn=yr(An);var En={0:"#NULL!",7:"#DIV/0!",15:"#VALUE!",23:"#REF!",29:"#NAME?",36:"#NUM!",42:"#N/A",43:"#GETTING_DATA",255:"#WTF?"};var Fn={"#NULL!":0,"#DIV/0!":7,"#VALUE!":15,"#REF!":23,"#NAME?":29,"#NUM!":36,"#N/A":42,"#GETTING_DATA":43,"#WTF?":255};var Dn=["_xlnm.Consolidate_Area","_xlnm.Auto_Open","_xlnm.Auto_Close","_xlnm.Extract","_xlnm.Database","_xlnm.Criteria","_xlnm.Print_Area","_xlnm.Print_Titles","_xlnm.Recorder","_xlnm.Data_Form","_xlnm.Auto_Activate","_xlnm.Auto_Deactivate","_xlnm.Sheet_Title","_xlnm._FilterDatabase"];var On={"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml":"workbooks","application/vnd.ms-excel.sheet.macroEnabled.main+xml":"workbooks","application/vnd.ms-excel.sheet.binary.macroEnabled.main":"workbooks","application/vnd.ms-excel.addin.macroEnabled.main+xml":"workbooks","application/vnd.openxmlformats-officedocument.spreadsheetml.template.main+xml":"workbooks","application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml":"sheets","application/vnd.ms-excel.worksheet":"sheets","application/vnd.ms-excel.binIndexWs":"TODO","application/vnd.openxmlformats-officedocument.spreadsheetml.chartsheet+xml":"charts","application/vnd.ms-excel.chartsheet":"charts","application/vnd.ms-excel.macrosheet+xml":"macros","application/vnd.ms-excel.macrosheet":"macros","application/vnd.ms-excel.intlmacrosheet":"TODO","application/vnd.ms-excel.binIndexMs":"TODO","application/vnd.openxmlformats-officedocument.spreadsheetml.dialogsheet+xml":"dialogs","application/vnd.ms-excel.dialogsheet":"dialogs","application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml":"strs","application/vnd.ms-excel.sharedStrings":"strs","application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml":"styles","application/vnd.ms-excel.styles":"styles","application/vnd.openxmlformats-package.core-properties+xml":"coreprops","application/vnd.openxmlformats-officedocument.custom-properties+xml":"custprops","application/vnd.openxmlformats-officedocument.extended-properties+xml":"extprops","application/vnd.openxmlformats-officedocument.customXmlProperties+xml":"TODO","application/vnd.openxmlformats-officedocument.spreadsheetml.customProperty":"TODO","application/vnd.openxmlformats-officedocument.spreadsheetml.comments+xml":"comments","application/vnd.ms-excel.comments":"comments","application/vnd.ms-excel.threadedcomments+xml":"threadedcomments","application/vnd.ms-excel.person+xml":"people","application/vnd.openxmlformats-officedocument.spreadsheetml.sheetMetadata+xml":"metadata","application/vnd.ms-excel.sheetMetadata":"metadata","application/vnd.ms-excel.pivotTable":"TODO","application/vnd.openxmlformats-officedocument.spreadsheetml.pivotTable+xml":"TODO","application/vnd.openxmlformats-officedocument.drawingml.chart+xml":"TODO","application/vnd.ms-office.chartcolorstyle+xml":"TODO","application/vnd.ms-office.chartstyle+xml":"TODO","application/vnd.ms-office.chartex+xml":"TODO","application/vnd.ms-excel.calcChain":"calcchains","application/vnd.openxmlformats-officedocument.spreadsheetml.calcChain+xml":"calcchains","application/vnd.openxmlformats-officedocument.spreadsheetml.printerSettings":"TODO","application/vnd.ms-office.activeX":"TODO","application/vnd.ms-office.activeX+xml":"TODO","application/vnd.ms-excel.attachedToolbars":"TODO","application/vnd.ms-excel.connections":"TODO","application/vnd.openxmlformats-officedocument.spreadsheetml.connections+xml":"TODO","application/vnd.ms-excel.externalLink":"links","application/vnd.openxmlformats-officedocument.spreadsheetml.externalLink+xml":"links","application/vnd.ms-excel.pivotCacheDefinition":"TODO","application/vnd.ms-excel.pivotCacheRecords":"TODO","application/vnd.openxmlformats-officedocument.spreadsheetml.pivotCacheDefinition+xml":"TODO","application/vnd.openxmlformats-officedocument.spreadsheetml.pivotCacheRecords+xml":"TODO","application/vnd.ms-excel.queryTable":"TODO","application/vnd.openxmlformats-officedocument.spreadsheetml.queryTable+xml":"TODO","application/vnd.ms-excel.userNames":"TODO","application/vnd.ms-excel.revisionHeaders":"TODO","application/vnd.ms-excel.revisionLog":"TODO","application/vnd.openxmlformats-officedocument.spreadsheetml.revisionHeaders+xml":"TODO","application/vnd.openxmlformats-officedocument.spreadsheetml.revisionLog+xml":"TODO","application/vnd.openxmlformats-officedocument.spreadsheetml.userNames+xml":"TODO","application/vnd.ms-excel.tableSingleCells":"TODO","application/vnd.openxmlformats-officedocument.spreadsheetml.tableSingleCells+xml":"TODO","application/vnd.ms-excel.slicer":"TODO","application/vnd.ms-excel.slicerCache":"TODO","application/vnd.ms-excel.slicer+xml":"TODO","application/vnd.ms-excel.slicerCache+xml":"TODO","application/vnd.ms-excel.wsSortMap":"TODO","application/vnd.ms-excel.table":"TODO","application/vnd.openxmlformats-officedocument.spreadsheetml.table+xml":"TODO","application/vnd.openxmlformats-officedocument.theme+xml":"themes","application/vnd.openxmlformats-officedocument.themeOverride+xml":"TODO","application/vnd.ms-excel.Timeline+xml":"TODO","application/vnd.ms-excel.TimelineCache+xml":"TODO","application/vnd.ms-office.vbaProject":"vba","application/vnd.ms-office.vbaProjectSignature":"TODO","application/vnd.ms-office.volatileDependencies":"TODO","application/vnd.openxmlformats-officedocument.spreadsheetml.volatileDependencies+xml":"TODO","application/vnd.ms-excel.controlproperties+xml":"TODO","application/vnd.openxmlformats-officedocument.model+data":"TODO","application/vnd.ms-excel.Survey+xml":"TODO","application/vnd.openxmlformats-officedocument.drawing+xml":"drawings","application/vnd.openxmlformats-officedocument.drawingml.chartshapes+xml":"TODO","application/vnd.openxmlformats-officedocument.drawingml.diagramColors+xml":"TODO","application/vnd.openxmlformats-officedocument.drawingml.diagramData+xml":"TODO","application/vnd.openxmlformats-officedocument.drawingml.diagramLayout+xml":"TODO","application/vnd.openxmlformats-officedocument.drawingml.diagramStyle+xml":"TODO","application/vnd.openxmlformats-officedocument.vmlDrawing":"TODO","application/vnd.openxmlformats-package.relationships+xml":"rels","application/vnd.openxmlformats-officedocument.oleObject":"TODO","image/png":"TODO",sheet:"js"};var Nn={workbooks:{xlsx:"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml",xlsm:"application/vnd.ms-excel.sheet.macroEnabled.main+xml",xlsb:"application/vnd.ms-excel.sheet.binary.macroEnabled.main",xlam:"application/vnd.ms-excel.addin.macroEnabled.main+xml",xltx:"application/vnd.openxmlformats-officedocument.spreadsheetml.template.main+xml"},strs:{xlsx:"application/vnd.openxmlformats-officedocument.spreadsheetml.sharedStrings+xml",xlsb:"application/vnd.ms-excel.sharedStrings"},comments:{xlsx:"application/vnd.openxmlformats-officedocument.spreadsheetml.comments+xml",xlsb:"application/vnd.ms-excel.comments"},sheets:{xlsx:"application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml",xlsb:"application/vnd.ms-excel.worksheet"},charts:{xlsx:"application/vnd.openxmlformats-officedocument.spreadsheetml.chartsheet+xml",xlsb:"application/vnd.ms-excel.chartsheet"},dialogs:{xlsx:"application/vnd.openxmlformats-officedocument.spreadsheetml.dialogsheet+xml",xlsb:"application/vnd.ms-excel.dialogsheet"},macros:{xlsx:"application/vnd.ms-excel.macrosheet+xml",xlsb:"application/vnd.ms-excel.macrosheet"},metadata:{xlsx:"application/vnd.openxmlformats-officedocument.spreadsheetml.sheetMetadata+xml",xlsb:"application/vnd.ms-excel.sheetMetadata"},styles:{xlsx:"application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml",xlsb:"application/vnd.ms-excel.styles"}};function Mn(){return{workbooks:[],sheets:[],charts:[],dialogs:[],macros:[],rels:[],strs:[],comments:[],threadedcomments:[],links:[],coreprops:[],extprops:[],custprops:[],themes:[],styles:[],calcchains:[],vba:[],drawings:[],metadata:[],people:[],TODO:[],xmlns:""}}function In(e){var r=Mn();if(!e||!e.match)return r;var t={};(e.match(lt)||[]).forEach(function(e){var a=ft(e);switch(a[0].replace(ot,"<")){case"<?xml":break;case"<Types":r.xmlns=a["xmlns"+(a[0].match(/<(\w+):/)||["",""])[1]];break;case"<Default":t[a.Extension.toLowerCase()]=a.ContentType;break;case"<Override":if(r[On[a.ContentType]]!==undefined)r[On[a.ContentType]].push(a.PartName);break;}});if(r.xmlns!==Ht.CT)throw new Error("Unknown Namespace: "+r.xmlns);r.calcchain=r.calcchains.length>0?r.calcchains[0]:"";r.sst=r.strs.length>0?r.strs[0]:"";r.style=r.styles.length>0?r.styles[0]:"";r.defaults=t;delete r.calcchains;return r}function Pn(e,r,t){var a=cr(On);var n=[],i;if(!t){n[n.length]=at;n[n.length]=Bt("Types",null,{xmlns:Ht.CT,"xmlns:xsd":Ht.xsd,"xmlns:xsi":Ht.xsi});n=n.concat([["xml","application/xml"],["bin","application/vnd.ms-excel.sheet.binary.macroEnabled.main"],["vml","application/vnd.openxmlformats-officedocument.vmlDrawing"],["data","application/vnd.openxmlformats-officedocument.model+data"],["bmp","image/bmp"],["png","image/png"],["gif","image/gif"],["emf","image/x-emf"],["wmf","image/x-wmf"],["jpg","image/jpeg"],["jpeg","image/jpeg"],["tif","image/tiff"],["tiff","image/tiff"],["pdf","application/pdf"],["rels","application/vnd.openxmlformats-package.relationships+xml"]].map(function(e){return Bt("Default",null,{Extension:e[0],ContentType:e[1]})}))}var s=function(t){if(e[t]&&e[t].length>0){i=e[t][0];n[n.length]=Bt("Override",null,{PartName:(i[0]=="/"?"":"/")+i,ContentType:Nn[t][r.bookType]||Nn[t]["xlsx"]})}};var l=function(t){(e[t]||[]).forEach(function(e){n[n.length]=Bt("Override",null,{PartName:(e[0]=="/"?"":"/")+e,ContentType:Nn[t][r.bookType]||Nn[t]["xlsx"]})})};var o=function(r){(e[r]||[]).forEach(function(e){n[n.length]=Bt("Override",null,{PartName:(e[0]=="/"?"":"/")+e,ContentType:a[r][0]})})};s("workbooks");l("sheets");l("charts");o("themes");["strs","styles"].forEach(s);["coreprops","extprops","custprops"].forEach(o);o("vba");o("comments");o("threadedcomments");o("drawings");l("metadata");o("people");if(!t&&n.length>2){n[n.length]="</Types>";n[1]=n[1].replace("/>",">")}return n.join("")}var Rn={WB:"http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument",SHEET:"http://sheetjs.openxmlformats.org/officeDocument/2006/relationships/officeDocument",HLINK:"http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink",VML:"http://schemas.openxmlformats.org/officeDocument/2006/relationships/vmlDrawing",XPATH:"http://schemas.openxmlformats.org/officeDocument/2006/relationships/externalLinkPath",XMISS:"http://schemas.microsoft.com/office/2006/relationships/xlExternalLinkPath/xlPathMissing",XLINK:"http://schemas.openxmlformats.org/officeDocument/2006/relationships/externalLink",CXML:"http://schemas.openxmlformats.org/officeDocument/2006/relationships/customXml",CXMLP:"http://schemas.openxmlformats.org/officeDocument/2006/relationships/customXmlProps",CMNT:"http://schemas.openxmlformats.org/officeDocument/2006/relationships/comments",CORE_PROPS:"http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties",EXT_PROPS:"http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties",CUST_PROPS:"http://schemas.openxmlformats.org/officeDocument/2006/relationships/custom-properties",SST:"http://schemas.openxmlformats.org/officeDocument/2006/relationships/sharedStrings",STY:"http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles",THEME:"http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme",CHART:"http://schemas.openxmlformats.org/officeDocument/2006/relationships/chart",CHARTEX:"http://schemas.microsoft.com/office/2014/relationships/chartEx",CS:"http://schemas.openxmlformats.org/officeDocument/2006/relationships/chartsheet",WS:["http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet","http://purl.oclc.org/ooxml/officeDocument/relationships/worksheet"],DS:"http://schemas.openxmlformats.org/officeDocument/2006/relationships/dialogsheet",MS:"http://schemas.microsoft.com/office/2006/relationships/xlMacrosheet",IMG:"http://schemas.openxmlformats.org/officeDocument/2006/relationships/image",DRAW:"http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing",XLMETA:"http://schemas.openxmlformats.org/officeDocument/2006/relationships/sheetMetadata",TCMNT:"http://schemas.microsoft.com/office/2017/10/relationships/threadedComment",PEOPLE:"http://schemas.microsoft.com/office/2017/10/relationships/person",CONN:"http://schemas.openxmlformats.org/officeDocument/2006/relationships/connections",VBA:"http://schemas.microsoft.com/office/2006/relationships/vbaProject"};function Ln(e){var r=e.lastIndexOf("/");return e.slice(0,r+1)+"_rels/"+e.slice(r+1)+".rels"}function Un(e,r){var t={"!id":{}};if(!e)return t;if(r.charAt(0)!=="/"){r="/"+r}var a={};(e.match(lt)||[]).forEach(function(e){var n=ft(e);if(n[0]==="<Relationship"){var i={};i.Type=n.Type;i.Target=mt(n.Target);i.Id=n.Id;if(n.TargetMode)i.TargetMode=n.TargetMode;var s=n.TargetMode==="External"?n.Target:tt(n.Target,r);t[s]=i;a[n.Id]=i}});t["!id"]=a;return t}function Bn(e){var r=[at,Bt("Relationships",null,{xmlns:Ht.RELS})];ir(e["!id"]).forEach(function(t){r[r.length]=Bt("Relationship",null,e["!id"][t])});if(r.length>2){r[r.length]="</Relationships>";r[1]=r[1].replace("/>",">")}return r.join("")}function zn(e,r,t,a,n,i){if(!n)n={};if(!e["!id"])e["!id"]={};if(!e["!idx"])e["!idx"]=1;if(r<0)for(r=e["!idx"];e["!id"]["rId"+r];++r){}e["!idx"]=r+1;n.Id="rId"+r;n.Type=a;n.Target=t;if(i)n.TargetMode=i;else if([Rn.HLINK,Rn.XPATH,Rn.XMISS].indexOf(n.Type)>-1)n.TargetMode="External";if(e["!id"][n.Id])throw new Error("Cannot rewrite rId "+r);e["!id"][n.Id]=n;e[("/"+n.Target).replace("//","/")]=n;return r}var $n="application/vnd.oasis.opendocument.spreadsheet";function Wn(e,r){var t=Wt(e);var a;var n;while(a=jt.exec(t))switch(a[3]){case"manifest":break;case"file-entry":n=ft(a[0],false);if(n.path=="/"&&n.type!==$n)throw new Error("This OpenDocument is not a spreadsheet");break;case"encryption-data":;case"algorithm":;case"start-key-generation":;case"key-derivation":throw new Error("Unsupported ODS Encryption");default:if(r&&r.WTF)throw a;}}function jn(e){var r=[at];r.push('<manifest:manifest xmlns:manifest="urn:oasis:names:tc:opendocument:xmlns:manifest:1.0" manifest:version="1.2">\n');r.push('  <manifest:file-entry manifest:full-path="/" manifest:version="1.2" manifest:media-type="application/vnd.oasis.opendocument.spreadsheet"/>\n');for(var t=0;t<e.length;++t)r.push('  <manifest:file-entry manifest:full-path="'+e[t][0]+'" manifest:media-type="'+e[t][1]+'"/>\n');r.push("</manifest:manifest>");return r.join("")}function Hn(e,r,t){return['  <rdf:Description rdf:about="'+e+'">\n','    <rdf:type rdf:resource="http://docs.oasis-open.org/ns/office/1.2/meta/'+(t||"odf")+"#"+r+'"/>\n',"  </rdf:Description>\n"].join("")}function Vn(e,r){return['  <rdf:Description rdf:about="'+e+'">\n','    <ns0:hasPart xmlns:ns0="http://docs.oasis-open.org/ns/office/1.2/meta/pkg#" rdf:resource="'+r+'"/>\n',"  </rdf:Description>\n"].join("")}function Xn(e){var r=[at];r.push('<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">\n');for(var t=0;t!=e.length;++t){r.push(Hn(e[t][0],e[t][1]));r.push(Vn("",e[t][0]))}r.push(Hn("","Document","pkg"));r.push("</rdf:RDF>");return r.join("")}function Gn(r,t){return'<office:document-meta xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:meta="urn:oasis:names:tc:opendocument:xmlns:meta:1.0" xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:xlink="http://www.w3.org/1999/xlink" office:version="1.2"><office:meta><meta:generator>SheetJS '+e.version+"</meta:generator></office:meta></office:document-meta>"}var Yn=[["cp:category","Category"],["cp:contentStatus","ContentStatus"],["cp:keywords","Keywords"],["cp:lastModifiedBy","LastAuthor"],["cp:lastPrinted","LastPrinted"],["cp:revision","RevNumber"],["cp:version","Version"],["dc:creator","Author"],["dc:description","Comments"],["dc:identifier","Identifier"],["dc:language","Language"],["dc:subject","Subject"],["dc:title","Title"],["dcterms:created","CreatedDate","date"],["dcterms:modified","ModifiedDate","date"]];function Jn(e){var r={};e=Dt(e);for(var t=0;t<Yn.length;++t){var a=Yn[t],n=Br(e,a[0]);if(n!=null&&n.length>0)r[a[1]]=mt(n[1]);if(a[2]==="date"&&r[a[1]])r[a[1]]=wr(r[a[1]])}return r}function Zn(e,r,t,a,n){if(n[e]!=null||r==null||r==="")return;n[e]=r;r=bt(r);a[a.length]=t?Bt(e,r,t):Lt(e,r)}function Kn(e,r){var t=r||{};var a=[at,Bt("cp:coreProperties",null,{"xmlns:cp":Ht.CORE_PROPS,"xmlns:dc":Ht.dc,"xmlns:dcterms":Ht.dcterms,"xmlns:dcmitype":Ht.dcmitype,"xmlns:xsi":Ht.xsi})],n={};if(!e&&!t.Props)return a.join("");if(e){if(e.CreatedDate!=null)Zn("dcterms:created",typeof e.CreatedDate==="string"?e.CreatedDate:zt(e.CreatedDate,t.WTF),{"xsi:type":"dcterms:W3CDTF"},a,n);if(e.ModifiedDate!=null)Zn("dcterms:modified",typeof e.ModifiedDate==="string"?e.ModifiedDate:zt(e.ModifiedDate,t.WTF),{"xsi:type":"dcterms:W3CDTF"},a,n)}for(var i=0;i!=Yn.length;++i){var s=Yn[i];var l=t.Props&&t.Props[s[1]]!=null?t.Props[s[1]]:e?e[s[1]]:null;if(l===true)l="1";else if(l===false)l="0";else if(typeof l=="number")l=String(l);if(l!=null)Zn(s[0],l,null,a,n)}if(a.length>2){a[a.length]="</cp:coreProperties>";a[1]=a[1].replace("/>",">")}return a.join("")}var qn=[["Application","Application","string"],["AppVersion","AppVersion","string"],["Company","Company","string"],["DocSecurity","DocSecurity","string"],["Manager","Manager","string"],["HyperlinksChanged","HyperlinksChanged","bool"],["SharedDoc","SharedDoc","bool"],["LinksUpToDate","LinksUpToDate","bool"],["ScaleCrop","ScaleCrop","bool"],["HeadingPairs","HeadingPairs","raw"],["TitlesOfParts","TitlesOfParts","raw"]];var Qn=["Worksheets","SheetNames","NamedRanges","DefinedNames","Chartsheets","ChartNames"];function ei(e,r,t,a){var n=[];if(typeof e=="string")n=Pt(e,a);else for(var i=0;i<e.length;++i)n=n.concat(e[i].map(function(e){return{v:e}}));var s=typeof r=="string"?Pt(r,a).map(function(e){return e.v}):r;var l=0,o=0;if(s.length>0)for(var c=0;c!==n.length;c+=2){o=+n[c+1].v;switch(n[c].v){case"Worksheets":;case"工作表":;case"Листы":;case"أوراق العمل":;case"ワークシート":;case"גליונות עבודה":;case"Arbeitsblätter":;case"Çalışma Sayfaları":;case"Feuilles de calcul":;case"Fogli di lavoro":;case"Folhas de cálculo":;case"Planilhas":;case"Regneark":;case"Hojas de cálculo":;case"Werkbladen":t.Worksheets=o;t.SheetNames=s.slice(l,l+o);break;case"Named Ranges":;case"Rangos con nombre":;case"名前付き一覧":;case"Benannte Bereiche":;case"Navngivne områder":t.NamedRanges=o;t.DefinedNames=s.slice(l,l+o);break;case"Charts":;case"Diagramme":t.Chartsheets=o;t.ChartNames=s.slice(l,l+o);break;}l+=o}}function ri(e,r,t){var a={};if(!r)r={};e=Dt(e);qn.forEach(function(t){var n=(zr(e,t[0])||[])[1];switch(t[2]){case"string":if(n)r[t[1]]=mt(n);break;case"bool":r[t[1]]=n==="true";break;case"raw":var i=Br(e,t[0]);if(i&&i.length>0)a[t[1]]=i[1];break;}});if(a.HeadingPairs&&a.TitlesOfParts)ei(a.HeadingPairs,a.TitlesOfParts,r,t);return r}function ti(e){var r=[],t=Bt;if(!e)e={};e.Application="SheetJS";r[r.length]=at;r[r.length]=Bt("Properties",null,{xmlns:Ht.EXT_PROPS,"xmlns:vt":Ht.vt});qn.forEach(function(a){if(e[a[1]]===undefined)return;var n;switch(a[2]){case"string":n=bt(String(e[a[1]]));break;case"bool":n=e[a[1]]?"true":"false";break;}if(n!==undefined)r[r.length]=t(a[0],n)});r[r.length]=t("HeadingPairs",t("vt:vector",t("vt:variant","<vt:lpstr>Worksheets</vt:lpstr>")+t("vt:variant",t("vt:i4",String(e.Worksheets))),{size:2,baseType:"variant"}));r[r.length]=t("TitlesOfParts",t("vt:vector",e.SheetNames.map(function(e){return"<vt:lpstr>"+bt(e)+"</vt:lpstr>"}).join(""),{size:e.Worksheets,baseType:"lpstr"}));if(r.length>2){r[r.length]="</Properties>";r[1]=r[1].replace("/>",">")}return r.join("")}var ai=/<[^<>]+>[^<]*/g;function ni(e,r){var t={},a="";var n=e.match(ai);if(n)for(var i=0;i!=n.length;++i){var s=n[i],l=ft(s);switch(ht(l[0])){case"<?xml":break;case"<Properties":break;case"<property":a=mt(l.name);break;case"</property>":a=null;break;default:if(s.indexOf("<vt:")===0){var o=s.split(">");var c=o[0].slice(4),f=o[1];switch(c){case"lpstr":;case"bstr":;case"lpwstr":t[a]=mt(f);break;case"bool":t[a]=_t(f);break;case"i1":;case"i2":;case"i4":;case"i8":;case"int":;case"uint":t[a]=parseInt(f,10);break;case"r4":;case"r8":;case"decimal":t[a]=parseFloat(f);break;case"filetime":;case"date":t[a]=wr(f);break;case"cy":;case"error":t[a]=mt(f);break;default:if(c.slice(-1)=="/")break;if(r.WTF&&typeof console!=="undefined")console.warn("Unexpected",s,c,o);}}else if(s.slice(0,2)==="</"){}else if(r.WTF)throw new Error(s);}}return t}function ii(e){var r=[at,Bt("Properties",null,{xmlns:Ht.CUST_PROPS,"xmlns:vt":Ht.vt})];if(!e)return r.join("");var t=1;ir(e).forEach(function a(n){++t;r[r.length]=Bt("property",$t(e[n],true),{fmtid:"{D5CDD505-2E9C-101B-9397-08002B2CF9AE}",pid:t,name:bt(n)})});if(r.length>2){r[r.length]="</Properties>";r[1]=r[1].replace("/>",">")}return r.join("")}var si=[2,3,48,49,131,139,140,245];var li=function(){var e={1:437,2:850,3:1252,4:1e4,100:852,101:866,102:865,103:861,104:895,105:620,106:737,107:857,120:950,121:949,122:936,123:932,124:874,125:1255,126:1256,150:10007,151:10029,152:10006,200:1250,201:1251,202:1254,203:1253,0:20127,8:865,9:437,10:850,11:437,13:437,14:850,15:437,16:850,17:437,18:850,19:932,20:850,21:437,22:850,23:865,24:437,25:437,26:850,27:437,28:863,29:850,31:852,34:852,35:852,36:860,37:850,38:866,55:850,64:852,77:936,78:949,79:950,80:874,87:1252,88:1252,89:1252,108:863,134:737,135:852,136:857,204:1257,255:16969};var n=lr({1:437,2:850,3:1252,4:1e4,100:852,101:866,102:865,103:861,104:895,105:620,106:737,107:857,120:950,121:949,122:936,123:932,124:874,125:1255,126:1256,150:10007,151:10029,152:10006,200:1250,201:1251,202:1254,203:1253,0:20127});function i(r,t){var n=[];var i=E(1);switch(t.type){case"base64":i=D(S(r));break;case"binary":i=D(r);break;case"buffer":;case"array":i=r;break;}Fa(i,0);var s=i._R(1);var l=!!(s&136);var o=false,c=false;switch(s){case 2:break;case 3:break;case 48:o=true;l=true;break;case 49:o=true;l=true;break;case 131:break;case 139:break;case 140:c=true;break;case 245:break;default:throw new Error("DBF Unsupported Version: "+s.toString(16));}var f=0,u=521;if(s==2)f=i._R(2);i.l+=3;if(s!=2)f=i._R(4);if(f>1048576)f=1e6;if(s!=2)u=i._R(2);var h=i._R(2);var d=t.codepage||1252;if(s!=2){i.l+=16;i._R(1);if(i[i.l]!==0)d=e[i[i.l]];i.l+=1;i.l+=2}if(c)i.l+=36;var p=[],m={};var v=Math.min(i.length,s==2?521:u-10-(o?264:0));var g=c?32:11;while(i.l<v&&i[i.l]!=13){m={};m.name=(typeof a!=="undefined"?a.utils.decode(d,i.slice(i.l,i.l+g)):N(i.slice(i.l,i.l+g))).replace(/[\u0000\r\n][\S\s]*$/g,"");i.l+=g;m.type=String.fromCharCode(i._R(1));if(s!=2&&!c)m.offset=i._R(4);m.len=i._R(1);if(s==2)m.offset=i._R(2);m.dec=i._R(1);if(m.name.length)p.push(m);if(s!=2)i.l+=c?13:14;switch(m.type){case"B":if((!o||m.len!=8)&&t.WTF)console.log("Skipping "+m.name+":"+m.type);break;case"G":;case"P":if(t.WTF)console.log("Skipping "+m.name+":"+m.type);break;case"+":;case"0":;case"@":;case"C":;case"D":;case"F":;case"I":;case"L":;case"M":;case"N":;case"O":;case"T":;case"Y":break;default:throw new Error("Unknown Field Type: "+m.type);}}if(i[i.l]!==13)i.l=u-1;if(i._R(1)!==13)throw new Error("DBF Terminator not found "+i.l+" "+i[i.l]);i.l=u;var b=0,w=0;n[0]=[];for(w=0;w!=p.length;++w)n[0][w]=p[w].name;while(f-- >0){if(i[i.l]===42){i.l+=h;continue}++i.l;n[++b]=[];w=0;for(w=0;w!=p.length;++w){var k=i.slice(i.l,i.l+p[w].len);i.l+=p[w].len;Fa(k,0);var y=typeof a!=="undefined"?a.utils.decode(d,k):N(k);switch(p[w].type){case"C":if(y.trim().length)n[b][w]=y.replace(/([^\s])\s+$/,"$1");break;case"D":if(y.length===8){n[b][w]=new Date(Date.UTC(+y.slice(0,4),+y.slice(4,6)-1,+y.slice(6,8),0,0,0,0));if(!(t&&t.UTC)){n[b][w]=Mr(n[b][w])}}else n[b][w]=y;break;case"F":n[b][w]=parseFloat(y.trim());break;case"+":;case"I":n[b][w]=c?k._R(-4,"i")^2147483648:k._R(4,"i");break;case"L":switch(y.trim().toUpperCase()){case"Y":;case"T":n[b][w]=true;break;case"N":;case"F":n[b][w]=false;break;case"":;case"\0":;case"?":break;default:throw new Error("DBF Unrecognized L:|"+y+"|");}break;case"M":if(!l)throw new Error("DBF Unexpected MEMO for type "+s.toString(16));n[b][w]="##MEMO##"+(c?parseInt(y.trim(),10):k._R(4));break;case"N":y=y.replace(/\u0000/g,"").trim();if(y&&y!=".")n[b][w]=+y||0;break;case"@":n[b][w]=new Date(k._R(-8,"f")-621356832e5);break;case"T":{var x=k._R(4),C=k._R(4);if(x==0&&C==0)break;n[b][w]=new Date((x-2440588)*864e5+C);if(!(t&&t.UTC))n[b][w]=Mr(n[b][w])}break;case"Y":n[b][w]=k._R(4,"i")/1e4+k._R(4,"i")/1e4*Math.pow(2,32);break;case"O":n[b][w]=-k._R(-8,"f");break;case"B":if(o&&p[w].len==8){n[b][w]=k._R(8,"f");break};case"G":;case"P":k.l+=p[w].len;break;case"0":if(p[w].name==="_NullFlags")break;default:throw new Error("DBF Unsupported data type "+p[w].type);}}}if(s!=2)if(i.l<i.length&&i[i.l++]!=26)throw new Error("DBF EOF Marker missing "+(i.l-1)+" of "+i.length+" "+i[i.l-1].toString(16));if(t&&t.sheetRows)n=n.slice(0,t.sheetRows);t.DBF=p;return n}function s(e,r){var t=r||{};if(!t.dateNF)t.dateNF="yyyymmdd";var a=ln(i(e,t),t);a["!cols"]=t.DBF.map(function(e){return{wch:e.len,DBF:e}});delete t.DBF;return a}function l(e,r){try{var t=an(s(e,r),r);t.bookType="dbf";return t}catch(a){if(r&&r.WTF)throw a}return{SheetNames:[],Sheets:{}}}var c={B:8,C:250,L:1,D:8,"?":0,"":0};function f(i,s){if(!i["!ref"])throw new Error("Cannot export empty sheet to DBF");var l=s||{};var f=r;if(+l.codepage>=0)o(+l.codepage);if(l.type=="string")throw new Error("Cannot write DBF to JS string");var u=Ma();var h=fc(i,{header:1,raw:true,cellDates:true});var d=h[0],p=h.slice(1),m=i["!cols"]||[];var v=0,g=0,b=0,w=1;for(v=0;v<d.length;++v){if(((m[v]||{}).DBF||{}).name){d[v]=m[v].DBF.name;++b;continue}if(d[v]==null)continue;++b;if(typeof d[v]==="number")d[v]=d[v].toString(10);if(typeof d[v]!=="string")throw new Error("DBF Invalid column name "+d[v]+" |"+typeof d[v]+"|");if(d.indexOf(d[v])!==v)for(g=0;g<1024;++g)if(d.indexOf(d[v]+"_"+g)==-1){d[v]+="_"+g;break}}var k=en(i["!ref"]);var y=[];var x=[];var C=[];for(v=0;v<=k.e.c-k.s.c;++v){var S="",_="",A=0;var T=[];for(g=0;g<p.length;++g){if(p[g][v]!=null)T.push(p[g][v])}if(T.length==0||d[v]==null){y[v]="?";continue}for(g=0;g<T.length;++g){switch(typeof T[g]){case"number":_="B";break;case"string":_="C";break;case"boolean":_="L";break;case"object":_=T[g]instanceof Date?"D":"C";break;default:_="C";}A=Math.max(A,(typeof a!=="undefined"&&typeof T[g]=="string"?a.utils.encode(t,T[g]):String(T[g])).length);S=S&&S!=_?"C":_}if(A>250)A=250;_=((m[v]||{}).DBF||{}).type;if(_=="C"){if(m[v].DBF.len>A)A=m[v].DBF.len}if(S=="B"&&_=="N"){S="N";C[v]=m[v].DBF.dec;A=m[v].DBF.len}x[v]=S=="C"||_=="N"?A:c[S]||0;w+=x[v];y[v]=S}var E=u.next(32);E._W(4,318902576);E._W(4,p.length);E._W(2,296+32*b);E._W(2,w);for(v=0;v<4;++v)E._W(4,0);var F=+n[r]||3;E._W(4,0|F<<8);if(e[F]!=+l.codepage){if(l.codepage)console.error("DBF Unsupported codepage "+r+", using 1252");
+r=1252}for(v=0,g=0;v<d.length;++v){if(d[v]==null)continue;var D=u.next(32);var O=(d[v].slice(-10)+"\0\0\0\0\0\0\0\0\0\0\0").slice(0,11);D._W(1,O,"sbcs");D._W(1,y[v]=="?"?"C":y[v],"sbcs");D._W(4,g);D._W(1,x[v]||c[y[v]]||0);D._W(1,C[v]||0);D._W(1,2);D._W(4,0);D._W(1,0);D._W(4,0);D._W(4,0);g+=x[v]||c[y[v]]||0}var N=u.next(264);N._W(4,13);for(v=0;v<65;++v)N._W(4,0);for(v=0;v<p.length;++v){var M=u.next(w);M._W(1,0);for(g=0;g<d.length;++g){if(d[g]==null)continue;switch(y[g]){case"L":M._W(1,p[v][g]==null?63:p[v][g]?84:70);break;case"B":M._W(8,p[v][g]||0,"f");break;case"N":var I="0";if(typeof p[v][g]=="number")I=p[v][g].toFixed(C[g]||0);if(I.length>x[g])I=I.slice(0,x[g]);for(b=0;b<x[g]-I.length;++b)M._W(1,32);M._W(1,I,"sbcs");break;case"D":if(!p[v][g])M._W(8,"00000000","sbcs");else{M._W(4,("0000"+p[v][g].getFullYear()).slice(-4),"sbcs");M._W(2,("00"+(p[v][g].getMonth()+1)).slice(-2),"sbcs");M._W(2,("00"+p[v][g].getDate()).slice(-2),"sbcs")}break;case"C":var P=M.l;var R=String(p[v][g]!=null?p[v][g]:"").slice(0,x[g]);M._W(1,R,"cpstr");P+=x[g]-M.l;for(b=0;b<P;++b)M._W(1,32);break;}}}r=f;u.next(1)._W(1,26);return u.end()}return{to_workbook:l,to_sheet:s,from_sheet:f}}();var oi=function(){var e={AA:"À",BA:"Á",CA:"Â",DA:195,HA:"Ä",JA:197,AE:"È",BE:"É",CE:"Ê",HE:"Ë",AI:"Ì",BI:"Í",CI:"Î",HI:"Ï",AO:"Ò",BO:"Ó",CO:"Ô",DO:213,HO:"Ö",AU:"Ù",BU:"Ú",CU:"Û",HU:"Ü",Aa:"à",Ba:"á",Ca:"â",Da:227,Ha:"ä",Ja:229,Ae:"è",Be:"é",Ce:"ê",He:"ë",Ai:"ì",Bi:"í",Ci:"î",Hi:"ï",Ao:"ò",Bo:"ó",Co:"ô",Do:245,Ho:"ö",Au:"ù",Bu:"ú",Cu:"û",Hu:"ü",KC:"Ç",Kc:"ç",q:"æ",z:"œ",a:"Æ",j:"Œ",DN:209,Dn:241,Hy:255,S:169,c:170,R:174,"B ":180,0:176,1:177,2:178,3:179,5:181,6:182,7:183,Q:185,k:186,b:208,i:216,l:222,s:240,y:248,"!":161,'"':162,"#":163,"(":164,"%":165,"'":167,"H ":168,"+":171,";":187,"<":188,"=":189,">":190,"?":191,"{":223};var r=new RegExp("N("+ir(e).join("|").replace(/\|\|\|/,"|\\||").replace(/([?()+])/g,"\\$1").replace("{","\\{")+"|\\|)","gm");try{r=new RegExp("N("+ir(e).join("|").replace(/\|\|\|/,"|\\||").replace(/([?()+])/g,"\\$1")+"|\\|)","gm")}catch(t){}var n=function(r,t){var a=e[t];return typeof a=="number"?v(a):a};var i=function(e,r,t){var a=r.charCodeAt(0)-32<<4|t.charCodeAt(0)-48;return a==59?e:v(a)};e["|"]=254;var s=function(e){return e.replace(/\n/g," :").replace(/\r/g," =")};function l(e,r){switch(r.type){case"base64":return c(S(e),r);case"binary":return c(e,r);case"buffer":return c(_&&Buffer.isBuffer(e)?e.toString("binary"):N(e),r);case"array":return c(kr(e),r);}throw new Error("Unrecognized type "+r.type)}function c(e,t){var s=e.split(/[\n\r]+/),l=-1,c=-1,f=0,u=0,h=[];var d=[];var p=null;var m={},v=[],g=[],b=[];var w=0,k;var y={Workbook:{WBProps:{},Names:[]}};if(+t.codepage>=0)o(+t.codepage);for(;f!==s.length;++f){w=0;var x=s[f].trim().replace(/\x1B([\x20-\x2F])([\x30-\x3F])/g,i).replace(r,n);var C=x.replace(/;;/g,"\0").split(";").map(function(e){return e.replace(/\u0000/g,";")});var S=C[0],_;if(x.length>0)switch(S){case"ID":break;case"E":break;case"B":break;case"O":for(u=1;u<C.length;++u)switch(C[u].charAt(0)){case"V":{var A=parseInt(C[u].slice(1),10);if(A>=1&&A<=4)y.Workbook.WBProps.date1904=true}break;}break;case"W":break;case"P":switch(C[1].charAt(0)){case"P":d.push(x.slice(3).replace(/;;/g,";"));break;}break;case"NN":{var T={Sheet:0};for(u=1;u<C.length;++u)switch(C[u].charAt(0)){case"N":T.Name=C[u].slice(1);break;case"E":T.Ref=(t&&t.sheet||"Sheet1")+"!"+Os(C[u].slice(1));break;}y.Workbook.Names.push(T)}break;case"C":var E=false,F=false,D=false,O=false,N=-1,M=-1,I="",P="z";var R="";for(u=1;u<C.length;++u)switch(C[u].charAt(0)){case"A":R=C[u].slice(1);break;case"X":c=parseInt(C[u].slice(1),10)-1;F=true;break;case"Y":l=parseInt(C[u].slice(1),10)-1;if(!F)c=0;for(k=h.length;k<=l;++k)h[k]=[];break;case"K":_=C[u].slice(1);if(_.charAt(0)==='"'){_=_.slice(1,_.length-1);P="s"}else if(_==="TRUE"||_==="FALSE"){_=_==="TRUE";P="b"}else if(_.charAt(0)=="#"&&Fn[_]!=null){P="e";_=Fn[_]}else if(!isNaN(Cr(_))){_=Cr(_);P="n";if(p!==null&&Re(p)&&t.cellDates){_=pr(y.Workbook.WBProps.date1904?_+1462:_);P=typeof _=="number"?"n":"d"}}if(typeof a!=="undefined"&&typeof _=="string"&&(t||{}).type!="string"&&(t||{}).codepage)_=a.utils.decode(t.codepage,_);E=true;break;case"E":O=true;I=Os(C[u].slice(1),{r:l,c:c});break;case"S":D=true;break;case"G":break;case"R":N=parseInt(C[u].slice(1),10)-1;break;case"C":M=parseInt(C[u].slice(1),10)-1;break;default:if(t&&t.WTF)throw new Error("SYLK bad record "+x);}if(E){if(!h[l][c])h[l][c]={t:P,v:_};else{h[l][c].t=P;h[l][c].v=_}if(p)h[l][c].z=p;if(t.cellText!==false&&p)h[l][c].w=$e(h[l][c].z,h[l][c].v,{date1904:y.Workbook.WBProps.date1904});p=null}if(D){if(O)throw new Error("SYLK shared formula cannot have own formula");var L=N>-1&&h[N][M];if(!L||!L[1])throw new Error("SYLK shared formula cannot find base");I=Ps(L[1],{r:l-N,c:c-M})}if(I){if(!h[l][c])h[l][c]={t:"n",f:I};else h[l][c].f=I}if(R){if(!h[l][c])h[l][c]={t:"z"};h[l][c].c=[{a:"SheetJSYLK",t:R}]}break;case"F":var U=0;for(u=1;u<C.length;++u)switch(C[u].charAt(0)){case"X":c=parseInt(C[u].slice(1),10)-1;++U;break;case"Y":l=parseInt(C[u].slice(1),10)-1;for(k=h.length;k<=l;++k)h[k]=[];break;case"M":w=parseInt(C[u].slice(1),10)/20;break;case"F":break;case"G":break;case"P":p=d[parseInt(C[u].slice(1),10)];break;case"S":break;case"D":break;case"N":break;case"W":b=C[u].slice(1).split(" ");for(k=parseInt(b[0],10);k<=parseInt(b[1],10);++k){w=parseInt(b[2],10);g[k-1]=w===0?{hidden:true}:{wch:w}}break;case"C":c=parseInt(C[u].slice(1),10)-1;if(!g[c])g[c]={};break;case"R":l=parseInt(C[u].slice(1),10)-1;if(!v[l])v[l]={};if(w>0){v[l].hpt=w;v[l].hpx=Wi(w)}else if(w===0)v[l].hidden=true;break;default:if(t&&t.WTF)throw new Error("SYLK bad record "+x);}if(U<1)p=null;break;default:if(t&&t.WTF)throw new Error("SYLK bad record "+x);}}if(v.length>0)m["!rows"]=v;if(g.length>0)m["!cols"]=g;g.forEach(function(e){Ui(e)});if(t&&t.sheetRows)h=h.slice(0,t.sheetRows);return[h,m,y]}function f(e,r){var t=l(e,r);var a=t[0],n=t[1],i=t[2];var s=yr(r);s.date1904=(((i||{}).Workbook||{}).WBProps||{}).date1904;var o=ln(a,s);ir(n).forEach(function(e){o[e]=n[e]});var c=an(o,r);ir(i).forEach(function(e){c[e]=i[e]});c.bookType="sylk";return c}function u(e,r,t,a,n,i){var s="C;Y"+(t+1)+";X"+(a+1)+";K";switch(e.t){case"n":s+=isFinite(e.v)?e.v||0:En[isNaN(e.v)?36:7];if(e.f&&!e.F)s+=";E"+Is(e.f,{r:t,c:a});break;case"b":s+=e.v?"TRUE":"FALSE";break;case"e":s+=e.w||En[e.v]||e.v;break;case"d":s+=dr(wr(e.v,i),i);break;case"s":s+='"'+(e.v==null?"":String(e.v)).replace(/"/g,"").replace(/;/g,";;")+'"';break;}return s}function h(e,r,t){var a="C;Y"+(r+1)+";X"+(t+1)+";A";a+=s(e.map(function(e){return e.t}).join(""));return a}function d(e,r){r.forEach(function(r,t){var a="F;W"+(t+1)+" "+(t+1)+" ";if(r.hidden)a+="0";else{if(typeof r.width=="number"&&!r.wpx)r.wpx=Mi(r.width);if(typeof r.wpx=="number"&&!r.wch)r.wch=Ii(r.wpx);if(typeof r.wch=="number")a+=Math.round(r.wch)}if(a.charAt(a.length-1)!=" ")e.push(a)})}function p(e,r){r.forEach(function(r,t){var a="F;";if(r.hidden)a+="M0;";else if(r.hpt)a+="M"+20*r.hpt+";";else if(r.hpx)a+="M"+20*$i(r.hpx)+";";if(a.length>2)e.push(a+"R"+(t+1))})}function m(e,r,t){if(!r)r={};r._formats=["General"];var a=["ID;PSheetJS;N;E"],n=[];var i=en(e["!ref"]||"A1"),s;var l=e["!data"]!=null;var o="\r\n";var c=(((t||{}).Workbook||{}).WBProps||{}).date1904;var f="General";a.push("P;PGeneral");var m=i.s.r,v=i.s.c,g=[];if(e["!ref"])for(m=i.s.r;m<=i.e.r;++m){if(l&&!e["!data"][m])continue;g=[];for(v=i.s.c;v<=i.e.c;++v){s=l?e["!data"][m][v]:e[Ha(v)+za(m)];if(!s||!s.c)continue;g.push(h(s.c,m,v))}if(g.length)n.push(g.join(o))}if(e["!ref"])for(m=i.s.r;m<=i.e.r;++m){if(l&&!e["!data"][m])continue;g=[];for(v=i.s.c;v<=i.e.c;++v){s=l?e["!data"][m][v]:e[Ha(v)+za(m)];if(!s||s.v==null&&(!s.f||s.F))continue;if((s.z||(s.t=="d"?q[14]:"General"))!=f){var b=r._formats.indexOf(s.z);if(b==-1){r._formats.push(s.z);b=r._formats.length-1;a.push("P;P"+s.z.replace(/;/g,";;"))}g.push("F;P"+b+";Y"+(m+1)+";X"+(v+1))}g.push(u(s,e,m,v,r,c))}n.push(g.join(o))}a.push("F;P0;DG0G8;M255");if(e["!cols"])d(a,e["!cols"]);if(e["!rows"])p(a,e["!rows"]);if(e["!ref"])a.push("B;Y"+(i.e.r-i.s.r+1)+";X"+(i.e.c-i.s.c+1)+";D"+[i.s.c,i.s.r,i.e.c,i.e.r].join(" "));a.push("O;L;D;B"+(c?";V4":"")+";K47;G100 0.001");delete r._formats;return a.join(o)+o+n.join(o)+o+"E"+o}return{to_workbook:f,from_sheet:m}}();var ci=function(){function e(e,t){switch(t.type){case"base64":return r(S(e),t);case"binary":return r(e,t);case"buffer":return r(_&&Buffer.isBuffer(e)?e.toString("binary"):N(e),t);case"array":return r(kr(e),t);}throw new Error("Unrecognized type "+t.type)}function r(e,r){var t=e.split("\n"),a=-1,n=-1,i=0,s=[];for(;i!==t.length;++i){if(t[i].trim()==="BOT"){s[++a]=[];n=0;continue}if(a<0)continue;var l=t[i].trim().split(",");var o=l[0],c=l[1];++i;var f=t[i]||"";while((f.match(/["]/g)||[]).length&1&&i<t.length-1)f+="\n"+t[++i];f=f.trim();switch(+o){case-1:if(f==="BOT"){s[++a]=[];n=0;continue}else if(f!=="EOD")throw new Error("Unrecognized DIF special command "+f);break;case 0:if(f==="TRUE")s[a][n]=true;else if(f==="FALSE")s[a][n]=false;else if(!isNaN(Cr(c)))s[a][n]=Cr(c);else if(!isNaN(Or(c).getDate())){s[a][n]=wr(c);if(!(r&&r.UTC)){s[a][n]=Mr(s[a][n])}}else s[a][n]=c;++n;break;case 1:f=f.slice(1,f.length-1);f=f.replace(/""/g,'"');if(w&&f&&f.match(/^=".*"$/))f=f.slice(2,-1);s[a][n++]=f!==""?f:null;break;}if(f==="EOD")break}if(r&&r.sheetRows)s=s.slice(0,r.sheetRows);return s}function t(r,t){return ln(e(r,t),t)}function a(e,r){var a=an(t(e,r),r);a.bookType="dif";return a}function n(e,r){return"0,"+String(e)+"\r\n"+r}function i(e){return'1,0\r\n"'+e.replace(/"/g,'""')+'"'}function s(e){var r=w;if(!e["!ref"])throw new Error("Cannot export empty sheet to DIF");var t=en(e["!ref"]);var a=e["!data"]!=null;var s=['TABLE\r\n0,1\r\n"sheetjs"\r\n',"VECTORS\r\n0,"+(t.e.r-t.s.r+1)+'\r\n""\r\n',"TUPLES\r\n0,"+(t.e.c-t.s.c+1)+'\r\n""\r\n','DATA\r\n0,0\r\n""\r\n'];for(var l=t.s.r;l<=t.e.r;++l){var o=a?e["!data"][l]:[];var c="-1,0\r\nBOT\r\n";for(var f=t.s.c;f<=t.e.c;++f){var u=a?o&&o[f]:e[Ja({r:l,c:f})];if(u==null){c+='1,0\r\n""\r\n';continue}switch(u.t){case"n":if(r){if(u.w!=null)c+="0,"+u.w+"\r\nV";else if(u.v!=null)c+=n(u.v,"V");else if(u.f!=null&&!u.F)c+=i("="+u.f);else c+='1,0\r\n""'}else{if(u.v==null)c+='1,0\r\n""';else c+=n(u.v,"V")}break;case"b":c+=u.v?n(1,"TRUE"):n(0,"FALSE");break;case"s":c+=i(!r||isNaN(+u.v)?u.v:'="'+u.v+'"');break;case"d":if(!u.w)u.w=$e(u.z||q[14],dr(wr(u.v)));if(r)c+=n(u.w,"V");else c+=i(u.w);break;default:c+='1,0\r\n""';}c+="\r\n"}s.push(c)}return s.join("")+"-1,0\r\nEOD"}return{to_workbook:a,to_sheet:t,from_sheet:s}}();var fi=function(){function e(e){return e.replace(/\\b/g,"\\").replace(/\\c/g,":").replace(/\\n/g,"\n")}function r(e){return e.replace(/\\/g,"\\b").replace(/:/g,"\\c").replace(/\n/g,"\\n")}function t(r,t){var a=r.split("\n"),n=-1,i=-1,s=0,l=[];for(;s!==a.length;++s){var o=a[s].trim().split(":");if(o[0]!=="cell")continue;var c=Ya(o[1]);if(l.length<=c.r)for(n=l.length;n<=c.r;++n)if(!l[n])l[n]=[];n=c.r;i=c.c;switch(o[2]){case"t":l[n][i]=e(o[3]);break;case"v":l[n][i]=+o[3];break;case"vtf":var f=o[o.length-1];case"vtc":switch(o[3]){case"nl":l[n][i]=+o[4]?true:false;break;default:l[n][i]=o[o.length-1].charAt(0)=="#"?{t:"e",v:Fn[o[o.length-1]]}:+o[4];break;}if(o[2]=="vtf")l[n][i]=[l[n][i],f];}}if(t&&t.sheetRows)l=l.slice(0,t.sheetRows);return l}function a(e,r){return ln(t(e,r),r)}function n(e,r){return an(a(e,r),r)}var i=["socialcalc:version:1.5","MIME-Version: 1.0","Content-Type: multipart/mixed; boundary=SocialCalcSpreadsheetControlSave"].join("\n");var s=["--SocialCalcSpreadsheetControlSave","Content-type: text/plain; charset=UTF-8"].join("\n")+"\n";var l=["# SocialCalc Spreadsheet Control Save","part:sheet"].join("\n");var o="--SocialCalcSpreadsheetControlSave--";function c(e){if(!e||!e["!ref"])return"";var t=[],a=[],n,i="";var s=Za(e["!ref"]);var l=e["!data"]!=null;for(var o=s.s.r;o<=s.e.r;++o){for(var c=s.s.c;c<=s.e.c;++c){i=Ja({r:o,c:c});n=l?(e["!data"][o]||[])[c]:e[i];if(!n||n.v==null||n.t==="z")continue;a=["cell",i,"t"];switch(n.t){case"s":a.push(r(n.v));break;case"b":a[2]="vt"+(n.f?"f":"c");a[3]="nl";a[4]=n.v?"1":"0";a[5]=r(n.f||(n.v?"TRUE":"FALSE"));break;case"d":var f=dr(wr(n.v));a[2]="vtc";a[3]="nd";a[4]=""+f;a[5]=n.w||$e(n.z||q[14],f);break;case"n":if(isFinite(n.v)){if(!n.f){a[2]="v";a[3]=n.v}else{a[2]="vtf";a[3]="n";a[4]=n.v;a[5]=r(n.f)}}else{a[2]="vt"+(n.f?"f":"c");a[3]="e"+En[isNaN(n.v)?36:7];a[4]="0";a[5]=n.f||a[3].slice(1);a[6]="e";a[7]=a[3].slice(1)}break;case"e":continue;}t.push(a.join(":"))}}t.push("sheet:c:"+(s.e.c-s.s.c+1)+":r:"+(s.e.r-s.s.r+1)+":tvf:1");t.push("valueformat:1:text-wiki");return t.join("\n")}function f(e){return[i,s,l,s,c(e),o].join("\n")}return{to_workbook:n,to_sheet:a,from_sheet:f}}();var ui=function(){function e(e,r,t,a,n){if(n.raw)r[t][a]=e;else if(e===""){}else if(e==="TRUE")r[t][a]=true;else if(e==="FALSE")r[t][a]=false;else if(!isNaN(Cr(e)))r[t][a]=Cr(e);else if(!isNaN(Or(e).getDate()))r[t][a]=wr(e);else if(e.charCodeAt(0)==35&&Fn[e]!=null)r[t][a]={t:"e",v:Fn[e],w:e};else r[t][a]=e}function r(r,t){var a=t||{};var n=[];if(!r||r.length===0)return n;var i=r.split(/[\r\n]/);var s=i.length-1;while(s>=0&&i[s].length===0)--s;var l=10,o=0;var c=0;for(;c<=s;++c){o=i[c].indexOf(" ");if(o==-1)o=i[c].length;else o++;l=Math.max(l,o)}for(c=0;c<=s;++c){n[c]=[];var f=0;e(i[c].slice(0,l).trim(),n,c,f,a);for(f=1;f<=(i[c].length-l)/10+1;++f)e(i[c].slice(l+(f-1)*10,l+f*10).trim(),n,c,f,a)}if(a.sheetRows)n=n.slice(0,a.sheetRows);return n}var t={44:",",9:"\t",59:";",124:"|"};var n={44:3,9:2,59:1,124:0};function i(e){var r={},a=false,i=0,s=0;for(;i<e.length;++i){if((s=e.charCodeAt(i))==34)a=!a;else if(!a&&s in t)r[s]=(r[s]||0)+1}s=[];for(i in r)if(Object.prototype.hasOwnProperty.call(r,i)){s.push([r[i],i])}if(!s.length){r=n;for(i in r)if(Object.prototype.hasOwnProperty.call(r,i)){s.push([r[i],i])}}s.sort(function(e,r){return e[0]-r[0]||n[e[1]]-n[r[1]]});return t[s.pop()[1]]||44}function s(e,r){var t=r||{};var a="";if(b!=null&&t.dense==null)t.dense=b;var n={};if(t.dense)n["!data"]=[];var s={s:{c:0,r:0},e:{c:0,r:0}};if(e.slice(0,4)=="sep="){if(e.charCodeAt(5)==13&&e.charCodeAt(6)==10){a=e.charAt(4);e=e.slice(7)}else if(e.charCodeAt(5)==13||e.charCodeAt(5)==10){a=e.charAt(4);e=e.slice(6)}else a=i(e.slice(0,1024))}else if(t&&t.FS)a=t.FS;else a=i(e.slice(0,1024));var l=0,o=0,c=0;var f=0,u=0,h=a.charCodeAt(0),d=false,p=0,m=e.charCodeAt(0);var v=t.dateNF!=null?Ye(t.dateNF):null;function g(){var r=e.slice(f,u);if(r.slice(-1)=="\r")r=r.slice(0,-1);var a={};if(r.charAt(0)=='"'&&r.charAt(r.length-1)=='"')r=r.slice(1,-1).replace(/""/g,'"');if(t.cellText!==false)a.w=r;if(r.length===0)a.t="z";else if(t.raw){a.t="s";a.v=r}else if(r.trim().length===0){a.t="s";a.v=r}else if(r.charCodeAt(0)==61){if(r.charCodeAt(1)==34&&r.charCodeAt(r.length-1)==34){a.t="s";a.v=r.slice(2,-1).replace(/""/g,'"')}else if(Ls(r)){a.t="s";a.f=r.slice(1);a.v=r}else{a.t="s";a.v=r}}else if(r=="TRUE"){a.t="b";a.v=true}else if(r=="FALSE"){a.t="b";a.v=false}else if(!isNaN(c=Cr(r))){a.t="n";a.v=c}else if(!isNaN((c=Or(r)).getDate())||v&&r.match(v)){a.z=t.dateNF||q[14];if(v&&r.match(v)){var i=Je(r,t.dateNF,r.match(v)||[]);c=wr(i);if(t&&t.UTC===false)c=Mr(c)}else if(t&&t.UTC===false)c=Mr(c);else if(t.cellText!==false&&t.dateNF)a.w=$e(a.z,c);if(t.cellDates){a.t="d";a.v=c}else{a.t="n";a.v=dr(c)}if(!t.cellNF)delete a.z}else if(r.charCodeAt(0)==35&&Fn[r]!=null){a.t="e";a.w=r;a.v=Fn[r]}else{a.t="s";a.v=r}if(a.t=="z"){}else if(t.dense){if(!n["!data"][l])n["!data"][l]=[];n["!data"][l][o]=a}else n[Ja({c:o,r:l})]=a;f=u+1;m=e.charCodeAt(f);if(s.e.c<o)s.e.c=o;if(s.e.r<l)s.e.r=l;if(p==h)++o;else{o=0;++l;if(t.sheetRows&&t.sheetRows<=l)return true}}e:for(;u<e.length;++u)switch(p=e.charCodeAt(u)){case 34:if(m===34)d=!d;break;case 13:if(d)break;if(e.charCodeAt(u+1)==10)++u;case h:;case 10:if(!d&&g())break e;break;default:break;}if(u-f>0)g();n["!ref"]=Ka(s);return n}function l(e,t){if(!(t&&t.PRN))return s(e,t);if(t.FS)return s(e,t);if(e.slice(0,4)=="sep=")return s(e,t);if(e.indexOf("\t")>=0||e.indexOf(",")>=0||e.indexOf(";")>=0)return s(e,t);return ln(r(e,t),t)}function o(e,r){var t="",n=r.type=="string"?[0,0,0,0]:Uo(e,r);switch(r.type){case"base64":t=S(e);break;case"binary":t=e;break;case"buffer":if(r.codepage==65001)t=e.toString("utf8");else if(r.codepage&&typeof a!=="undefined")t=a.utils.decode(r.codepage,e);else t=_&&Buffer.isBuffer(e)?e.toString("binary"):N(e);break;case"array":t=kr(e);break;case"string":t=e;break;default:throw new Error("Unrecognized type "+r.type);}if(n[0]==239&&n[1]==187&&n[2]==191)t=Dt(t.slice(3));else if(r.type!="string"&&r.type!="buffer"&&r.codepage==65001)t=Dt(t);else if(r.type=="binary"&&typeof a!=="undefined"&&r.codepage)t=a.utils.decode(r.codepage,a.utils.encode(28591,t));if(t.slice(0,19)=="socialcalc:version:")return fi.to_sheet(r.type=="string"?t:Dt(t),r);return l(t,r)}function c(e,r){return an(o(e,r),r)}function f(e){var r=[];if(!e["!ref"])return"";var t=en(e["!ref"]),a;var n=e["!data"]!=null;for(var i=t.s.r;i<=t.e.r;++i){var s=[];for(var l=t.s.c;l<=t.e.c;++l){var o=Ja({r:i,c:l});a=n?(e["!data"][i]||[])[l]:e[o];if(!a||a.v==null){s.push("          ");continue}var c=(a.w||(tn(a),a.w)||"").slice(0,10);while(c.length<10)c+=" ";s.push(c+(l===0?" ":""))}r.push(s.join(""))}return r.join("\n")}return{to_workbook:c,to_sheet:o,from_sheet:f}}();function hi(e,r){var t=r||{},a=!!t.WTF;t.WTF=true;try{var n=oi.to_workbook(e,t);t.WTF=a;return n}catch(i){t.WTF=a;if(i.message.indexOf("SYLK bad record ID")==-1&&a)throw i;return ui.to_workbook(e,r)}}function di(e){var r={},t=e.match(lt),a=0;var n=false;if(t)for(;a!=t.length;++a){var s=ft(t[a]);switch(s[0].replace(/<\w*:/g,"<")){case"<condense":break;case"<extend":break;case"<shadow":if(!s.val)break;case"<shadow>":;case"<shadow/>":r.shadow=1;break;case"</shadow>":break;case"<charset":if(s.val=="1")break;r.cp=i[parseInt(s.val,10)];break;case"<outline":if(!s.val)break;case"<outline>":;case"<outline/>":r.outline=1;break;case"</outline>":break;case"<rFont":r.name=s.val;break;case"<sz":r.sz=s.val;break;case"<strike":if(!s.val)break;case"<strike>":;case"<strike/>":r.strike=1;break;case"</strike>":break;case"<u":if(!s.val)break;switch(s.val){case"double":r.uval="double";break;case"singleAccounting":r.uval="single-accounting";break;case"doubleAccounting":r.uval="double-accounting";break;};case"<u>":;case"<u/>":r.u=1;break;case"</u>":break;case"<b":if(s.val=="0")break;case"<b>":;case"<b/>":r.b=1;break;case"</b>":break;case"<i":if(s.val=="0")break;case"<i>":;case"<i/>":r.i=1;break;case"</i>":break;case"<color":if(s.rgb)r.color=s.rgb.slice(2,8);break;case"<color>":;case"<color/>":;case"</color>":break;case"<family":r.family=s.val;break;case"<family>":;case"<family/>":;case"</family>":break;case"<vertAlign":r.valign=s.val;break;case"<vertAlign>":;case"<vertAlign/>":;case"</vertAlign>":break;case"<scheme":break;case"<scheme>":;case"<scheme/>":;case"</scheme>":break;case"<extLst":;case"<extLst>":;case"</extLst>":break;case"<ext":n=true;break;case"</ext>":n=false;break;default:if(s[0].charCodeAt(1)!==47&&!n)throw new Error("Unrecognized rich format "+s[0]);}}return r}var pi=function(){function e(e){var r=zr(e,"t");if(!r)return{t:"s",v:""};var t={t:"s",v:mt(r[1])};var a=zr(e,"rPr");if(a)t.s=di(a[1]);return t}var r=/<(?:\w+:)?r>/g,t=/<\/(?:\w+:)?r>/;return function a(n){return n.replace(r,"").split(t).map(e).filter(function(e){return e.v})}}();var mi=function Vc(){var e=/(\r\n|\n)/g;function r(e,r,t){var a=[];if(e.u)a.push("text-decoration: underline;");if(e.uval)a.push("text-underline-style:"+e.uval+";");if(e.sz)a.push("font-size:"+e.sz+"pt;");if(e.outline)a.push("text-effect: outline;");if(e.shadow)a.push("text-shadow: auto;");r.push('<span style="'+a.join("")+'">');if(e.b){r.push("<b>");t.push("</b>")}if(e.i){r.push("<i>");t.push("</i>")}if(e.strike){r.push("<s>");t.push("</s>")}var n=e.valign||"";if(n=="superscript"||n=="super")n="sup";else if(n=="subscript")n="sub";if(n!=""){r.push("<"+n+">");t.push("</"+n+">")}t.push("</span>");return e}function t(t){var a=[[],t.v,[]];if(!t.v)return"";if(t.s)r(t.s,a[0],a[2]);return a[0].join("")+a[1].replace(e,"<br/>")+a[2].join("")}return function a(e){return e.map(t).join("")}}();var vi=/<(?:\w+:)?t\b[^<>]*>([^<]*)<\/(?:\w+:)?t>/g,gi=/<(?:\w+:)?r\b[^<>]*>/;function bi(e,r){var t=r?r.cellHTML:true;var a={};if(!e)return{t:""};if(e.match(/^\s*<(?:\w+:)?t[^>]*>/)){a.t=mt(Dt(e.slice(e.indexOf(">")+1).split(/<\/(?:\w+:)?t>/)[0]||""),true);a.r=Dt(e);if(t)a.h=yt(a.t)}else if(e.match(gi)){a.r=Dt(e);a.t=mt(Dt((Wr(e,"rPh").match(vi)||[]).join("").replace(lt,"")),true);if(t)a.h=mi(pi(a.r))}return a}var wi=/<(?:\w+:)?(?:si|sstItem)>/g;var ki=/<\/(?:\w+:)?(?:si|sstItem)>/;function yi(e,r){var t=[],a="";if(!e)return t;var n=zr(e,"sst");if(n){a=n[1].replace(wi,"").split(ki);for(var i=0;i!=a.length;++i){var s=bi(a[i].trim(),r);if(s!=null)t[t.length]=s}n=ft(n[0].slice(0,n[0].indexOf(">")));t.Count=n.count;t.Unique=n.uniqueCount}return t}var xi=/^\s|\s$|[\t\n\r]/;function Ci(e,r){if(!r.bookSST)return"";var t=[at];t[t.length]=Bt("sst",null,{xmlns:Vt[0],count:e.Count,uniqueCount:e.Unique});for(var a=0;a!=e.length;++a){if(e[a]==null)continue;var n=e[a];var i="<si>";if(n.r)i+=n.r;else{i+="<t";if(!n.t)n.t="";if(typeof n.t!=="string")n.t=String(n.t);if(n.t.match(xi))i+=' xml:space="preserve"';i+=">"+bt(n.t)+"</t>"}i+="</si>";t[t.length]=i}if(t.length>2){t[t.length]="</sst>";t[1]=t[1].replace("/>",">")}return t.join("")}function Si(e){var r=e.slice(e[0]==="#"?1:0).slice(0,6);return[parseInt(r.slice(0,2),16),parseInt(r.slice(2,4),16),parseInt(r.slice(4,6),16)]}function _i(e){for(var r=0,t=1;r!=3;++r)t=t*256+(e[r]>255?255:e[r]<0?0:e[r]);return t.toString(16).toUpperCase().slice(1)}function Ai(e){var r=e[0]/255,t=e[1]/255,a=e[2]/255;var n=Math.max(r,t,a),i=Math.min(r,t,a),s=n-i;if(s===0)return[0,0,r];var l=0,o=0,c=n+i;o=s/(c>1?2-c:c);switch(n){case r:l=((t-a)/s+6)%6;break;case t:l=(a-r)/s+2;break;case a:l=(r-t)/s+4;break;}return[l/6,o,c/2]}function Ti(e){var r=e[0],t=e[1],a=e[2];var n=t*2*(a<.5?a:1-a),i=a-n/2;var s=[i,i,i],l=6*r;var o;if(t!==0)switch(l|0){case 0:;case 6:o=n*l;s[0]+=n;s[1]+=o;break;case 1:o=n*(2-l);s[0]+=o;s[1]+=n;break;case 2:o=n*(l-2);s[1]+=n;s[2]+=o;break;case 3:o=n*(4-l);s[1]+=o;s[2]+=n;break;case 4:o=n*(l-4);s[2]+=n;s[0]+=o;break;case 5:o=n*(6-l);s[2]+=o;s[0]+=n;break;}for(var c=0;c!=3;++c)s[c]=Math.round(s[c]*255);return s}function Ei(e,r){if(r===0)return e;var t=Ai(Si(e));if(r<0)t[2]=t[2]*(1+r);else t[2]=1-(1-t[2])*(1-r);return _i(Ti(t))}var Fi=6,Di=15,Oi=1,Ni=Fi;function Mi(e){return Math.floor((e+Math.round(128/Ni)/256)*Ni)}function Ii(e){return Math.floor((e-5)/Ni*100+.5)/100}function Pi(e){return Math.round((e*Ni+5)/Ni*256)/256}function Ri(e){return Pi(Ii(Mi(e)))}function Li(e){var r=Math.abs(e-Ri(e)),t=Ni;if(r>.005)for(Ni=Oi;Ni<Di;++Ni)if(Math.abs(e-Ri(e))<=r){r=Math.abs(e-Ri(e));t=Ni}Ni=t}function Ui(e){if(e.width){e.wpx=Mi(e.width);e.wch=Ii(e.wpx);e.MDW=Ni}else if(e.wpx){e.wch=Ii(e.wpx);e.width=Pi(e.wch);e.MDW=Ni}else if(typeof e.wch=="number"){e.width=Pi(e.wch);e.wpx=Mi(e.width);e.MDW=Ni}if(e.customWidth)delete e.customWidth}var Bi=96,zi=Bi;function $i(e){return e*96/zi}function Wi(e){return e*zi/96}var ji={None:"none",Solid:"solid",Gray50:"mediumGray",Gray75:"darkGray",Gray25:"lightGray",HorzStripe:"darkHorizontal",VertStripe:"darkVertical",ReverseDiagStripe:"darkDown",DiagStripe:"darkUp",DiagCross:"darkGrid",ThickDiagCross:"darkTrellis",ThinHorzStripe:"lightHorizontal",ThinVertStripe:"lightVertical",ThinReverseDiagStripe:"lightDown",ThinHorzCross:"lightGrid"};function Hi(e,r,t,a){r.Borders=[];var n={};var i=false;(e.match(lt)||[]).forEach(function(e){var t=ft(e);switch(ht(t[0])){case"<borders":;case"<borders>":;case"</borders>":break;case"<border":;case"<border>":;case"<border/>":n={};if(t.diagonalUp)n.diagonalUp=_t(t.diagonalUp);if(t.diagonalDown)n.diagonalDown=_t(t.diagonalDown);r.Borders.push(n);break;case"</border>":break;case"<left/>":break;case"<left":;case"<left>":break;case"</left>":break;case"<right/>":break;case"<right":;case"<right>":break;case"</right>":break;case"<top/>":break;case"<top":;case"<top>":break;case"</top>":break;case"<bottom/>":break;case"<bottom":;case"<bottom>":break;case"</bottom>":break;case"<diagonal":;case"<diagonal>":;case"<diagonal/>":break;case"</diagonal>":break;case"<horizontal":;case"<horizontal>":;case"<horizontal/>":break;case"</horizontal>":break;case"<vertical":;case"<vertical>":;case"<vertical/>":break;case"</vertical>":break;case"<start":;case"<start>":;case"<start/>":break;case"</start>":break;case"<end":;case"<end>":;case"<end/>":break;case"</end>":break;case"<color":;case"<color>":break;case"<color/>":;case"</color>":break;case"<extLst":;case"<extLst>":;case"</extLst>":break;case"<ext":i=true;break;case"</ext>":i=false;break;default:if(a&&a.WTF){if(!i)throw new Error("unrecognized "+t[0]+" in borders")};}})}function Vi(e,r,t,a){r.Fills=[];var n={};var i=false;(e.match(lt)||[]).forEach(function(e){var t=ft(e);switch(ht(t[0])){case"<fills":;case"<fills>":;case"</fills>":break;case"<fill>":;case"<fill":;case"<fill/>":n={};r.Fills.push(n);break;case"</fill>":break;case"<gradientFill>":break;case"<gradientFill":;case"</gradientFill>":r.Fills.push(n);n={};break;case"<patternFill":;case"<patternFill>":if(t.patternType)n.patternType=t.patternType;break;case"<patternFill/>":;case"</patternFill>":break;case"<bgColor":if(!n.bgColor)n.bgColor={};if(t.indexed)n.bgColor.indexed=parseInt(t.indexed,10);if(t.theme)n.bgColor.theme=parseInt(t.theme,10);if(t.tint)n.bgColor.tint=parseFloat(t.tint);if(t.rgb)n.bgColor.rgb=t.rgb.slice(-6);break;case"<bgColor/>":;case"</bgColor>":break;case"<fgColor":if(!n.fgColor)n.fgColor={};if(t.theme)n.fgColor.theme=parseInt(t.theme,10);if(t.tint)n.fgColor.tint=parseFloat(t.tint);if(t.rgb!=null)n.fgColor.rgb=t.rgb.slice(-6);break;case"<fgColor/>":;case"</fgColor>":break;case"<stop":;case"<stop/>":break;case"</stop>":break;case"<color":;case"<color/>":break;case"</color>":break;case"<extLst":;case"<extLst>":;case"</extLst>":break;case"<ext":i=true;break;case"</ext>":i=false;break;default:if(a&&a.WTF){if(!i)throw new Error("unrecognized "+t[0]+" in fills")};}})}function Xi(e,r,t,a){r.Fonts=[];var n={};var s=false;(e.match(lt)||[]).forEach(function(e){var l=ft(e);switch(ht(l[0])){case"<fonts":;case"<fonts>":;case"</fonts>":break;case"<font":;case"<font>":break;case"</font>":;case"<font/>":r.Fonts.push(n);n={};break;case"<name":if(l.val)n.name=Dt(l.val);break;case"<name/>":;case"</name>":break;case"<b":n.bold=l.val?_t(l.val):1;break;case"<b/>":n.bold=1;break;case"</b>":;case"</b":break;case"<i":n.italic=l.val?_t(l.val):1;break;case"<i/>":n.italic=1;break;case"</i>":;case"</i":break;case"<u":switch(l.val){case"none":n.underline=0;break;case"single":n.underline=1;break;case"double":n.underline=2;break;case"singleAccounting":n.underline=33;break;case"doubleAccounting":n.underline=34;break;}break;case"<u/>":n.underline=1;break;case"</u>":;case"</u":break;case"<strike":n.strike=l.val?_t(l.val):1;break;case"<strike/>":n.strike=1;break;case"</strike>":;case"</strike":break;case"<outline":n.outline=l.val?_t(l.val):1;break;case"<outline/>":n.outline=1;break;case"</outline>":;case"</outline":break;case"<shadow":n.shadow=l.val?_t(l.val):1;break;case"<shadow/>":n.shadow=1;break;case"</shadow>":;case"</shadow":break;case"<condense":n.condense=l.val?_t(l.val):1;break;case"<condense/>":n.condense=1;break;case"</condense>":;case"</condense":break;case"<extend":n.extend=l.val?_t(l.val):1;break;case"<extend/>":n.extend=1;break;case"</extend>":;case"</extend":break;case"<sz":if(l.val)n.sz=+l.val;break;case"<sz/>":;case"</sz>":;case"</sz":break;case"<vertAlign":if(l.val)n.vertAlign=l.val;break;case"<vertAlign/>":;case"</vertAlign>":;case"</vertAlign":break;case"<family":if(l.val)n.family=parseInt(l.val,10);break;case"<family/>":;case"</family>":;case"</family":break;case"<scheme":if(l.val)n.scheme=l.val;break;case"<scheme/>":;case"</scheme>":;case"</scheme":break;case"<charset":if(l.val=="1")break;l.codepage=i[parseInt(l.val,10)];break;case"<charset/>":;case"</charset>":;case"</charset":break;case"<color":if(!n.color)n.color={};if(l.auto)n.color.auto=_t(l.auto);if(l.rgb)n.color.rgb=l.rgb.slice(-6);else if(l.indexed){n.color.index=parseInt(l.indexed,10);var o=Tn[n.color.index];if(n.color.index==81)o=Tn[1];if(!o)o=Tn[1];n.color.rgb=o[0].toString(16)+o[1].toString(16)+o[2].toString(16)}else if(l.theme){n.color.theme=parseInt(l.theme,10);if(l.tint)n.color.tint=parseFloat(l.tint);if(l.theme&&t.themeElements&&t.themeElements.clrScheme){n.color.rgb=Ei(t.themeElements.clrScheme[n.color.theme].rgb,n.color.tint||0)}}break;case"<color/>":;case"</color>":;case"</color":break;case"<AlternateContent":s=true;break;case"</AlternateContent>":;case"</AlternateContent":s=false;break;case"<extLst":;case"<extLst>":;case"</extLst>":break;case"<ext":s=true;break;case"</ext>":s=false;break;default:if(a&&a.WTF){if(!s)throw new Error("unrecognized "+l[0]+" in fonts")};}})}function Gi(e,r,t){r.NumberFmt=[];var a=ir(q);for(var n=0;n<a.length;++n)r.NumberFmt[a[n]]=q[a[n]];var i=e.match(lt);if(!i)return;for(n=0;n<i.length;++n){var s=ft(i[n]);switch(ht(s[0])){case"<numFmts":;case"</numFmts>":;case"<numFmts/>":;case"<numFmts>":break;case"<numFmt":{var l=mt(Dt(s.formatCode)),o=parseInt(s.numFmtId,10);r.NumberFmt[o]=l;if(o>0){if(o>392){for(o=392;o>60;--o)if(r.NumberFmt[o]==null)break;r.NumberFmt[o]=l}Ke(l,o)}}break;case"</numFmt>":break;default:if(t.WTF)throw new Error("unrecognized "+s[0]+" in numFmts");}}}function Yi(e){var r=["<numFmts>"];[[5,8],[23,26],[41,44],[50,392]].forEach(function(t){for(var a=t[0];a<=t[1];++a)if(e[a]!=null)r[r.length]=Bt("numFmt",null,{numFmtId:a,formatCode:bt(e[a])})});if(r.length===1)return"";r[r.length]="</numFmts>";r[0]=Bt("numFmts",null,{count:r.length-2}).replace("/>",">");return r.join("")}var Ji=["numFmtId","fillId","fontId","borderId","xfId"];var Zi=["applyAlignment","applyBorder","applyFill","applyFont","applyNumberFormat","applyProtection","pivotButton","quotePrefix"];function Ki(e,r,t){r.CellXf=[];var a;var n=false;(e.match(lt)||[]).forEach(function(e){var i=ft(e),s=0;switch(ht(i[0])){case"<cellXfs":;case"<cellXfs>":;case"<cellXfs/>":;case"</cellXfs>":break;case"<xf":;case"<xf/>":;case"<xf>":a=i;delete a[0];for(s=0;s<Ji.length;++s)if(a[Ji[s]])a[Ji[s]]=parseInt(a[Ji[s]],10);for(s=0;s<Zi.length;++s)if(a[Zi[s]])a[Zi[s]]=_t(a[Zi[s]]);if(r.NumberFmt&&a.numFmtId>392){for(s=392;s>60;--s)if(r.NumberFmt[a.numFmtId]==r.NumberFmt[s]){a.numFmtId=s;break}}r.CellXf.push(a);break;case"</xf>":break;case"<alignment":;case"<alignment/>":;case"<alignment>":var l={};if(i.vertical)l.vertical=i.vertical;if(i.horizontal)l.horizontal=i.horizontal;if(i.textRotation!=null)l.textRotation=i.textRotation;if(i.indent)l.indent=i.indent;if(i.wrapText)l.wrapText=_t(i.wrapText);a.alignment=l;break;case"</alignment>":break;case"<protection":;case"<protection>":break;case"</protection>":;case"<protection/>":break;case"<AlternateContent":;case"<AlternateContent>":n=true;break;case"</AlternateContent>":n=false;break;case"<extLst":;case"<extLst>":;case"</extLst>":break;case"<ext":n=true;break;case"</ext>":n=false;break;default:if(t&&t.WTF){if(!n)throw new Error("unrecognized "+i[0]+" in cellXfs")};}})}function qi(e){var r=[];r[r.length]=Bt("cellXfs",null);e.forEach(function(e){r[r.length]=Bt("xf",null,e)});r[r.length]="</cellXfs>";if(r.length===2)return"";r[0]=Bt("cellXfs",null,{count:r.length-2}).replace("/>",">");return r.join("")}var Qi=function Xc(){return function e(r,t,a){var n={};if(!r)return n;r=Pr(Lr(r,"<!--","-->"));var i;if(i=zr(r,"numFmts"))Gi(i[0],n,a);if(i=zr(r,"fonts"))Xi(i[0],n,t,a);if(i=zr(r,"fills"))Vi(i[0],n,t,a);if(i=zr(r,"borders"))Hi(i[0],n,t,a);if(i=zr(r,"cellXfs"))Ki(i[0],n,a);return n}}();function es(e,r){var t=[at,Bt("styleSheet",null,{
+xmlns:Vt[0],"xmlns:vt":Ht.vt})],a;if(e.SSF&&(a=Yi(e.SSF))!=null)t[t.length]=a;t[t.length]='<fonts count="1"><font><sz val="12"/><color theme="1"/><name val="Calibri"/><family val="2"/><scheme val="minor"/></font></fonts>';t[t.length]='<fills count="2"><fill><patternFill patternType="none"/></fill><fill><patternFill patternType="gray125"/></fill></fills>';t[t.length]='<borders count="1"><border><left/><right/><top/><bottom/><diagonal/></border></borders>';t[t.length]='<cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs>';if(a=qi(r.cellXfs))t[t.length]=a;t[t.length]='<cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles>';t[t.length]='<dxfs count="0"/>';t[t.length]='<tableStyles count="0" defaultTableStyle="TableStyleMedium9" defaultPivotStyle="PivotStyleMedium4"/>';if(t.length>2){t[t.length]="</styleSheet>";t[1]=t[1].replace("/>",">")}return t.join("")}var rs=["</a:lt1>","</a:dk1>","</a:lt2>","</a:dk2>","</a:accent1>","</a:accent2>","</a:accent3>","</a:accent4>","</a:accent5>","</a:accent6>","</a:hlink>","</a:folHlink>"];function ts(e,r,t){r.themeElements.clrScheme=[];var a={};(e[0].match(lt)||[]).forEach(function(e){var n=ft(e);switch(n[0]){case"<a:clrScheme":;case"</a:clrScheme>":break;case"<a:srgbClr":a.rgb=n.val;break;case"</a:srgbClr>":break;case"<a:sysClr":a.rgb=n.lastClr;break;case"</a:sysClr>":break;case"</a:dk1>":;case"</a:lt1>":;case"<a:dk1>":;case"<a:lt1>":;case"<a:dk2>":;case"</a:dk2>":;case"<a:lt2>":;case"</a:lt2>":;case"<a:accent1>":;case"</a:accent1>":;case"<a:accent2>":;case"</a:accent2>":;case"<a:accent3>":;case"</a:accent3>":;case"<a:accent4>":;case"</a:accent4>":;case"<a:accent5>":;case"</a:accent5>":;case"<a:accent6>":;case"</a:accent6>":;case"<a:hlink>":;case"</a:hlink>":;case"<a:folHlink>":;case"</a:folHlink>":if(n[0].charAt(1)==="/"){r.themeElements.clrScheme[rs.indexOf(n[0])]=a;a={}}else{a.name=n[0].slice(3,n[0].length-1)}break;default:if(t&&t.WTF)throw new Error("Unrecognized "+n[0]+" in clrScheme");}})}function as(){}function ns(){}function is(e,r,t){r.themeElements={};var a;if(!(a=Br(e,"a:clrScheme")))throw new Error("clrScheme not found in themeElements");ts(a,r,t);if(!(a=Br(e,"a:fontScheme")))throw new Error("fontScheme not found in themeElements");as(a,r,t);if(!(a=Br(e,"a:fmtScheme")))throw new Error("fmtScheme not found in themeElements");ns(a,r,t)}function ss(e,r){if(!e||e.length===0)e=ls();var t;var a={};if(!(t=Br(e,"a:themeElements")))throw new Error("themeElements not found in theme");is(t[0],a,r);a.raw=e;return a}function ls(e,r){if(r&&r.themeXLSX)return r.themeXLSX;if(e&&typeof e.raw=="string")return e.raw;var t=[at];t[t.length]='<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" name="Office Theme">';t[t.length]="<a:themeElements>";t[t.length]='<a:clrScheme name="Office">';t[t.length]='<a:dk1><a:sysClr val="windowText" lastClr="000000"/></a:dk1>';t[t.length]='<a:lt1><a:sysClr val="window" lastClr="FFFFFF"/></a:lt1>';t[t.length]='<a:dk2><a:srgbClr val="1F497D"/></a:dk2>';t[t.length]='<a:lt2><a:srgbClr val="EEECE1"/></a:lt2>';t[t.length]='<a:accent1><a:srgbClr val="4F81BD"/></a:accent1>';t[t.length]='<a:accent2><a:srgbClr val="C0504D"/></a:accent2>';t[t.length]='<a:accent3><a:srgbClr val="9BBB59"/></a:accent3>';t[t.length]='<a:accent4><a:srgbClr val="8064A2"/></a:accent4>';t[t.length]='<a:accent5><a:srgbClr val="4BACC6"/></a:accent5>';t[t.length]='<a:accent6><a:srgbClr val="F79646"/></a:accent6>';t[t.length]='<a:hlink><a:srgbClr val="0000FF"/></a:hlink>';t[t.length]='<a:folHlink><a:srgbClr val="800080"/></a:folHlink>';t[t.length]="</a:clrScheme>";t[t.length]='<a:fontScheme name="Office">';t[t.length]="<a:majorFont>";t[t.length]='<a:latin typeface="Cambria"/>';t[t.length]='<a:ea typeface=""/>';t[t.length]='<a:cs typeface=""/>';t[t.length]='<a:font script="Jpan" typeface="ＭＳ Ｐゴシック"/>';t[t.length]='<a:font script="Hang" typeface="맑은 고딕"/>';t[t.length]='<a:font script="Hans" typeface="宋体"/>';t[t.length]='<a:font script="Hant" typeface="新細明體"/>';t[t.length]='<a:font script="Arab" typeface="Times New Roman"/>';t[t.length]='<a:font script="Hebr" typeface="Times New Roman"/>';t[t.length]='<a:font script="Thai" typeface="Tahoma"/>';t[t.length]='<a:font script="Ethi" typeface="Nyala"/>';t[t.length]='<a:font script="Beng" typeface="Vrinda"/>';t[t.length]='<a:font script="Gujr" typeface="Shruti"/>';t[t.length]='<a:font script="Khmr" typeface="MoolBoran"/>';t[t.length]='<a:font script="Knda" typeface="Tunga"/>';t[t.length]='<a:font script="Guru" typeface="Raavi"/>';t[t.length]='<a:font script="Cans" typeface="Euphemia"/>';t[t.length]='<a:font script="Cher" typeface="Plantagenet Cherokee"/>';t[t.length]='<a:font script="Yiii" typeface="Microsoft Yi Baiti"/>';t[t.length]='<a:font script="Tibt" typeface="Microsoft Himalaya"/>';t[t.length]='<a:font script="Thaa" typeface="MV Boli"/>';t[t.length]='<a:font script="Deva" typeface="Mangal"/>';t[t.length]='<a:font script="Telu" typeface="Gautami"/>';t[t.length]='<a:font script="Taml" typeface="Latha"/>';t[t.length]='<a:font script="Syrc" typeface="Estrangelo Edessa"/>';t[t.length]='<a:font script="Orya" typeface="Kalinga"/>';t[t.length]='<a:font script="Mlym" typeface="Kartika"/>';t[t.length]='<a:font script="Laoo" typeface="DokChampa"/>';t[t.length]='<a:font script="Sinh" typeface="Iskoola Pota"/>';t[t.length]='<a:font script="Mong" typeface="Mongolian Baiti"/>';t[t.length]='<a:font script="Viet" typeface="Times New Roman"/>';t[t.length]='<a:font script="Uigh" typeface="Microsoft Uighur"/>';t[t.length]='<a:font script="Geor" typeface="Sylfaen"/>';t[t.length]="</a:majorFont>";t[t.length]="<a:minorFont>";t[t.length]='<a:latin typeface="Calibri"/>';t[t.length]='<a:ea typeface=""/>';t[t.length]='<a:cs typeface=""/>';t[t.length]='<a:font script="Jpan" typeface="ＭＳ Ｐゴシック"/>';t[t.length]='<a:font script="Hang" typeface="맑은 고딕"/>';t[t.length]='<a:font script="Hans" typeface="宋体"/>';t[t.length]='<a:font script="Hant" typeface="新細明體"/>';t[t.length]='<a:font script="Arab" typeface="Arial"/>';t[t.length]='<a:font script="Hebr" typeface="Arial"/>';t[t.length]='<a:font script="Thai" typeface="Tahoma"/>';t[t.length]='<a:font script="Ethi" typeface="Nyala"/>';t[t.length]='<a:font script="Beng" typeface="Vrinda"/>';t[t.length]='<a:font script="Gujr" typeface="Shruti"/>';t[t.length]='<a:font script="Khmr" typeface="DaunPenh"/>';t[t.length]='<a:font script="Knda" typeface="Tunga"/>';t[t.length]='<a:font script="Guru" typeface="Raavi"/>';t[t.length]='<a:font script="Cans" typeface="Euphemia"/>';t[t.length]='<a:font script="Cher" typeface="Plantagenet Cherokee"/>';t[t.length]='<a:font script="Yiii" typeface="Microsoft Yi Baiti"/>';t[t.length]='<a:font script="Tibt" typeface="Microsoft Himalaya"/>';t[t.length]='<a:font script="Thaa" typeface="MV Boli"/>';t[t.length]='<a:font script="Deva" typeface="Mangal"/>';t[t.length]='<a:font script="Telu" typeface="Gautami"/>';t[t.length]='<a:font script="Taml" typeface="Latha"/>';t[t.length]='<a:font script="Syrc" typeface="Estrangelo Edessa"/>';t[t.length]='<a:font script="Orya" typeface="Kalinga"/>';t[t.length]='<a:font script="Mlym" typeface="Kartika"/>';t[t.length]='<a:font script="Laoo" typeface="DokChampa"/>';t[t.length]='<a:font script="Sinh" typeface="Iskoola Pota"/>';t[t.length]='<a:font script="Mong" typeface="Mongolian Baiti"/>';t[t.length]='<a:font script="Viet" typeface="Arial"/>';t[t.length]='<a:font script="Uigh" typeface="Microsoft Uighur"/>';t[t.length]='<a:font script="Geor" typeface="Sylfaen"/>';t[t.length]="</a:minorFont>";t[t.length]="</a:fontScheme>";t[t.length]='<a:fmtScheme name="Office">';t[t.length]="<a:fillStyleLst>";t[t.length]='<a:solidFill><a:schemeClr val="phClr"/></a:solidFill>';t[t.length]='<a:gradFill rotWithShape="1">';t[t.length]="<a:gsLst>";t[t.length]='<a:gs pos="0"><a:schemeClr val="phClr"><a:tint val="50000"/><a:satMod val="300000"/></a:schemeClr></a:gs>';t[t.length]='<a:gs pos="35000"><a:schemeClr val="phClr"><a:tint val="37000"/><a:satMod val="300000"/></a:schemeClr></a:gs>';t[t.length]='<a:gs pos="100000"><a:schemeClr val="phClr"><a:tint val="15000"/><a:satMod val="350000"/></a:schemeClr></a:gs>';t[t.length]="</a:gsLst>";t[t.length]='<a:lin ang="16200000" scaled="1"/>';t[t.length]="</a:gradFill>";t[t.length]='<a:gradFill rotWithShape="1">';t[t.length]="<a:gsLst>";t[t.length]='<a:gs pos="0"><a:schemeClr val="phClr"><a:tint val="100000"/><a:shade val="100000"/><a:satMod val="130000"/></a:schemeClr></a:gs>';t[t.length]='<a:gs pos="100000"><a:schemeClr val="phClr"><a:tint val="50000"/><a:shade val="100000"/><a:satMod val="350000"/></a:schemeClr></a:gs>';t[t.length]="</a:gsLst>";t[t.length]='<a:lin ang="16200000" scaled="0"/>';t[t.length]="</a:gradFill>";t[t.length]="</a:fillStyleLst>";t[t.length]="<a:lnStyleLst>";t[t.length]='<a:ln w="9525" cap="flat" cmpd="sng" algn="ctr"><a:solidFill><a:schemeClr val="phClr"><a:shade val="95000"/><a:satMod val="105000"/></a:schemeClr></a:solidFill><a:prstDash val="solid"/></a:ln>';t[t.length]='<a:ln w="25400" cap="flat" cmpd="sng" algn="ctr"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill><a:prstDash val="solid"/></a:ln>';t[t.length]='<a:ln w="38100" cap="flat" cmpd="sng" algn="ctr"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill><a:prstDash val="solid"/></a:ln>';t[t.length]="</a:lnStyleLst>";t[t.length]="<a:effectStyleLst>";t[t.length]="<a:effectStyle>";t[t.length]="<a:effectLst>";t[t.length]='<a:outerShdw blurRad="40000" dist="20000" dir="5400000" rotWithShape="0"><a:srgbClr val="000000"><a:alpha val="38000"/></a:srgbClr></a:outerShdw>';t[t.length]="</a:effectLst>";t[t.length]="</a:effectStyle>";t[t.length]="<a:effectStyle>";t[t.length]="<a:effectLst>";t[t.length]='<a:outerShdw blurRad="40000" dist="23000" dir="5400000" rotWithShape="0"><a:srgbClr val="000000"><a:alpha val="35000"/></a:srgbClr></a:outerShdw>';t[t.length]="</a:effectLst>";t[t.length]="</a:effectStyle>";t[t.length]="<a:effectStyle>";t[t.length]="<a:effectLst>";t[t.length]='<a:outerShdw blurRad="40000" dist="23000" dir="5400000" rotWithShape="0"><a:srgbClr val="000000"><a:alpha val="35000"/></a:srgbClr></a:outerShdw>';t[t.length]="</a:effectLst>";t[t.length]='<a:scene3d><a:camera prst="orthographicFront"><a:rot lat="0" lon="0" rev="0"/></a:camera><a:lightRig rig="threePt" dir="t"><a:rot lat="0" lon="0" rev="1200000"/></a:lightRig></a:scene3d>';t[t.length]='<a:sp3d><a:bevelT w="63500" h="25400"/></a:sp3d>';t[t.length]="</a:effectStyle>";t[t.length]="</a:effectStyleLst>";t[t.length]="<a:bgFillStyleLst>";t[t.length]='<a:solidFill><a:schemeClr val="phClr"/></a:solidFill>';t[t.length]='<a:gradFill rotWithShape="1">';t[t.length]="<a:gsLst>";t[t.length]='<a:gs pos="0"><a:schemeClr val="phClr"><a:tint val="40000"/><a:satMod val="350000"/></a:schemeClr></a:gs>';t[t.length]='<a:gs pos="40000"><a:schemeClr val="phClr"><a:tint val="45000"/><a:shade val="99000"/><a:satMod val="350000"/></a:schemeClr></a:gs>';t[t.length]='<a:gs pos="100000"><a:schemeClr val="phClr"><a:shade val="20000"/><a:satMod val="255000"/></a:schemeClr></a:gs>';t[t.length]="</a:gsLst>";t[t.length]='<a:path path="circle"><a:fillToRect l="50000" t="-80000" r="50000" b="180000"/></a:path>';t[t.length]="</a:gradFill>";t[t.length]='<a:gradFill rotWithShape="1">';t[t.length]="<a:gsLst>";t[t.length]='<a:gs pos="0"><a:schemeClr val="phClr"><a:tint val="80000"/><a:satMod val="300000"/></a:schemeClr></a:gs>';t[t.length]='<a:gs pos="100000"><a:schemeClr val="phClr"><a:shade val="30000"/><a:satMod val="200000"/></a:schemeClr></a:gs>';t[t.length]="</a:gsLst>";t[t.length]='<a:path path="circle"><a:fillToRect l="50000" t="50000" r="50000" b="50000"/></a:path>';t[t.length]="</a:gradFill>";t[t.length]="</a:bgFillStyleLst>";t[t.length]="</a:fmtScheme>";t[t.length]="</a:themeElements>";t[t.length]="<a:objectDefaults>";t[t.length]="<a:spDef>";t[t.length]='<a:spPr/><a:bodyPr/><a:lstStyle/><a:style><a:lnRef idx="1"><a:schemeClr val="accent1"/></a:lnRef><a:fillRef idx="3"><a:schemeClr val="accent1"/></a:fillRef><a:effectRef idx="2"><a:schemeClr val="accent1"/></a:effectRef><a:fontRef idx="minor"><a:schemeClr val="lt1"/></a:fontRef></a:style>';t[t.length]="</a:spDef>";t[t.length]="<a:lnDef>";t[t.length]='<a:spPr/><a:bodyPr/><a:lstStyle/><a:style><a:lnRef idx="2"><a:schemeClr val="accent1"/></a:lnRef><a:fillRef idx="0"><a:schemeClr val="accent1"/></a:fillRef><a:effectRef idx="1"><a:schemeClr val="accent1"/></a:effectRef><a:fontRef idx="minor"><a:schemeClr val="tx1"/></a:fontRef></a:style>';t[t.length]="</a:lnDef>";t[t.length]="</a:objectDefaults>";t[t.length]="<a:extraClrSchemeLst/>";t[t.length]="</a:theme>";return t.join("")}function os(e,r,t){var a={Types:[],Cell:[],Value:[]};if(!e)return a;var n=false;var i=2;var s;e.replace(lt,function(e){var r=ft(e);switch(ht(r[0])){case"<?xml":break;case"<metadata":;case"</metadata>":break;case"<metadataTypes":;case"</metadataTypes>":break;case"<metadataType":a.Types.push({name:r.name});break;case"</metadataType>":break;case"<futureMetadata":for(var l=0;l<a.Types.length;++l)if(a.Types[l].name==r.name)s=a.Types[l];break;case"</futureMetadata>":break;case"<bk>":break;case"</bk>":break;case"<rc":if(i==1)a.Cell.push({type:a.Types[r.t-1].name,index:+r.v});else if(i==0)a.Value.push({type:a.Types[r.t-1].name,index:+r.v});break;case"</rc>":break;case"<cellMetadata":i=1;break;case"</cellMetadata>":i=2;break;case"<valueMetadata":i=0;break;case"</valueMetadata>":i=2;break;case"<extLst":;case"<extLst>":;case"</extLst>":;case"<extLst/>":break;case"<ext":n=true;break;case"</ext>":n=false;break;case"<rvb":if(!s)break;if(!s.offsets)s.offsets=[];s.offsets.push(+r.i);break;default:if(!n&&(t==null?void 0:t.WTF))throw new Error("unrecognized "+r[0]+" in metadata");}return e});return a}function cs(){var e=[at];e.push('<metadata xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:xlrd="http://schemas.microsoft.com/office/spreadsheetml/2017/richdata" xmlns:xda="http://schemas.microsoft.com/office/spreadsheetml/2017/dynamicarray">\n  <metadataTypes count="1">\n    <metadataType name="XLDAPR" minSupportedVersion="120000" copy="1" pasteAll="1" pasteValues="1" merge="1" splitFirst="1" rowColShift="1" clearFormats="1" clearComments="1" assign="1" coerce="1" cellMeta="1"/>\n  </metadataTypes>\n  <futureMetadata name="XLDAPR" count="1">\n    <bk>\n      <extLst>\n        <ext uri="{bdbb8cdc-fa1e-496e-a857-3c3f30c029c3}">\n          <xda:dynamicArrayProperties fDynamic="1" fCollapsed="0"/>\n        </ext>\n      </extLst>\n    </bk>\n  </futureMetadata>\n  <cellMetadata count="1">\n    <bk>\n      <rc t="1" v="0"/>\n    </bk>\n  </cellMetadata>\n</metadata>');return e.join("")}function fs(){}function us(e,r,t,a){if(!e)return e;var n=a||{};var i=false,s=false;Na(e,function l(e,r,t){if(s)return;switch(t){case 359:;case 363:;case 364:;case 366:;case 367:;case 368:;case 369:;case 370:;case 371:;case 472:;case 577:;case 578:;case 579:;case 580:;case 581:;case 582:;case 583:;case 584:;case 585:;case 586:;case 587:break;case 35:i=true;break;case 36:i=false;break;default:if(r.T){}else if(!i||n.WTF)throw new Error("Unexpected record 0x"+t.toString(16));}},n)}function hs(e,r){if(!e)return"??";var t=(e.match(/<c:chart [^<>]*r:id="([^<>"]*)"/)||["",""])[1];return r["!id"][t].Target}function ds(e,r,t){var a=0;($r(e,"shape")||[]).forEach(function(e){var n="";var i=true;var s=-1;var l=-1,o=-1;e.replace(lt,function(r,t){var a=ft(r);switch(ht(a[0])){case"<ClientData":if(a.ObjectType)n=a.ObjectType;break;case"<Visible":;case"<Visible/>":i=false;break;case"<Row":;case"<Row>":s=t+r.length;break;case"</Row>":l=+e.slice(s,t).trim();break;case"<Column":;case"<Column>":s=t+r.length;break;case"</Column>":o=+e.slice(s,t).trim();break;}return""});switch(n){case"Note":var c=bc(r,l>=0&&o>=0?Ja({r:l,c:o}):t[a].ref);if(c.c){c.c.hidden=i}++a;break;}})}function ps(e,r,t){var a=[21600,21600];var n=["m0,0l0",a[1],a[0],a[1],a[0],"0xe"].join(",");var i=[Bt("xml",null,{"xmlns:v":Xt.v,"xmlns:o":Xt.o,"xmlns:x":Xt.x,"xmlns:mv":Xt.mv}).replace(/\/>/,">"),Bt("o:shapelayout",Bt("o:idmap",null,{"v:ext":"edit",data:e}),{"v:ext":"edit"})];var s=65536*e;var l=r||[];if(l.length>0)i.push(Bt("v:shapetype",[Bt("v:stroke",null,{joinstyle:"miter"}),Bt("v:path",null,{gradientshapeok:"t","o:connecttype":"rect"})].join(""),{id:"_x0000_t202",coordsize:a.join(","),"o:spt":202,path:n}));l.forEach(function(e){++s;i.push(ms(e,s))});i.push("</xml>");return i.join("")}function ms(e,r,t){var a=Ya(e[0]);var n={color2:"#BEFF82",type:"gradient"};if(n.type=="gradient")n.angle="-180";var i=n.type=="gradient"?Bt("o:fill",null,{type:"gradientUnscaled","v:ext":"view"}):null;var s=Bt("v:fill",i,n);var l={on:"t",obscured:"t"};return["<v:shape"+Ut({id:"_x0000_s"+r,type:"#_x0000_t202",style:"position:absolute; margin-left:80pt;margin-top:5pt;width:104pt;height:64pt;z-index:10"+(e[1].hidden?";visibility:hidden":""),fillcolor:"#ECFAD4",strokecolor:"#edeaa1"})+">",s,Bt("v:shadow",null,l),Bt("v:path",null,{"o:connecttype":"none"}),'<v:textbox><div style="text-align:left"></div></v:textbox>','<x:ClientData ObjectType="Note">',"<x:MoveWithCells/>","<x:SizeWithCells/>",Lt("x:Anchor",[a.c+1,0,a.r+1,0,a.c+3,20,a.r+5,20].join(",")),Lt("x:AutoFill","False"),Lt("x:Row",String(a.r)),Lt("x:Column",String(a.c)),e[1].hidden?"":"<x:Visible/>","</x:ClientData>","</v:shape>"].join("")}function vs(e,r,t,a){var n=e["!data"]!=null;var i;r.forEach(function(r){var s=Ya(r.ref);if(s.r<0||s.c<0)return;if(n){if(!e["!data"][s.r])e["!data"][s.r]=[];i=e["!data"][s.r][s.c]}else i=e[r.ref];if(!i){i={t:"z"};if(n)e["!data"][s.r][s.c]=i;else e[r.ref]=i;var l=en(e["!ref"]||"BDWGO1000001:A1");if(l.s.r>s.r)l.s.r=s.r;if(l.e.r<s.r)l.e.r=s.r;if(l.s.c>s.c)l.s.c=s.c;if(l.e.c<s.c)l.e.c=s.c;var o=Ka(l);e["!ref"]=o}if(!i.c)i.c=[];var c={a:r.author,t:r.t,r:r.r,T:t};if(r.h)c.h=r.h;for(var f=i.c.length-1;f>=0;--f){if(!t&&i.c[f].T)return;if(t&&!i.c[f].T)i.c.splice(f,1)}if(t&&a)for(f=0;f<a.length;++f){if(c.a==a[f].id){c.a=a[f].name||c.a;break}}i.c.push(c)})}function gs(e,r){if(e.match(/<(?:\w+:)?comments *\/>/))return[];var t=[];var a=[];var n=zr(e,"authors");if(n&&n[1])n[1].split(/<\/\w*:?author>/).forEach(function(e){if(e===""||e.trim()==="")return;var r=e.match(/<(?:\w+:)?author[^<>]*>(.*)/);if(r)t.push(r[1])});var i=zr(e,"commentList");if(i&&i[1])i[1].split(/<\/\w*:?comment>/).forEach(function(e){if(e===""||e.trim()==="")return;var n=e.match(/<(?:\w+:)?comment[^<>]*>/);if(!n)return;var i=ft(n[0]);var s={author:i.authorId&&t[i.authorId]||"sheetjsghost",ref:i.ref,guid:i.guid};var l=Ya(i.ref);if(r.sheetRows&&r.sheetRows<=l.r)return;var o=zr(e,"text");var c=!!o&&!!o[1]&&bi(o[1])||{r:"",t:"",h:""};s.r=c.r;if(c.r=="<t></t>")c.t=c.h="";s.t=(c.t||"").replace(/\r\n/g,"\n").replace(/\r/g,"\n");if(r.cellHTML)s.h=c.h;a.push(s)});return a}function bs(e){var r=[at,Bt("comments",null,{xmlns:Vt[0]})];var t=[];r.push("<authors>");e.forEach(function(e){e[1].forEach(function(e){var a=bt(e.a);if(t.indexOf(a)==-1){t.push(a);r.push("<author>"+a+"</author>")}if(e.T&&e.ID&&t.indexOf("tc="+e.ID)==-1){t.push("tc="+e.ID);r.push("<author>"+"tc="+e.ID+"</author>")}})});if(t.length==0){t.push("SheetJ5");r.push("<author>SheetJ5</author>")}r.push("</authors>");r.push("<commentList>");e.forEach(function(e){var a=0,n=[],i=0;if(e[1][0]&&e[1][0].T&&e[1][0].ID)a=t.indexOf("tc="+e[1][0].ID);e[1].forEach(function(e){if(e.a)a=t.indexOf(bt(e.a));if(e.T)++i;n.push(e.t==null?"":bt(e.t))});if(i===0){e[1].forEach(function(a){r.push('<comment ref="'+e[0]+'" authorId="'+t.indexOf(bt(a.a))+'"><text>');r.push(Lt("t",a.t==null?"":bt(a.t)));r.push("</text></comment>")})}else{if(e[1][0]&&e[1][0].T&&e[1][0].ID)a=t.indexOf("tc="+e[1][0].ID);r.push('<comment ref="'+e[0]+'" authorId="'+a+'"><text>');var s="Comment:\n    "+n[0]+"\n";for(var l=1;l<n.length;++l)s+="Reply:\n    "+n[l]+"\n";r.push(Lt("t",bt(s)));r.push("</text></comment>")}});r.push("</commentList>");if(r.length>2){r[r.length]="</comments>";r[1]=r[1].replace("/>",">")}return r.join("")}function ws(e,r){var t=[];var a=false,n={},i=0;e.replace(lt,function s(l,o){var c=ft(l);switch(ht(c[0])){case"<?xml":break;case"<ThreadedComments":break;case"</ThreadedComments>":break;case"<threadedComment":n={author:c.personId,guid:c.id,ref:c.ref,T:1};break;case"</threadedComment>":if(n.t!=null)t.push(n);break;case"<text>":;case"<text":i=o+l.length;break;case"</text>":n.t=e.slice(i,o).replace(/\r\n/g,"\n").replace(/\r/g,"\n");break;case"<mentions":;case"<mentions>":a=true;break;case"</mentions>":a=false;break;case"<extLst":;case"<extLst>":;case"</extLst>":;case"<extLst/>":break;case"<ext":a=true;break;case"</ext>":a=false;break;default:if(!a&&r.WTF)throw new Error("unrecognized "+c[0]+" in threaded comments");}return l});return t}function ks(e,r,t){var a=[at,Bt("ThreadedComments",null,{xmlns:Ht.TCMNT}).replace(/[\/]>/,">")];e.forEach(function(e){var n="";(e[1]||[]).forEach(function(i,s){if(!i.T){delete i.ID;return}if(i.a&&r.indexOf(i.a)==-1)r.push(i.a);var l={ref:e[0],id:"{54EE7951-7262-4200-6969-"+("000000000000"+t.tcid++).slice(-12)+"}"};if(s==0)n=l.id;else l.parentId=n;i.ID=l.id;if(i.a)l.personId="{54EE7950-7262-4200-6969-"+("000000000000"+r.indexOf(i.a)).slice(-12)+"}";a.push(Bt("threadedComment",Lt("text",i.t||""),l))})});a.push("</ThreadedComments>");return a.join("")}function ys(e,r){var t=[];var a=false;e.replace(lt,function n(e){var n=ft(e);switch(ht(n[0])){case"<?xml":break;case"<personList":break;case"</personList>":break;case"<person":t.push({name:n.displayname,id:n.id});break;case"</person>":break;case"<extLst":;case"<extLst>":;case"</extLst>":;case"<extLst/>":break;case"<ext":a=true;break;case"</ext>":a=false;break;default:if(!a&&r.WTF)throw new Error("unrecognized "+n[0]+" in threaded comments");}return e});return t}function xs(e){var r=[at,Bt("personList",null,{xmlns:Ht.TCMNT,"xmlns:x":Vt[0]}).replace(/[\/]>/,">")];e.forEach(function(e,t){r.push(Bt("person",null,{displayName:e,id:"{54EE7950-7262-4200-6969-"+("000000000000"+t).slice(-12)+"}",userId:e,providerId:"None"}))});r.push("</personList>");return r.join("")}var Cs="application/vnd.ms-office.vbaProject";function Ss(e){var r=Qe.utils.cfb_new({root:"R"});e.FullPaths.forEach(function(t,a){if(t.slice(-1)==="/"||!t.match(/_VBA_PROJECT_CUR/))return;var n=t.replace(/^[^\/]*/,"R").replace(/\/_VBA_PROJECT_CUR\u0000*/,"");Qe.utils.cfb_add(r,n,e.FileIndex[a].content)});return Qe.write(r)}function _s(e,r){r.FullPaths.forEach(function(t,a){if(a==0)return;var n=t.replace(/^[\/]*[^\/]*[\/]/,"/_VBA_PROJECT_CUR/");if(n.slice(-1)!=="/")Qe.utils.cfb_add(e,n,r.FileIndex[a].content)})}var As=["xlsb","xlsm","xlam","biff8","xla"];function Ts(){return{"!type":"dialog"}}function Es(){return{"!type":"dialog"}}function Fs(){return{"!type":"macro"}}function Ds(){return{"!type":"macro"}}var Os=function(){var e=/(^|[^A-Za-z_])R(\[?-?\d+\]|[1-9]\d*|)C(\[?-?\d+\]|[1-9]\d*|)(?![A-Za-z0-9_])/g;var r={r:0,c:0};function t(e,t,a,n){var i=false,s=false;if(a.length==0)s=true;else if(a.charAt(0)=="["){s=true;a=a.slice(1,-1)}if(n.length==0)i=true;else if(n.charAt(0)=="["){i=true;n=n.slice(1,-1)}var l=a.length>0?parseInt(a,10)|0:0,o=n.length>0?parseInt(n,10)|0:0;if(i)o+=r.c;else--o;if(s)l+=r.r;else--l;return t+(i?"":"$")+Ha(o)+(s?"":"$")+za(l)}return function a(n,i){r=i;return n.replace(e,t)}}();var Ns=/(^|[^._A-Z0-9])(\$?)([A-Z]{1,2}|[A-W][A-Z]{2}|X[A-E][A-Z]|XF[A-D])(\$?)(\d{1,7})(?![_.\(A-Za-z0-9])/g;try{Ns=/(^|[^._A-Z0-9])([$]?)([A-Z]{1,2}|[A-W][A-Z]{2}|X[A-E][A-Z]|XF[A-D])([$]?)(10[0-3]\d{4}|104[0-7]\d{3}|1048[0-4]\d{2}|10485[0-6]\d|104857[0-6]|[1-9]\d{0,5})(?![_.\(A-Za-z0-9])/g}catch(Ms){}var Is=function(){return function e(r,t){return r.replace(Ns,function(e,r,a,n,i,s){var l=ja(n)-(a?0:t.c);var o=Ba(s)-(i?0:t.r);var c=i=="$"?o+1:o==0?"":"["+o+"]";var f=a=="$"?l+1:l==0?"":"["+l+"]";return r+"R"+c+"C"+f})}}();function Ps(e,r){return e.replace(Ns,function(e,t,a,n,i,s){return t+(a=="$"?a+n:Ha(ja(n)+r.c))+(i=="$"?i+s:za(Ba(s)+r.r))})}function Rs(e,r,t){var a=Za(r),n=a.s,i=Ya(t);var s={r:i.r-n.r,c:i.c-n.c};return Ps(e,s)}function Ls(e){if(e.length==1)return false;return true}function Us(e){return e.replace(/_xlfn\./g,"")}function Bs(e){if(e.slice(0,3)=="of:")e=e.slice(3);if(e.charCodeAt(0)==61){e=e.slice(1);if(e.charCodeAt(0)==61)e=e.slice(1)}e=e.replace(/COM\.MICROSOFT\./g,"");e=e.replace(/\[((?:\.[A-Z]+[0-9]+)(?::\.[A-Z]+[0-9]+)?)\]/g,function(e,r){return r.replace(/\./g,"")});e=e.replace(/\$'([^']|'')+'/g,function(e){return e.slice(1)});e=e.replace(/\$([^\]\. #$]+)/g,function(e,r){return r.match(/^([A-Z]{1,2}|[A-W][A-Z]{2}|X[A-E][A-Z]|XF[A-D])?(10[0-3]\d{4}|104[0-7]\d{3}|1048[0-4]\d{2}|10485[0-6]\d|104857[0-6]|[1-9]\d{0,5})?$/)?e:r});e=e.replace(/\[.(#[A-Z]*[?!])\]/g,"$1");return e.replace(/[;~]/g,",").replace(/\|/g,";")}function zs(e){var r="of:="+e.replace(Ns,"$1[.$2$3$4$5]").replace(/\]:\[/g,":");return r.replace(/;/g,"|").replace(/,/g,";")}function $s(e){e=e.replace(/\$'([^']|'')+'/g,function(e){return e.slice(1)});e=e.replace(/\$([^\]\. #$]+)/g,function(e,r){return r.match(/^([A-Z]{1,2}|[A-W][A-Z]{2}|X[A-E][A-Z]|XF[A-D])?(10[0-3]\d{4}|104[0-7]\d{3}|1048[0-4]\d{2}|10485[0-6]\d|104857[0-6]|[1-9]\d{0,5})?$/)?e:r});var r=e.split(":");var t=r[0].split(".")[0];return[t,r[0].split(".")[1]+(r.length>1?":"+(r[1].split(".")[1]||r[1].split(".")[0]):"")]}function Ws(e){return e.replace(/!/,".").replace(/:/,":.")}var js={};var Hs={};var Vs=typeof Map!=="undefined";function Xs(e,r,t){var a=0,n=e.length;if(t){if(Vs?t.has(r):Object.prototype.hasOwnProperty.call(t,r)){var i=Vs?t.get(r):t[r];for(;a<i.length;++a){if(e[i[a]].t===r){e.Count++;return i[a]}}}}else for(;a<n;++a){if(e[a].t===r){e.Count++;return a}}e[n]={t:r};e.Count++;e.Unique++;if(t){if(Vs){if(!t.has(r))t.set(r,[]);t.get(r).push(n)}else{if(!Object.prototype.hasOwnProperty.call(t,r))t[r]=[];t[r].push(n)}}return n}function Gs(e,r){var t={min:e+1,max:e+1};var a=-1;if(r.MDW)Ni=r.MDW;if(r.width!=null)t.customWidth=1;else if(r.wpx!=null)a=Ii(r.wpx);else if(r.wch!=null)a=r.wch;if(a>-1){t.width=Pi(a);t.customWidth=1}else if(r.width!=null)t.width=r.width;if(r.hidden)t.hidden=true;if(r.level!=null){t.outlineLevel=t.level=r.level}return t}function Ys(e,r){if(!e)return;var t=[.7,.7,.75,.75,.3,.3];if(r=="xlml")t=[1,1,1,1,.5,.5];if(e.left==null)e.left=t[0];if(e.right==null)e.right=t[1];if(e.top==null)e.top=t[2];if(e.bottom==null)e.bottom=t[3];if(e.header==null)e.header=t[4];if(e.footer==null)e.footer=t[5]}function Js(e,r,t){var a=t.revssf[r.z!=null?r.z:"General"];var n=60,i=e.length;if(a==null&&t.ssf){for(;n<392;++n)if(t.ssf[n]==null){Ke(r.z,n);t.ssf[n]=r.z;t.revssf[r.z]=a=n;break}}for(n=0;n!=i;++n)if(e[n].numFmtId===a)return n;e[i]={numFmtId:a,fontId:0,fillId:0,borderId:0,xfId:0,applyNumberFormat:1};return i}function Zs(e,r,t,a,n,i,s){try{if(a.cellNF)e.z=q[r]}catch(l){if(a.WTF)throw l}if(e.t==="z"&&!a.cellStyles)return;if(e.t==="d"&&typeof e.v==="string")e.v=wr(e.v);if((!a||a.cellText!==false)&&e.t!=="z")try{if(q[r]==null)Ke(Xe[r]||"General",r);if(e.t==="e")e.w=e.w||En[e.v];else if(r===0){if(e.t==="n"){if((e.v|0)===e.v)e.w=e.v.toString(10);else e.w=oe(e.v)}else if(e.t==="d"){var o=dr(e.v,!!s);if((o|0)===o)e.w=o.toString(10);else e.w=oe(o)}else if(e.v===undefined)return"";else e.w=ce(e.v,Hs)}else if(e.t==="d")e.w=$e(r,dr(e.v,!!s),Hs);else e.w=$e(r,e.v,Hs)}catch(l){if(a.WTF)throw l}if(!a.cellStyles)return;if(t!=null)try{e.s=i.Fills[t];if(e.s.fgColor&&e.s.fgColor.theme&&!e.s.fgColor.rgb){e.s.fgColor.rgb=Ei(n.themeElements.clrScheme[e.s.fgColor.theme].rgb,e.s.fgColor.tint||0);if(a.WTF)e.s.fgColor.raw_rgb=n.themeElements.clrScheme[e.s.fgColor.theme].rgb}if(e.s.bgColor&&e.s.bgColor.theme){e.s.bgColor.rgb=Ei(n.themeElements.clrScheme[e.s.bgColor.theme].rgb,e.s.bgColor.tint||0);if(a.WTF)e.s.bgColor.raw_rgb=n.themeElements.clrScheme[e.s.bgColor.theme].rgb}}catch(l){if(a.WTF&&i.Fills)throw l}}function Ks(e,r,t){if(e&&e["!ref"]){var a=en(e["!ref"]);if(a.e.c<a.s.c||a.e.r<a.s.r)throw new Error("Bad range ("+t+"): "+e["!ref"])}}function qs(e,r){var t=en(r);if(t.s.r<=t.e.r&&t.s.c<=t.e.c&&t.s.r>=0&&t.s.c>=0)e["!ref"]=Ka(t)}var Qs=/<(?:\w+:)?mergeCell ref=["'][A-Z0-9:]+['"]\s*[\/]?>/g;var el=/<(?:\w+:)?hyperlink [^<>]*>/gm;var rl=/"(\w*:\w*)"/;var tl=/<(?:\w+:)?col\b[^<>]*[\/]?>/g;var al=/<(?:\w+:)?autoFilter[^>]*/g;var nl=/<(?:\w+:)?pageMargins[^<>]*\/>/g;var il=/<(?:\w+:)?sheetPr\b[^<>]*?\/>/;function sl(e,r,t,a,n,i,s){if(!e)return e;if(!a)a={"!id":{}};if(b!=null&&r.dense==null)r.dense=b;var l={};if(r.dense)l["!data"]=[];var o={s:{r:2e6,c:2e6},e:{r:0,c:0}};var c="",f="";var u=zr(e,"sheetData");if(u){c=e.slice(0,u.index);f=e.slice(u.index+u[0].length)}else c=f=e;var h=c.match(il);if(h)ol(h[0],l,n,t);else if(h=zr(c,"sheetPr"))cl(h[0],h[1]||"",l,n,t,s,i);var d=(c.match(/<(?:\w*:)?dimension/)||{index:-1}).index;if(d>0){var p=c.slice(d,d+50).match(rl);if(p&&!(r&&r.nodim))qs(l,p[1])}var m=zr(c,"sheetViews");if(m&&m[1])xl(m[1],n);var v=[];if(r.cellStyles){var g=c.match(tl);if(g)gl(v,g)}if(u)_l(u[1],l,r,o,i,s,n);var w=f.match(al);if(w)l["!autofilter"]=wl(w[0]);var k=[];var y=f.match(Qs);if(y)for(d=0;d!=y.length;++d)k[d]=en(y[d].slice(y[d].indexOf("=")+2));var x=f.match(el);if(x)pl(l,x,a);var C=f.match(nl);if(C)l["!margins"]=ml(ft(C[0]));var S;if(S=f.match(/legacyDrawing r:id="(.*?)"/))l["!legrel"]=S[1];if(r&&r.nodim)o.s.c=o.s.r=0;if(!l["!ref"]&&o.e.c>=o.s.c&&o.e.r>=o.s.r)l["!ref"]=Ka(o);if(r.sheetRows>0&&l["!ref"]){var _=en(l["!ref"]);if(r.sheetRows<=+_.e.r){_.e.r=r.sheetRows-1;if(_.e.r>o.e.r)_.e.r=o.e.r;if(_.e.r<_.s.r)_.s.r=_.e.r;if(_.e.c>o.e.c)_.e.c=o.e.c;if(_.e.c<_.s.c)_.s.c=_.e.c;l["!fullref"]=l["!ref"];l["!ref"]=Ka(_)}}if(v.length>0)l["!cols"]=v;if(k.length>0)l["!merges"]=k;if(a["!id"][l["!legrel"]])l["!legdrawel"]=a["!id"][l["!legrel"]];return l}function ll(e){if(e.length===0)return"";var r='<mergeCells count="'+e.length+'">';for(var t=0;t!=e.length;++t)r+='<mergeCell ref="'+Ka(e[t])+'"/>';return r+"</mergeCells>"}function ol(e,r,t,a){var n=ft(e);if(!t.Sheets[a])t.Sheets[a]={};if(n.codeName)t.Sheets[a].CodeName=mt(Dt(n.codeName))}function cl(e,r,t,a,n){ol(e.slice(0,e.indexOf(">")),t,a,n)}function fl(e,r,t,a,n){var i=false;var s={},l=null;if(a.bookType!=="xlsx"&&r.vbaraw){var o=r.SheetNames[t];try{if(r.Workbook)o=r.Workbook.Sheets[t].CodeName||o}catch(c){}i=true;s.codeName=Ot(bt(o))}if(e&&e["!outline"]){var f={summaryBelow:1,summaryRight:1};if(e["!outline"].above)f.summaryBelow=0;if(e["!outline"].left)f.summaryRight=0;l=(l||"")+Bt("outlinePr",null,f)}if(!i&&!l)return;n[n.length]=Bt("sheetPr",l,s)}var ul=["objects","scenarios","selectLockedCells","selectUnlockedCells"];var hl=["formatColumns","formatRows","formatCells","insertColumns","insertRows","insertHyperlinks","deleteColumns","deleteRows","sort","autoFilter","pivotTables"];function dl(e){var r={sheet:1};ul.forEach(function(t){if(e[t]!=null&&e[t])r[t]="1"});hl.forEach(function(t){if(e[t]!=null&&!e[t])r[t]="0"});if(e.password)r.password=crypto_CreatePasswordVerifier_Method1(e.password).toString(16).toUpperCase();return Bt("sheetProtection",null,r)}function pl(e,r,t){var a=e["!data"]!=null;for(var n=0;n!=r.length;++n){var i=ft(Dt(r[n]),true);if(!i.ref)return;var s=((t||{})["!id"]||[])[i.id];if(s){i.Target=s.Target;if(i.location)i.Target+="#"+mt(i.location)}else{i.Target="#"+mt(i.location);s={Target:i.Target,TargetMode:"Internal"}}i.Rel=s;if(i.tooltip){i.Tooltip=i.tooltip;delete i.tooltip}var l=en(i.ref);for(var o=l.s.r;o<=l.e.r;++o)for(var c=l.s.c;c<=l.e.c;++c){var f=Ha(c)+za(o);if(a){if(!e["!data"][o])e["!data"][o]=[];if(!e["!data"][o][c])e["!data"][o][c]={t:"z",v:undefined};e["!data"][o][c].l=i}else{if(!e[f])e[f]={t:"z",v:undefined};e[f].l=i}}}}function ml(e){var r={};["left","right","top","bottom","header","footer"].forEach(function(t){if(e[t])r[t]=parseFloat(e[t])});return r}function vl(e){Ys(e);return Bt("pageMargins",null,e)}function gl(e,r){var t=false;for(var a=0;a!=r.length;++a){var n=ft(r[a],true);if(n.hidden)n.hidden=_t(n.hidden);var i=parseInt(n.min,10)-1,s=parseInt(n.max,10)-1;if(n.outlineLevel)n.level=+n.outlineLevel||0;delete n.min;delete n.max;n.width=+n.width;if(!t&&n.width){t=true;Li(n.width)}Ui(n);while(i<=s)e[i++]=yr(n);
+}}function bl(e,r){var t=["<cols>"],a;for(var n=0;n!=r.length;++n){if(!(a=r[n]))continue;t[t.length]=Bt("col",null,Gs(n,a))}t[t.length]="</cols>";return t.join("")}function wl(e){var r={ref:(e.match(/ref="([^"]*)"/)||[])[1]};return r}function kl(e,r,t,a){var n=typeof e.ref=="string"?e.ref:Ka(e.ref);if(!t.Workbook)t.Workbook={Sheets:[]};if(!t.Workbook.Names)t.Workbook.Names=[];var i=t.Workbook.Names;var s=Za(n);if(s.s.r==s.e.r){s.e.r=Za(r["!ref"]).e.r;n=Ka(s)}for(var l=0;l<i.length;++l){var o=i[l];if(o.Name!="_xlnm._FilterDatabase")continue;if(o.Sheet!=a)continue;o.Ref=Qa(t.SheetNames[a])+"!"+qa(n);break}if(l==i.length)i.push({Name:"_xlnm._FilterDatabase",Sheet:a,Ref:"'"+t.SheetNames[a]+"'!"+n});return Bt("autoFilter",null,{ref:n})}var yl=/<(?:\w:)?sheetView(?:[^<>a-z][^<>]*)?\/?>/g;function xl(e,r){if(!r.Views)r.Views=[{}];(e.match(yl)||[]).forEach(function(e,t){var a=ft(e);if(!r.Views[t])r.Views[t]={};if(+a.zoomScale)r.Views[t].zoom=+a.zoomScale;if(a.rightToLeft&&_t(a.rightToLeft))r.Views[t].RTL=true})}function Cl(e,r,t,a){var n={workbookViewId:"0"};if((((a||{}).Workbook||{}).Views||[])[0])n.rightToLeft=a.Workbook.Views[0].RTL?"1":"0";return Bt("sheetViews",Bt("sheetView",null,n),{})}function Sl(e,r,t,a,n,i,s){if(e.c)t["!comments"].push([r,e.c]);if((e.v===undefined||e.t==="z"&&!(a||{}).sheetStubs)&&typeof e.f!=="string"&&typeof e.z=="undefined")return"";var l="";var o=e.t,c=e.v;if(e.t!=="z")switch(e.t){case"b":l=e.v?"1":"0";break;case"n":if(isNaN(e.v)){e.t="e";l=En[e.v=36]}else if(!isFinite(e.v)){e.t="e";l=En[e.v=7]}else l=""+e.v;break;case"e":l=En[e.v];break;case"d":if(a&&a.cellDates){var f=wr(e.v,s);l=f.toISOString();if(f.getUTCFullYear()<1900)l=l.slice(l.indexOf("T")+1).replace("Z","")}else{e=yr(e);e.t="n";l=""+(e.v=dr(wr(e.v,s),s))}if(typeof e.z==="undefined")e.z=q[14];break;default:l=e.v;break;}var u=e.t=="z"||e.v==null?"":Lt("v",bt(l)),h={r:r};var d=Js(a.cellXfs,e,a);if(d!==0)h.s=d;switch(e.t){case"n":break;case"d":h.t="d";break;case"b":h.t="b";break;case"e":h.t="e";break;case"z":break;default:if(e.v==null){delete e.t;break}if(e.v.length>32767)throw new Error("Text length must not exceed 32767 characters");if(a&&a.bookSST){u=Lt("v",""+Xs(a.Strings,e.v,a.revStrings));h.t="s";break}else h.t="str";break;}if(e.t!=o){e.t=o;e.v=c}if(typeof e.f=="string"&&e.f){var p=e.F&&e.F.slice(0,r.length)==r?{t:"array",ref:e.F}:null;u=Bt("f",bt(e.f),p)+(e.v!=null?u:"")}if(e.l){e.l.display=bt(l);t["!links"].push([r,e.l])}if(e.D)h.cm=1;return Bt("c",u,h)}var _l=function(){var e=/<(?:\w+:)?c[ \/>]/,r=/<\/(?:\w+:)?row>/;var t=/r=["']([^"']*)["']/;var a=/ref=["']([^"']*)["']/;return function n(i,s,l,o,c,f,u){var h=0,d="",p=[],m=[],v=0,g=0,b=0,w="",k;var y,x=0,C=0;var S,_;var A=0,T=0;var E=Array.isArray(f.CellXf),F;var D=[];var O=[];var N=s["!data"]!=null;var M=[],I={},P=false;var R=!!l.sheetStubs;var L=!!((u||{}).WBProps||{}).date1904;for(var U=i.split(r),B=0,z=U.length;B!=z;++B){d=U[B].trim();var $=d.length;if($===0)continue;var W=0;e:for(h=0;h<$;++h)switch(d[h]){case">":if(d[h-1]!="/"){++h;break e}if(l&&l.cellStyles){y=ft(d.slice(W,h),true);x=y.r!=null?parseInt(y.r,10):x+1;C=-1;if(l.sheetRows&&l.sheetRows<x)continue;I={};P=false;if(y.ht){P=true;I.hpt=parseFloat(y.ht);I.hpx=Wi(I.hpt)}if(y.hidden&&_t(y.hidden)){P=true;I.hidden=true}if(y.outlineLevel!=null){P=true;I.level=+y.outlineLevel}if(P)M[x-1]=I}break;case"<":W=h;break;}if(W>=h)break;y=ft(d.slice(W,h),true);x=y.r!=null?parseInt(y.r,10):x+1;C=-1;if(l.sheetRows&&l.sheetRows<x)continue;if(!l.nodim){if(o.s.r>x-1)o.s.r=x-1;if(o.e.r<x-1)o.e.r=x-1}if(l&&l.cellStyles){I={};P=false;if(y.ht){P=true;I.hpt=parseFloat(y.ht);I.hpx=Wi(I.hpt)}if(y.hidden&&_t(y.hidden)){P=true;I.hidden=true}if(y.outlineLevel!=null){P=true;I.level=+y.outlineLevel}if(P)M[x-1]=I}p=d.slice(h).split(e);for(var j=0;j!=p.length;++j)if(p[j].trim().charAt(0)!="<")break;p=p.slice(j);for(h=0;h!=p.length;++h){d=p[h].trim();if(d.length===0)continue;m=d.match(t);v=h;g=0;b=0;d="<c "+(d.slice(0,1)=="<"?">":"")+d;if(m!=null&&m.length===2){v=0;w=m[1];for(g=0;g!=w.length;++g){if((b=w.charCodeAt(g)-64)<1||b>26)break;v=26*v+b}--v;C=v}else++C;for(g=0;g!=d.length;++g)if(d.charCodeAt(g)===62)break;++g;y=ft(d.slice(0,g),true);if(!y.r)y.r=Ja({r:x-1,c:C});w=d.slice(g);k={t:""};if((m=zr(w,"v"))!=null&&m[1]!=="")k.v=mt(m[1]);if(l.cellFormula){if((m=zr(w,"f"))!=null){if(m[1]==""){if(m[0].indexOf('t="shared"')>-1){_=ft(m[0]);if(O[_.si])k.f=Rs(O[_.si][1],O[_.si][2],y.r)}}else{k.f=mt(Dt(m[1]),true);if(!l.xlfn)k.f=Us(k.f);if(m[0].indexOf('t="array"')>-1){k.F=(w.match(a)||[])[1];if(k.F.indexOf(":")>-1)D.push([en(k.F),k.F])}else if(m[0].indexOf('t="shared"')>-1){_=ft(m[0]);var H=mt(Dt(m[1]));if(!l.xlfn)H=Us(H);O[parseInt(_.si,10)]=[_,H,y.r]}}}else if(m=w.match(/<f[^<>]*\/>/)){_=ft(m[0]);if(O[_.si])k.f=Rs(O[_.si][1],O[_.si][2],y.r)}var V=Ya(y.r);for(g=0;g<D.length;++g)if(V.r>=D[g][0].s.r&&V.r<=D[g][0].e.r)if(V.c>=D[g][0].s.c&&V.c<=D[g][0].e.c)k.F=D[g][1]}if(y.t==null&&k.v===undefined){if(k.f||k.F){k.v=0;k.t="n"}else if(!R)continue;else k.t="z"}else k.t=y.t||"n";if(o.s.c>C)o.s.c=C;if(o.e.c<C)o.e.c=C;switch(k.t){case"n":if(k.v==""||k.v==null){if(!R)continue;k.t="z"}else k.v=parseFloat(k.v);break;case"s":if(typeof k.v=="undefined"){if(!R)continue;k.t="z"}else{S=js[parseInt(k.v,10)];k.v=S.t;k.r=S.r;if(l.cellHTML)k.h=S.h}break;case"str":k.t="s";k.v=k.v!=null?mt(Dt(k.v),true):"";if(l.cellHTML)k.h=yt(k.v);break;case"inlineStr":m=zr(w,"is");k.t="s";if(m!=null&&(S=bi(m[1]))){k.v=S.t;if(l.cellHTML)k.h=S.h}else k.v="";break;case"b":k.v=_t(k.v);break;case"d":if(l.cellDates)k.v=wr(k.v,L);else{k.v=dr(wr(k.v,L),L);k.t="n"}break;case"e":if(!l||l.cellText!==false)k.w=k.v;k.v=Fn[k.v];break;}A=T=0;F=null;if(E&&y.s!==undefined){F=f.CellXf[y.s];if(F!=null){if(F.numFmtId!=null)A=F.numFmtId;if(l.cellStyles){if(F.fillId!=null)T=F.fillId}}}Zs(k,A,T,l,c,f,L);if(l.cellDates&&E&&k.t=="n"&&Re(q[A])){k.v=pr(k.v+(L?1462:0));k.t=typeof k.v=="number"?"n":"d"}if(y.cm&&l.xlmeta){var X=(l.xlmeta.Cell||[])[+y.cm-1];if(X&&X.type=="XLDAPR")k.D=true}var G;if(l.nodim){G=Ya(y.r);if(o.s.r>G.r)o.s.r=G.r;if(o.e.r<G.r)o.e.r=G.r}if(N){G=Ya(y.r);if(!s["!data"][G.r])s["!data"][G.r]=[];s["!data"][G.r][G.c]=k}else s[y.r]=k}}if(M.length>0)s["!rows"]=M}}();function Al(e,r,t,a){var n=[],i=[],s=en(e["!ref"]),l="",o,c="",f=[],u=0,h=0,d=e["!rows"];var p=e["!data"]!=null,m=p?e["!data"]:[];var v={r:c},g,b=-1;var w=(((a||{}).Workbook||{}).WBProps||{}).date1904;for(h=s.s.c;h<=s.e.c;++h)f[h]=Ha(h);for(u=s.s.r;u<=s.e.r;++u){i=[];c=za(u);var k=p?m[u]:[];for(h=s.s.c;h<=s.e.c;++h){o=f[h]+c;var y=p?k[h]:e[o];if(y===undefined)continue;if((l=Sl(y,o,e,r,t,a,w))!=null)i.push(l)}if(i.length>0||d&&d[u]){v={r:c};if(d&&d[u]){g=d[u];if(g.hidden)v.hidden=1;b=-1;if(g.hpx)b=$i(g.hpx);else if(g.hpt)b=g.hpt;if(b>-1){v.ht=b;v.customHeight=1}if(g.level){v.outlineLevel=g.level}}n[n.length]=Bt("row",i.join(""),v)}}if(d)for(;u<d.length;++u){if(d&&d[u]){v={r:u+1};g=d[u];if(g.hidden)v.hidden=1;b=-1;if(g.hpx)b=$i(g.hpx);else if(g.hpt)b=g.hpt;if(b>-1){v.ht=b;v.customHeight=1}if(g.level){v.outlineLevel=g.level}n[n.length]=Bt("row","",v)}}return n.join("")}function Tl(e,r,t,a){var n=[at,Bt("worksheet",null,{xmlns:Vt[0],"xmlns:r":Ht.r})];var i=t.SheetNames[e],s=0,l="";var o=t.Sheets[i];if(o==null)o={};var c=o["!ref"]||"A1";var f=en(c);if(f.e.c>16383||f.e.r>1048575){if(r.WTF)throw new Error("Range "+c+" exceeds format limit A1:XFD1048576");f.e.c=Math.min(f.e.c,16383);f.e.r=Math.min(f.e.c,1048575);c=Ka(f)}if(!a)a={};o["!comments"]=[];var u=[];fl(o,t,e,r,n);n[n.length]=Bt("dimension",null,{ref:c});n[n.length]=Cl(o,r,e,t);if(r.sheetFormat)n[n.length]=Bt("sheetFormatPr",null,{defaultRowHeight:r.sheetFormat.defaultRowHeight||"16",baseColWidth:r.sheetFormat.baseColWidth||"10",outlineLevelRow:r.sheetFormat.outlineLevelRow||"7"});if(o["!cols"]!=null&&o["!cols"].length>0)n[n.length]=bl(o,o["!cols"]);n[s=n.length]="<sheetData/>";o["!links"]=[];if(o["!ref"]!=null){l=Al(o,r,e,t,a);if(l.length>0)n[n.length]=l}if(n.length>s+1){n[n.length]="</sheetData>";n[s]=n[s].replace("/>",">")}if(o["!protect"])n[n.length]=dl(o["!protect"]);if(o["!autofilter"]!=null)n[n.length]=kl(o["!autofilter"],o,t,e);if(o["!merges"]!=null&&o["!merges"].length>0)n[n.length]=ll(o["!merges"]);var h=-1,d,p=-1;if(o["!links"].length>0){n[n.length]="<hyperlinks>";o["!links"].forEach(function(e){if(!e[1].Target)return;d={ref:e[0]};if(e[1].Target.charAt(0)!="#"){p=zn(a,-1,bt(e[1].Target).replace(/#[\s\S]*$/,""),Rn.HLINK);d["r:id"]="rId"+p}if((h=e[1].Target.indexOf("#"))>-1)d.location=bt(e[1].Target.slice(h+1));if(e[1].Tooltip)d.tooltip=bt(e[1].Tooltip);d.display=e[1].display;n[n.length]=Bt("hyperlink",null,d)});n[n.length]="</hyperlinks>"}delete o["!links"];if(o["!margins"]!=null)n[n.length]=vl(o["!margins"]);if(!r||r.ignoreEC||r.ignoreEC==void 0)n[n.length]=Lt("ignoredErrors",Bt("ignoredError",null,{numberStoredAsText:1,sqref:c}));if(u.length>0){p=zn(a,-1,"../drawings/drawing"+(e+1)+".xml",Rn.DRAW);n[n.length]=Bt("drawing",null,{"r:id":"rId"+p});o["!drawing"]=u}if(o["!comments"].length>0){p=zn(a,-1,"../drawings/vmlDrawing"+(e+1)+".vml",Rn.VML);n[n.length]=Bt("legacyDrawing",null,{"r:id":"rId"+p});o["!legacy"]=p}if(n.length>1){n[n.length]="</worksheet>";n[1]=n[1].replace("/>",">")}return n.join("")}function El(e){var r=[];var t=e.match(/^<c:numCache>/);var a;(e.match(/<c:pt idx="(\d*)"[^<>\/]*><c:v>([^<])<\/c:v><\/c:pt>/gm)||[]).forEach(function(e){var a=e.match(/<c:pt idx="(\d*)"[^<>\/]*><c:v>([^<]*)<\/c:v><\/c:pt>/);if(!a)return;r[+a[1]]=t?+a[2]:a[2]});var n=mt((Br(e,"c:formatCode")||["","General"])[1]);(Rr(e,"<c:f>","</c:f>")||[]).forEach(function(e){a=e.replace(/<[^<>]*>/g,"")});return[r,n,a]}function Fl(e,r,t,a,n,i){var s=i||{"!type":"chart"};if(!e)return i;var l=0,o=0,c="A";var f={s:{r:2e6,c:2e6},e:{r:0,c:0}};(Rr(e,"<c:numCache>","</c:numCache>")||[]).forEach(function(e){var r=El(e);f.s.r=f.s.c=0;f.e.c=l;c=Ha(l);r[0].forEach(function(e,t){if(s["!data"]){if(!s["!data"][t])s["!data"][t]=[];s["!data"][t][l]={t:"n",v:e,z:r[1]}}else s[c+za(t)]={t:"n",v:e,z:r[1]};o=t});if(f.e.r<o)f.e.r=o;++l});if(l>0)s["!ref"]=Ka(f);return s}function Dl(e,r,t,a,n){if(!e)return e;if(!a)a={"!id":{}};var i={"!type":"chart","!drawel":null,"!rel":""};var s;var l=e.match(il);if(l)ol(l[0],i,n,t);if(s=e.match(/drawing r:id="(.*?)"/))i["!rel"]=s[1];if(a["!id"][i["!rel"]])i["!drawel"]=a["!id"][i["!rel"]];return i}var Ol=[["allowRefreshQuery",false,"bool"],["autoCompressPictures",true,"bool"],["backupFile",false,"bool"],["checkCompatibility",false,"bool"],["CodeName",""],["date1904",false,"bool"],["defaultThemeVersion",0,"int"],["filterPrivacy",false,"bool"],["hidePivotFieldList",false,"bool"],["promptedSolutions",false,"bool"],["publishItems",false,"bool"],["refreshAllConnections",false,"bool"],["saveExternalLinkValues",true,"bool"],["showBorderUnselectedTables",true,"bool"],["showInkAnnotation",true,"bool"],["showObjects","all"],["showPivotChartFilter",false,"bool"],["updateLinks","userSet"]];var Nl=[["activeTab",0,"int"],["autoFilterDateGrouping",true,"bool"],["firstSheet",0,"int"],["minimized",false,"bool"],["showHorizontalScroll",true,"bool"],["showSheetTabs",true,"bool"],["showVerticalScroll",true,"bool"],["tabRatio",600,"int"],["visibility","visible"]];var Ml=[];var Il=[["calcCompleted","true"],["calcMode","auto"],["calcOnSave","true"],["concurrentCalc","true"],["fullCalcOnLoad","false"],["fullPrecision","true"],["iterate","false"],["iterateCount","100"],["iterateDelta","0.001"],["refMode","A1"]];function Pl(e,r){for(var t=0;t!=e.length;++t){var a=e[t];for(var n=0;n!=r.length;++n){var i=r[n];if(a[i[0]]==null)a[i[0]]=i[1];else switch(i[2]){case"bool":if(typeof a[i[0]]=="string")a[i[0]]=_t(a[i[0]]);break;case"int":if(typeof a[i[0]]=="string")a[i[0]]=parseInt(a[i[0]],10);break;}}}}function Rl(e,r){for(var t=0;t!=r.length;++t){var a=r[t];if(e[a[0]]==null)e[a[0]]=a[1];else switch(a[2]){case"bool":if(typeof e[a[0]]=="string")e[a[0]]=_t(e[a[0]]);break;case"int":if(typeof e[a[0]]=="string")e[a[0]]=parseInt(e[a[0]],10);break;}}}function Ll(e){Rl(e.WBProps,Ol);Rl(e.CalcPr,Il);Pl(e.WBView,Nl);Pl(e.Sheets,Ml);Hs.date1904=_t(e.WBProps.date1904)}function Ul(e){if(!e.Workbook)return"false";if(!e.Workbook.WBProps)return"false";return _t(e.Workbook.WBProps.date1904)?"true":"false"}var Bl=":][*?/\\".split("");function zl(e,r){try{if(e=="")throw new Error("Sheet name cannot be blank");if(e.length>31)throw new Error("Sheet name cannot exceed 31 chars");if(e.charCodeAt(0)==39||e.charCodeAt(e.length-1)==39)throw new Error("Sheet name cannot start or end with apostrophe (')");if(e.toLowerCase()=="history")throw new Error("Sheet name cannot be 'History'");Bl.forEach(function(r){if(e.indexOf(r)==-1)return;throw new Error("Sheet name cannot contain : \\ / ? * [ ]")})}catch(t){if(r)return false;throw t}return true}function $l(e,r,t){e.forEach(function(a,n){zl(a);for(var i=0;i<n;++i)if(a==e[i])throw new Error("Duplicate Sheet Name: "+a);if(t){var s=r&&r[n]&&r[n].CodeName||a;if(s.charCodeAt(0)==95&&s.length>22)throw new Error("Bad Code Name: Worksheet"+s)}})}function Wl(e){if(!e||!e.SheetNames||!e.Sheets)throw new Error("Invalid Workbook");if(!e.SheetNames.length)throw new Error("Workbook is empty");var r=e.Workbook&&e.Workbook.Sheets||[];$l(e.SheetNames,r,!!e.vbaraw);for(var t=0;t<e.SheetNames.length;++t)Ks(e.Sheets[e.SheetNames[t]],e.SheetNames[t],t);e.SheetNames.forEach(function(r,t){var a=e.Sheets[r];if(!a||!a["!autofilter"])return;var n;if(!e.Workbook)e.Workbook={};if(!e.Workbook.Names)e.Workbook.Names=[];e.Workbook.Names.forEach(function(e){if(e.Name=="_xlnm._FilterDatabase"&&e.Sheet==t)n=e});var i=Qa(r)+"!"+qa(a["!autofilter"].ref);if(n)n.Ref=i;else e.Workbook.Names.push({Name:"_xlnm._FilterDatabase",Sheet:t,Ref:i})})}var jl=/<\w+:workbook/;function Hl(e,r){if(!e)throw new Error("Could not find file");var t={AppVersion:{},WBProps:{},WBView:[],Sheets:[],CalcPr:{},Names:[],xmlns:""};var a=false,n="xmlns";var i={},s=0;e.replace(lt,function l(o,c){var f=ft(o);switch(ht(f[0])){case"<?xml":break;case"<workbook":if(o.match(jl))n="xmlns"+o.match(/<(\w+):/)[1];t.xmlns=f[n];break;case"</workbook>":break;case"<fileVersion":delete f[0];t.AppVersion=f;break;case"<fileVersion/>":;case"</fileVersion>":break;case"<fileSharing":break;case"<fileSharing/>":break;case"<workbookPr":;case"<workbookPr/>":Ol.forEach(function(e){if(f[e[0]]==null)return;switch(e[2]){case"bool":t.WBProps[e[0]]=_t(f[e[0]]);break;case"int":t.WBProps[e[0]]=parseInt(f[e[0]],10);break;default:t.WBProps[e[0]]=f[e[0]];}});if(f.codeName)t.WBProps.CodeName=Dt(f.codeName);break;case"</workbookPr>":break;case"<workbookProtection":break;case"<workbookProtection/>":break;case"<bookViews":;case"<bookViews>":;case"</bookViews>":break;case"<workbookView":;case"<workbookView/>":delete f[0];t.WBView.push(f);break;case"</workbookView>":break;case"<sheets":;case"<sheets>":;case"</sheets>":break;case"<sheet":switch(f.state){case"hidden":f.Hidden=1;break;case"veryHidden":f.Hidden=2;break;default:f.Hidden=0;}delete f.state;f.name=mt(Dt(f.name));delete f[0];t.Sheets.push(f);break;case"</sheet>":break;case"<functionGroups":;case"<functionGroups/>":break;case"<functionGroup":break;case"<externalReferences":;case"</externalReferences>":;case"<externalReferences>":break;case"<externalReference":break;case"<definedNames/>":break;case"<definedNames>":;case"<definedNames":a=true;break;case"</definedNames>":a=false;break;case"<definedName":{i={};i.Name=Dt(f.name);if(f.comment)i.Comment=f.comment;if(f.localSheetId)i.Sheet=+f.localSheetId;if(_t(f.hidden||"0"))i.Hidden=true;s=c+o.length}break;case"</definedName>":{i.Ref=mt(Dt(e.slice(s,c)));t.Names.push(i)}break;case"<definedName/>":break;case"<calcPr":delete f[0];t.CalcPr=f;break;case"<calcPr/>":delete f[0];t.CalcPr=f;break;case"</calcPr>":break;case"<oleSize":break;case"<customWorkbookViews>":;case"</customWorkbookViews>":;case"<customWorkbookViews":break;case"<customWorkbookView":;case"</customWorkbookView>":break;case"<pivotCaches>":;case"</pivotCaches>":;case"<pivotCaches":break;case"<pivotCache":break;case"<smartTagPr":;case"<smartTagPr/>":break;case"<smartTagTypes":;case"<smartTagTypes>":;case"</smartTagTypes>":break;case"<smartTagType":break;case"<webPublishing":;case"<webPublishing/>":break;case"<fileRecoveryPr":;case"<fileRecoveryPr/>":break;case"<webPublishObjects>":;case"<webPublishObjects":;case"</webPublishObjects>":break;case"<webPublishObject":break;case"<extLst":;case"<extLst>":;case"</extLst>":;case"<extLst/>":break;case"<ext":a=true;break;case"</ext>":a=false;break;case"<ArchID":break;case"<AlternateContent":;case"<AlternateContent>":a=true;break;case"</AlternateContent>":a=false;break;case"<revisionPtr":break;default:if(!a&&r.WTF)throw new Error("unrecognized "+f[0]+" in workbook");}return o});if(Vt.indexOf(t.xmlns)===-1)throw new Error("Unknown Namespace: "+t.xmlns);Ll(t);return t}function Vl(e){var r=[at];r[r.length]=Bt("workbook",null,{xmlns:Vt[0],"xmlns:r":Ht.r});var t=e.Workbook&&(e.Workbook.Names||[]).length>0;var a={codeName:"ThisWorkbook"};if(e.Workbook&&e.Workbook.WBProps){Ol.forEach(function(r){if(e.Workbook.WBProps[r[0]]==null)return;if(e.Workbook.WBProps[r[0]]==r[1])return;a[r[0]]=e.Workbook.WBProps[r[0]]});if(e.Workbook.WBProps.CodeName){a.codeName=e.Workbook.WBProps.CodeName;delete a.CodeName}}r[r.length]=Bt("workbookPr",null,a);var n=e.Workbook&&e.Workbook.Sheets||[];var i=0;if(n&&n[0]&&!!n[0].Hidden){r[r.length]="<bookViews>";for(i=0;i!=e.SheetNames.length;++i){if(!n[i])break;if(!n[i].Hidden)break}if(i==e.SheetNames.length)i=0;r[r.length]='<workbookView firstSheet="'+i+'" activeTab="'+i+'"/>';r[r.length]="</bookViews>"}r[r.length]="<sheets>";for(i=0;i!=e.SheetNames.length;++i){var s={name:bt(e.SheetNames[i].slice(0,31))};s.sheetId=""+(i+1);s["r:id"]="rId"+(i+1);if(n[i])switch(n[i].Hidden){case 1:s.state="hidden";break;case 2:s.state="veryHidden";break;}r[r.length]=Bt("sheet",null,s)}r[r.length]="</sheets>";if(t){r[r.length]="<definedNames>";if(e.Workbook&&e.Workbook.Names)e.Workbook.Names.forEach(function(e){var t={name:e.Name};if(e.Comment)t.comment=e.Comment;if(e.Sheet!=null)t.localSheetId=""+e.Sheet;if(e.Hidden)t.hidden="1";if(!e.Ref)return;r[r.length]=Bt("definedName",bt(e.Ref),t)});r[r.length]="</definedNames>"}if(r.length>2){r[r.length]="</workbook>";r[1]=r[1].replace("/>",">")}return r.join("")}function Xl(e,r,t){if(r.slice(-4)===".bin")return parse_wb_bin(e,t);return Hl(e,t)}function Gl(e,r,t,a,n,i,s,l){if(r.slice(-4)===".bin")return parse_ws_bin(e,a,t,n,i,s,l);return sl(e,a,t,n,i,s,l)}function Yl(e,r,t,a,n,i,s,l){if(r.slice(-4)===".bin")return parse_cs_bin(e,a,t,n,i,s,l);return Dl(e,a,t,n,i,s,l)}function Jl(e,r,t,a,n,i,s,l){if(r.slice(-4)===".bin")return Fs(e,a,t,n,i,s,l);return Ds(e,a,t,n,i,s,l)}function Zl(e,r,t,a,n,i,s,l){if(r.slice(-4)===".bin")return Ts(e,a,t,n,i,s,l);return Es(e,a,t,n,i,s,l)}function Kl(e,r,t,a){if(r.slice(-4)===".bin")return parse_sty_bin(e,t,a);return Qi(e,t,a)}function ql(e,r,t){if(r.slice(-4)===".bin")return parse_sst_bin(e,t);return yi(e,t)}function Ql(e,r,t){if(r.slice(-4)===".bin")return parse_comments_bin(e,t);return gs(e,t)}function eo(e,r,t){if(r.slice(-4)===".bin")return parse_cc_bin(e,r,t);return parse_cc_xml(e,r,t)}function ro(e,r,t,a){if(t.slice(-4)===".bin")return us(e,r,t,a);return fs(e,r,t,a)}function to(e,r,t){if(r.slice(-4)===".bin")return parse_xlmeta_bin(e,r,t);return os(e,r,t)}function ao(e,r){var t=r||{};var a=t.dense!=null?t.dense:b;var n={};if(a)n["!data"]=[];e=Lr(e,"<!--","-->");var i=e.match(/<table/i);if(!i)throw new Error("Invalid HTML: could not find <table>");var s=e.match(/<\/table/i);var l=i.index,o=s&&s.index||e.length;var c=Nr(e.slice(l,o),/(:?<tr[^<>]*>)/i,"<tr>");var f=-1,u=0,h=0,d=0;var p={s:{r:1e7,c:1e7},e:{r:0,c:0}};var m=[];for(l=0;l<c.length;++l){var v=c[l].trim();var g=v.slice(0,3).toLowerCase();if(g=="<tr"){++f;if(t.sheetRows&&t.sheetRows<=f){--f;break}u=0;continue}if(g!="<td"&&g!="<th")continue;var w=v.split(/<\/t[dh]>/i);for(o=0;o<w.length;++o){var k=w[o].trim();if(!k.match(/<t[dh]/i))continue;var y=k,x=0;while(y.charAt(0)=="<"&&(x=y.indexOf(">"))>-1)y=y.slice(x+1);for(var C=0;C<m.length;++C){var S=m[C];if(S.s.c==u&&S.s.r<f&&f<=S.e.r){u=S.e.c+1;C=-1}}var _=ft(k.slice(0,k.indexOf(">")));d=_.colspan?+_.colspan:1;if((h=+_.rowspan)>1||d>1)m.push({s:{r:f,c:u},e:{r:f+(h||1)-1,c:u+d-1}});var A=_.t||_["data-t"]||"";if(!y.length){u+=d;continue}y=Nt(y);if(p.s.r>f)p.s.r=f;if(p.e.r<f)p.e.r=f;if(p.s.c>u)p.s.c=u;if(p.e.c<u)p.e.c=u;if(!y.length){u+=d;continue}var T={t:"s",v:y};if(t.raw||!y.trim().length||A=="s"){}else if(y==="TRUE")T={t:"b",v:true};else if(y==="FALSE")T={t:"b",v:false};else if(!isNaN(Cr(y)))T={t:"n",v:Cr(y)};else if(!isNaN(Or(y).getDate())){T={t:"d",v:wr(y)};if(t.UTC===false)T.v=Mr(T.v);if(!t.cellDates)T={t:"n",v:dr(T.v)};T.z=t.dateNF||q[14]}else if(y.charCodeAt(0)==35&&Fn[y]!=null){T.t="e";T.w=y;T.v=Fn[y]}if(T.cellText!==false)T.w=y;if(a){if(!n["!data"][f])n["!data"][f]=[];n["!data"][f][u]=T}else n[Ja({r:f,c:u})]=T;u+=d}}n["!ref"]=Ka(p);if(m.length)n["!merges"]=m;return n}function no(e,r,t,a){var n=e["!merges"]||[];var i=[];var s={};var l=e["!data"]!=null;for(var o=r.s.c;o<=r.e.c;++o){var c=0,f=0;for(var u=0;u<n.length;++u){if(n[u].s.r>t||n[u].s.c>o)continue;if(n[u].e.r<t||n[u].e.c<o)continue;if(n[u].s.r<t||n[u].s.c<o){c=-1;break}c=n[u].e.r-n[u].s.r+1;f=n[u].e.c-n[u].s.c+1;break}if(c<0)continue;var h=Ha(o)+za(t);var d=l?(e["!data"][t]||[])[o]:e[h];if(d&&d.t=="n"&&d.v!=null&&!isFinite(d.v)){if(isNaN(d.v))d={t:"e",v:36,w:En[36]};else d={t:"e",v:7,w:En[7]}}var p=d&&d.v!=null&&(d.h||yt(d.w||(tn(d),d.w)||""))||"";s={};if(c>1)s.rowspan=c;if(f>1)s.colspan=f;if(a.editable)p='<span contenteditable="true">'+p+"</span>";else if(d){s["data-t"]=d&&d.t||"z";if(d.v!=null)s["data-v"]=yt(d.v instanceof Date?d.v.toISOString():d.v);if(d.z!=null)s["data-z"]=d.z;if(d.l&&(d.l.Target||"#").charAt(0)!="#")p='<a href="'+yt(d.l.Target)+'">'+p+"</a>"}s.id=(a.id||"sjs")+"-"+h;i.push(Bt("td",p,s))}var m="<tr>";return m+i.join("")+"</tr>"}var io='<html><head><meta charset="utf-8"/><title>SheetJS Table Export</title></head><body>';var so="</body></html>";function lo(e,r){var t=jr(e,"table");if(!t||t.length==0)throw new Error("Invalid HTML: could not find <table>");if(t.length==1){var a=an(ao(t[0],r),r);a.bookType="html";return a}var n=kc();t.forEach(function(e,t){yc(n,ao(e,r),"Sheet"+(t+1))});n.bookType="html";return n}function oo(e,r,t){var a=[];return a.join("")+"<table"+(t&&t.id?' id="'+t.id+'"':"")+">"}function co(e,r){var t=r||{};var a=t.header!=null?t.header:io;var n=t.footer!=null?t.footer:so;var i=[a];var s=Za(e["!ref"]||"A1");i.push(oo(e,s,t));if(e["!ref"])for(var l=s.s.r;l<=s.e.r;++l)i.push(no(e,s,l,t));i.push("</table>"+n);return i.join("")}function fo(e,r,t){var a=r.rows;if(!a){throw"Unsupported origin when "+r.tagName+" is not a TABLE"}var n=t||{};var i=e["!data"]!=null;var s=0,l=0;if(n.origin!=null){if(typeof n.origin=="number")s=n.origin;else{var o=typeof n.origin=="string"?Ya(n.origin):n.origin;s=o.r;l=o.c}}var c=Math.min(n.sheetRows||1e7,a.length);var f={s:{r:0,c:0},e:{r:s,c:l}};if(e["!ref"]){var u=Za(e["!ref"]);f.s.r=Math.min(f.s.r,u.s.r);f.s.c=Math.min(f.s.c,u.s.c);f.e.r=Math.max(f.e.r,u.e.r);f.e.c=Math.max(f.e.c,u.e.c);if(s==-1)f.e.r=s=u.e.r+1}var h=[],d=0;var p=e["!rows"]||(e["!rows"]=[]);var m=0,v=0,g=0,b=0,w=0,k=0;if(!e["!cols"])e["!cols"]=[];for(;m<a.length&&v<c;++m){var y=a[m];if(po(y)){if(n.display)continue;p[v]={hidden:true}}var x=y.cells;for(g=b=0;g<x.length;++g){var C=x[g];if(n.display&&po(C))continue;var S=C.hasAttribute("data-v")?C.getAttribute("data-v"):C.hasAttribute("v")?C.getAttribute("v"):Nt(C.innerHTML);var _=C.getAttribute("data-z")||C.getAttribute("z");for(d=0;d<h.length;++d){var A=h[d];if(A.s.c==b+l&&A.s.r<v+s&&v+s<=A.e.r){b=A.e.c+1-l;d=-1}}k=+C.getAttribute("colspan")||1;if((w=+C.getAttribute("rowspan")||1)>1||k>1)h.push({s:{r:v+s,c:b+l},e:{r:v+s+(w||1)-1,c:b+l+(k||1)-1}});var T={t:"s",v:S};var E=C.getAttribute("data-t")||C.getAttribute("t")||"";if(S!=null){if(S.length==0)T.t=E||"z";else if(n.raw||S.trim().length==0||E=="s"){}else if(E=="e"&&En[+S])T={t:"e",v:+S,w:En[+S]};else if(S==="TRUE")T={t:"b",v:true};else if(S==="FALSE")T={t:"b",v:false};else if(!isNaN(Cr(S)))T={t:"n",v:Cr(S)};else if(!isNaN(Or(S).getDate())){T={t:"d",v:wr(S)};if(n.UTC)T.v=Ir(T.v);if(!n.cellDates)T={t:"n",v:dr(T.v)};T.z=n.dateNF||q[14]}else if(S.charCodeAt(0)==35&&Fn[S]!=null)T={t:"e",v:Fn[S],w:S}}if(T.z===undefined&&_!=null)T.z=_;var F="",D=C.getElementsByTagName("A");if(D&&D.length)for(var O=0;O<D.length;++O)if(D[O].hasAttribute("href")){F=D[O].getAttribute("href");if(F.charAt(0)!="#")break}if(F&&F.charAt(0)!="#"&&F.slice(0,11).toLowerCase()!="javascript:")T.l={Target:F};if(i){if(!e["!data"][v+s])e["!data"][v+s]=[];e["!data"][v+s][b+l]=T}else e[Ja({c:b+l,r:v+s})]=T;if(f.e.c<b+l)f.e.c=b+l;b+=k}++v}if(h.length)e["!merges"]=(e["!merges"]||[]).concat(h);f.e.r=Math.max(f.e.r,v-1+s);e["!ref"]=Ka(f);if(v>=c)e["!fullref"]=Ka((f.e.r=a.length-m+v-1+s,f));return e}function uo(e,r){var t=r||{};var a={};if(t.dense)a["!data"]=[];return fo(a,e,r)}function ho(e,r){var t=an(uo(e,r),r);return t}function po(e){var r="";var t=mo(e);if(t)r=t(e).getPropertyValue("display");if(!r)r=e.style&&e.style.display;return r==="none"}function mo(e){if(e.ownerDocument.defaultView&&typeof e.ownerDocument.defaultView.getComputedStyle==="function")return e.ownerDocument.defaultView.getComputedStyle;if(typeof getComputedStyle==="function")return getComputedStyle;return null}function vo(e){var r=e.replace(/[\t\r\n]/g," ").trim().replace(/ +/g," ").replace(/<text:s\/>/g," ").replace(/<text:s text:c="(\d+)"\/>/g,function(e,r){return Array(parseInt(r,10)+1).join(" ")}).replace(/<text:tab[^<>]*\/>/g,"\t").replace(/<text:line-break\/>/g,"\n");var t=mt(r.replace(/<[^<>]*>/g,""));return[t]}function go(e,r,t){var a=t||{};var n=Wt(e);jt.lastIndex=0;n=Pr(Lr(n,"<!--","-->"));var i,s,l="",o="",c,f=0,u=-1,h=false,d="";while(i=jt.exec(n)){switch(i[3]=i[3].replace(/_[\s\S]*$/,"")){case"number-style":;case"currency-style":;case"percentage-style":;case"date-style":;case"time-style":;case"text-style":if(i[1]==="/"){h=false;if(s["truncate-on-overflow"]=="false"){if(l.match(/h/))l=l.replace(/h+/,"[$&]");else if(l.match(/m/))l=l.replace(/m+/,"[$&]");else if(l.match(/s/))l=l.replace(/s+/,"[$&]")}a[s.name]=l;l=""}else if(i[0].charAt(i[0].length-2)!=="/"){h=true;l="";s=ft(i[0],false)}break;case"boolean-style":if(i[1]==="/"){h=false;a[s.name]="General";l=""}else if(i[0].charAt(i[0].length-2)!=="/"){h=true;l="";s=ft(i[0],false)}break;case"boolean":l+="General";break;case"text":if(i[1]==="/"){d=n.slice(u,jt.lastIndex-i[0].length);if(d=="%"&&s[0]=="<number:percentage-style")l+="%";else l+='"'+d.replace(/"/g,'""')+'"'}else if(i[0].charAt(i[0].length-2)!=="/"){u=jt.lastIndex}break;case"day":{c=ft(i[0],false);switch(c["style"]){case"short":l+="d";break;case"long":l+="dd";break;default:l+="dd";break;}}break;case"day-of-week":{c=ft(i[0],false);switch(c["style"]){case"short":l+="ddd";break;case"long":l+="dddd";break;default:l+="ddd";break;}}break;case"era":{c=ft(i[0],false);switch(c["style"]){case"short":l+="ee";break;case"long":l+="eeee";break;default:l+="eeee";break;}}break;case"hours":{c=ft(i[0],false);switch(c["style"]){case"short":l+="h";break;case"long":l+="hh";break;default:l+="hh";break;}}break;case"minutes":{c=ft(i[0],false);switch(c["style"]){case"short":l+="m";break;case"long":l+="mm";break;default:l+="mm";break;}}break;case"month":{c=ft(i[0],false);if(c["textual"])l+="mm";switch(c["style"]){case"short":l+="m";break;case"long":l+="mm";break;default:l+="m";break;}}break;case"seconds":{c=ft(i[0],false);switch(c["style"]){case"short":l+="s";break;case"long":l+="ss";break;default:l+="ss";break;}if(c["decimal-places"])l+="."+xr("0",+c["decimal-places"])}break;case"year":{c=ft(i[0],false);switch(c["style"]){case"short":l+="yy";break;case"long":l+="yyyy";break;default:l+="yy";break;}}break;case"am-pm":l+="AM/PM";break;case"week-of-year":;case"quarter":console.error("Excel does not support ODS format token "+i[3]);break;case"fill-character":if(i[1]==="/"){d=n.slice(u,jt.lastIndex-i[0].length);l+='"'+d.replace(/"/g,'""')+'"*'}else if(i[0].charAt(i[0].length-2)!=="/"){u=jt.lastIndex}break;case"scientific-number":c=ft(i[0],false);l+="0."+xr("0",+c["min-decimal-places"]||+c["decimal-places"]||2)+xr("?",+c["decimal-places"]-+c["min-decimal-places"]||0)+"E"+(_t(c["forced-exponent-sign"])?"+":"")+xr("0",+c["min-exponent-digits"]||2);break;case"fraction":c=ft(i[0],false);if(!+c["min-integer-digits"])l+="#";else l+=xr("0",+c["min-integer-digits"]);l+=" ";l+=xr("?",+c["min-numerator-digits"]||1);l+="/";if(+c["denominator-value"])l+=c["denominator-value"];else l+=xr("?",+c["min-denominator-digits"]||1);break;case"currency-symbol":if(i[1]==="/"){l+='"'+n.slice(u,jt.lastIndex-i[0].length).replace(/"/g,'""')+'"'}else if(i[0].charAt(i[0].length-2)!=="/"){u=jt.lastIndex}else l+="$";break;case"text-properties":c=ft(i[0],false);switch((c["color"]||"").toLowerCase().replace("#","")){case"ff0000":;case"red":l="[Red]"+l;break;}break;case"text-content":l+="@";break;case"map":c=ft(i[0],false);if(mt(c["condition"])=="value()>=0")l=a[c["apply-style-name"]]+";"+l;else console.error("ODS number format may be incorrect: "+c["condition"]);break;case"number":if(i[1]==="/")break;c=ft(i[0],false);o="";o+=xr("0",+c["min-integer-digits"]||1);if(_t(c["grouping"]))o=he(xr("#",Math.max(0,4-o.length))+o);if(+c["min-decimal-places"]||+c["decimal-places"])o+=".";if(+c["min-decimal-places"])o+=xr("0",+c["min-decimal-places"]||1);if(+c["decimal-places"]-(+c["min-decimal-places"]||0))o+=xr("0",+c["decimal-places"]-(+c["min-decimal-places"]||0));l+=o;break;case"embedded-text":if(i[1]==="/"){if(f==0)l+='"'+n.slice(u,jt.lastIndex-i[0].length).replace(/"/g,'""')+'"';else l=l.slice(0,f)+'"'+n.slice(u,jt.lastIndex-i[0].length).replace(/"/g,'""')+'"'+l.slice(f)}else if(i[0].charAt(i[0].length-2)!=="/"){u=jt.lastIndex;f=-+ft(i[0],false)["position"]||0}break;}}return a}function bo(e,r,t){var a=r||{};if(b!=null&&a.dense==null)a.dense=b;var n=Wt(e);var i=[],s;var l;var o,c="",f=0;var u;var h;var d={},p=[];var m={};if(a.dense)m["!data"]=[];var v,g;var w={value:""},k={};var y="",x=0,C,S="",_=0;var A=[],T=[];var E=-1,F=-1,D={s:{r:1e6,c:1e7},e:{r:0,c:0}};var O=0;var N=t||{},M={};var I=[],P={},R=0,L=0;var U=[],B=1,z=1;var $=[];var W={Names:[],WBProps:{}};var j={};var H=["",""];var V=[],X={};var G="",Y=0;var J=false,Z=false;var K=0;jt.lastIndex=0;n=Pr(Lr(n,"<!--","-->"));while(v=jt.exec(n))switch(v[3]=v[3].replace(/_[\s\S]*$/,"")){case"table":;case"工作表":if(v[1]==="/"){if(D.e.c>=D.s.c&&D.e.r>=D.s.r)m["!ref"]=Ka(D);else m["!ref"]="A1:A1";if(a.sheetRows>0&&a.sheetRows<=D.e.r){m["!fullref"]=m["!ref"];D.e.r=a.sheetRows-1;m["!ref"]=Ka(D)}if(I.length)m["!merges"]=I;if(U.length)m["!rows"]=U;u.name=u["名称"]||u.name;if(typeof JSON!=="undefined")JSON.stringify(u);p.push(u.name);d[u.name]=m;Z=false}else if(v[0].charAt(v[0].length-2)!=="/"){u=ft(v[0],false);E=F=-1;D.s.r=D.s.c=1e7;D.e.r=D.e.c=0;m={};if(a.dense)m["!data"]=[];I=[];U=[];Z=true}break;case"table-row-group":if(v[1]==="/")--O;else++O;break;case"table-row":;case"行":if(v[1]==="/"){E+=B;B=1;break}h=ft(v[0],false);if(h["行号"])E=h["行号"]-1;else if(E==-1)E=0;B=+h["number-rows-repeated"]||1;if(B<10)for(K=0;K<B;++K)if(O>0)U[E+K]={level:O};F=-1;break;case"covered-table-cell":if(v[1]!=="/"){++F;w=ft(v[0],false);z=parseInt(w["number-columns-repeated"]||"1",10)||1;if(a.sheetStubs){while(z-- >0){if(a.dense){if(!m["!data"][E])m["!data"][E]=[];m["!data"][E][F]={t:"z"}}else m[Ja({r:E,c:F})]={t:"z"};++F}--F}else F+=z-1}y="";A=[];break;case"table-cell":;case"数据":if(v[0].charAt(v[0].length-2)==="/"){++F;w=ft(v[0],false);z=parseInt(w["number-columns-repeated"]||"1",10)||1;g={t:"z",v:null};if(w.formula&&a.cellFormula!=false)g.f=Bs(mt(w.formula));if(w["style-name"]&&M[w["style-name"]])g.z=M[w["style-name"]];if((w["数据类型"]||w["value-type"])=="string"){g.t="s";g.v=mt(w["string-value"]||"");if(a.dense){if(!m["!data"][E])m["!data"][E]=[];m["!data"][E][F]=g}else{m[Ha(F)+za(E)]=g}}F+=z-1}else if(v[1]!=="/"){++F;y=S="";x=_=0;A=[];T=[];z=1;
+var q=B?E+B-1:E;if(F>D.e.c)D.e.c=F;if(F<D.s.c)D.s.c=F;if(E<D.s.r)D.s.r=E;if(q>D.e.r)D.e.r=q;w=ft(v[0],false);k=ut(v[0],true);V=[];X={};g={t:w["数据类型"]||w["value-type"],v:null};if(w["style-name"]&&M[w["style-name"]])g.z=M[w["style-name"]];if(a.cellFormula){if(w.formula)w.formula=mt(w.formula);if(w["number-matrix-columns-spanned"]&&w["number-matrix-rows-spanned"]){R=parseInt(w["number-matrix-rows-spanned"],10)||0;L=parseInt(w["number-matrix-columns-spanned"],10)||0;P={s:{r:E,c:F},e:{r:E+R-1,c:F+L-1}};g.F=Ka(P);$.push([P,g.F])}if(w.formula)g.f=Bs(w.formula);else for(K=0;K<$.length;++K)if(E>=$[K][0].s.r&&E<=$[K][0].e.r)if(F>=$[K][0].s.c&&F<=$[K][0].e.c)g.F=$[K][1]}if(w["number-columns-spanned"]||w["number-rows-spanned"]){R=parseInt(w["number-rows-spanned"]||"1",10)||1;L=parseInt(w["number-columns-spanned"]||"1",10)||1;if(R*L>1){P={s:{r:E,c:F},e:{r:E+R-1,c:F+L-1}};I.push(P)}}if(w["number-columns-repeated"])z=parseInt(w["number-columns-repeated"],10);switch(g.t){case"boolean":g.t="b";g.v=_t(w["boolean-value"])||+w["boolean-value"]>=1;break;case"float":g.t="n";g.v=parseFloat(w.value);if(a.cellDates&&g.z&&Re(g.z)){g.v=pr(g.v+(W.WBProps.date1904?1462:0));g.t=typeof g.v=="number"?"n":"d"}break;case"percentage":g.t="n";g.v=parseFloat(w.value);break;case"currency":g.t="n";g.v=parseFloat(w.value);break;case"date":g.t="d";g.v=wr(w["date-value"],W.WBProps.date1904);if(!a.cellDates){g.t="n";g.v=dr(g.v,W.WBProps.date1904)}if(!g.z)g.z="m/d/yy";break;case"time":g.t="n";g.v=mr(w["time-value"])/86400;if(a.cellDates){g.v=pr(g.v);g.t=typeof g.v=="number"?"n":"d"}if(!g.z)g.z="HH:MM:SS";break;case"number":g.t="n";g.v=parseFloat(w["数据数值"]);break;default:if(g.t==="string"||g.t==="text"||!g.t){g.t="s";if(w["string-value"]!=null){y=mt(w["string-value"]);A=[]}}else throw new Error("Unsupported value type "+g.t);}}else{J=false;if(k["calcext:value-type"]=="error"&&Fn[y]!=null){g.t="e";g.w=y;g.v=Fn[y]}if(g.t==="s"){g.v=y||"";if(A.length)g.R=A;J=x==0}if(j.Target)g.l=j;if(V.length>0){g.c=V;V=[]}if(y&&a.cellText!==false)g.w=y;if(J){g.t="z";delete g.v}if(!J||a.sheetStubs){if(!(a.sheetRows&&a.sheetRows<=E)){for(var Q=0;Q<B;++Q){z=parseInt(w["number-columns-repeated"]||"1",10);if(a.dense){if(!m["!data"][E+Q])m["!data"][E+Q]=[];m["!data"][E+Q][F]=Q==0?g:yr(g);while(--z>0)m["!data"][E+Q][F+z]=yr(g)}else{m[Ja({r:E+Q,c:F})]=g;while(--z>0)m[Ja({r:E+Q,c:F+z})]=yr(g)}if(D.e.c<=F)D.e.c=F}}}z=parseInt(w["number-columns-repeated"]||"1",10);F+=z-1;z=0;g={};y="";A=[]}j={};break;case"document":;case"document-content":;case"电子表格文档":;case"spreadsheet":;case"主体":;case"scripts":;case"styles":;case"font-face-decls":;case"master-styles":if(v[1]==="/"){if((s=i.pop())[0]!==v[3])throw"Bad state: "+s}else if(v[0].charAt(v[0].length-2)!=="/")i.push([v[3],true]);break;case"annotation":if(v[1]==="/"){if((s=i.pop())[0]!==v[3])throw"Bad state: "+s;X.t=y;if(A.length)X.R=A;X.a=G;V.push(X);y=S;x=_;A=T}else if(v[0].charAt(v[0].length-2)!=="/"){i.push([v[3],false]);var ee=ft(v[0],true);if(!(ee["display"]&&_t(ee["display"])))V.hidden=true;S=y;_=x;T=A;y="";x=0;A=[]}G="";Y=0;break;case"creator":if(v[1]==="/"){G=n.slice(Y,v.index)}else Y=v.index+v[0].length;break;case"meta":;case"元数据":;case"settings":;case"config-item-set":;case"config-item-map-indexed":;case"config-item-map-entry":;case"config-item-map-named":;case"shapes":;case"frame":;case"text-box":;case"image":;case"data-pilot-tables":;case"list-style":;case"form":;case"dde-links":;case"event-listeners":;case"chart":if(v[1]==="/"){if((s=i.pop())[0]!==v[3])throw"Bad state: "+s}else if(v[0].charAt(v[0].length-2)!=="/")i.push([v[3],false]);y="";x=0;A=[];break;case"scientific-number":;case"currency-symbol":;case"fill-character":break;case"text-style":;case"boolean-style":;case"number-style":;case"currency-style":;case"percentage-style":;case"date-style":;case"time-style":if(v[1]==="/"){var re=jt.lastIndex;go(n.slice(o,jt.lastIndex),r,N);jt.lastIndex=re}else if(v[0].charAt(v[0].length-2)!=="/"){o=jt.lastIndex-v[0].length}break;case"script":break;case"libraries":break;case"automatic-styles":break;case"default-style":;case"page-layout":break;case"style":{var te=ft(v[0],false);if(te["family"]=="table-cell"&&N[te["data-style-name"]])M[te["name"]]=N[te["data-style-name"]]}break;case"map":break;case"font-face":break;case"paragraph-properties":break;case"table-properties":break;case"table-column-properties":break;case"table-row-properties":break;case"table-cell-properties":break;case"number":break;case"fraction":break;case"day":;case"month":;case"year":;case"era":;case"day-of-week":;case"week-of-year":;case"quarter":;case"hours":;case"minutes":;case"seconds":;case"am-pm":break;case"boolean":break;case"text":if(v[0].slice(-2)==="/>")break;else if(v[1]==="/")switch(i[i.length-1][0]){case"number-style":;case"date-style":;case"time-style":c+=n.slice(f,v.index);break;}else f=v.index+v[0].length;break;case"named-range":l=ft(v[0],false);H=$s(l["cell-range-address"]);var ae={Name:l.name,Ref:H[0]+"!"+H[1]};if(Z)ae.Sheet=p.length;W.Names.push(ae);break;case"text-content":break;case"text-properties":break;case"embedded-text":break;case"body":;case"电子表格":break;case"forms":break;case"table-column":break;case"table-header-rows":break;case"table-rows":break;case"table-column-group":break;case"table-header-columns":break;case"table-columns":break;case"null-date":l=ft(v[0],false);switch(l["date-value"]){case"1904-01-01":W.WBProps.date1904=true;break;}break;case"graphic-properties":break;case"calculation-settings":break;case"named-expressions":break;case"label-range":break;case"label-ranges":break;case"named-expression":break;case"sort":break;case"sort-by":break;case"sort-groups":break;case"tab":break;case"line-break":break;case"span":break;case"p":;case"文本串":if(["master-styles"].indexOf(i[i.length-1][0])>-1)break;if(v[1]==="/"&&(!w||!w["string-value"])){var ne=vo(n.slice(x,v.index),C);y=(y.length>0?y+"\n":"")+ne[0]}else if(v[0].slice(-2)=="/>"){y+="\n"}else{C=ft(v[0],false);x=v.index+v[0].length}break;case"s":break;case"database-range":if(v[1]==="/")break;try{H=$s(ft(v[0])["target-range-address"]);d[H[0]]["!autofilter"]={ref:H[1]}}catch(ie){}break;case"date":break;case"object":break;case"title":;case"标题":break;case"desc":break;case"binary-data":break;case"table-source":break;case"scenario":break;case"iteration":break;case"content-validations":break;case"content-validation":break;case"help-message":break;case"error-message":break;case"database-ranges":break;case"filter":break;case"filter-and":break;case"filter-or":break;case"filter-condition":break;case"filter-set-item":break;case"list-level-style-bullet":break;case"list-level-style-number":break;case"list-level-properties":break;case"sender-firstname":;case"sender-lastname":;case"sender-initials":;case"sender-title":;case"sender-position":;case"sender-email":;case"sender-phone-private":;case"sender-fax":;case"sender-company":;case"sender-phone-work":;case"sender-street":;case"sender-city":;case"sender-postal-code":;case"sender-country":;case"sender-state-or-province":;case"author-name":;case"author-initials":;case"chapter":;case"file-name":;case"template-name":;case"sheet-name":break;case"event-listener":break;case"initial-creator":;case"creation-date":;case"print-date":;case"generator":;case"document-statistic":;case"user-defined":;case"editing-duration":;case"editing-cycles":break;case"config-item":break;case"page-number":break;case"page-count":break;case"time":break;case"cell-range-source":break;case"detective":break;case"operation":break;case"highlighted-range":break;case"data-pilot-table":;case"source-cell-range":;case"source-service":;case"data-pilot-field":;case"data-pilot-level":;case"data-pilot-subtotals":;case"data-pilot-subtotal":;case"data-pilot-members":;case"data-pilot-member":;case"data-pilot-display-info":;case"data-pilot-sort-info":;case"data-pilot-layout-info":;case"data-pilot-field-reference":;case"data-pilot-groups":;case"data-pilot-group":;case"data-pilot-group-member":break;case"rect":break;case"dde-connection-decls":;case"dde-connection-decl":;case"dde-link":;case"dde-source":break;case"properties":break;case"property":break;case"a":if(v[1]!=="/"){j=ft(v[0],false);if(!j.href)break;j.Target=mt(j.href);delete j.href;if(j.Target.charAt(0)=="#"&&j.Target.indexOf(".")>-1){H=$s(j.Target.slice(1));j.Target="#"+H[0]+"!"+H[1]}else if(j.Target.match(/^\.\.[\\\/]/))j.Target=j.Target.slice(3)}break;case"table-protection":break;case"data-pilot-grand-total":break;case"office-document-common-attrs":break;default:switch(v[2]){case"dc:":;case"calcext:":;case"loext:":;case"ooo:":;case"chartooo:":;case"draw:":;case"style:":;case"chart:":;case"form:":;case"uof:":;case"表:":;case"字:":break;default:if(a.WTF)throw new Error(v);};}var se={Sheets:d,SheetNames:p,Workbook:W};if(a.bookSheets)delete se.Sheets;return se}function wo(e,r){r=r||{};if(Gr(e,"META-INF/manifest.xml"))Wn(Jr(e,"META-INF/manifest.xml"),r);var t=Zr(e,"styles.xml");var a=t&&go(Dt(t),r);var n=Zr(e,"content.xml");if(!n)throw new Error("Missing content.xml in ODS / UOF file");var i=bo(Dt(n),r,a);if(Gr(e,"meta.xml"))i.Props=Jn(Jr(e,"meta.xml"));i.bookType="ods";return i}function ko(e,r){var t=bo(e,r);t.bookType="fods";return t}var yo=function(){var e=["<office:master-styles>",'<style:master-page style:name="mp1" style:page-layout-name="mp1">',"<style:header/>",'<style:header-left style:display="false"/>',"<style:footer/>",'<style:footer-left style:display="false"/>',"</style:master-page>","</office:master-styles>"].join("");var r="<office:document-styles "+Ut({"xmlns:office":"urn:oasis:names:tc:opendocument:xmlns:office:1.0","xmlns:table":"urn:oasis:names:tc:opendocument:xmlns:table:1.0","xmlns:style":"urn:oasis:names:tc:opendocument:xmlns:style:1.0","xmlns:text":"urn:oasis:names:tc:opendocument:xmlns:text:1.0","xmlns:draw":"urn:oasis:names:tc:opendocument:xmlns:drawing:1.0","xmlns:fo":"urn:oasis:names:tc:opendocument:xmlns:xsl-fo-compatible:1.0","xmlns:xlink":"http://www.w3.org/1999/xlink","xmlns:dc":"http://purl.org/dc/elements/1.1/","xmlns:number":"urn:oasis:names:tc:opendocument:xmlns:datastyle:1.0","xmlns:svg":"urn:oasis:names:tc:opendocument:xmlns:svg-compatible:1.0","xmlns:of":"urn:oasis:names:tc:opendocument:xmlns:of:1.2","office:version":"1.2"})+">"+e+"</office:document-styles>";return function t(){return at+r}}();function xo(e,r){var t="number",a="",n={"style:name":r},i="",s=0;e=e.replace(/"[$]"/g,"$");e:{if(e.indexOf(";")>-1){console.error("Unsupported ODS Style Map exported.  Using first branch of "+e);e=e.slice(0,e.indexOf(";"))}if(e=="@"){t="text";a="<number:text-content/>";break e}if(e.indexOf(/\$/)>-1){t="currency"}if(e[s]=='"'){i="";while(e[++s]!='"'||e[++s]=='"')i+=e[s];--s;if(e[s+1]=="*"){s++;a+="<number:fill-character>"+bt(i.replace(/""/g,'"'))+"</number:fill-character>"}else{a+="<number:text>"+bt(i.replace(/""/g,'"'))+"</number:text>"}e=e.slice(s+1);s=0}var l=e.match(/# (\?+)\/(\?+)/);if(l){a+=Bt("number:fraction",null,{"number:min-integer-digits":0,"number:min-numerator-digits":l[1].length,"number:max-denominator-value":Math.max(+l[1].replace(/./g,"9"),+l[2].replace(/./g,"9"))});break e}if(l=e.match(/# (\?+)\/(\d+)/)){a+=Bt("number:fraction",null,{"number:min-integer-digits":0,"number:min-numerator-digits":l[1].length,"number:denominator-value":+l[2]});break e}if(l=e.match(/\b(\d+)(|\.\d+)%/)){t="percentage";a+=Bt("number:number",null,{"number:decimal-places":l[2]&&l.length-1||0,"number:min-decimal-places":l[2]&&l.length-1||0,"number:min-integer-digits":l[1].length})+"<number:text>%</number:text>";break e}var o=false;if(["y","m","d"].indexOf(e[0])>-1){t="date";r:for(;s<e.length;++s)switch(i=e[s].toLowerCase()){case"h":;case"s":o=true;--s;break r;case"m":t:for(var c=s+1;c<e.length;++c)switch(e[c]){case"y":;case"d":break t;case"h":;case"s":o=true;--s;break r;};case"y":;case"d":while((e[++s]||"").toLowerCase()==i[0])i+=i[0];--s;switch(i){case"y":;case"yy":a+="<number:year/>";break;case"yyy":;case"yyyy":a+='<number:year number:style="long"/>';break;case"mmmmm":console.error("ODS has no equivalent of format |mmmmm|");case"m":;case"mm":;case"mmm":;case"mmmm":a+='<number:month number:style="'+(i.length%2?"short":"long")+'" number:textual="'+(i.length>=3?"true":"false")+'"/>';break;case"d":;case"dd":a+='<number:day number:style="'+(i.length%2?"short":"long")+'"/>';break;case"ddd":;case"dddd":a+='<number:day-of-week number:style="'+(i.length%2?"short":"long")+'"/>';break;}break;case'"':while(e[++s]!='"'||e[++s]=='"')i+=e[s];--s;a+="<number:text>"+bt(i.slice(1).replace(/""/g,'"'))+"</number:text>";break;case"\\":i=e[++s];a+="<number:text>"+bt(i)+"</number:text>";break;case"/":;case":":a+="<number:text>"+bt(i)+"</number:text>";break;default:console.error("unrecognized character "+i+" in ODF format "+e);}if(!o)break e;e=e.slice(s+1);s=0}if(e.match(/^\[?[hms]/)){if(t=="number")t="time";if(e.match(/\[/)){e=e.replace(/[\[\]]/g,"");n["number:truncate-on-overflow"]="false"}for(;s<e.length;++s)switch(i=e[s].toLowerCase()){case"h":;case"m":;case"s":while((e[++s]||"").toLowerCase()==i[0])i+=i[0];--s;switch(i){case"h":;case"hh":a+='<number:hours number:style="'+(i.length%2?"short":"long")+'"/>';break;case"m":;case"mm":a+='<number:minutes number:style="'+(i.length%2?"short":"long")+'"/>';break;case"s":;case"ss":if(e[s+1]==".")do{i+=e[s+1];++s}while(e[s+1]=="0");a+='<number:seconds number:style="'+(i.match("ss")?"long":"short")+'"'+(i.match(/\./)?' number:decimal-places="'+(i.match(/0+/)||[""])[0].length+'"':"")+"/>";break;}break;case'"':while(e[++s]!='"'||e[++s]=='"')i+=e[s];--s;a+="<number:text>"+bt(i.slice(1).replace(/""/g,'"'))+"</number:text>";break;case"/":;case":":a+="<number:text>"+bt(i)+"</number:text>";break;case"a":if(e.slice(s,s+3).toLowerCase()=="a/p"){a+="<number:am-pm/>";s+=2;break}if(e.slice(s,s+5).toLowerCase()=="am/pm"){a+="<number:am-pm/>";s+=4;break};default:console.error("unrecognized character "+i+" in ODF format "+e);}break e}if(e.indexOf(/\$/)>-1){t="currency"}if(e[0]=="$"){a+='<number:currency-symbol number:language="en" number:country="US">$</number:currency-symbol>';e=e.slice(1);s=0}s=0;if(e[s]=='"'){while(e[++s]!='"'||e[++s]=='"')i+=e[s];--s;if(e[s+1]=="*"){s++;a+="<number:fill-character>"+bt(i.replace(/""/g,'"'))+"</number:fill-character>"}else{a+="<number:text>"+bt(i.replace(/""/g,'"'))+"</number:text>"}e=e.slice(s+1);s=0}var f=e.match(/([#0][0#,]*)(\.[0#]*|)(E[+]?0*|)/i);if(!f||!f[0])console.error("Could not find numeric part of "+e);else{var u=f[1].replace(/,/g,"");a+="<number:"+(f[3]?"scientific-":"")+"number"+' number:min-integer-digits="'+(u.indexOf("0")==-1?"0":u.length-u.indexOf("0"))+'"'+(f[0].indexOf(",")>-1?' number:grouping="true"':"")+(f[2]&&' number:decimal-places="'+(f[2].length-1)+'"'||' number:decimal-places="0"')+(f[3]&&f[3].indexOf("+")>-1?' number:forced-exponent-sign="true"':"")+(f[3]?' number:min-exponent-digits="'+f[3].match(/0+/)[0].length+'"':"")+">"+"</number:"+(f[3]?"scientific-":"")+"number>";s=f.index+f[0].length}if(e[s]=='"'){i="";while(e[++s]!='"'||e[++s]=='"')i+=e[s];--s;a+="<number:text>"+bt(i.replace(/""/g,'"'))+"</number:text>"}}if(!a){console.error("Could not generate ODS number format for |"+e+"|");return""}return Bt("number:"+t+"-style",a,n)}function Co(e,r,t){var a=[];for(var n=0;n<e.length;++n){var i=e[n];if(!i)continue;if(i.Sheet==(t==-1?null:t))a.push(i)}if(!a.length)return"";return"      <table:named-expressions>\n"+a.map(function(e){var r=(t==-1?"$":"")+Ws(e.Ref);return"        "+Bt("table:named-range",null,{"table:name":e.Name,"table:cell-range-address":r,"table:base-cell-address":r.replace(/[\.][^\.]*$/,".$A$1")})}).join("\n")+"\n      </table:named-expressions>\n"}var So=function(){var e=function(e,r){return bt(e).replace(/  +/g,function(e){return'<text:s text:c="'+e.length+'"/>'}).replace(/\t/g,"<text:tab/>").replace(/\n/g,r?"<text:line-break/>":"</text:p><text:p>").replace(/^ /,"<text:s/>").replace(/ $/,"<text:s/>")};var r="          <table:table-cell />\n";var t=function(t,a,n,i,s,l){var o=[];o.push('      <table:table table:name="'+bt(a.SheetNames[n])+'" table:style-name="ta1">\n');var c=0,f=0,u=Za(t["!ref"]||"A1");var h=t["!merges"]||[],d=0;var p=t["!data"]!=null;if(t["!cols"]){for(f=0;f<=u.e.c;++f)o.push("        <table:table-column"+(t["!cols"][f]?' table:style-name="co'+t["!cols"][f].ods+'"':"")+"></table:table-column>\n")}var m="",v=t["!rows"]||[];for(c=0;c<u.s.r;++c){m=v[c]?' table:style-name="ro'+v[c].ods+'"':"";o.push("        <table:table-row"+m+"></table:table-row>\n")}for(;c<=u.e.r;++c){m=v[c]?' table:style-name="ro'+v[c].ods+'"':"";o.push("        <table:table-row"+m+">\n");for(f=0;f<u.s.c;++f)o.push(r);for(;f<=u.e.c;++f){var g=false,b={},w="";for(d=0;d!=h.length;++d){if(h[d].s.c>f)continue;if(h[d].s.r>c)continue;if(h[d].e.c<f)continue;if(h[d].e.r<c)continue;if(h[d].s.c!=f||h[d].s.r!=c)g=true;b["table:number-columns-spanned"]=h[d].e.c-h[d].s.c+1;b["table:number-rows-spanned"]=h[d].e.r-h[d].s.r+1;break}if(g){o.push("          <table:covered-table-cell/>\n");continue}var k=Ja({r:c,c:f}),y=p?(t["!data"][c]||[])[f]:t[k];if(y&&y.f){b["table:formula"]=bt(zs(y.f));if(y.F){if(y.F.slice(0,k.length)==k){var x=Za(y.F);b["table:number-matrix-columns-spanned"]=x.e.c-x.s.c+1;b["table:number-matrix-rows-spanned"]=x.e.r-x.s.r+1}}}if(!y){o.push(r);continue}switch(y.t){case"b":w=y.v?"TRUE":"FALSE";b["office:value-type"]="boolean";b["office:boolean-value"]=y.v?"true":"false";break;case"n":if(!isFinite(y.v)){if(isNaN(y.v)){w="#NUM!";b["table:formula"]="of:=#NUM!"}else{w="#DIV/0!";b["table:formula"]="of:="+(y.v<0?"-":"")+"1/0"}b["office:string-value"]="";b["office:value-type"]="string";b["calcext:value-type"]="error"}else{w=y.w||String(y.v||0);b["office:value-type"]="float";b["office:value"]=y.v||0}break;case"s":;case"str":w=y.v==null?"":y.v;b["office:value-type"]="string";break;case"d":w=y.w||wr(y.v,l).toISOString();b["office:value-type"]="date";b["office:date-value"]=wr(y.v,l).toISOString();b["table:style-name"]="ce1";break;default:o.push(r);continue;}var C=e(w);if(y.l&&y.l.Target){var S=y.l.Target;S=S.charAt(0)=="#"?"#"+Ws(S.slice(1)):S;if(S.charAt(0)!="#"&&!S.match(/^\w+:/))S="../"+S;C=Bt("text:a",C,{"xlink:href":S.replace(/&/g,"&amp;")})}if(s[y.z])b["table:style-name"]="ce"+s[y.z].slice(1);var _=Bt("text:p",C,{});if(y.c){var A="",T="",E={};for(var F=0;F<y.c.length;++F){if(!A&&y.c[F].a)A=y.c[F].a;T+="<text:p>"+e(y.c[F].t)+"</text:p>"}if(!y.c.hidden)E["office:display"]=true;_=Bt("office:annotation",T,E)+_}o.push("          "+Bt("table:table-cell",_,b)+"\n")}o.push("        </table:table-row>\n")}if((a.Workbook||{}).Names)o.push(Co(a.Workbook.Names,a.SheetNames,n));o.push("      </table:table>\n");return o.join("")};var a=function(e,r){e.push(" <office:automatic-styles>\n");var t=0;r.SheetNames.map(function(e){return r.Sheets[e]}).forEach(function(r){if(!r)return;if(r["!cols"]){for(var a=0;a<r["!cols"].length;++a)if(r["!cols"][a]){var n=r["!cols"][a];if(n.width==null&&n.wpx==null&&n.wch==null)continue;Ui(n);n.ods=t;var i=r["!cols"][a].wpx+"px";e.push('  <style:style style:name="co'+t+'" style:family="table-column">\n');e.push('   <style:table-column-properties fo:break-before="auto" style:column-width="'+i+'"/>\n');e.push("  </style:style>\n");++t}}});var a=0;r.SheetNames.map(function(e){return r.Sheets[e]}).forEach(function(r){if(!r)return;if(r["!rows"]){for(var t=0;t<r["!rows"].length;++t)if(r["!rows"][t]){r["!rows"][t].ods=a;var n=r["!rows"][t].hpx+"px";e.push('  <style:style style:name="ro'+a+'" style:family="table-row">\n');e.push('   <style:table-row-properties fo:break-before="auto" style:row-height="'+n+'"/>\n');e.push("  </style:style>\n");++a}}});e.push('  <style:style style:name="ta1" style:family="table" style:master-page-name="mp1">\n');e.push('   <style:table-properties table:display="true" style:writing-mode="lr-tb"/>\n');e.push("  </style:style>\n");e.push('  <number:date-style style:name="N37" number:automatic-order="true">\n');e.push('   <number:month number:style="long"/>\n');e.push("   <number:text>/</number:text>\n");e.push('   <number:day number:style="long"/>\n');e.push("   <number:text>/</number:text>\n");e.push("   <number:year/>\n");e.push("  </number:date-style>\n");var n={};var i=69;r.SheetNames.map(function(e){return r.Sheets[e]}).forEach(function(r){if(!r)return;var t=r["!data"]!=null;if(!r["!ref"])return;var a=Za(r["!ref"]);for(var s=0;s<=a.e.r;++s)for(var l=0;l<=a.e.c;++l){var o=t?(r["!data"][s]||[])[l]:r[Ja({r:s,c:l})];if(!o||!o.z||o.z.toLowerCase()=="general")continue;if(!n[o.z]){var c=xo(o.z,"N"+i);if(c){n[o.z]="N"+i;++i;e.push(c+"\n")}}}});e.push('  <style:style style:name="ce1" style:family="table-cell" style:parent-style-name="Default" style:data-style-name="N37"/>\n');ir(n).forEach(function(r){e.push('<style:style style:name="ce'+n[r].slice(1)+'" style:family="table-cell" style:parent-style-name="Default" style:data-style-name="'+n[r]+'"/>\n')});e.push(" </office:automatic-styles>\n");return n};return function n(e,r){var n=[at];var i=Ut({"xmlns:office":"urn:oasis:names:tc:opendocument:xmlns:office:1.0","xmlns:table":"urn:oasis:names:tc:opendocument:xmlns:table:1.0","xmlns:style":"urn:oasis:names:tc:opendocument:xmlns:style:1.0","xmlns:text":"urn:oasis:names:tc:opendocument:xmlns:text:1.0","xmlns:draw":"urn:oasis:names:tc:opendocument:xmlns:drawing:1.0","xmlns:fo":"urn:oasis:names:tc:opendocument:xmlns:xsl-fo-compatible:1.0","xmlns:xlink":"http://www.w3.org/1999/xlink","xmlns:dc":"http://purl.org/dc/elements/1.1/","xmlns:meta":"urn:oasis:names:tc:opendocument:xmlns:meta:1.0","xmlns:number":"urn:oasis:names:tc:opendocument:xmlns:datastyle:1.0","xmlns:presentation":"urn:oasis:names:tc:opendocument:xmlns:presentation:1.0","xmlns:svg":"urn:oasis:names:tc:opendocument:xmlns:svg-compatible:1.0","xmlns:chart":"urn:oasis:names:tc:opendocument:xmlns:chart:1.0","xmlns:dr3d":"urn:oasis:names:tc:opendocument:xmlns:dr3d:1.0","xmlns:math":"http://www.w3.org/1998/Math/MathML","xmlns:form":"urn:oasis:names:tc:opendocument:xmlns:form:1.0","xmlns:script":"urn:oasis:names:tc:opendocument:xmlns:script:1.0","xmlns:ooo":"http://openoffice.org/2004/office","xmlns:ooow":"http://openoffice.org/2004/writer","xmlns:oooc":"http://openoffice.org/2004/calc","xmlns:dom":"http://www.w3.org/2001/xml-events","xmlns:xforms":"http://www.w3.org/2002/xforms","xmlns:xsd":"http://www.w3.org/2001/XMLSchema","xmlns:xsi":"http://www.w3.org/2001/XMLSchema-instance","xmlns:sheet":"urn:oasis:names:tc:opendocument:sh33tjs:1.0","xmlns:rpt":"http://openoffice.org/2005/report","xmlns:of":"urn:oasis:names:tc:opendocument:xmlns:of:1.2","xmlns:xhtml":"http://www.w3.org/1999/xhtml","xmlns:grddl":"http://www.w3.org/2003/g/data-view#","xmlns:tableooo":"http://openoffice.org/2009/table","xmlns:drawooo":"http://openoffice.org/2010/draw","xmlns:calcext":"urn:org:documentfoundation:names:experimental:calc:xmlns:calcext:1.0","xmlns:loext":"urn:org:documentfoundation:names:experimental:office:xmlns:loext:1.0","xmlns:field":"urn:openoffice:names:experimental:ooo-ms-interop:xmlns:field:1.0","xmlns:formx":"urn:openoffice:names:experimental:ooxml-odf-interop:xmlns:form:1.0","xmlns:css3t":"http://www.w3.org/TR/css3-text/","office:version":"1.2"});var s=Ut({"xmlns:config":"urn:oasis:names:tc:opendocument:xmlns:config:1.0","office:mimetype":"application/vnd.oasis.opendocument.spreadsheet"});if(r.bookType=="fods"){n.push("<office:document"+i+s+">\n");n.push(Gn().replace(/<office:document-meta[^<>]*?>/,"").replace(/<\/office:document-meta>/,"")+"\n")}else n.push("<office:document-content"+i+">\n");var l=a(n,e);n.push("  <office:body>\n");n.push("    <office:spreadsheet>\n");if(((e.Workbook||{}).WBProps||{}).date1904)n.push('      <table:calculation-settings table:case-sensitive="false" table:search-criteria-must-apply-to-whole-cell="true" table:use-wildcards="true" table:use-regular-expressions="false" table:automatic-find-labels="false">\n        <table:null-date table:date-value="1904-01-01"/>\n      </table:calculation-settings>\n');for(var o=0;o!=e.SheetNames.length;++o)n.push(t(e.Sheets[e.SheetNames[o]],e,o,r,l,((e.Workbook||{}).WBProps||{}).date1904));if((e.Workbook||{}).Names)n.push(Co(e.Workbook.Names,e.SheetNames,-1));n.push("    </office:spreadsheet>\n");n.push("  </office:body>\n");if(r.bookType=="fods")n.push("</office:document>");else n.push("</office:document-content>");return n.join("")}}();function _o(e,r){if(r.bookType=="fods")return So(e,r);var t=et();var a="";var n=[];var i=[];a="mimetype";Qr(t,a,"application/vnd.oasis.opendocument.spreadsheet");a="content.xml";Qr(t,a,So(e,r));n.push([a,"text/xml"]);i.push([a,"ContentFile"]);a="styles.xml";Qr(t,a,yo(e,r));n.push([a,"text/xml"]);i.push([a,"StylesFile"]);a="meta.xml";Qr(t,a,at+Gn());n.push([a,"text/xml"]);i.push([a,"MetadataFile"]);a="manifest.rdf";Qr(t,a,Xn(i));n.push([a,"application/rdf+xml"]);a="META-INF/manifest.xml";Qr(t,a,jn(n));return t}function Ao(e){return function r(t){for(var a=0;a!=e.length;++a){var n=e[a];if(t[n[0]]===undefined)t[n[0]]=n[1];if(n[2]==="n")t[n[0]]=Number(t[n[0]])}}}function To(e){Ao([["cellNF",false],["cellHTML",true],["cellFormula",true],["cellStyles",false],["cellText",true],["cellDates",false],["sheetStubs",false],["sheetRows",0,"n"],["bookDeps",false],["bookSheets",false],["bookProps",false],["bookFiles",false],["bookVBA",false],["password",""],["WTF",false]])(e)}function Eo(e){Ao([["cellDates",false],["bookSST",false],["bookType","xlsx"],["compression",false],["WTF",false]])(e)}function Fo(e){if(Rn.WS.indexOf(e)>-1)return"sheet";if(Rn.CS&&e==Rn.CS)return"chart";if(Rn.DS&&e==Rn.DS)return"dialog";if(Rn.MS&&e==Rn.MS)return"macro";return e&&e.length?e:"sheet"}function Do(e,r){if(!e)return 0;try{e=r.map(function a(r){if(!r.id)r.id=r.strRelID;return[r.name,e["!id"][r.id].Target,Fo(e["!id"][r.id].Type)]})}catch(t){return null}return!e||e.length===0?null:e}function Oo(e,r,t,a,n,i,s,l){if(!e||!e["!legdrawel"])return;var o=tt(e["!legdrawel"].Target,a);var c=Zr(t,o,true);if(c)ds(Dt(c),e,l||[])}function No(e,r,t,a,n,i,s,l,o,c,f,u){try{i[a]=Un(Zr(e,t,true),r);var h=Jr(e,r);var d;switch(l){case"sheet":d=Gl(h,r,n,o,i[a],c,f,u);break;case"chart":d=Yl(h,r,n,o,i[a],c,f,u);if(!d||!d["!drawel"])break;var p=tt(d["!drawel"].Target,r);var m=Ln(p);var v=hs(Zr(e,p,true),Un(Zr(e,m,true),p));var g=tt(v,p);var b=Ln(g);d=Fl(Zr(e,g,true),g,o,Un(Zr(e,b,true),g),c,d);break;case"macro":d=Jl(h,r,n,o,i[a],c,f,u);break;case"dialog":d=Zl(h,r,n,o,i[a],c,f,u);break;default:throw new Error("Unrecognized sheet type "+l);}s[a]=d;var w=[],k=[];if(i&&i[a])ir(i[a]).forEach(function(t){var n="";if(i[a][t].Type==Rn.CMNT){n=tt(i[a][t].Target,r);w=Ql(Jr(e,n,true),n,o);if(!w||!w.length)return;vs(d,w,false)}if(i[a][t].Type==Rn.TCMNT){n=tt(i[a][t].Target,r);k=k.concat(ws(Jr(e,n,true),o))}});if(k&&k.length)vs(d,k,true,o.people||[]);Oo(d,l,e,r,n,o,c,w)}catch(y){if(o.WTF)throw y}}function Mo(e){return e.charAt(0)=="/"?e.slice(1):e}function Io(e,r){He();r=r||{};To(r);if(Gr(e,"META-INF/manifest.xml"))return wo(e,r);if(Gr(e,"objectdata.xml"))return wo(e,r);if(Gr(e,"Index/Document.iwa")){if(typeof Uint8Array=="undefined")throw new Error("NUMBERS file parsing requires Uint8Array support");if(typeof parse_numbers_iwa!="undefined"){if(e.FileIndex)return parse_numbers_iwa(e,r);var t=Qe.utils.cfb_new();qr(e).forEach(function(r){Qr(t,r,Kr(e,r))});return parse_numbers_iwa(t,r)}throw new Error("Unsupported NUMBERS file")}if(!Gr(e,"[Content_Types].xml")){if(Gr(e,"index.xml.gz"))throw new Error("Unsupported NUMBERS 08 file");if(Gr(e,"index.xml"))throw new Error("Unsupported NUMBERS 09 file");var a=Qe.find(e,"Index.zip");if(a){r=yr(r);delete r.type;if(typeof a.content=="string")r.type="binary";if(typeof Bun!=="undefined"&&Buffer.isBuffer(a.content))return Xo(new Uint8Array(a.content),r);return Xo(a.content,r)}throw new Error("Unsupported ZIP file")}var n=qr(e);var i=In(Zr(e,"[Content_Types].xml"));var s=false;var l,o;if(i.workbooks.length===0){o="xl/workbook.xml";if(Jr(e,o,true))i.workbooks.push(o)}if(i.workbooks.length===0){o="xl/workbook.bin";if(!Jr(e,o,true))throw new Error("Could not find workbook");i.workbooks.push(o);s=true}if(i.workbooks[0].slice(-3)=="bin")s=true;var c={};var f={};if(!r.bookSheets&&!r.bookProps){js=[];if(i.sst)try{js=ql(Jr(e,Mo(i.sst)),i.sst,r)}catch(u){if(r.WTF)throw u}if(r.cellStyles&&i.themes.length)c=ss(Zr(e,i.themes[0].replace(/^\//,""),true)||"",r);if(i.style)f=Kl(Jr(e,Mo(i.style)),i.style,c,r)}i.links.map(function(t){try{var a=Un(Zr(e,Ln(Mo(t))),t);return ro(Jr(e,Mo(t)),a,t,r)}catch(n){}});var h=Xl(Jr(e,Mo(i.workbooks[0])),i.workbooks[0],r);var d={},p="";if(i.coreprops.length){p=Jr(e,Mo(i.coreprops[0]),true);if(p)d=Jn(p);if(i.extprops.length!==0){p=Jr(e,Mo(i.extprops[0]),true);if(p)ri(p,d,r)}}var m={};if(!r.bookSheets||r.bookProps){if(i.custprops.length!==0){p=Zr(e,Mo(i.custprops[0]),true);if(p)m=ni(p,r)}}var v={};if(r.bookSheets||r.bookProps){if(h.Sheets)l=h.Sheets.map(function N(e){return e.name});else if(d.Worksheets&&d.SheetNames.length>0)l=d.SheetNames;if(r.bookProps){v.Props=d;v.Custprops=m}if(r.bookSheets&&typeof l!=="undefined")v.SheetNames=l;if(r.bookSheets?v.SheetNames:r.bookProps)return v}l={};var g={};if(r.bookDeps&&i.calcchain)g=eo(Jr(e,Mo(i.calcchain)),i.calcchain,r);var b=0;var w={};var k,y;{var x=h.Sheets;d.Worksheets=x.length;d.SheetNames=[];for(var C=0;C!=x.length;++C){d.SheetNames[C]=x[C].name}}var S=s?"bin":"xml";var _=i.workbooks[0].lastIndexOf("/");var A=(i.workbooks[0].slice(0,_+1)+"_rels/"+i.workbooks[0].slice(_+1)+".rels").replace(/^\//,"");if(!Gr(e,A))A="xl/_rels/workbook."+S+".rels";var T=Un(Zr(e,A,true),A.replace(/_rels.*/,"s5s"));if((i.metadata||[]).length>=1){r.xlmeta=to(Jr(e,Mo(i.metadata[0])),i.metadata[0],r)}if((i.people||[]).length>=1){r.people=ys(Jr(e,Mo(i.people[0])),r)}if(T)T=Do(T,h.Sheets);var E=Jr(e,"xl/worksheets/sheet.xml",true)?1:0;e:for(b=0;b!=d.Worksheets;++b){var F="sheet";if(T&&T[b]){k="xl/"+T[b][1].replace(/[\/]?xl\//,"");if(!Gr(e,k))k=T[b][1];if(!Gr(e,k))k=A.replace(/_rels\/[\S\s]*$/,"")+T[b][1];F=T[b][2]}else{k="xl/worksheets/sheet"+(b+1-E)+"."+S;k=k.replace(/sheet0\./,"sheet.")}y=k.replace(/^(.*)(\/)([^\/]*)$/,"$1/_rels/$3.rels");if(r&&r.sheets!=null)switch(typeof r.sheets){case"number":if(b!=r.sheets)continue e;break;case"string":if(d.SheetNames[b].toLowerCase()!=r.sheets.toLowerCase())continue e;break;default:if(Array.isArray&&Array.isArray(r.sheets)){var D=false;for(var O=0;O!=r.sheets.length;++O){if(typeof r.sheets[O]=="number"&&r.sheets[O]==b)D=1;if(typeof r.sheets[O]=="string"&&r.sheets[O].toLowerCase()==d.SheetNames[b].toLowerCase())D=1}if(!D)continue e};}No(e,k,y,d.SheetNames[b],b,w,l,F,r,h,c,f)}v={Directory:i,Workbook:h,Props:d,Custprops:m,Deps:g,Sheets:l,SheetNames:d.SheetNames,Strings:js,Styles:f,Themes:c,SSF:yr(q)};if(r&&r.bookFiles){if(e.files){v.keys=n;v.files=e.files}else{v.keys=[];v.files={};e.FullPaths.forEach(function(r,t){r=r.replace(/^Root Entry[\/]/,"");v.keys.push(r);v.files[r]=e.FileIndex[t]})}}if(r&&r.bookVBA){if(i.vba.length>0)v.vbaraw=Jr(e,Mo(i.vba[0]),true);else if(i.defaults&&i.defaults.bin===Cs)v.vbaraw=Jr(e,"xl/vbaProject.bin",true)}v.bookType=s?"xlsb":"xlsx";return v}function Po(e,r){var t=r||{};var a="Workbook",n=Qe.find(e,a);try{a="/!DataSpaces/Version";n=Qe.find(e,a);if(!n||!n.content)throw new Error("ECMA-376 Encrypted file missing "+a);parse_DataSpaceVersionInfo(n.content);a="/!DataSpaces/DataSpaceMap";n=Qe.find(e,a);if(!n||!n.content)throw new Error("ECMA-376 Encrypted file missing "+a);var i=parse_DataSpaceMap(n.content);if(i.length!==1||i[0].comps.length!==1||i[0].comps[0].t!==0||i[0].name!=="StrongEncryptionDataSpace"||i[0].comps[0].v!=="EncryptedPackage")throw new Error("ECMA-376 Encrypted file bad "+a);a="/!DataSpaces/DataSpaceInfo/StrongEncryptionDataSpace";n=Qe.find(e,a);if(!n||!n.content)throw new Error("ECMA-376 Encrypted file missing "+a);var s=parse_DataSpaceDefinition(n.content);if(s.length!=1||s[0]!="StrongEncryptionTransform")throw new Error("ECMA-376 Encrypted file bad "+a);a="/!DataSpaces/TransformInfo/StrongEncryptionTransform/!Primary";n=Qe.find(e,a);if(!n||!n.content)throw new Error("ECMA-376 Encrypted file missing "+a);
+parse_Primary(n.content)}catch(l){}a="/EncryptionInfo";n=Qe.find(e,a);if(!n||!n.content)throw new Error("ECMA-376 Encrypted file missing "+a);var o=parse_EncryptionInfo(n.content);a="/EncryptedPackage";n=Qe.find(e,a);if(!n||!n.content)throw new Error("ECMA-376 Encrypted file missing "+a);if(o[0]==4&&typeof decrypt_agile!=="undefined")return decrypt_agile(o[1],n.content,t.password||"",t);if(o[0]==2&&typeof decrypt_std76!=="undefined")return decrypt_std76(o[1],n.content,t.password||"",t);throw new Error("File is password-protected")}function Ro(e,r){if(e&&!e.SSF){e.SSF=yr(q)}if(e&&e.SSF){He();je(e.SSF);r.revssf=or(e.SSF);r.revssf[e.SSF[65535]]=0;r.ssf=e.SSF}r.rels={};r.wbrels={};r.Strings=[];r.Strings.Count=0;r.Strings.Unique=0;if(Vs)r.revStrings=new Map;else{r.revStrings={};r.revStrings.foo=[];delete r.revStrings.foo}var t="bin";var a=true;var n=Mn();Eo(r=r||{});var i=et();var s="",l=0;r.cellXfs=[];Js(r.cellXfs,{},{revssf:{General:0}});if(!e.Props)e.Props={};s="docProps/core.xml";Qr(i,s,Kn(e.Props,r));n.coreprops.push(s);zn(r.rels,2,s,Rn.CORE_PROPS);s="docProps/app.xml";if(e.Props&&e.Props.SheetNames){}else if(!e.Workbook||!e.Workbook.Sheets)e.Props.SheetNames=e.SheetNames;else{var o=[];for(var c=0;c<e.SheetNames.length;++c)if((e.Workbook.Sheets[c]||{}).Hidden!=2)o.push(e.SheetNames[c]);e.Props.SheetNames=o}e.Props.Worksheets=e.Props.SheetNames.length;Qr(i,s,ti(e.Props,r));n.extprops.push(s);zn(r.rels,3,s,Rn.EXT_PROPS);if(e.Custprops!==e.Props&&ir(e.Custprops||{}).length>0){s="docProps/custom.xml";Qr(i,s,ii(e.Custprops,r));n.custprops.push(s);zn(r.rels,4,s,Rn.CUST_PROPS)}var f=["SheetJ5"];r.tcid=0;for(l=1;l<=e.SheetNames.length;++l){var u={"!id":{}};var h=e.Sheets[e.SheetNames[l-1]];var d=(h||{})["!type"]||"sheet";switch(d){case"chart":;default:s="xl/worksheets/sheet"+l+"."+t;Qr(i,s,write_ws_bin(l-1,r,e,u));n.sheets.push(s);zn(r.wbrels,-1,"worksheets/sheet"+l+"."+t,Rn.WS[0]);}if(h){var p=h["!comments"];var m=false;var v="";if(p&&p.length>0){var g=false;p.forEach(function(e){e[1].forEach(function(e){if(e.T==true)g=true})});if(g){v="xl/threadedComments/threadedComment"+l+".xml";Qr(i,v,ks(p,f,r));n.threadedcomments.push(v);zn(u,-1,"../threadedComments/threadedComment"+l+".xml",Rn.TCMNT)}v="xl/comments"+l+"."+t;Qr(i,v,write_comments_bin(p,r));n.comments.push(v);zn(u,-1,"../comments"+l+"."+t,Rn.CMNT);m=true}if(h["!legacy"]){if(m)Qr(i,"xl/drawings/vmlDrawing"+l+".vml",ps(l,h["!comments"]))}delete h["!comments"];delete h["!legacy"]}if(u["!id"].rId1)Qr(i,Ln(s),Bn(u))}if(r.Strings!=null&&r.Strings.length>0){s="xl/sharedStrings."+t;Qr(i,s,write_sst_bin(r.Strings,r));n.strs.push(s);zn(r.wbrels,-1,"sharedStrings."+t,Rn.SST)}s="xl/workbook."+t;Qr(i,s,write_wb_bin(e,r));n.workbooks.push(s);zn(r.rels,1,s,Rn.WB);s="xl/theme/theme1.xml";var b=ls(e.Themes,r);Qr(i,s,b);n.themes.push(s);zn(r.wbrels,-1,"theme/theme1.xml",Rn.THEME);s="xl/styles."+t;Qr(i,s,write_sty_bin(e,r));n.styles.push(s);zn(r.wbrels,-1,"styles."+t,Rn.STY);if(e.vbaraw&&a){s="xl/vbaProject.bin";Qr(i,s,e.vbaraw);n.vba.push(s);zn(r.wbrels,-1,"vbaProject.bin",Rn.VBA)}s="xl/metadata."+t;Qr(i,s,write_xlmeta_bin());n.metadata.push(s);zn(r.wbrels,-1,"metadata."+t,Rn.XLMETA);if(f.length>1){s="xl/persons/person.xml";Qr(i,s,xs(f,r));n.people.push(s);zn(r.wbrels,-1,"persons/person.xml",Rn.PEOPLE)}Qr(i,"[Content_Types].xml",Pn(n,r));Qr(i,"_rels/.rels",Bn(r.rels));Qr(i,"xl/_rels/workbook."+t+".rels",Bn(r.wbrels));delete r.revssf;delete r.ssf;return i}function Lo(e,r){if(e&&!e.SSF){e.SSF=yr(q)}if(e&&e.SSF){He();je(e.SSF);r.revssf=or(e.SSF);r.revssf[e.SSF[65535]]=0;r.ssf=e.SSF}r.rels={};r.wbrels={};r.Strings=[];r.Strings.Count=0;r.Strings.Unique=0;if(Vs)r.revStrings=new Map;else{r.revStrings={};r.revStrings.foo=[];delete r.revStrings.foo}var t="xml";var a=As.indexOf(r.bookType)>-1;var n=Mn();Eo(r=r||{});var i=et();var s="",l=0;r.cellXfs=[];Js(r.cellXfs,{},{revssf:{General:0}});if(!e.Props)e.Props={};s="docProps/core.xml";Qr(i,s,Kn(e.Props,r));n.coreprops.push(s);zn(r.rels,2,s,Rn.CORE_PROPS);s="docProps/app.xml";if(e.Props&&e.Props.SheetNames){}else if(!e.Workbook||!e.Workbook.Sheets)e.Props.SheetNames=e.SheetNames;else{var o=[];for(var c=0;c<e.SheetNames.length;++c)if((e.Workbook.Sheets[c]||{}).Hidden!=2)o.push(e.SheetNames[c]);e.Props.SheetNames=o}e.Props.Worksheets=e.Props.SheetNames.length;Qr(i,s,ti(e.Props,r));n.extprops.push(s);zn(r.rels,3,s,Rn.EXT_PROPS);if(e.Custprops!==e.Props&&ir(e.Custprops||{}).length>0){s="docProps/custom.xml";Qr(i,s,ii(e.Custprops,r));n.custprops.push(s);zn(r.rels,4,s,Rn.CUST_PROPS)}var f=["SheetJ5"];r.tcid=0;for(l=1;l<=e.SheetNames.length;++l){var u={"!id":{}};var h=e.Sheets[e.SheetNames[l-1]];var d=(h||{})["!type"]||"sheet";switch(d){case"chart":;default:s="xl/worksheets/sheet"+l+"."+t;Qr(i,s,Tl(l-1,r,e,u));n.sheets.push(s);zn(r.wbrels,-1,"worksheets/sheet"+l+"."+t,Rn.WS[0]);}if(h){var p=h["!comments"];var m=false;var v="";if(p&&p.length>0){var g=false;p.forEach(function(e){e[1].forEach(function(e){if(e.T==true)g=true})});if(g){v="xl/threadedComments/threadedComment"+l+".xml";Qr(i,v,ks(p,f,r));n.threadedcomments.push(v);zn(u,-1,"../threadedComments/threadedComment"+l+".xml",Rn.TCMNT)}v="xl/comments"+l+"."+t;Qr(i,v,bs(p,r));n.comments.push(v);zn(u,-1,"../comments"+l+"."+t,Rn.CMNT);m=true}if(h["!legacy"]){if(m)Qr(i,"xl/drawings/vmlDrawing"+l+".vml",ps(l,h["!comments"]))}delete h["!comments"];delete h["!legacy"]}if(u["!id"].rId1)Qr(i,Ln(s),Bn(u))}if(r.Strings!=null&&r.Strings.length>0){s="xl/sharedStrings."+t;Qr(i,s,Ci(r.Strings,r));n.strs.push(s);zn(r.wbrels,-1,"sharedStrings."+t,Rn.SST)}s="xl/workbook."+t;Qr(i,s,Vl(e,r));n.workbooks.push(s);zn(r.rels,1,s,Rn.WB);s="xl/theme/theme1.xml";Qr(i,s,ls(e.Themes,r));n.themes.push(s);zn(r.wbrels,-1,"theme/theme1.xml",Rn.THEME);s="xl/styles."+t;Qr(i,s,es(e,r));n.styles.push(s);zn(r.wbrels,-1,"styles."+t,Rn.STY);if(e.vbaraw&&a){s="xl/vbaProject.bin";Qr(i,s,e.vbaraw);n.vba.push(s);zn(r.wbrels,-1,"vbaProject.bin",Rn.VBA)}s="xl/metadata."+t;Qr(i,s,cs());n.metadata.push(s);zn(r.wbrels,-1,"metadata."+t,Rn.XLMETA);if(f.length>1){s="xl/persons/person.xml";Qr(i,s,xs(f,r));n.people.push(s);zn(r.wbrels,-1,"persons/person.xml",Rn.PEOPLE)}Qr(i,"[Content_Types].xml",Pn(n,r));Qr(i,"_rels/.rels",Bn(r.rels));Qr(i,"xl/_rels/workbook."+t+".rels",Bn(r.wbrels));delete r.revssf;delete r.ssf;return i}function Uo(e,r){var t="";switch((r||{}).type||"base64"){case"buffer":return[e[0],e[1],e[2],e[3],e[4],e[5],e[6],e[7]];case"base64":t=S(e.slice(0,12));break;case"binary":t=e;break;case"array":return[e[0],e[1],e[2],e[3],e[4],e[5],e[6],e[7]];default:throw new Error("Unrecognized type "+(r&&r.type||"undefined"));}return[t.charCodeAt(0),t.charCodeAt(1),t.charCodeAt(2),t.charCodeAt(3),t.charCodeAt(4),t.charCodeAt(5),t.charCodeAt(6),t.charCodeAt(7)]}function Bo(e,r){if(Qe.find(e,"EncryptedPackage"))return Po(e,r);return parse_xlscfb(e,r)}function zo(e,r){var t,a=e;var n=r||{};if(!n.type)n.type=_&&Buffer.isBuffer(e)?"buffer":"base64";t=rt(a,n);return Io(t,n)}function $o(e,r){var t=0;e:while(t<e.length)switch(e.charCodeAt(t)){case 10:;case 13:;case 32:++t;break;case 60:return parse_xlml(e.slice(t),r);default:break e;}return ui.to_workbook(e,r)}function Wo(e,r){var t="",a=Uo(e,r);switch(r.type){case"base64":t=S(e);break;case"binary":t=e;break;case"buffer":t=e.toString("binary");break;case"array":t=kr(e);break;default:throw new Error("Unrecognized type "+r.type);}if(a[0]==239&&a[1]==187&&a[2]==191)t=Dt(t);r.type="binary";return $o(t,r)}function jo(e,r){var t=e;if(r.type=="base64")t=S(t);if(typeof ArrayBuffer!=="undefined"&&e instanceof ArrayBuffer)t=new Uint8Array(e);t=typeof a!=="undefined"?a.utils.decode(1200,t.slice(2),"str"):_&&Buffer.isBuffer(e)?e.slice(2).toString("utf16le"):typeof Uint8Array!=="undefined"&&t instanceof Uint8Array?typeof TextDecoder!=="undefined"?new TextDecoder("utf-16le").decode(t.slice(2)):h(t.slice(2)):u(t.slice(2));r.type="binary";return $o(t,r)}function Ho(e){return!e.match(/[^\x00-\x7F]/)?e:Ot(e)}function Vo(e,r,t,a){if(a){t.type="string";return ui.to_workbook(e,t)}return ui.to_workbook(r,t)}function Xo(e,r){c();var t=r||{};if(t.codepage&&typeof a==="undefined")console.error("Codepage tables are not loaded.  Non-ASCII characters may not give expected results");if(typeof ArrayBuffer!=="undefined"&&e instanceof ArrayBuffer)return Xo(new Uint8Array(e),(t=yr(t),t.type="array",t));if(typeof Int8Array!=="undefined"&&e instanceof Int8Array)return Xo(new Uint8Array(e.buffer,e.byteOffset,e.length),t);if(typeof Uint8Array!=="undefined"&&e instanceof Uint8Array&&!t.type)t.type=typeof Deno!=="undefined"?"buffer":"array";var n=e,i=[0,0,0,0],s=false;if(t.cellStyles){t.cellNF=true;t.sheetStubs=true}Hs={};if(t.dateNF)Hs.dateNF=t.dateNF;if(!t.type)t.type=_&&Buffer.isBuffer(e)?"buffer":"base64";if(t.type=="file"){t.type=_?"buffer":"binary";n=nr(e);if(typeof Uint8Array!=="undefined"&&!_)t.type="array"}if(t.type=="string"){s=true;t.type="binary";t.codepage=65001;n=Ho(e)}if(t.type=="array"&&typeof Uint8Array!=="undefined"&&e instanceof Uint8Array&&typeof ArrayBuffer!=="undefined"){var l=new ArrayBuffer(3),o=new Uint8Array(l);o.foo="bar";if(!o.foo){t=yr(t);t.type="array";return Xo(I(n),t)}}switch((i=Uo(n,t))[0]){case 208:if(i[1]===207&&i[2]===17&&i[3]===224&&i[4]===161&&i[5]===177&&i[6]===26&&i[7]===225)return Bo(Qe.read(n,t),t);break;case 9:if(i[1]<=8)return parse_xlscfb(n,t);break;case 60:return parse_xlml(n,t);case 73:if(i[1]===73&&i[2]===42&&i[3]===0)throw new Error("TIFF Image File is not a spreadsheet");if(i[1]===68)return hi(n,t);break;case 84:if(i[1]===65&&i[2]===66&&i[3]===76)return ci.to_workbook(n,t);break;case 80:return i[1]===75&&i[2]<9&&i[3]<9?zo(n,t):Vo(e,n,t,s);case 239:return i[3]===60?parse_xlml(n,t):Vo(e,n,t,s);case 255:if(i[1]===254){return jo(n,t)}else if(i[1]===0&&i[2]===2&&i[3]===0)return WK_.to_workbook(n,t);break;case 0:if(i[1]===0){if(i[2]>=2&&i[3]===0)return WK_.to_workbook(n,t);if(i[2]===0&&(i[3]===8||i[3]===9))return WK_.to_workbook(n,t)}break;case 3:;case 131:;case 139:;case 140:return li.to_workbook(n,t);case 123:if(i[1]===92&&i[2]===114&&i[3]===116)return rtf_to_workbook(n,t);break;case 10:;case 13:;case 32:return Wo(n,t);case 137:if(i[1]===80&&i[2]===78&&i[3]===71)throw new Error("PNG Image File is not a spreadsheet");break;case 8:if(i[1]===231)throw new Error("Unsupported Multiplan 1.x file!");break;case 12:if(i[1]===236)throw new Error("Unsupported Multiplan 2.x file!");if(i[1]===237)throw new Error("Unsupported Multiplan 3.x file!");break;}if(si.indexOf(i[0])>-1&&i[2]<=12&&i[3]<=31)return li.to_workbook(n,t);return Vo(e,n,t,s)}function Go(e,r){var t=r||{};t.type="file";return Xo(e,t)}function Yo(e,r){switch(r.type){case"base64":;case"binary":break;case"buffer":;case"array":r.type="";break;case"file":return ar(r.file,Qe.write(e,{type:_?"buffer":""}));case"string":throw new Error("'string' output type invalid for '"+r.bookType+"' files");default:throw new Error("Unrecognized type "+r.type);}return Qe.write(e,r)}function Jo(e,r){switch(r.bookType){case"ods":return _o(e,r);case"numbers":return write_numbers_iwa(e,r);case"xlsb":return Ro(e,r);default:return Lo(e,r);}}function Zo(e,r){var t=yr(r||{});var a=Jo(e,t);return qo(a,t)}function Ko(e,r){var t=yr(r||{});var a=Lo(e,t);return qo(a,t)}function qo(e,r){var t={};var a=_?"nodebuffer":typeof Uint8Array!=="undefined"?"array":"string";if(r.compression)t.compression="DEFLATE";if(r.password)t.type=a;else switch(r.type){case"base64":t.type="base64";break;case"binary":t.type="string";break;case"string":throw new Error("'string' output type invalid for '"+r.bookType+"' files");case"buffer":;case"file":t.type=a;break;default:throw new Error("Unrecognized type "+r.type);}var n=e.FullPaths?Qe.write(e,{fileType:"zip",type:{nodebuffer:"buffer",string:"binary"}[t.type]||t.type,compression:!!r.compression}):e.generate(t);if(typeof Deno!=="undefined"){if(typeof n=="string"){if(r.type=="binary"||r.type=="base64")return n;n=new Uint8Array(O(n))}}if(r.password&&typeof encrypt_agile!=="undefined")return Yo(encrypt_agile(n,r.password),r);if(r.type==="file")return ar(r.file,n);return r.type=="string"?Dt(n):n}function Qo(e,r){var t=r||{};var a=write_xlscfb(e,t);return Yo(a,t)}function ec(e,r,t){if(!t)t="";var a=t+e;switch(r.type){case"base64":return y(Ot(a));case"binary":return Ot(a);case"string":return e;case"file":return ar(r.file,a,"utf8");case"buffer":{if(_)return A(a,"utf8");else if(typeof TextEncoder!=="undefined")return(new TextEncoder).encode(a);else return ec(a,{type:"binary"}).split("").map(function(e){return e.charCodeAt(0)})};}throw new Error("Unrecognized type "+r.type)}function rc(e,r){switch(r.type){case"base64":return x(e);case"binary":return e;case"string":return e;case"file":return ar(r.file,e,"binary");case"buffer":{if(_)return A(e,"binary");else return e.split("").map(function(e){return e.charCodeAt(0)})};}throw new Error("Unrecognized type "+r.type)}function tc(e,r){switch(r.type){case"string":;case"base64":;case"binary":var t="";for(var a=0;a<e.length;++a)t+=String.fromCharCode(e[a]);return r.type=="base64"?y(t):r.type=="string"?Dt(t):t;case"file":return ar(r.file,e);case"buffer":return e;default:throw new Error("Unrecognized type "+r.type);}}function ac(e,r){c();Wl(e);var t=yr(r||{});if(t.cellStyles){t.cellNF=true;t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=ac(e,t);t.type="array";return O(a)}return Ko(e,t)}function nc(e,r){c();Wl(e);var t=yr(r||{});if(t.cellStyles){t.cellNF=true;t.sheetStubs=true}if(t.type=="array"){t.type="binary";var a=nc(e,t);t.type="array";return O(a)}var n=0;if(t.sheet){if(typeof t.sheet=="number")n=t.sheet;else n=e.SheetNames.indexOf(t.sheet);if(!e.SheetNames[n])throw new Error("Sheet not found: "+t.sheet+" : "+typeof t.sheet)}switch(t.bookType||"xlsb"){case"xml":;case"xlml":return ec(write_xlml(e,t),t);case"slk":;case"sylk":return ec(oi.from_sheet(e.Sheets[e.SheetNames[n]],t,e),t);case"htm":;case"html":return ec(co(e.Sheets[e.SheetNames[n]],t),t);case"txt":return rc(pc(e.Sheets[e.SheetNames[n]],t),t);case"csv":return ec(dc(e.Sheets[e.SheetNames[n]],t),t,"\ufeff");case"dif":return ec(ci.from_sheet(e.Sheets[e.SheetNames[n]],t),t);case"dbf":return tc(li.from_sheet(e.Sheets[e.SheetNames[n]],t),t);case"prn":return ec(ui.from_sheet(e.Sheets[e.SheetNames[n]],t),t);case"rtf":return ec(sheet_to_rtf(e.Sheets[e.SheetNames[n]],t),t);case"eth":return ec(fi.from_sheet(e.Sheets[e.SheetNames[n]],t),t);case"fods":return ec(_o(e,t),t);case"wk1":return tc(WK_.sheet_to_wk1(e.Sheets[e.SheetNames[n]],t),t);case"wk3":return tc(WK_.book_to_wk3(e,t),t);case"biff2":if(!t.biff)t.biff=2;case"biff3":if(!t.biff)t.biff=3;case"biff4":if(!t.biff)t.biff=4;return tc(write_biff_buf(e,t),t);case"biff5":if(!t.biff)t.biff=5;case"biff8":;case"xla":;case"xls":if(!t.biff)t.biff=8;return Qo(e,t);case"xlsx":;case"xlsm":;case"xlam":;case"xlsb":;case"numbers":;case"ods":return Zo(e,t);default:throw new Error("Unrecognized bookType |"+t.bookType+"|");}}function ic(e){if(e.bookType)return;var r={xls:"biff8",htm:"html",slk:"sylk",socialcalc:"eth",Sh33tJS:"WTF"};var t=e.file.slice(e.file.lastIndexOf(".")).toLowerCase();if(t.match(/^\.[a-z]+$/))e.bookType=t.slice(1);e.bookType=r[e.bookType]||e.bookType}function sc(e,r,t){var a=t||{};a.type="file";a.file=r;ic(a);return nc(e,a)}function lc(e,r,t){var a=t||{};a.type="file";a.file=r;ic(a);return ac(e,a)}function oc(e,r,t,a){var n=t||{};n.type="file";n.file=e;ic(n);n.type="buffer";var i=a;if(!(i instanceof Function))i=t;return er.writeFile(e,nc(r,n),i)}function cc(e,r,t,a,n,i,s){var l=za(t);var o=s.defval,c=s.raw||!Object.prototype.hasOwnProperty.call(s,"raw");var f=true,u=e["!data"]!=null;var h=n===1?[]:{};if(n!==1){if(Object.defineProperty)try{Object.defineProperty(h,"__rowNum__",{value:t,enumerable:false})}catch(d){h.__rowNum__=t}else h.__rowNum__=t}if(!u||e["!data"][t])for(var p=r.s.c;p<=r.e.c;++p){var m=u?(e["!data"][t]||[])[p]:e[a[p]+l];if(m==null||m.t===undefined){if(o===undefined)continue;if(i[p]!=null){h[i[p]]=o}continue}var v=m.v;switch(m.t){case"z":if(v==null)break;continue;case"e":v=v==0?null:void 0;break;case"s":;case"b":;case"n":if(!m.z||!Re(m.z))break;v=pr(v);if(typeof v=="number")break;case"d":if(!(s&&(s.UTC||s.raw===false)))v=Mr(new Date(v));break;default:throw new Error("unrecognized type "+m.t);}if(i[p]!=null){if(v==null){if(m.t=="e"&&v===null)h[i[p]]=null;else if(o!==undefined)h[i[p]]=o;else if(c&&v===null)h[i[p]]=null;else continue}else{h[i[p]]=(m.t==="n"&&typeof s.rawNumbers==="boolean"?s.rawNumbers:c)?v:tn(m,v,s)}if(v!=null)f=false}}return{row:h,isempty:f}}function fc(e,r){if(e==null||e["!ref"]==null)return[];var t={t:"n",v:0},a=0,n=1,i=[],s=0,l="";var o={s:{r:0,c:0},e:{r:0,c:0}};var c=r||{};var f=c.range!=null?c.range:e["!ref"];if(c.header===1)a=1;else if(c.header==="A")a=2;else if(Array.isArray(c.header))a=3;else if(c.header==null)a=0;switch(typeof f){case"string":o=en(f);break;case"number":o=en(e["!ref"]);o.s.r=f;break;default:o=f;}if(a>0)n=0;var u=za(o.s.r);var h=[];var d=[];var p=0,m=0;var v=e["!data"]!=null;var g=o.s.r,b=0;var w={};if(v&&!e["!data"][g])e["!data"][g]=[];var k=c.skipHidden&&e["!cols"]||[];var y=c.skipHidden&&e["!rows"]||[];for(b=o.s.c;b<=o.e.c;++b){if((k[b]||{}).hidden)continue;h[b]=Ha(b);t=v?e["!data"][g][b]:e[h[b]+u];switch(a){case 1:i[b]=b-o.s.c;break;case 2:i[b]=h[b];break;case 3:i[b]=c.header[b-o.s.c];break;default:if(t==null)t={w:"__EMPTY",t:"s"};l=s=tn(t,null,c);m=w[s]||0;if(!m)w[s]=1;else{do{l=s+"_"+m++}while(w[l]);w[s]=m;w[l]=1}i[b]=l;}}for(g=o.s.r+n;g<=o.e.r;++g){if((y[g]||{}).hidden)continue;var x=cc(e,o,g,h,a,i,c);if(x.isempty===false||(a===1?c.blankrows!==false:!!c.blankrows))d[p++]=x.row}d.length=p;return d}var uc=/"/g;function hc(e,r,t,a,n,i,s,l,o){var c=true;var f=[],u="",h=za(t);var d=e["!data"]!=null;var p=d&&e["!data"][t]||[];for(var m=r.s.c;m<=r.e.c;++m){if(!a[m])continue;var v=d?p[m]:e[a[m]+h];if(v==null)u="";else if(v.v!=null){c=false;u=""+(o.rawNumbers&&v.t=="n"?v.v:tn(v,null,o));for(var g=0,b=0;g!==u.length;++g)if((b=u.charCodeAt(g))===n||b===i||b===34||o.forceQuotes){u='"'+u.replace(uc,'""')+'"';break}if(u=="ID"&&l==0&&f.length==0)u='"ID"'}else if(v.f!=null&&!v.F){c=false;u="="+v.f;if(u.indexOf(",")>=0)u='"'+u.replace(uc,'""')+'"'}else u="";f.push(u)}if(o.strip)while(f[f.length-1]==="")--f.length;if(o.blankrows===false&&c)return null;return f.join(s)}function dc(e,r){var t=[];var a=r==null?{}:r;if(e==null||e["!ref"]==null)return"";var n=en(e["!ref"]);var i=a.FS!==undefined?a.FS:",",s=i.charCodeAt(0);var l=a.RS!==undefined?a.RS:"\n",o=l.charCodeAt(0);var c="",f=[];var u=a.skipHidden&&e["!cols"]||[];var h=a.skipHidden&&e["!rows"]||[];for(var d=n.s.c;d<=n.e.c;++d)if(!(u[d]||{}).hidden)f[d]=Ha(d);var p=0;for(var m=n.s.r;m<=n.e.r;++m){if((h[m]||{}).hidden)continue;c=hc(e,n,m,f,s,o,i,p,a);if(c==null){continue}if(c||a.blankrows!==false)t.push((p++?l:"")+c)}return t.join("")}function pc(e,r){if(!r)r={};r.FS="\t";r.RS="\n";var t=dc(e,r);if(typeof a=="undefined"||r.type=="string")return t;var n=a.utils.encode(1200,t,"str");return String.fromCharCode(255)+String.fromCharCode(254)+n}function mc(e,r){var t="",a,n="";if(e==null||e["!ref"]==null)return[];var i=en(e["!ref"]),s="",l=[],o;var c=[];var f=e["!data"]!=null;for(o=i.s.c;o<=i.e.c;++o)l[o]=Ha(o);for(var u=i.s.r;u<=i.e.r;++u){s=za(u);for(o=i.s.c;o<=i.e.c;++o){t=l[o]+s;a=f?(e["!data"][u]||[])[o]:e[t];n="";if(a===undefined)continue;else if(a.F!=null){t=a.F;if(!a.f)continue;n=a.f;if(t.indexOf(":")==-1)t=t+":"+t}if(a.f!=null)n=a.f;else if(r&&r.values===false)continue;else if(a.t=="z")continue;else if(a.t=="n"&&a.v!=null)n=""+a.v;else if(a.t=="b")n=a.v?"TRUE":"FALSE";else if(a.w!==undefined)n="'"+a.w;else if(a.v===undefined)continue;else if(a.t=="s")n="'"+a.v;else n=""+a.v;c[c.length]=t+"="+n}}return c}function vc(e,r,t){var a=t||{};var n=e?e["!data"]!=null:a.dense;if(b!=null&&n==null)n=b;var i=+!a.skipHeader;var s=e||{};if(!e&&n)s["!data"]=[];var l=0,o=0;if(s&&a.origin!=null){if(typeof a.origin=="number")l=a.origin;else{var c=typeof a.origin=="string"?Ya(a.origin):a.origin;l=c.r;o=c.c}}var f={s:{c:0,r:0},e:{c:o,r:l+r.length-1+i}};if(s["!ref"]){var u=en(s["!ref"]);f.e.c=Math.max(f.e.c,u.e.c);f.e.r=Math.max(f.e.r,u.e.r);if(l==-1){l=u.e.r+1;f.e.r=l+r.length-1+i}}else{if(l==-1){l=0;f.e.r=r.length-1+i}}var h=a.header||[],d=0;var p=[];r.forEach(function(e,r){if(n&&!s["!data"][l+r+i])s["!data"][l+r+i]=[];if(n)p=s["!data"][l+r+i];ir(e).forEach(function(t){if((d=h.indexOf(t))==-1)h[d=h.length]=t;var c=e[t];var f="z";var u="";var m=n?"":Ha(o+d)+za(l+r+i);var v=n?p[o+d]:s[m];if(c&&typeof c==="object"&&!(c instanceof Date)){if(n)p[o+d]=c;else s[m]=c}else{if(typeof c=="number")f="n";else if(typeof c=="boolean")f="b";else if(typeof c=="string")f="s";else if(c instanceof Date){f="d";if(!a.UTC)c=Ir(c);if(!a.cellDates){f="n";c=dr(c)}u=v!=null&&v.z&&Re(v.z)?v.z:a.dateNF||q[14]}else if(c===null&&a.nullError){f="e";c=0}if(!v){if(!n)s[m]=v={t:f,v:c};else p[o+d]=v={t:f,v:c}}else{v.t=f;v.v=c;delete v.w;delete v.R;if(u)v.z=u}if(u)v.z=u}})});f.e.c=Math.max(f.e.c,o+h.length-1);var m=za(l);if(n&&!s["!data"][l])s["!data"][l]=[];if(i)for(d=0;d<h.length;++d){if(n)s["!data"][l][d+o]={t:"s",v:h[d]};else s[Ha(d+o)+m]={t:"s",v:h[d]}}s["!ref"]=Ka(f);return s}function gc(e,r){return vc(null,e,r)}function bc(e,r,t){if(typeof r=="string"){if(e["!data"]!=null){var a=Ya(r);if(!e["!data"][a.r])e["!data"][a.r]=[];return e["!data"][a.r][a.c]||(e["!data"][a.r][a.c]={t:"z"})}return e[r]||(e[r]={t:"z"})}if(typeof r!="number")return bc(e,Ja(r));return bc(e,Ha(t||0)+za(r))}function wc(e,r){if(typeof r=="number"){if(r>=0&&e.SheetNames.length>r)return r;throw new Error("Cannot find sheet # "+r)}else if(typeof r=="string"){var t=e.SheetNames.indexOf(r);if(t>-1)return t;throw new Error("Cannot find sheet name |"+r+"|")}else throw new Error("Cannot find sheet |"+r+"|")}function kc(e,r){var t={SheetNames:[],Sheets:{}};if(e)yc(t,e,r||"Sheet1");return t}function yc(e,r,t,a){var n=1;if(!t)for(;n<=65535;++n,t=undefined)if(e.SheetNames.indexOf(t="Sheet"+n)==-1)break;if(!t||e.SheetNames.length>=65535)throw new Error("Too many worksheets");if(a&&e.SheetNames.indexOf(t)>=0&&t.length<32){var i=t.match(/\d+$/);n=i&&+i[0]||0;var s=i&&t.slice(0,i.index)||t;for(++n;n<=65535;++n)if(e.SheetNames.indexOf(t=s+n)==-1)break}zl(t);if(e.SheetNames.indexOf(t)>=0)throw new Error("Worksheet with name |"+t+"| already exists!");e.SheetNames.push(t);e.Sheets[t]=r;return t}function xc(e,r,t){if(!e.Workbook)e.Workbook={};if(!e.Workbook.Sheets)e.Workbook.Sheets=[];var a=wc(e,r);if(!e.Workbook.Sheets[a])e.Workbook.Sheets[a]={};switch(t){case 0:;case 1:;case 2:break;default:throw new Error("Bad sheet visibility setting "+t);}e.Workbook.Sheets[a].Hidden=t}function Cc(e,r){e.z=r;return e}function Sc(e,r,t){if(!r){delete e.l}else{e.l={Target:r};if(t)e.l.Tooltip=t}return e}function _c(e,r,t){return Sc(e,"#"+r,t)}function Ac(e,r,t){if(!e.c)e.c=[];e.c.push({t:r,a:t||"SheetJS"})}function Tc(e,r,t,a){var n=typeof r!="string"?r:en(r);var i=typeof r=="string"?r:Ka(r);for(var s=n.s.r;s<=n.e.r;++s)for(var l=n.s.c;l<=n.e.c;++l){var o=bc(e,s,l);o.t="n";o.F=i;delete o.v;if(s==n.s.r&&l==n.s.c){o.f=t;if(a)o.D=true}}var c=Za(e["!ref"]);if(c.s.r>n.s.r)c.s.r=n.s.r;if(c.s.c>n.s.c)c.s.c=n.s.c;if(c.e.r<n.e.r)c.e.r=n.e.r;if(c.e.c<n.e.c)c.e.c=n.e.c;e["!ref"]=Ka(c);return e}var Ec={encode_col:Ha,encode_row:za,encode_cell:Ja,encode_range:Ka,decode_col:ja,decode_row:Ba,split_cell:Ga,decode_cell:Ya,decode_range:Za,format_cell:tn,sheet_new:nn,sheet_add_aoa:sn,sheet_add_json:vc,sheet_add_dom:fo,aoa_to_sheet:ln,json_to_sheet:gc,table_to_sheet:uo,table_to_book:ho,sheet_to_csv:dc,sheet_to_txt:pc,sheet_to_json:fc,sheet_to_html:co,sheet_to_formulae:mc,sheet_to_row_object_array:fc,sheet_get_cell:bc,book_new:kc,book_append_sheet:yc,book_set_sheet_visibility:xc,cell_set_number_format:Cc,cell_set_hyperlink:Sc,cell_set_internal_link:_c,cell_add_comment:Ac,sheet_set_array_formula:Tc,consts:{SHEET_VISIBLE:0,SHEET_HIDDEN:1,SHEET_VERY_HIDDEN:2}};if(typeof parse_xlscfb!=="undefined")e.parse_xlscfb=parse_xlscfb;e.parse_zip=Io;e.read=Xo;e.readFile=Go;e.readFileSync=Go;e.write=nc;e.writeFile=sc;e.writeFileSync=sc;e.writeFileAsync=oc;e.utils=Ec;e.writeXLSX=ac;e.writeFileXLSX=lc;e.set_fs=rr;e.set_cptable=g;e.SSF=Ve;if(typeof __stream!=="undefined")e.stream=__stream;if(typeof Qe!=="undefined")e.CFB=Qe;if(typeof require!=="undefined"){var Fc=undefined;if((Fc||{}).Readable)set_readable(Fc.Readable);try{er=undefined}catch(Ms){}}}if(typeof exports!=="undefined")make_xlsx_lib(exports);else if(typeof module!=="undefined"&&module.exports)make_xlsx_lib(module.exports);else if(typeof define==="function"&&define.amd)define("xlsx",function(){if(!XLSX.version)make_xlsx_lib(XLSX);return XLSX});else make_xlsx_lib(XLSX);if(typeof window!=="undefined"&&!window.XLSX)try{window.XLSX=XLSX}catch(e){}
+
+      if (globalTarget && globalTarget.XLSX) {
+        cachedInlineXlsx = globalTarget.XLSX;
+        return cachedInlineXlsx;
+      }
+      if (typeof XLSX !== "undefined") {
+        cachedInlineXlsx = XLSX;
+        if (globalTarget) globalTarget.XLSX = XLSX;
+        return cachedInlineXlsx;
+      }
+    } catch (e) {
+      console.error("[pi-enh-excel] Failed to initialize XLSX engine:", e);
+    }
+    return null;
+  }
+
+  function getExcelColName(idx) {
+    let name = "";
+    let n = idx;
+    while (n >= 0) {
+      name = String.fromCharCode((n % 26) + 65) + name;
+      n = Math.floor(n / 26) - 1;
+    }
+    return name;
+  }
+
+  function formatExcelCellValue(val) {
+    if (val == null || val === "") return "";
+    if (val instanceof Date) {
+      const y = val.getFullYear();
+      const m = String(val.getMonth() + 1).padStart(2, "0");
+      const d = String(val.getDate()).padStart(2, "0");
+      return y + "-" + m + "-" + d;
+    }
+    if (typeof val === "number") {
+      return String(val);
+    }
+    return String(val);
+  }
+
+  function syncExcelViewerMode() {
+    if (!isPluginEnabled("excel-sheet-preview")) {
+      removeExcelViewerEnhancements();
+      return;
+    }
+
+    const viewerShell = document.querySelector(".file-viewer-shell");
+    if (!viewerShell) {
+      activeExcelViewerPath = null;
+      return;
+    }
+
+    const pathEl = viewerShell.querySelector(".file-viewer-path");
+    const rawPath = pathEl?.getAttribute("title") || pathEl?.textContent || "";
+    const cleanPath = (rawPath || "").trim();
+    const isExcel = /\.(xlsx|xls|csv|tsv)$/i.test(cleanPath);
+
+    if (!isExcel) {
+      removeExcelViewerEnhancements();
+      activeExcelViewerPath = null;
+      return;
+    }
+
+    // 用户显式要求查看纯文本源码
+    if (excelUserExplicitSourcePaths.has(cleanPath)) {
+      const container = viewerShell.querySelector(".pi-enh-excel-container");
+      if (container) container.style.display = "none";
+      const nativeContent = viewerShell.querySelector(".file-viewer-content");
+      if (nativeContent) nativeContent.style.display = "";
+      decorateExcelSourceSwitcher(viewerShell, cleanPath);
+      return;
+    }
+
+    // 隐藏原生纯文本容器（避免乱码闪烁）
+    const nativeContent = viewerShell.querySelector(".file-viewer-content");
+    if (nativeContent && nativeContent.style.display !== "none") {
+      nativeContent.style.display = "none";
+    }
+
+    // 检查缓存状态
+    let state = excelWorkbookCache.get(cleanPath);
+    if (!state) {
+      state = { workbook: null, activeSheet: "", searchQuery: "", loading: true, error: null };
+      excelWorkbookCache.set(cleanPath, state);
+      loadExcelWorkbook(cleanPath, viewerShell);
+    }
+
+    renderExcelViewer(viewerShell, cleanPath);
+  }
+
+  function loadExcelWorkbook(filePath, viewerShell) {
+    const encoded = encodeURIComponent(filePath.replace(/^[\\/]+/, ""));
+    const downloadUrl = "/api/files/" + encoded + "?type=download";
+
+    fetch(downloadUrl)
+      .then((res) => {
+        if (!res.ok) throw new Error("HTTP " + res.status + " " + res.statusText);
+        return res.arrayBuffer();
+      })
+      .then((buf) => {
+        const XLSX = ensureXlsxEngine();
+        if (!XLSX) throw new Error("Excel 解析引擎初始化失败");
+        const isCsv = /\.csv$/i.test(filePath);
+        const readOpts = isCsv ? { type: "array" } : { type: "array", cellStyles: true, cellDates: true };
+        const wb = XLSX.read(new Uint8Array(buf), readOpts);
+        const state = excelWorkbookCache.get(filePath) || {};
+        state.workbook = wb;
+        state.activeSheet = (wb.SheetNames && wb.SheetNames[0]) || "Sheet1";
+        state.loading = false;
+        state.error = null;
+        excelWorkbookCache.set(filePath, state);
+        renderExcelViewer(viewerShell, filePath);
+      })
+      .catch((err) => {
+        console.error("[pi-enh-excel] 加载解析失败:", err);
+        const state = excelWorkbookCache.get(filePath) || {};
+        state.loading = false;
+        state.error = err.message || "文件读取解析失败";
+        excelWorkbookCache.set(filePath, state);
+        renderExcelViewer(viewerShell, filePath);
+      });
+  }
+
+  function renderExcelViewer(viewerShell, filePath) {
+    let container = viewerShell.querySelector(".pi-enh-excel-container");
+    if (!container) {
+      container = document.createElement("div");
+      container.className = "pi-enh-excel-container";
+      viewerShell.appendChild(container);
+    }
+    container.style.display = "flex";
+
+    const state = excelWorkbookCache.get(filePath) || { loading: true };
+
+    if (state.loading) {
+      container.innerHTML = `
+        <div class="pi-enh-excel-status-spinner">
+          <div style="font-size:22px;animation:spin 1s linear infinite;">⏳</div>
+          <div>正在解析 Excel 表格数据...</div>
+        </div>
+      `;
+      return;
+    }
+
+    if (state.error || !state.workbook) {
+      container.innerHTML = `
+        <div class="pi-enh-excel-status-spinner">
+          <div style="font-size:22px;">⚠️</div>
+          <div style="color:#f87171;">无法解析该表格: ${escapeHtml(state.error || "未知格式")}</div>
+          <div style="display:flex;gap:8px;margin-top:8px;">
+            <button type="button" class="pi-enh-excel-btn" data-action="retry">重新加载</button>
+            <button type="button" class="pi-enh-excel-btn" data-action="source">查看原始文本</button>
+          </div>
+        </div>
+      `;
+      container.querySelector('[data-action="retry"]')?.addEventListener("click", () => {
+        excelWorkbookCache.delete(filePath);
+        syncExcelViewerMode();
+      });
+      container.querySelector('[data-action="source"]')?.addEventListener("click", () => {
+        excelUserExplicitSourcePaths.add(filePath);
+        syncExcelViewerMode();
+      });
+      return;
+    }
+
+    const wb = state.workbook;
+    const sheetNames = wb.SheetNames || [];
+    const activeSheetName = state.activeSheet || sheetNames[0] || "";
+    const sheet = wb.Sheets[activeSheetName] || {};
+
+    const XLSX = ensureXlsxEngine();
+    const rows = XLSX ? XLSX.utils.sheet_to_json(sheet, { header: 1, defval: "" }) : [];
+    const totalRows = rows.length;
+    let maxCols = 0;
+    for (let i = 0; i < rows.length; i++) {
+      if (rows[i] && rows[i].length > maxCols) maxCols = rows[i].length;
+    }
+    if (maxCols === 0 && totalRows === 0) maxCols = 5;
+
+    // 解析合并单元格 (Merges)
+    const merges = sheet["!merges"] || [];
+    const mergeMap = new Map(); // "r,c" -> { rowSpan, colSpan, skip }
+    for (const m of merges) {
+      const sR = m.s.r;
+      const sC = m.s.c;
+      const eR = m.e.r;
+      const eC = m.e.c;
+      mergeMap.set(sR + "," + sC, { rowSpan: eR - sR + 1, colSpan: eC - sC + 1, skip: false });
+      for (let r = sR; r <= eR; r++) {
+        for (let c = sC; c <= eC; c++) {
+          if (r !== sR || c !== sC) {
+            mergeMap.set(r + "," + c, { skip: true });
+          }
+        }
+      }
+    }
+
+    const ext = (filePath.split(".").pop() || "xlsx").toUpperCase();
+    const query = (state.searchQuery || "").trim().toLowerCase();
+
+    // 构造 HTML
+    let tableHtml = '<table class="pi-enh-excel-table"><thead><tr><th class="pi-enh-excel-th pi-enh-excel-corner"></th>';
+    for (let c = 0; c < maxCols; c++) {
+      tableHtml += `<th class="pi-enh-excel-th">${getExcelColName(c)}</th>`;
+    }
+    tableHtml += '</tr></thead><tbody>';
+
+    let matchCount = 0;
+    const maxRenderRows = Math.min(totalRows, 1500); // 性能保护：首屏最多渲染1500行
+    for (let r = 0; r < maxRenderRows; r++) {
+      const rowData = rows[r] || [];
+      tableHtml += `<tr class="pi-enh-excel-tr"><td class="pi-enh-excel-row-num">${r + 1}</td>`;
+      for (let c = 0; c < maxCols; c++) {
+        const mInfo = mergeMap.get(r + "," + c);
+        if (mInfo && mInfo.skip) continue;
+
+        const val = rowData[c];
+        const strVal = formatExcelCellValue(val);
+        const isNum = typeof val === "number" && !isNaN(val);
+        const isDate = val instanceof Date;
+
+        let isMatch = false;
+        if (query && strVal && strVal.toLowerCase().includes(query)) {
+          isMatch = true;
+          matchCount++;
+        }
+
+        const cls = ["pi-enh-excel-td"];
+        if (isNum) cls.push("num");
+        if (isDate) cls.push("date");
+        if (isMatch) cls.push("is-match");
+
+        let spanAttr = "";
+        if (mInfo && mInfo.rowSpan > 1) spanAttr += ` rowspan="${mInfo.rowSpan}"`;
+        if (mInfo && mInfo.colSpan > 1) spanAttr += ` colspan="${mInfo.colSpan}"`;
+
+        tableHtml += `<td class="${cls.join(" ")}" data-r="${r}" data-c="${c}" title="${escapeHtml(strVal)}"${spanAttr}>${escapeHtml(strVal)}</td>`;
+      }
+      tableHtml += '</tr>';
+    }
+    if (totalRows > maxRenderRows) {
+      tableHtml += `<tr><td colspan="${maxCols + 1}" style="text-align:center;padding:12px;color:var(--text-dim);font-size:11px;">⚠️ 已显示前 ${maxRenderRows} 行，更多行请下载原件查看</td></tr>`;
+    }
+    tableHtml += '</tbody></table>';
+
+    // 构造底栏 Sheet 切换 Tabs
+    let tabsHtml = '';
+    if (sheetNames.length > 0) {
+      tabsHtml += '<div class="pi-enh-excel-bottom-bar">';
+      for (const name of sheetNames) {
+        const isActive = name === activeSheetName;
+        tabsHtml += `<button type="button" class="pi-enh-excel-tab ${isActive ? "is-active" : ""}" data-sheet="${escapeHtml(name)}"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="opacity:0.75;"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line></svg>${escapeHtml(name)}</button>`;
+      }
+      tabsHtml += '</div>';
+    }
+
+    container.innerHTML = `
+      <div class="pi-enh-excel-toolbar">
+        <span class="pi-enh-excel-badge">${ext}</span>
+        <span class="pi-enh-excel-meta" title="${escapeHtml(activeSheetName)}">
+          ${escapeHtml(activeSheetName)} · ${totalRows} 行 × ${maxCols} 列 ${sheetNames.length > 1 ? "(" + sheetNames.length + "个工作表)" : ""}
+        </span>
+        <div class="pi-enh-excel-search">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="opacity:0.6;flex-shrink:0;"><circle cx="11" cy="11" r="8"></circle><line x1="21" y1="21" x2="16.65" y2="16.65"></line></svg>
+          <input type="text" placeholder="搜索单元格..." value="${escapeHtml(state.searchQuery || "")}" />
+          ${query ? `<span style="font-size:10px;color:#34d399;flex-shrink:0;">${matchCount}项</span>` : ""}
+        </div>
+        <button type="button" class="pi-enh-excel-btn" data-action="copy" title="复制当前工作表为TSV表格"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>复制数据</button>
+        <button type="button" class="pi-enh-excel-btn" data-action="download" title="下载原文件"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>下载原件</button>
+        <button type="button" class="pi-enh-excel-btn" data-action="toggle-source" title="切换到纯文本源码查看"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"></polyline><polyline points="8 6 2 12 8 18"></polyline></svg>文本源码</button>
+      </div>
+      <div class="pi-enh-excel-grid-wrap">
+        ${tableHtml}
+      </div>
+      ${tabsHtml}
+    `;
+
+    // 绑定事件：搜索输入
+    const searchInput = container.querySelector(".pi-enh-excel-search input");
+    if (searchInput) {
+      searchInput.addEventListener("input", (e) => {
+        state.searchQuery = e.target.value || "";
+        renderExcelViewer(viewerShell, filePath);
+      });
+      if (state.searchQuery) {
+        searchInput.focus();
+        searchInput.setSelectionRange(searchInput.value.length, searchInput.value.length);
+      }
+    }
+
+    // 绑定事件：复制工作表 TSV
+    container.querySelector('[data-action="copy"]')?.addEventListener("click", () => {
+      try {
+        const tsv = rows.map((r) => (r || []).map((v) => formatExcelCellValue(v).replace(/\t/g, " ")).join("\t")).join("\n");
+        navigator.clipboard.writeText(tsv);
+        showToast("已复制当前工作表数据至剪贴板", null, 1800);
+      } catch (e) {
+        showToast("复制失败", null, 1800);
+      }
+    });
+
+    // 绑定事件：下载原件
+    container.querySelector('[data-action="download"]')?.addEventListener("click", () => {
+      const encoded = encodeURIComponent(filePath.replace(/^[\\/]+/, ""));
+      const a = document.createElement("a");
+      a.href = "/api/files/" + encoded + "?type=download";
+      a.download = filePath.split("/").pop() || "download.xlsx";
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+    });
+
+    // 绑定事件：切换到文本源码
+    container.querySelector('[data-action="toggle-source"]')?.addEventListener("click", () => {
+      excelUserExplicitSourcePaths.add(filePath);
+      syncExcelViewerMode();
+    });
+
+    // 绑定事件：切换工作表 Tab
+    for (const tabBtn of container.querySelectorAll(".pi-enh-excel-tab")) {
+      tabBtn.addEventListener("click", () => {
+        const targetSheet = tabBtn.getAttribute("data-sheet");
+        if (targetSheet && targetSheet !== state.activeSheet) {
+          state.activeSheet = targetSheet;
+          state.searchQuery = "";
+          renderExcelViewer(viewerShell, filePath);
+        }
+      });
+    }
+
+    // 绑定事件：单元格点击高亮
+    container.querySelector(".pi-enh-excel-grid-wrap")?.addEventListener("click", (e) => {
+      const cell = e.target?.closest?.(".pi-enh-excel-td");
+      if (cell) {
+        container.querySelectorAll(".pi-enh-excel-td.is-selected").forEach((el) => el.classList.remove("is-selected"));
+        cell.classList.add("is-selected");
+      }
+    });
+  }
+
+  function decorateExcelSourceSwitcher(viewerShell, filePath) {
+    let customBtn = viewerShell.querySelector(".pi-enh-excel-switch-btn");
+    if (!customBtn) {
+      const controls = viewerShell.querySelector(".file-viewer-controls") || viewerShell.querySelector(".file-viewer-toolbar");
+      if (!controls) return;
+      customBtn = document.createElement("button");
+      customBtn.type = "button";
+      customBtn.className = "pi-enh-excel-switch-btn pi-enh-excel-btn";
+      customBtn.innerHTML = "📊 表格预览";
+      customBtn.title = "返回 Excel 交互表格预览";
+      customBtn.style.marginLeft = "6px";
+      customBtn.addEventListener("click", () => {
+        excelUserExplicitSourcePaths.delete(filePath);
+        syncExcelViewerMode();
+      });
+      controls.appendChild(customBtn);
+    }
+  }
+
+  function removeExcelViewerEnhancements() {
+    for (const el of document.querySelectorAll(".pi-enh-excel-container")) {
+      el.remove();
+    }
+    for (const el of document.querySelectorAll(".pi-enh-excel-switch-btn")) {
+      el.remove();
+    }
+    const nativeContent = document.querySelector(".file-viewer-shell .file-viewer-content");
+    if (nativeContent && nativeContent.style.display === "none") {
+      nativeContent.style.display = "";
+    }
+    activeExcelViewerPath = null;
+  }
+
+
   addManagedListener(document, "click", (e) => {
     const link = e.target?.closest?.("a, [role='tab'], .file-viewer-mode-button, .pi-enh-md-btn");
     if (link) {
@@ -48853,9 +57064,17 @@
             observedTarget = container;
           }
         }
-        if (isPluginEnabled("task-tool-auto-collapse")) {
-          syncAllTaskToolAutoCollapse();
-        }
+        withMutationGuard(() => {
+          if (isPluginEnabled("task-tool-auto-collapse")) {
+            syncAllTaskToolAutoCollapse();
+          }
+          if (isPluginEnabled("compaction-auto-collapse") && typeof syncCompactionCards === "function") {
+            syncCompactionCards();
+          }
+          if (isPluginEnabled("pi-mail-auto-collapse") && typeof syncPiMailCards === "function") {
+            syncPiMailCards();
+          }
+        });
 
         // 针对输入框、队列变动立即触发同步，消除 50ms 延时导致的界面跳动（带内部变更守卫防死循环）
         if (mutations && mutations.length > 0) {
@@ -48879,16 +57098,25 @@
             }
           }
           if (touchesComposer && !isMutatingInternally) {
-            withMutationGuard(() => {
-              syncCodexComposerLayout();
-              syncComposerMarkdownFormat();
-              syncComposerModes();
-              syncComposerQueuePanel();
-              syncComposerCleanPlaceholder();
-              const textarea = findComposerTextarea();
-              const card = textarea?.closest('fieldset > div[style*="max-width"]');
-              if (card && textarea) updateCardContentState(card, textarea);
-            });
+            // 输入保护：若当前活动焦点就在输入框内且卡片已打好标记，说明是打字/退格引发的 React 局部重排，
+            // 严禁在此高频执行耗时的全量布局扫描与重排！
+            const isTypingInComposer = Boolean(
+              document.activeElement &&
+              document.activeElement.closest?.("fieldset, .pi-enh-cursor-composer")
+            );
+            const cardReady = Boolean(document.querySelector(".pi-enh-cursor-composer"));
+            if (!isTypingInComposer || !cardReady) {
+              withMutationGuard(() => {
+                syncCodexComposerLayout();
+                syncComposerMarkdownFormat();
+                syncComposerModes();
+                syncComposerQueuePanel();
+                syncComposerCleanPlaceholder();
+                const textarea = findComposerTextarea();
+                const card = textarea?.closest('fieldset > div[style*="max-width"]');
+                if (card && textarea) updateCardContentState(card, textarea);
+              });
+            }
           }
           if (touchesDialog && isPluginEnabled("ask-user-web-native") && !isMutatingInternally) {
             withMutationGuard(() => {
@@ -48963,6 +57191,7 @@
       syncSessionColorEffects();
       syncSessionTags();
       syncSessionOdooAddons();
+      syncSessionSectionHeaders();
     });
   }
 
@@ -48972,25 +57201,60 @@
     try {
       sidebarObserver = new MutationObserver((mutations) => {
         if (isMutatingInternally) return;
-        let hasNewSessionRows = false;
+        let hasSidebarRowOrHeaderChange = false;
+        let hasSessionTagContentChange = false;
         for (let i = 0; i < mutations.length; i++) {
           const m = mutations[i];
-          if (m.type === "childList" && m.addedNodes && m.addedNodes.length > 0) {
-            for (let j = 0; j < m.addedNodes.length; j++) {
-              const node = m.addedNodes[j];
-              if (node.nodeType === 1) {
-                if (node.classList?.contains("pi-enh-session-row-host") ||
-                    (typeof node.querySelector === "function" && node.querySelector(".pi-enh-session-row-host"))) {
-                  hasNewSessionRows = true;
-                  break;
+          if (m.type === "childList") {
+            // React may prune the extension-owned tag node during a row-local update without replacing the row host.
+            const mutationTarget = m.target?.nodeType === 1 ? m.target : m.target?.parentElement;
+            const insideSessionRow = mutationTarget?.closest?.(".pi-enh-session-row-host[data-pi-enh-session-id]");
+            const insideSessionTagsRow = mutationTarget?.closest?.(".pi-enh-session-tags-row");
+            const changedNodes = [...(m.addedNodes || []), ...(m.removedNodes || [])];
+            if ((insideSessionRow || insideSessionTagsRow) && (insideSessionTagsRow || changedNodes.some((node) =>
+              node.nodeType === 1 && (
+                node.classList?.contains("pi-enh-session-tags-row") ||
+                (typeof node.querySelector === "function" && node.querySelector(".pi-enh-session-tags-row"))
+              )
+            ))) {
+              hasSessionTagContentChange = true;
+            }
+
+            if (m.addedNodes && m.addedNodes.length > 0) {
+              for (let j = 0; j < m.addedNodes.length; j++) {
+                const node = m.addedNodes[j];
+                if (node.nodeType === 1) {
+                  if (node.classList?.contains("pi-enh-session-row-host") ||
+                      (typeof node.querySelector === "function" && node.querySelector(".pi-enh-session-row-host"))) {
+                    hasSidebarRowOrHeaderChange = true;
+                    break;
+                  }
+                }
+              }
+            }
+            if (!hasSidebarRowOrHeaderChange && m.removedNodes && m.removedNodes.length > 0) {
+              for (let j = 0; j < m.removedNodes.length; j++) {
+                const node = m.removedNodes[j];
+                if (node.nodeType === 1) {
+                  if (node.classList?.contains("pi-enh-session-row-host") ||
+                      node.classList?.contains("pi-enh-session-section-header") ||
+                      (typeof node.querySelector === "function" &&
+                        node.querySelector(".pi-enh-session-row-host, .pi-enh-session-section-header"))) {
+                    hasSidebarRowOrHeaderChange = true;
+                    break;
+                  }
                 }
               }
             }
           }
-          if (hasNewSessionRows) break;
+          if (hasSidebarRowOrHeaderChange) break;
         }
-        if (hasNewSessionRows && !isMutatingInternally) {
+        if (hasSidebarRowOrHeaderChange && !isMutatingInternally) {
           syncSidebarRowsImmediate();
+        } else if (hasSessionTagContentChange && !isMutatingInternally) {
+          withMutationGuard(() => {
+            syncSessionTags();
+          });
         }
       });
       const root = document.querySelector(".sidebar-container") || document.documentElement || document.body;
@@ -49260,13 +57524,7 @@
     } catch (err) {}
     if (!turnUsage) return;
 
-    if (!turnUsage.model) {
-      const currentSessionId = getCurrentSessionId();
-      const currentSession = currentSessionId ? knownSessionsMap.get(currentSessionId) : null;
-      if (currentSession && currentSession.model) {
-        turnUsage.model = currentSession.model;
-      }
-    }
+    // 严禁用当前 session.model 给历史回合补模型；未知标未知，真实记录 cost/缓存必须完整保留
 
     const tt = getUsageTooltip();
     tt.__currentBadge = usageBadge;
@@ -49520,6 +57778,7 @@
     if (!m) return true;
     if (m.hasAttribute?.("data-pi-enh-completed")) return true;
     if (m.querySelector && m.querySelector(".pi-enh-duration-badge")) return true;
+    if (m.classList?.contains?.("pi-enh-duration-badge")) return true;
     const entryId = getMessageEntryId(m);
     if (entryId && knownTurnMetrics.has(entryId)) return true;
     return false;
@@ -49644,10 +57903,48 @@
     clearLiveStopwatchDom();
   }
 
+  function isCurrentEmptySession() {
+    try {
+      // 1. 若页面存在首屏 Brand 元素（包含 apple-touch-icon 图标或标题区域），说明处于新建/空会话初始状态
+      const brandLogo = document.querySelector('img[src*="apple-touch-icon"]');
+      if (brandLogo && isElementVisibleForLiveTimer(brandLogo)) {
+        return true;
+      }
+      // 2. 检查是否有任何实际对话消息（user 或 assistant）
+      const userMsgs = typeof findUserMessages === "function" ? findUserMessages() : [];
+      if (userMsgs.length > 0) return false;
+      const assistantMsgs = document.querySelectorAll ? document.querySelectorAll('div[data-message-role="assistant"]') : [];
+      if (assistantMsgs.length > 0) return false;
+      const allMsgs = document.querySelectorAll ? document.querySelectorAll('div[data-message-role]') : [];
+      if (allMsgs.length > 0) return false;
+      // 没有任何消息且处于页面中，断定为空会话
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   function isLiveRunning(sessionId) {
     const currentSid = getCurrentSessionId();
     const sid = sessionId || currentSid;
     const isCurrent = !sid || !currentSid || sid === currentSid;
+
+    // 物理铁律：新建空会话（页面处于初始状态、没有任何用户或助手消息）绝对不可能在运行！
+    if (isCurrent && isCurrentEmptySession()) {
+      window.__PI_ENH_LAST_RUNNING_REASON__ = "empty new session is idle";
+      return false;
+    }
+
+    // 权威终态保护优先于 DOM：若该会话有可验证的终态证据（agent_settled/prompt_done、或 fresh /state running:false），
+    // 则即使 DOM 残留陈旧的 stop 按钮、placeholder 或 spin 动画，也绝不复活秒表与运行态。
+    // 只有更新的 agent_start 或实际发送才能解除该终态。
+    const checkSettled = typeof isSessionTerminallySettled === "function"
+      ? isSessionTerminallySettled
+      : (typeof window !== "undefined" ? window.__PI_ENH_IS_SESSION_TERMINALLY_SETTLED__ : null);
+    if (typeof checkSettled === "function" && checkSettled(sid)) {
+      window.__PI_ENH_LAST_RUNNING_REASON__ = "terminally settled protected";
+      return false;
+    }
 
     if (isCurrent) {
       const stopBtn = findActiveStopButton();
@@ -49655,7 +57952,9 @@
         window.__PI_ENH_LAST_RUNNING_REASON__ = "active stop button: " + (stopBtn.outerHTML || stopBtn.textContent);
         return true;
       }
+    }
 
+    if (isCurrent) {
       const textarea = findComposerTextarea();
       if (textarea) {
         const ph = typeof getComposerEffectivePlaceholder === "function"
@@ -49707,19 +58006,33 @@
   }
   window.__PI_ENH_IS_LIVE_RUNNING__ = isLiveRunning;
 
+  let lastTrackedLiveSessionId = null;
+
   function tickLiveDuration() {
     if (!isPluginEnabled("live-stopwatch")) {
       clearLiveStopwatchDom();
       return;
     }
     const currentSessionId = getCurrentSessionId();
+    // 立即检测会话切换（比 800ms DOM 观察器更灵敏，每 400ms tick 即可探测）
+    if (lastTrackedLiveSessionId !== currentSessionId) {
+      lastTrackedLiveSessionId = currentSessionId;
+      handleSessionSwitchLiveCleanup();
+    }
+
+    // 物理级防御：如果是新建空会话，彻底重置秒表与运行态，绝不弹窗
+    if (isCurrentEmptySession()) {
+      handleSessionSwitchLiveCleanup();
+      return;
+    }
+
     const isRunning = isLiveRunning(currentSessionId);
     
     if (isRunning) {
       notRunningConsecutiveTicks = 0;
       let turnStartTime = getActiveTurnStartTime(currentSessionId);
       if (!turnStartTime) {
-        turnStartTime = activeTurnStartTime || Date.now();
+        turnStartTime = Date.now();
         recordActiveTurnStart(currentSessionId, turnStartTime, null, false);
         scheduleCurrentSessionMetrics(100);
       }
@@ -49743,24 +58056,36 @@
       const lastUserMsg = userMsgs.length > 0 ? userMsgs[userMsgs.length - 1] : null;
       const assistantMsgs = document.querySelectorAll ? document.querySelectorAll('div[data-message-role="assistant"]') : [];
       const activeAssistantMsgs = [];
+      let hasCompletedAssistantAfterLastUser = false;
+
       for (let i = 0; i < assistantMsgs.length; i++) {
         const m = assistantMsgs[i];
         if (!isElementVisibleForLiveTimer(m)) continue;
-        if (isCompletedAssistantMsg(m)) continue;
+
+        let isFollowingLastUser = false;
         if (!lastUserMsg) {
-          // 若暂无已识别的 user 消息，仅将最后一条未完成的助手消息视作候选活跃卡片，绝不把历史已完成消息全部囊括
-          if (i === assistantMsgs.length - 1) {
-            activeAssistantMsgs.push(m);
-          }
+          // 若暂无已识别的 user 消息，仅将最后一条助手消息视作当前轮候选
+          isFollowingLastUser = (i === assistantMsgs.length - 1);
         } else if (typeof lastUserMsg.compareDocumentPosition === "function") {
           const pos = lastUserMsg.compareDocumentPosition(m);
           const isPreceding = Boolean(pos & 2);
           const isDisconnected = Boolean(pos & 1);
-          if (!isPreceding && !isDisconnected && m !== lastUserMsg) {
+          isFollowingLastUser = (!isPreceding && !isDisconnected && m !== lastUserMsg);
+        } else {
+          isFollowingLastUser = true;
+        }
+
+        if (isFollowingLastUser) {
+          if (isCompletedAssistantMsg(m)) {
+            const entryId = getMessageEntryId(m);
+            const hasTerminalTurnMetric = Boolean(entryId && knownTurnMetrics.has(entryId));
+            // An intermediate tool-use card may already have a static step badge; it is not
+            // proof that the agent's entire turn has settled. Keep the chat-tail timer available.
+            const isUnsettledToolStep = !hasTerminalTurnMetric && Boolean(m.querySelector?.('[data-pi-enh-tool-card="true"], [data-pi-enh-tool-card]'));
+            if (!isUnsettledToolStep) hasCompletedAssistantAfterLastUser = true;
+          } else {
             activeAssistantMsgs.push(m);
           }
-        } else {
-          activeAssistantMsgs.push(m);
         }
       }
 
@@ -49780,7 +58105,9 @@
           footer = ensureLiveTimerFallbackFooter(latestActiveMsg);
           usingFallbackFooter = Boolean(footer);
         }
-      } else {
+      } else if (lastUserMsg && !hasCompletedAssistantAfterLastUser) {
+        // 关键不变量：必须存在未完成的真实 User 提问轮次，且新 User 提问之后尚未出现已完成 assistant 时才允许 fallback 到 chat tail。
+        // 空会话（lastUserMsg 为 null）绝对禁止挂载任何 fallback live timer！
         const tailHost = findChatTailFallbackHost(lastUserMsg);
         if (tailHost) {
           footer = ensureLiveTimerFallbackFooter(tailHost);
@@ -49866,6 +58193,8 @@
         for (const timer of allLiveTimers) {
           if (timer !== liveBadge) timer.remove();
         }
+      } else {
+        clearLiveStopwatchDom();
       }
     } else {
       clearLiveStopwatchDom();
@@ -49989,8 +58318,8 @@
           activeTurnStartTime = null;
           activeTurnEntryId = null;
 
-          // Clean up any stray live timers anywhere in the document
-          document.querySelectorAll(".pi-enh-live-timer").forEach((el) => el.remove());
+          // Clean up any stray live timers and fallback hosts anywhere in the document
+          clearLiveStopwatchDom();
 
           // Fetch exact metrics after the mobile navigation quiet period.
           scheduleCurrentSessionMetrics(600);
@@ -50010,11 +58339,82 @@
   }
   const liveStopwatchIntervalId = addManagedInterval(tickLiveDuration, 400);
 
+  // 监听侧边栏新建会话按钮及全局新建操作，捕获阶段微秒级立即清空秒表和重置运行态
+  try {
+    if (typeof document !== "undefined" && typeof document.addEventListener === "function") {
+      document.addEventListener("click", (e) => {
+        const target = e.target;
+        if (!target) return;
+        const btn = typeof target.closest === "function" ? target.closest("button, a") : null;
+        if (!btn) return;
+        const title = String(btn.getAttribute("title") || "");
+        const ariaLabel = String(btn.getAttribute("aria-label") || "");
+        const text = String(btn.textContent || "").trim();
+        const isNewSession =
+          title.includes("新建会话") ||
+          title.includes("New session") ||
+          ariaLabel.includes("新建会话") ||
+          ariaLabel.includes("New session") ||
+          text === "新建" ||
+          text === "New" ||
+          btn.hasAttribute("data-pi-enh-new-session");
+        if (isNewSession) {
+          handleSessionSwitchLiveCleanup();
+        }
+      }, true);
+    }
+  } catch {}
+
   // ==========================================
   // 5. Thinking Level Persistence & Auto-Restore (思考深度记忆与自动恢复)
   // ==========================================
   const THINKING_STORAGE_KEY = "pi-thinking-level";
+  const VALID_THINKING_LEVELS = ["high", "medium", "low", "minimal", "off", "xhigh", "max", "auto"];
   restoredThinkingSessionScopes = new Set();
+
+  function parseThinkingOptionLevel(opt) {
+    if (!opt) return null;
+    const hasDataAttr = typeof opt.hasAttribute === "function"
+      ? opt.hasAttribute("data-thinking-level")
+      : (opt.getAttribute && opt.getAttribute("data-thinking-level") !== null) || (opt.dataset && "thinkingLevel" in opt.dataset);
+
+    if (hasDataAttr) {
+      const rawAttr = (typeof opt.getAttribute === "function" ? opt.getAttribute("data-thinking-level") : null) ?? (opt.dataset ? opt.dataset.thinkingLevel : null);
+      if (rawAttr !== null && rawAttr !== undefined) {
+        const val = String(rawAttr).trim().toLowerCase();
+        if (VALID_THINKING_LEVELS.includes(val)) {
+          return val;
+        }
+      }
+      return null;
+    }
+
+    if (typeof opt.querySelectorAll === "function") {
+      const spans = opt.querySelectorAll("span");
+      for (const span of spans) {
+        const spanText = (span.textContent || "").trim().toLowerCase();
+        if (VALID_THINKING_LEVELS.includes(spanText)) {
+          return spanText;
+        }
+      }
+    }
+    const text = (opt.textContent || "").trim().toLowerCase();
+    for (const lvl of VALID_THINKING_LEVELS) {
+      if (text === lvl || text.startsWith(lvl + " ") || text.includes(`(${lvl})`) || text.startsWith(lvl + "(")) {
+        return lvl;
+      }
+    }
+    return null;
+  }
+
+  function isMatchingThinkingLevel(lvlA, lvlB) {
+    if (!lvlA || !lvlB) return false;
+    const a = lvlA.trim().toLowerCase();
+    const b = lvlB.trim().toLowerCase();
+    if (a === b) return true;
+    if ((a === "max" && b === "xhigh") || (a === "xhigh" && b === "max")) return true;
+    return false;
+  }
 
   function findThinkingButton() {
     const buttons = document.querySelectorAll("button");
@@ -50059,30 +58459,67 @@
 
   // Record user selection when clicking inside the reasoning popup menu
   addManagedListener(document, "click", (e) => {
+    if (!isPluginEnabled("thinking-persistence")) return;
     const target = e.target;
     if (!target) return;
-    const btn = target.closest("button");
+    let btn = null;
+    if (typeof target.closest === "function") {
+      btn = target.closest("button");
+    } else if (target.parentElement && typeof target.parentElement.closest === "function") {
+      btn = target.parentElement.closest("button");
+    }
     if (!btn) return;
 
     // Check if the clicked button is an option inside the reasoning menu
-    const popup = btn.closest('div[style*="boxShadow"], div[style*="box-shadow"], div[style*="box_shadow"]');
-    if (popup) {
-      const text = btn.textContent.trim().toLowerCase();
-      const levels = ["high", "medium", "low", "minimal", "off", "xhigh", "max", "auto"];
-      for (const lvl of levels) {
-        if (text === lvl || text.startsWith(lvl + " ") || text.includes(`(${lvl})`) || text.startsWith(lvl + "(")) {
-          try {
-            localStorage.setItem(THINKING_STORAGE_KEY, lvl);
-          } catch {}
-          const scope = getThinkingSessionScope();
-          if (scope) restoredThinkingSessionScopes.add(scope);
-          break;
-        }
-      }
-    }
+    const triggerBtn = findThinkingButton();
+    if (!triggerBtn) return;
+    const host = triggerBtn.parentElement || triggerBtn;
+    if (!host.contains(btn) || btn === triggerBtn || btn.contains(triggerBtn)) return;
+
+    const lvl = parseThinkingOptionLevel(btn);
+    if (!lvl) return;
+
+    try {
+      localStorage.setItem(THINKING_STORAGE_KEY, lvl);
+    } catch {}
+    const scope = getThinkingSessionScope();
+    if (scope) restoredThinkingSessionScopes.add(scope);
   }, true);
 
-  // Auto-restore preferred thinking level if UI falls back to "auto"
+  function isElementConnected(el) {
+    if (!el) return false;
+    if (typeof el.isConnected === "boolean") return el.isConnected;
+    try {
+      return Boolean(document && document.contains && document.contains(el));
+    } catch {
+      return false;
+    }
+  }
+
+  function hasOpenedNativeMenu(container, trigger) {
+    if (!container || typeof container.querySelectorAll !== "function") return false;
+    const buttons = container.querySelectorAll("button");
+    for (const b of buttons) {
+      if (b !== trigger && !b.contains(trigger) && !trigger.contains(b)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  function safeCloseCurrentMenu(targetBtn, targetHost, targetScope) {
+    if (
+      getThinkingSessionScope() === targetScope &&
+      isElementConnected(targetBtn) &&
+      isElementConnected(targetHost) &&
+      targetHost.getAttribute("data-pi-enh-thinking-silent") === "true" &&
+      hasOpenedNativeMenu(targetHost, targetBtn)
+    ) {
+      targetBtn.click();
+    }
+  }
+
+  // Restore the last user-selected thinking level even when native defaults initialize another level.
   isRestoringThinking = false;
 
   function autoRestoreThinkingLevel() {
@@ -50107,55 +58544,67 @@
     if (!btn || btn.disabled) return;
 
     const currentLevel = getButtonThinkingLevel(btn);
-    if (currentLevel === preferred) {
+    if (!currentLevel) return;
+    if (isMatchingThinkingLevel(currentLevel, preferred)) {
       restoredThinkingSessionScopes.add(scope);
       return;
     }
 
-    if (currentLevel === "auto") {
-      isRestoringThinking = true;
-      restoredThinkingSessionScopes.add(scope);
-      if (restoredThinkingSessionScopes.size > 200) {
-        const first = restoredThinkingSessionScopes.values().next().value;
-        if (first) restoredThinkingSessionScopes.delete(first);
-      }
-
-      const host = btn.parentElement || btn;
-      host.setAttribute("data-pi-enh-thinking-silent", "true");
-
-      btn.click();
-      addManagedTimeout(() => {
-        try {
-          const popups = document.querySelectorAll('div[style*="boxShadow"], div[style*="box-shadow"], div[style*="box_shadow"]');
-          let matchedBtn = null;
-          for (const popup of popups) {
-            const options = popup.querySelectorAll("button");
-            for (const opt of options) {
-              const optText = opt.textContent.trim().toLowerCase();
-              if (optText === preferred || optText.startsWith(preferred + " ") || optText.includes(`(${preferred})`)) {
-                matchedBtn = opt;
-                break;
-              }
-            }
-            if (matchedBtn) break;
-          }
-          if (matchedBtn) {
-            matchedBtn.click();
-          } else {
-            // 当前模型不支持该思考级别，安全关闭弹窗，不再重试
-            btn.click();
-          }
-        } finally {
-          host.removeAttribute("data-pi-enh-thinking-silent");
-          addManagedTimeout(() => {
-            isRestoringThinking = false;
-          }, 200);
-        }
-      }, 50);
+    isRestoringThinking = true;
+    restoredThinkingSessionScopes.add(scope);
+    if (restoredThinkingSessionScopes.size > 200) {
+      const first = restoredThinkingSessionScopes.values().next().value;
+      if (first) restoredThinkingSessionScopes.delete(first);
     }
+
+    const host = btn.parentElement || btn;
+    host.setAttribute("data-pi-enh-thinking-silent", "true");
+
+    btn.click();
+    addManagedTimeout(() => {
+      try {
+        const pluginEnabled = isPluginEnabled("thinking-persistence");
+        const sameScope = getThinkingSessionScope() === scope;
+        const connected = isElementConnected(btn) && isElementConnected(host);
+        let currentPref = null;
+        try {
+          currentPref = localStorage.getItem(THINKING_STORAGE_KEY);
+        } catch {}
+        const prefUnchanged = currentPref === preferred;
+
+        // 复核：插件仍开启、同session scope、btn/host仍连接以及存储偏好未变化
+        if (!pluginEnabled || !sameScope || !connected || !prefUnchanged || !restoredThinkingSessionScopes.has(scope)) {
+          safeCloseCurrentMenu(btn, host, scope);
+          return;
+        }
+
+        let matchedBtn = null;
+        const options = host.querySelectorAll("button");
+        for (const opt of options) {
+          if (opt === btn || opt.contains(btn) || btn.contains(opt)) continue;
+          const optLevel = parseThinkingOptionLevel(opt);
+          if (isMatchingThinkingLevel(optLevel, preferred)) {
+            matchedBtn = opt;
+            break;
+          }
+        }
+        if (matchedBtn) {
+          matchedBtn.click();
+        } else {
+          // 当前模型不支持该思考级别，安全关闭弹窗，不再重试
+          safeCloseCurrentMenu(btn, host, scope);
+        }
+      } finally {
+        if (host && typeof host.removeAttribute === "function") {
+          host.removeAttribute("data-pi-enh-thinking-silent");
+        }
+        addManagedTimeout(() => {
+          isRestoringThinking = false;
+        }, 200);
+      }
+    }, 50);
   }
   const thinkingIntervalId = addManagedInterval(autoRestoreThinkingLevel, 1000);
-
   // ==========================================
   // 设置对话框可调节尺寸与侧边栏可调节宽度 (Settings Dialog & Sidebar Resizable)
   // ==========================================
@@ -50194,13 +58643,68 @@
     } catch (e) {}
   }
 
+  let activeResizingSurface = null;
+  let cancelActiveResizing = null;
+
+  function isResizerActiveAndEligible(surface) {
+    if (!surface) return false;
+    let pluginEnabled = true;
+    if (typeof isPluginEnabled === "function") {
+      pluginEnabled = isPluginEnabled("settings-sidebar-layout");
+    } else if (typeof window !== "undefined" && typeof window.__PI_ENH_IS_PLUGIN_ENABLED__ === "function") {
+      pluginEnabled = window.__PI_ENH_IS_PLUGIN_ENABLED__("settings-sidebar-layout");
+    }
+    if (!pluginEnabled) return false;
+    if (surface.hasAttribute("disabled") || surface.getAttribute("aria-disabled") === "true") return false;
+    const connected = typeof surface.isConnected === "boolean"
+      ? surface.isConnected
+      : (typeof document !== "undefined" && document.body && document.body.contains(surface));
+    if (!connected) return false;
+    if (typeof window !== "undefined" && window.innerWidth <= 640) return false;
+    return true;
+  }
+
+  function unbindSettingsDialogResizable(surface) {
+    if (!surface) return;
+    if (typeof surface.__piEnhResizableCleanup === "function") {
+      try {
+        surface.__piEnhResizableCleanup();
+      } catch (err) {}
+    }
+    delete surface.__piEnhResizableCleanup;
+    delete surface.__piEnhResizableBound;
+  }
+
+  function cleanupDetachedSettingsResizeSurface() {
+    const surface = activeResizingSurface;
+    if (!surface) return;
+    const detached = typeof surface.isConnected === "boolean"
+      ? !surface.isConnected : !document.body?.contains(surface);
+    if (detached) unbindSettingsDialogResizable(surface);
+  }
+
+  function cleanupSettingsDialogResizers() {
+    if (activeResizingSurface) unbindSettingsDialogResizable(activeResizingSurface);
+    document.querySelectorAll(".settings-dialog-surface").forEach(unbindSettingsDialogResizable);
+  }
+
   function bindSettingsDialogResizable(surface) {
     if (!surface) return;
     // 防重复绑定与防反复重置：同一 surface 仅在首次挂载时恢复一次存储尺寸并绑定事件，防止后续 DOM Mutation 触发时将拖动中的尺寸覆盖
     if (surface.__piEnhResizableBound) return;
     surface.__piEnhResizableBound = true;
 
+    // 记录绑定前原始尺寸变量与优先级，以便在关闭布局 (off) 时精确还原原生样式
+    const origSidebarWidth = surface.style.getPropertyValue("--settings-sidebar-width");
+    const origSidebarWidthPriority = surface.style.getPropertyPriority("--settings-sidebar-width");
+    const origDialogWidth = surface.style.getPropertyValue("--settings-dialog-width");
+    const origDialogWidthPriority = surface.style.getPropertyPriority("--settings-dialog-width");
+    const origDialogHeight = surface.style.getPropertyValue("--settings-dialog-height");
+    const origDialogHeightPriority = surface.style.getPropertyPriority("--settings-dialog-height");
+
     applySavedSettingsDialogDimensions(surface);
+
+    const cleanups = [];
 
     // 1. 侧边栏可调节手柄 (Sidebar Splitter Resizer) - 防拉扯防回弹抗抖动架构
     let splitter = surface.querySelector(".pi-enh-sidebar-resizer");
@@ -50221,6 +58725,48 @@
       let lastDragEndTime = 0;
       let rafId = null;
       let latestTargetWidth = 200;
+      let isDraggingOwned = false;
+      let prevBodyCursor = "";
+      let prevBodyCursorPriority = "";
+      let prevBodyUserSelect = "";
+      let prevBodyUserSelectPriority = "";
+      let dragStartSidebarWidth = "";
+      let dragStartSidebarWidthPriority = "";
+
+      const restoreBodyStyles = () => {
+        if (!isDraggingOwned) return;
+        isDraggingOwned = false;
+        if (typeof document !== "undefined" && document.body) {
+          const curCursor = document.body.style.getPropertyValue("cursor");
+          const curCursorPri = document.body.style.getPropertyPriority("cursor");
+          if (curCursor === "col-resize" && curCursorPri === "important") {
+            if (prevBodyCursor) {
+              document.body.style.setProperty("cursor", prevBodyCursor, prevBodyCursorPriority);
+            } else {
+              document.body.style.removeProperty("cursor");
+            }
+          }
+          const curUserSelect = document.body.style.getPropertyValue("user-select");
+          const curUserSelectPri = document.body.style.getPropertyPriority("user-select");
+          if (curUserSelect === "none" && curUserSelectPri === "important") {
+            if (prevBodyUserSelect) {
+              document.body.style.setProperty("user-select", prevBodyUserSelect, prevBodyUserSelectPriority);
+            } else {
+              document.body.style.removeProperty("user-select");
+            }
+          }
+        }
+      };
+
+      const removeSplitterWindowListeners = () => {
+        if (typeof window !== "undefined") {
+          window.removeEventListener("pointermove", onSplitterMove, true);
+          window.removeEventListener("pointerup", onSplitterEnd, true);
+          window.removeEventListener("pointercancel", onSplitterCancel, true);
+          window.removeEventListener("mousemove", onSplitterMove, true);
+          window.removeEventListener("mouseup", onSplitterEnd, true);
+        }
+      };
 
       const applyWidthStyle = () => {
         rafId = null;
@@ -50228,9 +58774,56 @@
         surface.style.setProperty("--settings-sidebar-width", `${latestTargetWidth}px`);
       };
 
+      const cancelSplitterDrag = () => {
+        if (!isDraggingSplitter) return;
+        isDraggingSplitter = false;
+        if (rafId) {
+          if (typeof cancelAnimationFrame === "function") {
+            cancelAnimationFrame(rafId);
+          }
+          rafId = null;
+        }
+
+        // 取消正在进行的拖拽：还原拖拽前临时应用的尺寸变量与优先级，不写入 localStorage
+        if (dragStartSidebarWidth) {
+          surface.style.setProperty("--settings-sidebar-width", dragStartSidebarWidth, dragStartSidebarWidthPriority);
+        } else {
+          surface.style.removeProperty("--settings-sidebar-width");
+        }
+
+        surface.classList.remove("is-resizing");
+        splitter.classList.remove("is-dragging");
+        if (document.documentElement) {
+          if (!activeResizingSurface || activeResizingSurface === surface) {
+            document.documentElement.classList.remove("pi-enh-settings-resizing");
+          }
+        }
+        restoreBodyStyles();
+
+        if (activePointerId !== null && typeof splitter.releasePointerCapture === "function") {
+          try {
+            splitter.releasePointerCapture(activePointerId);
+          } catch (err) {}
+        }
+        activePointerId = null;
+
+        removeSplitterWindowListeners();
+
+        if (activeResizingSurface === surface) {
+          activeResizingSurface = null;
+          cancelActiveResizing = null;
+        }
+      };
+
       const onSplitterMove = (e) => {
         if (!isDraggingSplitter) return;
         if (activePointerId !== null && e.pointerId !== undefined && e.pointerId !== activePointerId) return;
+
+        // 若拖拽期间脱离 DOM、切至移动视图或插件已关闭/disabled，立即取消拖拽
+        if (!isResizerActiveAndEligible(surface)) {
+          cancelSplitterDrag();
+          return;
+        }
 
         const deltaX = e.clientX - startX;
         if (Math.abs(deltaX) > 2) {
@@ -50241,18 +58834,34 @@
         latestTargetWidth = newWidth;
 
         // 使用 requestAnimationFrame 单帧节流视觉写入，杜绝事件堆积与强制同步重排掉帧
-        if (!rafId) {
+        if (!rafId && typeof requestAnimationFrame === "function") {
           rafId = requestAnimationFrame(applyWidthStyle);
+        } else if (!rafId) {
+          applyWidthStyle();
         }
+      };
+
+      const onSplitterCancel = (e) => {
+        if (!isDraggingSplitter) return;
+        if (activePointerId !== null && e && e.pointerId !== undefined && e.pointerId !== activePointerId) return;
+        cancelSplitterDrag();
       };
 
       const onSplitterEnd = (e) => {
         if (!isDraggingSplitter) return;
         if (activePointerId !== null && e && e.pointerId !== undefined && e.pointerId !== activePointerId) return;
 
+        // 尤其鼠标 up 先于 observer 时不得提交断开/已关闭拖拽
+        if (!isResizerActiveAndEligible(surface)) {
+          cancelSplitterDrag();
+          return;
+        }
+
         isDraggingSplitter = false;
         if (rafId) {
-          cancelAnimationFrame(rafId);
+          if (typeof cancelAnimationFrame === "function") {
+            cancelAnimationFrame(rafId);
+          }
           rafId = null;
         }
 
@@ -50267,10 +58876,11 @@
         surface.classList.remove("is-resizing");
         splitter.classList.remove("is-dragging");
         if (document.documentElement) {
-          document.documentElement.classList.remove("pi-enh-settings-resizing");
+          if (!activeResizingSurface || activeResizingSurface === surface) {
+            document.documentElement.classList.remove("pi-enh-settings-resizing");
+          }
         }
-        document.body.style.removeProperty("cursor");
-        document.body.style.removeProperty("user-select");
+        restoreBodyStyles();
 
         // 释放 Pointer Capture
         if (activePointerId !== null && typeof splitter.releasePointerCapture === "function") {
@@ -50280,11 +58890,12 @@
         }
         activePointerId = null;
 
-        window.removeEventListener("pointermove", onSplitterMove, true);
-        window.removeEventListener("pointerup", onSplitterEnd, true);
-        window.removeEventListener("pointercancel", onSplitterEnd, true);
-        window.removeEventListener("mousemove", onSplitterMove, true);
-        window.removeEventListener("mouseup", onSplitterEnd, true);
+        removeSplitterWindowListeners();
+
+        if (activeResizingSurface === surface) {
+          activeResizingSurface = null;
+          cancelActiveResizing = null;
+        }
 
         // 立即持久化存储最新宽度，保证后续任何状态恢复均以本次调整为准
         try {
@@ -50294,12 +58905,19 @@
 
       const onSplitterStart = (e) => {
         if (e.button !== 0) return;
+        // 拒绝已有活跃拖拽 surface，保护首拖拽 owner 不被覆盖破坏
+        if (activeResizingSurface || isDraggingSplitter) return;
+        // 真实 flag / connected / mobile / disabled 检查
+        if (!isResizerActiveAndEligible(surface)) return;
+
         e.preventDefault();
         e.stopPropagation();
 
         isDraggingSplitter = true;
         hasMovedDuringDrag = false;
         startX = e.clientX;
+        dragStartSidebarWidth = surface.style.getPropertyValue("--settings-sidebar-width");
+        dragStartSidebarWidthPriority = surface.style.getPropertyPriority("--settings-sidebar-width");
 
         // 清除任何选区，防止文本选中导致指针行为畸变
         try {
@@ -50334,8 +58952,20 @@
         if (document.documentElement) {
           document.documentElement.classList.add("pi-enh-settings-resizing");
         }
-        document.body.style.setProperty("cursor", "col-resize", "important");
-        document.body.style.setProperty("user-select", "none", "important");
+
+        // 仅在拖拽时拥有并修改 body cursor/user-select
+        if (typeof document !== "undefined" && document.body) {
+          prevBodyCursor = document.body.style.getPropertyValue("cursor");
+          prevBodyCursorPriority = document.body.style.getPropertyPriority("cursor");
+          prevBodyUserSelect = document.body.style.getPropertyValue("user-select");
+          prevBodyUserSelectPriority = document.body.style.getPropertyPriority("user-select");
+          isDraggingOwned = true;
+          document.body.style.setProperty("cursor", "col-resize", "important");
+          document.body.style.setProperty("user-select", "none", "important");
+        }
+
+        activeResizingSurface = surface;
+        cancelActiveResizing = cancelSplitterDrag;
 
         // 优先使用 setPointerCapture 锁定指针，确保快速拖拽或滑出窗口边界时不丢失事件
         if (e.pointerId !== undefined && typeof splitter.setPointerCapture === "function") {
@@ -50347,21 +58977,21 @@
           activePointerId = null;
         }
 
-        window.addEventListener("pointermove", onSplitterMove, true);
-        window.addEventListener("pointerup", onSplitterEnd, true);
-        window.addEventListener("pointercancel", onSplitterEnd, true);
-        window.addEventListener("mousemove", onSplitterMove, true);
-        window.addEventListener("mouseup", onSplitterEnd, true);
+        if (typeof window !== "undefined") {
+          window.addEventListener("pointermove", onSplitterMove, true);
+          window.addEventListener("pointerup", onSplitterEnd, true);
+          window.addEventListener("pointercancel", onSplitterCancel, true);
+          window.addEventListener("mousemove", onSplitterMove, true);
+          window.addEventListener("mouseup", onSplitterEnd, true);
+        }
       };
 
-      if (window.PointerEvent) {
-        splitter.addEventListener("pointerdown", onSplitterStart);
-      } else {
-        splitter.addEventListener("mousedown", onSplitterStart);
-      }
+      const isPointer = typeof window !== "undefined" && !!window.PointerEvent;
+      const startEventType = isPointer ? "pointerdown" : "mousedown";
+      splitter.addEventListener(startEventType, onSplitterStart);
 
       // 双击恢复默认侧边栏宽度 200px (具备严格的防误触阻断：拖拽移动过或拖拽结束后 500ms 内禁止重置)
-      splitter.addEventListener("dblclick", (e) => {
+      const onSplitterDblClick = (e) => {
         e.preventDefault();
         e.stopPropagation();
 
@@ -50377,6 +59007,16 @@
         } catch (err) {}
         if (typeof showToast === "function") {
           showToast("已恢复默认侧边栏宽度 (200px)");
+        }
+      };
+      splitter.addEventListener("dblclick", onSplitterDblClick);
+
+      cleanups.push(() => {
+        cancelSplitterDrag();
+        splitter.removeEventListener(startEventType, onSplitterStart);
+        splitter.removeEventListener("dblclick", onSplitterDblClick);
+        if (splitter.parentNode) {
+          splitter.remove();
         }
       });
     }
@@ -50413,9 +59053,89 @@
         let startY = 0;
         let startWidth = 1220;
         let startHeight = 650;
+        let isDraggingOwned = false;
+        let prevBodyCursor = "";
+        let prevBodyCursorPriority = "";
+        let prevBodyUserSelect = "";
+        let prevBodyUserSelectPriority = "";
+        let dragStartDialogWidth = "";
+        let dragStartDialogWidthPriority = "";
+        let dragStartDialogHeight = "";
+        let dragStartDialogHeightPriority = "";
+
+        const restoreBodyStyles = () => {
+          if (!isDraggingOwned) return;
+          isDraggingOwned = false;
+          if (typeof document !== "undefined" && document.body) {
+            const curCursor = document.body.style.getPropertyValue("cursor");
+            const curCursorPri = document.body.style.getPropertyPriority("cursor");
+            if (curCursor === cursor && curCursorPri === "important") {
+              if (prevBodyCursor) {
+                document.body.style.setProperty("cursor", prevBodyCursor, prevBodyCursorPriority);
+              } else {
+                document.body.style.removeProperty("cursor");
+              }
+            }
+            const curUserSelect = document.body.style.getPropertyValue("user-select");
+            const curUserSelectPri = document.body.style.getPropertyPriority("user-select");
+            if (curUserSelect === "none" && curUserSelectPri === "important") {
+              if (prevBodyUserSelect) {
+                document.body.style.setProperty("user-select", prevBodyUserSelect, prevBodyUserSelectPriority);
+              } else {
+                document.body.style.removeProperty("user-select");
+              }
+            }
+          }
+        };
+
+        const removeDialogWindowListeners = () => {
+          if (typeof window !== "undefined") {
+            window.removeEventListener("mousemove", onDialogMouseMove, true);
+            window.removeEventListener("mouseup", onDialogMouseUp, true);
+          }
+        };
+
+        const cancelDialogDrag = () => {
+          if (!isResizingDialog) return;
+          isResizingDialog = false;
+
+          // 取消正在进行的拖拽：还原拖拽前临时应用的尺寸变量与优先级，不写入 localStorage
+          if (dragStartDialogWidth) {
+            surface.style.setProperty("--settings-dialog-width", dragStartDialogWidth, dragStartDialogWidthPriority);
+          } else {
+            surface.style.removeProperty("--settings-dialog-width");
+          }
+          if (dragStartDialogHeight) {
+            surface.style.setProperty("--settings-dialog-height", dragStartDialogHeight, dragStartDialogHeightPriority);
+          } else {
+            surface.style.removeProperty("--settings-dialog-height");
+          }
+
+          surface.classList.remove("is-resizing");
+          handle.classList.remove("is-dragging");
+          if (document.documentElement) {
+            if (!activeResizingSurface || activeResizingSurface === surface) {
+              document.documentElement.classList.remove("pi-enh-settings-resizing");
+            }
+          }
+          restoreBodyStyles();
+          removeDialogWindowListeners();
+
+          if (activeResizingSurface === surface) {
+            activeResizingSurface = null;
+            cancelActiveResizing = null;
+          }
+        };
 
         const onDialogMouseMove = (e) => {
           if (!isResizingDialog) return;
+
+          // 若拖拽期间脱离 DOM、切至移动视图或插件已关闭/disabled，立即取消拖拽
+          if (!isResizerActiveAndEligible(surface)) {
+            cancelDialogDrag();
+            return;
+          }
+
           e.preventDefault();
 
           const maxW = Math.max(760, (window.innerWidth || 1440) - 32);
@@ -50436,13 +59156,28 @@
 
         const onDialogMouseUp = (e) => {
           if (!isResizingDialog) return;
+
+          // 尤其鼠标 up 先于 observer 时不得提交断开/已关闭拖拽
+          if (!isResizerActiveAndEligible(surface)) {
+            cancelDialogDrag();
+            return;
+          }
+
           isResizingDialog = false;
           surface.classList.remove("is-resizing");
           handle.classList.remove("is-dragging");
-          document.body.style.removeProperty("cursor");
-          document.body.style.removeProperty("user-select");
-          window.removeEventListener("mousemove", onDialogMouseMove, true);
-          window.removeEventListener("mouseup", onDialogMouseUp, true);
+          if (document.documentElement) {
+            if (!activeResizingSurface || activeResizingSurface === surface) {
+              document.documentElement.classList.remove("pi-enh-settings-resizing");
+            }
+          }
+          restoreBodyStyles();
+          removeDialogWindowListeners();
+
+          if (activeResizingSurface === surface) {
+            activeResizingSurface = null;
+            cancelActiveResizing = null;
+          }
 
           try {
             const rect = surface.getBoundingClientRect();
@@ -50452,12 +59187,21 @@
           } catch (err) {}
         };
 
-        handle.addEventListener("mousedown", (e) => {
+        const onDialogMouseDown = (e) => {
           if (e.button !== 0) return;
+          // 拒绝已有活跃拖拽 surface，保护首拖拽 owner 不被覆盖破坏
+          if (activeResizingSurface || isResizingDialog) return;
+          // 真实 flag / connected / mobile / disabled 检查
+          if (!isResizerActiveAndEligible(surface)) return;
+
           e.preventDefault();
           isResizingDialog = true;
           startX = e.clientX;
           startY = e.clientY;
+          dragStartDialogWidth = surface.style.getPropertyValue("--settings-dialog-width");
+          dragStartDialogWidthPriority = surface.style.getPropertyPriority("--settings-dialog-width");
+          dragStartDialogHeight = surface.style.getPropertyValue("--settings-dialog-height");
+          dragStartDialogHeightPriority = surface.style.getPropertyPriority("--settings-dialog-height");
 
           const rect = surface.getBoundingClientRect();
           startWidth = rect.width;
@@ -50465,26 +59209,100 @@
 
           surface.classList.add("is-resizing");
           handle.classList.add("is-dragging");
-          document.body.style.setProperty("cursor", cursor, "important");
-          document.body.style.setProperty("user-select", "none", "important");
+          if (document.documentElement) {
+            document.documentElement.classList.add("pi-enh-settings-resizing");
+          }
 
-          window.addEventListener("mousemove", onDialogMouseMove, true);
-          window.addEventListener("mouseup", onDialogMouseUp, true);
-        });
+          // 仅在拖拽时拥有并修改 body cursor/user-select
+          if (typeof document !== "undefined" && document.body) {
+            prevBodyCursor = document.body.style.getPropertyValue("cursor");
+            prevBodyCursorPriority = document.body.style.getPropertyPriority("cursor");
+            prevBodyUserSelect = document.body.style.getPropertyValue("user-select");
+            prevBodyUserSelectPriority = document.body.style.getPropertyPriority("user-select");
+            isDraggingOwned = true;
+            document.body.style.setProperty("cursor", cursor, "important");
+            document.body.style.setProperty("user-select", "none", "important");
+          }
 
+          activeResizingSurface = surface;
+          cancelActiveResizing = cancelDialogDrag;
+
+          if (typeof window !== "undefined") {
+            window.addEventListener("mousemove", onDialogMouseMove, true);
+            window.addEventListener("mouseup", onDialogMouseUp, true);
+          }
+        };
+
+        handle.addEventListener("mousedown", onDialogMouseDown);
+
+        let onDialogDblClick = null;
         if (type === "se") {
-          handle.addEventListener("dblclick", (e) => {
+          onDialogDblClick = (e) => {
             e.preventDefault();
             surface.style.removeProperty("--settings-dialog-width");
             surface.style.removeProperty("--settings-dialog-height");
             try {
               localStorage.removeItem(SETTINGS_DIALOG_SIZE_KEY);
             } catch (err) {}
-            showToast("已恢复默认弹窗尺寸 (1220px × 86vh)");
-          });
+            if (typeof showToast === "function") {
+              showToast("已恢复默认弹窗尺寸 (1220px × 86vh)");
+            }
+          };
+          handle.addEventListener("dblclick", onDialogDblClick);
         }
+
+        cleanups.push(() => {
+          cancelDialogDrag();
+          handle.removeEventListener("mousedown", onDialogMouseDown);
+          if (onDialogDblClick) {
+            handle.removeEventListener("dblclick", onDialogDblClick);
+          }
+          if (handle.parentNode) {
+            handle.remove();
+          }
+        });
       }
     });
+
+    surface.__piEnhResizableCleanup = () => {
+      // 1. 执行所有句柄的销毁与解绑
+      while (cleanups.length > 0) {
+        try {
+          const fn = cleanups.pop();
+          fn();
+        } catch (e) {}
+      }
+
+      // 2. 恢复 surface 绑定前的 3 个 CSS 逻辑变量，恢复原生尺寸表现
+      if (origSidebarWidth) {
+        surface.style.setProperty("--settings-sidebar-width", origSidebarWidth, origSidebarWidthPriority);
+      } else {
+        surface.style.removeProperty("--settings-sidebar-width");
+      }
+      if (origDialogWidth) {
+        surface.style.setProperty("--settings-dialog-width", origDialogWidth, origDialogWidthPriority);
+      } else {
+        surface.style.removeProperty("--settings-dialog-width");
+      }
+      if (origDialogHeight) {
+        surface.style.setProperty("--settings-dialog-height", origDialogHeight, origDialogHeightPriority);
+      } else {
+        surface.style.removeProperty("--settings-dialog-height");
+      }
+
+      // 3. 清理 surface 与 documentElement 状态类
+      surface.classList.remove("is-resizing");
+      if (document.documentElement) {
+        if (!activeResizingSurface || activeResizingSurface === surface) {
+          document.documentElement.classList.remove("pi-enh-settings-resizing");
+        }
+      }
+
+      if (activeResizingSurface === surface) {
+        activeResizingSurface = null;
+        cancelActiveResizing = null;
+      }
+    };
   }
 
   SHORTCUT_TIP_STORAGE_KEY = "pi-enh-settings-shortcut-tip-dismissed";
@@ -50588,8 +59406,8 @@
   function syncSettingsSidebarCollapse(header) {
     if (!header || typeof header.querySelector !== "function") return;
 
-    // 直屏手机 / 移动端视图：彻底清除并严禁创建折叠按钮，退出折叠状态
-    if (isMobileSettingsView(header)) {
+    // 插件关闭或移动端视图：清除按钮，禁止后续同步重新创建。
+    if (!isPluginEnabled("settings-sidebar-layout") || isMobileSettingsView(header)) {
       const existingBtn = header.querySelector(".pi-enh-sidebar-collapse-btn");
       if (existingBtn) existingBtn.remove();
       const existingTip = header.querySelector(".pi-enh-sidebar-shortcut-tip");
@@ -50650,9 +59468,243 @@
   }
 
   // ==========================================
+  // 6.0 Mobile Section Picker & Active Enhancement Authority Helper
+  // ==========================================
+  const ENHANCEMENT_PICKER_SECTIONS = [
+    {
+      value: "enhancements",
+      label: "增强插件",
+      tabSelector: "[data-pi-enh-tab='plugins']",
+      panelSelector: ".pi-enh-plugins-panel",
+      isEnabled: () => true,
+    },
+    {
+      value: "archived",
+      label: "已归档",
+      tabSelector: "[data-pi-enh-tab='archived']",
+      panelSelector: ".pi-enh-archived-panel",
+      isEnabled: () => isPluginEnabled("session-pin-archive"),
+    },
+    {
+      value: "notifications",
+      label: "通知管理",
+      tabSelector: "[data-pi-enh-tab='notifications']",
+      panelSelector: ".pi-enh-notifications-panel",
+      isEnabled: () => isPluginEnabled("notification-center"),
+    },
+    {
+      value: "usage",
+      label: "Usage",
+      tabSelector: "[data-pi-enh-tab='usage']",
+      panelSelector: ".pi-enh-usage-panel",
+      isEnabled: () => isPluginEnabled("usage-cost-dashboard"),
+    },
+    {
+      value: "tags",
+      label: "会话标签",
+      tabSelector: "[data-pi-enh-tab='tags']",
+      panelSelector: ".pi-enh-tags-panel",
+      isEnabled: () => isPluginEnabled("session-tags"),
+    },
+  ];
+
+  function isEnhancementPickerValue(val) {
+    return ENHANCEMENT_PICKER_SECTIONS.some((sec) => sec.value === val);
+  }
+
+  function isPanelEffectivelyVisible(panel, dialog) {
+    if (!panel) return false;
+    if (panel.hidden) return false;
+    if (panel.style && (panel.style.display === "none" || panel.style.visibility === "hidden")) return false;
+    if (dialog && typeof dialog.contains === "function" && !dialog.contains(panel)) return false;
+    if (typeof panel.isConnected === "boolean" && panel.ownerDocument?.documentElement && !panel.isConnected) return false;
+
+    if (typeof panel.getClientRects === "function") {
+      try {
+        const rects = panel.getClientRects();
+        if (rects.length === 0) return false;
+        const r = rects[0];
+        if (r && r.width === 0 && r.height === 0) return false;
+      } catch (e) {}
+    }
+
+    const win = (panel.ownerDocument && panel.ownerDocument.defaultView) || (typeof window !== "undefined" ? window : null);
+    let curr = panel;
+    while (curr && curr !== dialog && curr !== curr.ownerDocument?.documentElement) {
+      if (curr.hidden) return false;
+      if (curr.style && (curr.style.display === "none" || curr.style.visibility === "hidden")) return false;
+      if (win && typeof win.getComputedStyle === "function") {
+        try {
+          const comp = win.getComputedStyle(curr);
+          if (comp && (comp.display === "none" || comp.visibility === "hidden")) {
+            return false;
+          }
+        } catch (e) {}
+      }
+      curr = curr.parentElement;
+    }
+    return true;
+  }
+
+  function resolveActiveEnhancementSection(dialog, nav) {
+    if (!dialog) return null;
+    const bodyEl = (dialog.ownerDocument && dialog.ownerDocument.body) || (typeof document !== "undefined" ? document.body : null);
+    if (nav && typeof dialog.contains === "function") {
+      let navRoot = nav;
+      while (navRoot.parentElement && navRoot.parentElement !== bodyEl && navRoot.parentElement.tagName !== "BODY" && navRoot.parentElement.tagName !== "HTML") {
+        navRoot = navRoot.parentElement;
+      }
+      if (navRoot !== nav && !navRoot.contains(dialog) && !dialog.contains(navRoot)) {
+        return null;
+      }
+    }
+    for (const sec of ENHANCEMENT_PICKER_SECTIONS) {
+      if (!sec.isEnabled()) continue;
+      const panel = dialog.querySelector(sec.panelSelector);
+      if (!panel || !isPanelEffectivelyVisible(panel, dialog)) {
+        continue;
+      }
+      if (nav) {
+        const tab = nav.querySelector(sec.tabSelector);
+        if (!tab || tab.getAttribute("aria-current") !== "page") {
+          continue;
+        }
+      }
+      return sec.value;
+    }
+    return null;
+  }
+
+  function getFallbackNativeSection(picker) {
+    if (!picker) return "general";
+    if (picker.__piEnhNativeValue && picker.querySelector(`option[value='${picker.__piEnhNativeValue}']`)) {
+      return picker.__piEnhNativeValue;
+    }
+    const nativeOpt = picker.querySelector("option:not([value='enhancements']):not([value='archived']):not([value='notifications']):not([value='usage']):not([value='tags'])");
+    return nativeOpt ? nativeOpt.value : "general";
+  }
+
+  function resolveActiveNativeSection(nav, picker) {
+    if (picker) return getFallbackNativeSection(picker);
+    if (nav) {
+      const header = (nav.closest && nav.closest(".settings-dialog-header")) || nav.parentElement;
+      const p = header ? header.querySelector("select.settings-mobile-section-picker") : null;
+      if (p) return getFallbackNativeSection(p);
+      const activeNativeTab = nav.querySelector(".settings-section-tab[aria-current='page']:not([data-pi-enh-tab])");
+      if (activeNativeTab) {
+        const text = (activeNativeTab.textContent || "").trim();
+        if (text.includes("插件") || text.includes("Plugins")) return "plugins";
+        if (text.includes("模型") || text.includes("Models")) return "models";
+        if (text.includes("技能") || text.includes("Skills")) return "skills";
+        if (text.includes("子代理") || text.includes("Agents")) return "agents";
+      }
+    }
+    return "general";
+  }
+
+  function syncMobilePickerState(header, nav, dialog) {
+    const mobilePicker = header ? header.querySelector("select.settings-mobile-section-picker") : null;
+    if (!mobilePicker) return;
+
+    const currentVal = mobilePicker.value;
+    if (currentVal && !isEnhancementPickerValue(currentVal)) {
+      mobilePicker.__piEnhNativeValue = currentVal;
+    }
+
+    let wasSelectedDisabledEnhancement = false;
+    for (const sec of ENHANCEMENT_PICKER_SECTIONS) {
+      const enabled = sec.isEnabled();
+      if (!enabled && currentVal === sec.value) {
+        wasSelectedDisabledEnhancement = true;
+      }
+    }
+
+    for (const sec of ENHANCEMENT_PICKER_SECTIONS) {
+      const existingOpt = mobilePicker.querySelector(`option[value='${sec.value}']`);
+      const enabled = sec.isEnabled();
+      if (enabled) {
+        if (!existingOpt) {
+          const opt = document.createElement("option");
+          opt.value = sec.value;
+          opt.textContent = sec.label;
+          mobilePicker.appendChild(opt);
+        }
+      } else if (existingOpt) {
+        existingOpt.remove();
+      }
+    }
+
+    if (!mobilePicker.__piEnhChangeHandler) {
+      const changeHandler = (e) => {
+        const val = mobilePicker.value;
+        if (isEnhancementPickerValue(val)) {
+          e.stopPropagation();
+          if (typeof e.stopImmediatePropagation === "function") {
+            e.stopImmediatePropagation();
+          }
+
+          const targetSec = ENHANCEMENT_PICKER_SECTIONS.find((s) => s.value === val);
+          if (targetSec) {
+            const tab = nav?.querySelector(targetSec.tabSelector);
+            tab?.click();
+          }
+
+          if (mobilePicker.value !== val) {
+            mobilePicker.value = val;
+          }
+        } else {
+          mobilePicker.__piEnhNativeValue = val;
+          hideEnhancementsPanel(nav);
+          hideNotificationPanel(nav);
+          hideArchivedPanel(nav);
+          hideUsagePanel(nav);
+          hideTagsPanel(nav);
+        }
+      };
+      mobilePicker.__piEnhChangeHandler = changeHandler;
+      mobilePicker.addEventListener("change", changeHandler);
+    }
+
+    const effectiveDialog = dialog || (nav?.closest && (nav.closest(".settings-dialog-backdrop") || nav.closest("[role='dialog']"))) || header?.closest?.(".settings-dialog-backdrop, [role='dialog']") || document.body;
+    const activeEnh = resolveActiveEnhancementSection(effectiveDialog, nav);
+    if (activeEnh) {
+      if (mobilePicker.value !== activeEnh && mobilePicker.querySelector(`option[value='${activeEnh}']`)) {
+        mobilePicker.value = activeEnh;
+      }
+    } else if (wasSelectedDisabledEnhancement || isEnhancementPickerValue(mobilePicker.value)) {
+      const nativeSec = getFallbackNativeSection(mobilePicker);
+      if (mobilePicker.value !== nativeSec) {
+        mobilePicker.value = nativeSec;
+      }
+      hideEnhancementsPanel(nav);
+      hideNotificationPanel(nav);
+      hideArchivedPanel(nav);
+      hideUsagePanel(nav);
+      hideTagsPanel(nav);
+      // Restore through the native tab owner, including React's selected tab/host.
+      const nativeOptions = Array.from(mobilePicker.options).filter((opt) => !isEnhancementPickerValue(opt.value));
+      const nativeIndex = nativeOptions.findIndex((opt) => opt.value === nativeSec);
+      const nativeTabs = nav?.querySelectorAll(".settings-section-tab:not([data-pi-enh-tab])");
+      if (nativeIndex >= 0 && nativeTabs?.[nativeIndex]) {
+        nativeTabs[nativeIndex].click();
+        // Enhancement activation cleared these DOM attributes; React may keep
+        // identical native props and therefore not write them back itself.
+        nativeTabs.forEach((tab, index) => {
+          if (index === nativeIndex) tab.setAttribute("aria-current", "page");
+          else tab.removeAttribute("aria-current");
+        });
+      }
+    }
+  }
+
+  // ==========================================
   // 6. Settings Dialog Enhancements & Archived Tabs (设置对话框增强与归档管理)
   // ==========================================
   function syncSettingsDialogEnhancements() {
+    // 弹窗打开瞬间立即静默并发预热模型数据，确保切换至模型标签页时 0ms 瞬间秒开
+    if (typeof window !== "undefined" && typeof window.__PI_ENH_PRELOAD_MODELS_CACHE__ === "function") {
+      void window.__PI_ENH_PRELOAD_MODELS_CACHE__();
+    }
     const isSidebarActive = isPluginEnabled("settings-sidebar-layout");
     const nav = document.querySelector(".settings-section-tabs");
     const header = (nav?.closest && nav.closest(".settings-dialog-header")) || (nav?.parentElement ? nav.parentElement : null) || document.querySelector(".settings-dialog-header");
@@ -50674,6 +59726,8 @@
     const surface = nav.closest(".settings-dialog-surface") || document.querySelector(".settings-dialog-surface");
     if (surface && isSidebarActive && !isMobile) {
       bindSettingsDialogResizable(surface);
+    } else if (surface) {
+      unbindSettingsDialogResizable(surface);
     }
     if (header && isSidebarActive && !isMobile) {
       syncSidebarShortcutTip(header);
@@ -50837,61 +59891,7 @@
     }
 
     // Mobile select picker sync
-    const mobilePicker = header ? header.querySelector("select.settings-mobile-section-picker") : null;
-    if (mobilePicker) {
-      if (!mobilePicker.querySelector("option[value='enhancements']")) {
-        const opt = document.createElement("option");
-        opt.value = "enhancements";
-        opt.textContent = "增强插件";
-        mobilePicker.appendChild(opt);
-      }
-      if (isPluginEnabled("session-pin-archive") && !mobilePicker.querySelector("option[value='archived']")) {
-        const optArch = document.createElement("option");
-        optArch.value = "archived";
-        optArch.textContent = "已归档";
-        mobilePicker.appendChild(optArch);
-      }
-      if (isPluginEnabled("notification-center") && !mobilePicker.querySelector("option[value='notifications']")) {
-        const optNotifications = document.createElement("option");
-        optNotifications.value = "notifications";
-        optNotifications.textContent = "通知管理";
-        mobilePicker.appendChild(optNotifications);
-      }
-      if (isPluginEnabled("usage-cost-dashboard") && !mobilePicker.querySelector("option[value='usage']")) {
-        const optUsage = document.createElement("option");
-        optUsage.value = "usage";
-        optUsage.textContent = "Usage";
-        mobilePicker.appendChild(optUsage);
-      }
-      if (isPluginEnabled("session-tags") && !mobilePicker.querySelector("option[value='tags']")) {
-        const optTags = document.createElement("option");
-        optTags.value = "tags";
-        optTags.textContent = "会话标签";
-        mobilePicker.appendChild(optTags);
-      }
-      if (!mobilePicker.__piEnhBound) {
-        mobilePicker.__piEnhBound = true;
-        mobilePicker.addEventListener("change", () => {
-          if (mobilePicker.value === "enhancements") {
-            enhTab?.click();
-          } else if (mobilePicker.value === "archived") {
-            nav.querySelector("[data-pi-enh-tab='archived']")?.click();
-          } else if (mobilePicker.value === "notifications") {
-            nav.querySelector("[data-pi-enh-tab='notifications']")?.click();
-          } else if (mobilePicker.value === "usage") {
-            nav.querySelector("[data-pi-enh-tab='usage']")?.click();
-          } else if (mobilePicker.value === "tags") {
-            nav.querySelector("[data-pi-enh-tab='tags']")?.click();
-          } else {
-            hideEnhancementsPanel(nav);
-            hideNotificationPanel(nav);
-            hideArchivedPanel(nav);
-            hideUsagePanel(nav);
-            hideTagsPanel(nav);
-          }
-        });
-      }
-    }
+    syncMobilePickerState(header, nav, surface?.parentElement || document.body);
 
     // 4. 在通用 (General) 设置面板构建自平衡双列仪表盘与运维卡片
     const generalPanel = document.querySelector(".settings-general");
@@ -50960,6 +59960,105 @@
           generalPanel.appendChild(cacheSection);
         }
 
+        // 确保“系统版本与 Pi Agent 上游更新”卡片已存在
+        let versionSection = generalPanel.querySelector(".pi-enh-version-section");
+        if (!versionSection) {
+          versionSection = document.createElement("section");
+          versionSection.className = "settings-general-section pi-enh-version-section";
+          versionSection.setAttribute("data-pi-enh-section", "version-info");
+
+          const heading = document.createElement("h3");
+          heading.className = "settings-general-heading";
+          heading.innerHTML = `
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color: #10b981;">
+              <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/>
+            </svg>
+            <span>系统版本与上游更新</span>
+          `;
+
+          const desc = document.createElement("div");
+          desc.className = "settings-general-description";
+          desc.textContent = "监控上游官方 Pi Coding Agent (https://github.com/earendil-works/pi) 发布动态。当有新版本时在新建会话页面与设置中自动提示。";
+
+          const card = document.createElement("div");
+          card.className = "pi-enh-version-card";
+          card.style.cssText = "display: flex; flex-direction: column; gap: 8px; padding: 10px 12px; background: var(--bg-surface, rgba(255,255,255,0.03)); border: 1px solid var(--border, rgba(255,255,255,0.08)); border-radius: 8px; margin-top: 8px; font-size: 12px;";
+
+          versionSection.appendChild(heading);
+          versionSection.appendChild(desc);
+          versionSection.appendChild(card);
+          generalPanel.appendChild(versionSection);
+        }
+
+        if (versionSection) {
+          const card = versionSection.querySelector(".pi-enh-version-card");
+          if (card) {
+            const state = (typeof window !== "undefined" && window.__PI_AGENT_UPDATE_STATE__) || {
+              currentVersion: (typeof window !== "undefined" && window.__PI_OFFICIAL_AGENT_VERSION__) || "0.87.1",
+              latestVersion: null,
+              updateAvailable: false,
+              releaseUrl: "https://github.com/earendil-works/pi/releases",
+              isChecking: false,
+            };
+            const suiteVer = window.__PI_WEB_STANDALONE_VERSION__ || "1.0.5";
+            const updateTag = state.updateAvailable
+              ? `<span style="display:inline-flex;align-items:center;gap:3px;padding:1px 6px;border-radius:9999px;font-size:10px;font-weight:600;background:rgba(16,185,129,0.15);color:#10b981;border:1px solid rgba(16,185,129,0.4);"><span style="width:4px;height:4px;border-radius:50%;background:#10b981;"></span>可升级至 v${state.latestVersion}</span>`
+              : (state.latestVersion ? `<span style="display:inline-flex;padding:1px 6px;border-radius:9999px;font-size:10px;color:var(--text-muted);background:rgba(255,255,255,0.05);">已是最新</span>` : `<span style="font-size:10px;color:var(--text-muted);">未检测</span>`);
+
+            card.innerHTML = `
+              <div style="display: flex; justify-content: space-between; align-items: center; line-height: 1.5;">
+                <span style="color: var(--text-muted);">Web 前端发行版</span>
+                <span style="font-family: var(--font-mono, monospace); font-weight: 600;">v${suiteVer} (Koxir Standalone)</span>
+              </div>
+              <div style="display: flex; justify-content: space-between; align-items: center; line-height: 1.5;">
+                <span style="color: var(--text-muted);">Pi Agent 本地核心</span>
+                <span style="font-family: var(--font-mono, monospace); font-weight: 600;">v${state.currentVersion}</span>
+              </div>
+              <div style="display: flex; justify-content: space-between; align-items: center; line-height: 1.5;">
+                <span style="color: var(--text-muted);">官方上游最新版本</span>
+                <div style="display: flex; align-items: center; gap: 6px; font-family: var(--font-mono, monospace);">
+                  <span>${state.latestVersion ? `v${state.latestVersion}` : "检测中…"}</span>
+                  ${updateTag}
+                </div>
+              </div>
+              <div style="display: flex; gap: 8px; margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--border, rgba(255,255,255,0.06));">
+                <a href="${state.releaseUrl || 'https://github.com/earendil-works/pi/releases'}" target="_blank" rel="noopener noreferrer" class="pi-enh-btn-sm" style="flex: 1; text-align: center; text-decoration: none; display: inline-flex; align-items: center; justify-content: center; gap: 4px;">
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6M15 3h6v6M10 14L21 3"/></svg>
+                  <span>查看 Release Notes</span>
+                </a>
+                <button type="button" class="pi-enh-btn-sm pi-enh-check-agent-update-btn" style="flex: 1; display: inline-flex; align-items: center; justify-content: center; gap: 4px;">
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2"/></svg>
+                  <span>${state.isChecking ? "正在检测…" : "立即检查更新"}</span>
+                </button>
+              </div>
+            `;
+
+            const btnCheck = card.querySelector(".pi-enh-check-agent-update-btn");
+            if (btnCheck) {
+              btnCheck.addEventListener("click", async () => {
+                if (typeof window.__PI_ENH_CHECK_AGENT_UPDATE__ === "function") {
+                  btnCheck.disabled = true;
+                  btnCheck.innerHTML = `<span>⏳ 正在检测上游版本…</span>`;
+                  await window.__PI_ENH_CHECK_AGENT_UPDATE__(true);
+                  if (typeof showToast === "function") {
+                    const st = window.__PI_AGENT_UPDATE_STATE__;
+                    if (st && st.updateAvailable) {
+                      showToast(`发现 Pi Agent 新版本 v${st.latestVersion}！`);
+                    } else if (st && st.latestVersion) {
+                      showToast(`Pi Agent 已是最新版本 (v${st.latestVersion})`);
+                    } else if (st && st.error) {
+                      showToast(`检测失败: ${st.error}`);
+                    }
+                  }
+                  if (typeof scheduleDomSync === "function") {
+                    scheduleDomSync();
+                  }
+                }
+              });
+            }
+          }
+        }
+
         // 确保双列外壳容器存在
         let shell = generalPanel.querySelector(".pi-enh-dashboard-shell");
         if (!shell) {
@@ -50998,6 +60097,9 @@
             colLeft.appendChild(sec);
           } else if (sec.classList.contains("pi-enh-cache-section")) {
             sec.setAttribute("data-pi-enh-section", "maintenance");
+            colLeft.appendChild(sec);
+          } else if (sec.classList.contains("pi-enh-version-section")) {
+            sec.setAttribute("data-pi-enh-section", "version-info");
             colLeft.appendChild(sec);
           } else if (sec.querySelector('#settings-chat-content-width') || sec.querySelector('.settings-chat-options')) {
             sec.setAttribute("data-pi-enh-section", "chat");
@@ -51381,6 +60483,17 @@
         pinBadge.remove();
       }
 
+      if (meta.id === "models" && !tab.__piEnhModelPrewarmBound) {
+        tab.__piEnhModelPrewarmBound = true;
+        const prewarm = () => {
+          if (typeof window !== "undefined" && typeof window.__PI_ENH_PRELOAD_MODELS_CACHE__ === "function") {
+            void window.__PI_ENH_PRELOAD_MODELS_CACHE__();
+          }
+        };
+        tab.addEventListener("pointerenter", prewarm, { passive: true });
+        tab.addEventListener("touchstart", prewarm, { passive: true });
+      }
+
       if (!tab.__piEnhShortcutDblBound) {
         tab.__piEnhShortcutDblBound = true;
         tab.style.userSelect = "none";
@@ -51524,6 +60637,17 @@
     for (const btn of renderedButtons) {
       const id = btn.getAttribute("data-shortcut-id");
 
+      if (id === "models" && !btn.__piEnhModelPrewarmBound) {
+        btn.__piEnhModelPrewarmBound = true;
+        const prewarm = () => {
+          if (typeof window !== "undefined" && typeof window.__PI_ENH_PRELOAD_MODELS_CACHE__ === "function") {
+            void window.__PI_ENH_PRELOAD_MODELS_CACHE__();
+          }
+        };
+        btn.addEventListener("pointerenter", prewarm, { passive: true });
+        btn.addEventListener("touchstart", prewarm, { passive: true });
+      }
+
       btn.addEventListener("click", (e) => {
         e.preventDefault();
         e.stopPropagation();
@@ -51558,6 +60682,9 @@
   }
 
   function triggerShortcutNavigation(shortcutId) {
+    if (shortcutId === "models" && typeof window !== "undefined" && typeof window.__PI_ENH_PRELOAD_MODELS_CACHE__ === "function") {
+      void window.__PI_ENH_PRELOAD_MODELS_CACHE__();
+    }
     const existingNav = document.querySelector(".settings-section-tabs");
     if (existingNav) {
       activateSettingsTab(existingNav, shortcutId);
@@ -51650,13 +60777,30 @@
       const header = (nav.closest && nav.closest(".settings-dialog-header")) || (nav.parentElement ? nav.parentElement : null);
       const mobilePicker = header ? header.querySelector("select.settings-mobile-section-picker") : null;
       if (mobilePicker && val) {
-        mobilePicker.value = val;
+        if (!isEnhancementPickerValue(mobilePicker.value)) {
+          mobilePicker.__piEnhNativeValue = mobilePicker.value;
+        }
+        if (!mobilePicker.querySelector(`option[value='${val}']`)) {
+          const matchedSec = ENHANCEMENT_PICKER_SECTIONS.find((sec) => sec.value === val);
+          if (matchedSec && matchedSec.isEnabled()) {
+            const opt = document.createElement("option");
+            opt.value = matchedSec.value;
+            opt.textContent = matchedSec.label;
+            mobilePicker.appendChild(opt);
+          }
+        }
+        if (mobilePicker.value !== val) {
+          mobilePicker.value = val;
+        }
       }
     } catch (e) {}
   }
 
   function activateSettingsTab(nav, shortcutId) {
     if (!nav) return false;
+    if (shortcutId === "models" && typeof window !== "undefined" && typeof window.__PI_ENH_PRELOAD_MODELS_CACHE__ === "function") {
+      void window.__PI_ENH_PRELOAD_MODELS_CACHE__();
+    }
 
     let enhTab = nav.querySelector("[data-pi-enh-tab='plugins']");
     let archTab = nav.querySelector("[data-pi-enh-tab='archived']");
@@ -51768,7 +60912,10 @@
     if (settingsDialogObserver || typeof MutationObserver !== "function") return;
     try {
       settingsDialogObserver = new MutationObserver((mutations) => {
+        // Detachment must also be cleaned during internal DOM updates.
+        cleanupDetachedSettingsResizeSurface();
         if (isMutatingInternally) return;
+
         let shouldSync = false;
         for (const m of mutations) {
           if (m.type === "childList" && m.addedNodes && m.addedNodes.length > 0) {
@@ -51809,11 +60956,34 @@
   initSettingsDialogObserver();
   syncSettingsDialogEnhancements();
   activeCleanups.push(() => {
+    cleanupSettingsDialogResizers();
     if (settingsDialogObserver) {
       settingsDialogObserver.disconnect();
       settingsDialogObserver = null;
     }
   });
+
+  let settingsResizeRaf = 0;
+  function handleCoalescedResize() {
+    if (settingsResizeRaf) return;
+    if (typeof requestAnimationFrame === "function") {
+      settingsResizeRaf = requestAnimationFrame(() => {
+        settingsResizeRaf = 0;
+        syncSettingsDialogEnhancements();
+      });
+    }
+  }
+  if (typeof window !== "undefined") {
+    addManagedListener(window, "resize", handleCoalescedResize, { passive: true });
+    activeCleanups.push(() => {
+      if (settingsResizeRaf) {
+        if (typeof cancelAnimationFrame === "function") {
+          cancelAnimationFrame(settingsResizeRaf);
+        }
+        settingsResizeRaf = 0;
+      }
+    });
+  }
 
   addManagedListener(document, "click", (e) => {
     const target = e.target;
@@ -52109,17 +61279,10 @@
         });
       }
 
-      // 仅以最新 HTML 所需的首屏静态资源 + 当前文档核心样式/app入口为刷新目标，
-      // 剔除历史会话期间按需懒加载的数 MB 非首屏 chunk，防止手机 VPN 下重复全量拉取超时
+      // 仅以最新 HTML 所需的首屏静态资源 (+ 可选增强脚本) 为刷新预热目标，
+      // 严禁将当前旧 DOM 已加载的历史静态资源（如旧哈希 CSS、旧 chunks）混入 staticUrls，
+      // 避免服务器已清理下线的旧文件 404 导致强制刷新被意外阻断。
       const staticUrls = new Set(latestHtmlUrls);
-      alreadyLoadedUrls.forEach((u) => {
-        try {
-          const p = new URL(u).pathname;
-          if (p.endsWith(".css") || p.includes("/chunks/app/") || p.includes("/chunks/pages/")) {
-            staticUrls.add(u);
-          }
-        } catch (_) {}
-      });
       if (latestEnhancementUrl) {
         staticUrls.add(latestEnhancementUrl);
       }
@@ -52271,7 +61434,7 @@
         type: "container",
         isSynology: true,
         displayName: "群晖同事端 Pi Web (30142)",
-        containerName: "pi-agent-colleague",
+        containerName: "pi-web-colleague",
         targetParam: "30142",
         port: 30142,
         bridgeCandidateUrls: [
@@ -52281,29 +61444,27 @@
         restartApi: "/restart-container",
         statusApi: "/container-status?target=30142",
         probePath: "/login",
-        manualScriptPath: "/volume1/docker/pi-agent-colleague/restart-container-30142.sh",
-        manualCommand: 'ssh root@127.0.0.1 -p 2222 "/volume1/docker/pi-agent-colleague/restart-container-30142.sh"',
+        manualScriptPath: "~/.pi/agent/scripts/restart-pi-web.sh --target 30142",
+        manualCommand: "bash ~/.pi/agent/scripts/restart-pi-web.sh --target 30142",
       };
     }
 
-    // 2. Windows 本地端：主机名为 127.0.0.1，或在 Windows 系统下的 localhost / 127.0.0.1
-    const isWindowsHost = hostname === "127.0.0.1";
+    // 2. Windows 本地端：在 Windows 系统下的 localhost / 127.0.0.1
     const isWindowsLocal = (hostname === "localhost" || hostname === "127.0.0.1") && platform.includes("win");
-    if (isWindowsHost || isWindowsLocal) {
-      const host = isWindowsHost ? "127.0.0.1" : "127.0.0.1";
+    if (isWindowsLocal) {
+      const parsedPort = Number(port) || 30141;
       return {
-        id: "windows-30141",
+        id: `windows-${parsedPort}`,
         type: "process",
         isSynology: false,
-        displayName: "Windows 本地 Pi Web (30141)",
+        displayName: `Windows 本地 Pi Web (${parsedPort})`,
         containerName: null,
         targetParam: "windows",
-        port: 30141,
+        port: parsedPort,
         bridgeCandidateUrls: [
-          `http://${host}:30149`,
+          `http://${hostname || "127.0.0.1"}:30149`,
           "http://127.0.0.1:30149",
           "http://localhost:30149",
-          "http://127.0.0.1:30149"
         ],
         restartApi: "/restart-pi-web",
         statusApi: "/pi-web-status",
@@ -52314,7 +61475,7 @@
     }
 
     // 3. MacBook 本地端：主机名为 127.0.0.1，或在 Mac 下的 localhost / 127.0.0.1
-    if (hostname === "127.0.0.1" || ((hostname === "localhost" || hostname === "127.0.0.1") && platform.includes("mac"))) {
+    if ((hostname === "localhost" || hostname === "127.0.0.1") && platform.includes("mac")) {
       return {
         id: "mac-30141",
         type: "process",
@@ -52331,19 +61492,19 @@
         restartApi: "/restart-pi-web",
         statusApi: "/pi-web-status",
         probePath: "/login",
-        manualScriptPath: "/Users/palhan/.pi/agent/scripts/restart-pi-web.sh",
-        manualCommand: "bash /Users/palhan/.pi/agent/scripts/restart-pi-web.sh",
+        manualScriptPath: "~/.pi/agent/scripts/restart-pi-web.sh",
+        manualCommand: "bash ~/.pi/agent/scripts/restart-pi-web.sh",
       };
     }
 
-    // 4. 群晖主开发端容器 (30141 / pi-agent)：默认全覆盖（127.0.0.1、手机/平板客户端访问、OpenVPN 127.0.0.1、外网域名）
+    // 4. 群晖主开发端容器 (30141 / pi-web)：默认全覆盖（127.0.0.1、手机/平板客户端访问、OpenVPN 127.0.0.1、外网域名）
     const bridgeHost = (hostname && !["localhost", "127.0.0.1"].includes(hostname)) ? hostname : "127.0.0.1";
     return {
       id: "synology-30141",
       type: "container",
       isSynology: true,
       displayName: "群晖 NAS Pi Web (30141)",
-      containerName: "pi-agent",
+      containerName: "pi-web",
       targetParam: "30141",
       port: 30141,
       bridgeCandidateUrls: [
@@ -52353,8 +61514,8 @@
       restartApi: "/restart-container",
       statusApi: "/container-status?target=30141",
       probePath: "/login",
-      manualScriptPath: "/volume1/docker/pi-agent/restart-container-30141.sh",
-      manualCommand: 'ssh root@127.0.0.1 -p 2222 "/volume1/docker/pi-agent/restart-container-30141.sh"',
+      manualScriptPath: "~/.pi/agent/scripts/restart-pi-web.sh --target 30141",
+      manualCommand: "bash ~/.pi/agent/scripts/restart-pi-web.sh --target 30141",
     };
   }
 
@@ -52946,6 +62107,7 @@ function showUsagePanel(nav, usageTab) {
     parent.appendChild(panel);
   }
   panel.style.display = "block";
+  syncMobilePickerOption(nav, "usage");
   renderUsagePanel(panel, nav);
 }
 
@@ -53968,15 +63130,24 @@ window.__PI_ENH_RENDER_USAGE_PANEL__ = renderUsagePanel;
       </div>`;
   }
 
-  const SUBAGENT_PROFILE_SCOPE_PRIORITY = Object.freeze({
-    builtin: 0,
-    global: 1,
-    workspace: 2,
-    project: 3,
-  });
+  const SUBAGENT_MODEL_UNAVAILABLE_VALUE = "__subagent_model_unavailable__";
+  const SUBAGENT_THINKING_LEVELS = [
+    { value: "", label: "遵循默认 (inherit)" },
+    { value: "off", label: "关闭 (off)" },
+    { value: "minimal", label: "极简 (minimal)" },
+    { value: "low", label: "低深度 (low)" },
+    { value: "medium", label: "中深度 (medium)" },
+    { value: "high", label: "高深度 (high)" },
+    { value: "xhigh", label: "超高深度 (xhigh)" },
+    { value: "max", label: "最大深度 (max)" },
+  ];
 
-  function normalizeSubagentProfileName(value) {
-    return typeof value === "string" && value.trim() ? value.trim() : "";
+  function normalizeSubagentModel(value) {
+    return typeof value === "string" && value.trim() ? value.trim() : null;
+  }
+
+  function normalizeSubagentThinking(value) {
+    return typeof value === "string" && value.trim() ? value.trim() : null;
   }
 
   function normalizeSubagentCwd(value) {
@@ -54022,29 +63193,6 @@ window.__PI_ENH_RENDER_USAGE_PANEL__ = renderUsagePanel;
     return "";
   }
 
-  function getEffectiveSubagentProfiles(rawProfiles) {
-    const byName = new Map();
-    for (const source of Array.isArray(rawProfiles) ? rawProfiles : []) {
-      const name = normalizeSubagentProfileName(source?.name);
-      const scope = typeof source?.scope === "string" ? source.scope.trim().toLowerCase() : "";
-      const priority = SUBAGENT_PROFILE_SCOPE_PRIORITY[scope];
-      if (!name || !Number.isInteger(priority)) continue;
-      const key = name.toLocaleLowerCase();
-      const previous = byName.get(key);
-      if (!previous || priority >= previous.priority) {
-        byName.set(key, { profile: { ...source, name, scope }, priority });
-      }
-    }
-    return [...byName.values()]
-      .map(({ profile }) => profile)
-      .filter((profile) => profile.enabled === true)
-      .sort((a, b) => {
-        const aLabel = normalizeSubagentProfileName(a.displayName) || a.name;
-        const bLabel = normalizeSubagentProfileName(b.displayName) || b.name;
-        return aLabel.localeCompare(bLabel, undefined, { sensitivity: "base" }) || a.name.localeCompare(b.name);
-      });
-  }
-
   async function fetchSubagentJson(url, options = {}) {
     const { timeoutMs = 8000, ...requestOptions } = options || {};
     let timeoutController = null;
@@ -54074,107 +63222,183 @@ window.__PI_ENH_RENDER_USAGE_PANEL__ = renderUsagePanel;
     }
   }
 
-  function appendSubagentProfileOption(select, value, label, disabled = false) {
-    const option = document.createElement("option");
-    option.value = String(value ?? "");
-    option.textContent = String(label ?? "");
-    option.disabled = Boolean(disabled);
-    select.appendChild(option);
-    return option;
-  }
-
-  function syncSubagentProfileControlDisabled(control) {
+  function syncSubagentModelControlDisabled(control) {
     if (!control) return;
-    const select = control.querySelector("[data-subagent-profile-select]");
-    if (!select) return;
-    const state = control.__piEnhSubagentProfileState;
-    const featureId = control.getAttribute("data-subagent-profile-feature") || "";
+    const state = control.__piEnhSubagentModelState;
+    const featureId = control.getAttribute("data-subagent-model-feature") || "";
     const row = control.closest("[data-module-row]");
     const moduleId = row?.getAttribute("data-module-row") || "";
     const moduleDisabled = moduleId ? !isModuleEnabled(moduleId) : false;
     const featureDisabled = featureId ? !isPluginEnabled(featureId) : false;
-    const busy = Boolean(state?.loading || state?.saving) || select.getAttribute("data-subagent-profile-busy") === "true";
-    const unavailable = select.getAttribute("data-subagent-profile-unavailable") === "true";
-    const ready = select.getAttribute("data-subagent-profile-ready") === "true";
-    select.disabled = moduleDisabled || featureDisabled || busy || !ready || unavailable;
-    const reload = control.querySelector("[data-subagent-profile-reload]");
-    if (reload) reload.disabled = moduleDisabled || featureDisabled || busy;
+    const busy = Boolean(state?.loading);
+    const disabled = moduleDisabled || featureDisabled || busy;
+
+    const reload = control.querySelector("[data-subagent-model-reload]");
+    if (reload) reload.disabled = disabled;
+
+    for (const select of control.querySelectorAll("select[data-subagent-profile-model], select[data-subagent-profile-thinking]")) {
+      const prof = select.getAttribute("data-subagent-profile-model") || select.getAttribute("data-subagent-profile-thinking") || "";
+      const isSavingThis = state?.savingProfiles?.has(prof.toLowerCase());
+      select.disabled = disabled || isSavingThis || !state?.settingsLoaded;
+    }
   }
 
-  function renderSubagentProfileControl(control, state) {
+  function renderSubagentModelControl(control, state) {
     if (!control || !state) return;
-    const select = control.querySelector("[data-subagent-profile-select]");
-    if (!select) return;
-    const cwdNode = control.querySelector("[data-subagent-profile-cwd]");
-    const statusNode = control.querySelector("[data-subagent-profile-status]");
+    const cwdNode = control.querySelector("[data-subagent-model-cwd]");
+    const statusNode = control.querySelector("[data-subagent-model-status]");
+    const matrixBody = control.querySelector("[data-subagent-matrix-body]");
     if (cwdNode) {
       cwdNode.textContent = state.cwd ? `当前 cwd：${state.cwd}` : "当前 cwd：未检测到有效工作目录";
       cwdNode.title = state.cwd || "";
     }
 
-    while (select.firstChild) select.removeChild(select.firstChild);
-    select.setAttribute("data-subagent-profile-ready", "false");
-    select.setAttribute("data-subagent-profile-unavailable", "true");
-    select.setAttribute("data-subagent-profile-busy", state.saving ? "true" : "false");
+    if (!matrixBody) return;
+    while (matrixBody.firstChild) matrixBody.removeChild(matrixBody.firstChild);
 
     if (state.loading) {
-      appendSubagentProfileOption(select, "", "正在读取服务端 profile…", true);
-      if (statusNode) statusNode.textContent = "正在读取当前 cwd 的生效 profile 与服务端默认值…";
-      syncSubagentProfileControlDisabled(control);
-      return;
-    }
-    if (!state.cwd) {
-      appendSubagentProfileOption(select, "", "当前没有可用 cwd", true);
-      if (statusNode) statusNode.textContent = "当前没有有效 cwd，无法读取项目 profile；请先打开一个工作区或会话。";
-      syncSubagentProfileControlDisabled(control);
-      return;
-    }
-    if (state.settingsError || !state.settingsLoaded) {
-      appendSubagentProfileOption(select, "", "服务端默认值读取失败", true);
-      if (statusNode) statusNode.textContent = "无法读取服务端默认 profile，暂不可保存；可点击“重新读取”。";
-      syncSubagentProfileControlDisabled(control);
-      return;
-    }
-    if (state.profilesError || !state.profilesLoaded) {
-      appendSubagentProfileOption(select, "", "当前 cwd 的 profile 读取失败", true);
-      if (statusNode) statusNode.textContent = "无法读取当前 cwd 下的 profile；可点击“重新读取”。";
-      syncSubagentProfileControlDisabled(control);
+      matrixBody.innerHTML = `<div style="padding:14px;color:var(--text-muted);font-size:12px;text-align:center;">正在读取子 Agent 列表、模型配置与服务端状态…</div>`;
+      if (statusNode) statusNode.textContent = "正在读取子 Agent 列表与可用模型…";
+      syncSubagentModelControlDisabled(control);
       return;
     }
 
-    const availableProfiles = Array.isArray(state.profiles) ? state.profiles : [];
-    const defaultProfile = normalizeSubagentProfileName(state.defaultProfile) || "general-purpose";
-    const selectedProfile = availableProfiles.find((profile) =>
-      normalizeSubagentProfileName(profile.name).toLocaleLowerCase() === defaultProfile.toLocaleLowerCase()
-    );
-
-    if (availableProfiles.length === 0) {
-      appendSubagentProfileOption(select, "", `当前默认 profile “${defaultProfile}” 在此 cwd 不可用`, true);
-      if (statusNode) statusNode.textContent = "当前 cwd 没有可用且已启用的 profile；服务端默认值在此 cwd 不会生效。";
-      syncSubagentProfileControlDisabled(control);
+    if (!state.settingsLoaded || state.settingsError) {
+      matrixBody.innerHTML = `<div style="padding:14px;color:#ef4444;font-size:12px;text-align:center;">无法读取服务端子任务设置；请检查连接后点击“重新读取”。</div>`;
+      if (statusNode) statusNode.textContent = "服务端设置读取失败。";
+      syncSubagentModelControlDisabled(control);
       return;
     }
-    if (!selectedProfile) {
-      appendSubagentProfileOption(select, "", `当前默认 profile “${defaultProfile}” 在此 cwd 不可用，请选择其他 profile`, true);
+
+    const profiles = Array.isArray(state.profiles) ? state.profiles : [];
+    if (profiles.length === 0) {
+      matrixBody.innerHTML = `<div style="padding:14px;color:var(--text-muted);font-size:12px;text-align:center;">${state.cwd ? "当前 cwd 下未检测到任何子 Agent profile。" : "当前没有有效 cwd，无法加载子 Agent 列表。"}</div>`;
+      if (statusNode) statusNode.textContent = state.cwd ? "未找到可配置的子 Agent。" : "请在有效工作区会话下配置子 Agent。";
+      syncSubagentModelControlDisabled(control);
+      return;
     }
-    for (const profile of availableProfiles) {
-      const name = normalizeSubagentProfileName(profile.name);
-      const displayName = normalizeSubagentProfileName(profile.displayName);
-      const label = displayName && displayName !== name ? `${displayName} (${name})` : name;
-      appendSubagentProfileOption(select, name, label);
+
+    const models = Array.isArray(state.models) ? state.models : [];
+    const modelOptions = models.map((m) => {
+      const provider = typeof m?.provider === "string" ? m.provider.trim() : "";
+      const id = typeof m?.id === "string" ? m.id.trim() : "";
+      if (!provider || !id) return null;
+      const value = `${provider}/${id}`;
+      const name = typeof m.name === "string" && m.name.trim() ? m.name.trim() : id;
+      return { value, label: `${name} (${value})` };
+    }).filter(Boolean);
+
+    const overrides = state.overrides && typeof state.overrides === "object" ? state.overrides : {};
+
+    for (const profile of profiles) {
+      const profName = String(profile?.name || "").trim();
+      if (!profName) continue;
+      const profKey = profName.toLowerCase();
+      const profOverride = overrides[profKey] || {};
+      const configuredModel = normalizeSubagentModel(profOverride.model);
+      const configuredThinking = normalizeSubagentThinking(profOverride.thinking) || "";
+      const isSaving = state.savingProfiles?.has(profKey);
+
+      const row = document.createElement("div");
+      row.className = "pi-enh-subagent-row";
+      row.setAttribute("data-subagent-row", profName);
+      row.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:8px 12px;padding:8px 10px;border-radius:6px;background:var(--bg-hover, rgba(255,255,255,0.04));border:1px solid var(--border, rgba(255,255,255,0.08));flex-wrap:wrap;";
+
+      const scopeText = profile.scope === "builtin" ? "内置" : profile.scope === "project" ? "项目" : "全局";
+      const displayName = profile.displayName || profName;
+      const desc = profile.description || "无描述";
+
+      const infoCol = document.createElement("div");
+      infoCol.className = "pi-enh-subagent-row-info";
+      infoCol.style.cssText = "display:flex;flex-direction:column;gap:2px;min-width:140px;flex:1 1 160px;";
+      infoCol.innerHTML = `
+        <div style="display:flex;align-items:center;gap:6px;">
+          <strong style="color:var(--text);font-size:12.5px;">${escapeQuickActionHtml(displayName)}</strong>
+          <span style="font-size:10px;padding:1px 5px;border-radius:3px;background:rgba(255,255,255,0.08);color:var(--text-muted);">${escapeQuickActionHtml(scopeText)}</span>
+          ${profile.model ? `<span style="font-size:10px;color:var(--text-dim);" title="Profile 自身默认模型: ${escapeQuickActionHtml(profile.model)}">(默认: ${escapeQuickActionHtml(profile.model)})</span>` : ""}
+        </div>
+        <span style="font-size:11px;color:var(--text-muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escapeQuickActionHtml(desc)}">${escapeQuickActionHtml(desc)}</span>
+      `;
+      row.appendChild(infoCol);
+
+      const ctrlCol = document.createElement("div");
+      ctrlCol.className = "pi-enh-subagent-row-controls";
+      ctrlCol.style.cssText = "display:flex;align-items:center;gap:8px;flex-wrap:wrap;";
+
+      // Model Select
+      const modelLabel = document.createElement("label");
+      modelLabel.style.cssText = "display:inline-flex;align-items:center;gap:4px;font-size:11.5px;color:var(--text-muted);";
+      modelLabel.innerHTML = `<span>模型:</span>`;
+      const modelSelect = document.createElement("select");
+      modelSelect.setAttribute("data-subagent-profile-model", profName);
+      modelSelect.setAttribute("aria-label", `${displayName} 模型`);
+      modelSelect.style.cssText = "min-width:140px;max-width:220px;height:26px;padding:2px 6px;border-radius:5px;border:1px solid var(--border);background:var(--bg, #1a1a1a);color:var(--text);font-size:11.5px;";
+
+      const defaultModelOpt = document.createElement("option");
+      defaultModelOpt.value = "";
+      defaultModelOpt.textContent = profile.model ? `遵循 profile (${profile.model})` : "遵循主会话模型";
+      modelSelect.appendChild(defaultModelOpt);
+
+      let foundConfigured = false;
+      for (const m of modelOptions) {
+        const opt = document.createElement("option");
+        opt.value = m.value;
+        opt.textContent = m.label;
+        if (m.value === configuredModel) {
+          opt.selected = true;
+          foundConfigured = true;
+        }
+        modelSelect.appendChild(opt);
+      }
+      if (configuredModel && !foundConfigured) {
+        const missingOpt = document.createElement("option");
+        missingOpt.value = SUBAGENT_MODEL_UNAVAILABLE_VALUE;
+        missingOpt.textContent = `不可用: ${configuredModel}`;
+        missingOpt.disabled = true;
+        missingOpt.selected = true;
+        modelSelect.appendChild(missingOpt);
+      }
+      if (!configuredModel) defaultModelOpt.selected = true;
+      modelLabel.appendChild(modelSelect);
+      ctrlCol.appendChild(modelLabel);
+
+      // Thinking Select
+      const thinkingLabel = document.createElement("label");
+      thinkingLabel.style.cssText = "display:inline-flex;align-items:center;gap:4px;font-size:11.5px;color:var(--text-muted);";
+      thinkingLabel.innerHTML = `<span>思考:</span>`;
+      const thinkingSelect = document.createElement("select");
+      thinkingSelect.setAttribute("data-subagent-profile-thinking", profName);
+      thinkingSelect.setAttribute("aria-label", `${displayName} 思考深度`);
+      thinkingSelect.style.cssText = "min-width:105px;height:26px;padding:2px 6px;border-radius:5px;border:1px solid var(--border);background:var(--bg, #1a1a1a);color:var(--text);font-size:11.5px;";
+
+      for (const lvl of SUBAGENT_THINKING_LEVELS) {
+        const opt = document.createElement("option");
+        opt.value = lvl.value;
+        opt.textContent = lvl.label;
+        if (lvl.value === configuredThinking) opt.selected = true;
+        thinkingSelect.appendChild(opt);
+      }
+      thinkingLabel.appendChild(thinkingSelect);
+      ctrlCol.appendChild(thinkingLabel);
+
+      // Status indicator
+      const statusSpan = document.createElement("span");
+      statusSpan.setAttribute("data-subagent-row-status", profName);
+      statusSpan.style.cssText = "font-size:11px;min-width:36px;color:var(--text-dim);";
+      if (isSaving) statusSpan.textContent = "保存中…";
+      ctrlCol.appendChild(statusSpan);
+
+      row.appendChild(ctrlCol);
+      matrixBody.appendChild(row);
     }
-    select.value = selectedProfile ? selectedProfile.name : "";
-    select.setAttribute("data-subagent-profile-ready", "true");
-    select.setAttribute("data-subagent-profile-unavailable", "false");
+
     if (statusNode) {
-      statusNode.textContent = selectedProfile
-        ? `服务端当前默认：${selectedProfile.name}`
-        : `当前默认 profile “${defaultProfile}” 不可用；请选择下方已启用 profile。`;
+      statusNode.textContent = "每个子 Agent 独立配置模型与思考深度；单次调用显式参数优先。";
     }
-    syncSubagentProfileControlDisabled(control);
+    syncSubagentModelControlDisabled(control);
   }
 
-  async function loadSubagentProfileControl(control, state) {
+  async function loadSubagentModelControl(control, state) {
     if (!control || !state) return;
     try { state.controller?.abort(); } catch (e) {}
     const token = (state.requestToken || 0) + 1;
@@ -54183,37 +63407,61 @@ window.__PI_ENH_RENDER_USAGE_PANEL__ = renderUsagePanel;
     state.settingsLoaded = false;
     state.profilesLoaded = false;
     state.settingsError = null;
+    state.modelsError = null;
     state.profilesError = null;
+    state.models = [];
     state.profiles = [];
+    state.overrides = {};
     const controller = typeof AbortController === "function" ? new AbortController() : null;
     state.controller = controller;
-    renderSubagentProfileControl(control, state);
+    renderSubagentModelControl(control, state);
     const timeoutId = controller ? setTimeout(() => controller.abort(), 8000) : null;
-    const isCurrent = () => control.isConnected && control.__piEnhSubagentProfileState === state && state.requestToken === token;
+    const isCurrent = () => control.isConnected && control.__piEnhSubagentModelState === state && state.requestToken === token;
 
     try {
       const settingsRequest = fetchSubagentJson("/api/subagents/settings", { signal: controller?.signal });
+      const modelsRequest = state.cwd
+        ? fetchSubagentJson(`/api/models?cwd=${encodeURIComponent(state.cwd)}`, { signal: controller?.signal })
+        : Promise.resolve({ modelList: [] });
       const profilesRequest = state.cwd
         ? fetchSubagentJson(`/api/subagents/profiles?cwd=${encodeURIComponent(state.cwd)}`, { signal: controller?.signal })
         : Promise.resolve({ profiles: [] });
-      const [settingsResult, profilesResult] = await Promise.allSettled([settingsRequest, profilesRequest]);
+
+      const [settingsResult, modelsResult, profilesResult] = await Promise.allSettled([
+        settingsRequest,
+        modelsRequest,
+        profilesRequest,
+      ]);
       if (!isCurrent()) return;
 
       if (settingsResult.status === "fulfilled") {
-        const value = normalizeSubagentProfileName(settingsResult.value?.defaultProfile);
-        state.defaultProfile = value || "general-purpose";
+        const settingsData = settingsResult.value;
+        state.overrides = (settingsData && typeof settingsData === "object" && settingsData.subagentOverrides && typeof settingsData.subagentOverrides === "object")
+          ? settingsData.subagentOverrides
+          : {};
+        state.globalModel = normalizeSubagentModel(settingsData?.subagentModel);
         state.settingsLoaded = true;
       } else {
         state.settingsError = settingsResult.reason;
       }
 
       if (!state.cwd) {
-        state.profilesLoaded = true;
-      } else if (profilesResult.status === "fulfilled" && Array.isArray(profilesResult.value?.profiles)) {
-        state.profiles = getEffectiveSubagentProfiles(profilesResult.value.profiles);
-        state.profilesLoaded = true;
+        state.modelsError = null;
+        state.profilesError = null;
       } else {
-        state.profilesError = profilesResult.status === "rejected" ? profilesResult.reason : new Error("Invalid profiles response");
+        if (modelsResult.status === "fulfilled" && Array.isArray(modelsResult.value?.modelList)) {
+          state.models = modelsResult.value.modelList;
+          state.modelsError = modelsResult.value.modelError ? new Error(String(modelsResult.value.modelError)) : null;
+        } else {
+          state.modelsError = modelsResult.status === "rejected" ? modelsResult.reason : new Error("Invalid model list response");
+        }
+
+        if (profilesResult.status === "fulfilled" && Array.isArray(profilesResult.value?.profiles)) {
+          state.profiles = profilesResult.value.profiles;
+          state.profilesLoaded = true;
+        } else {
+          state.profilesError = profilesResult.status === "rejected" ? profilesResult.reason : new Error("Invalid profiles response");
+        }
       }
     } catch (error) {
       if (isCurrent()) state.settingsError = error;
@@ -54222,85 +63470,146 @@ window.__PI_ENH_RENDER_USAGE_PANEL__ = renderUsagePanel;
       if (!isCurrent()) return;
       state.loading = false;
       if (state.controller === controller) state.controller = null;
-      renderSubagentProfileControl(control, state);
+      renderSubagentModelControl(control, state);
     }
   }
 
-  async function saveSubagentProfileSelection(control, state, select) {
-    const nextProfile = normalizeSubagentProfileName(select?.value);
-    if (!nextProfile || state.saving || !state.settingsLoaded) return;
-    const previousProfile = state.defaultProfile;
-    state.saving = true;
-    select.setAttribute("data-subagent-profile-busy", "true");
-    const statusNode = control.querySelector("[data-subagent-profile-status]");
-    if (statusNode) statusNode.textContent = "正在保存到服务端…";
-    syncSubagentProfileControlDisabled(control);
+  async function saveSubagentProfileOverride(control, state, profileName) {
+    if (!control || !state || !state.settingsLoaded || !profileName) return;
+    const profKey = profileName.toLowerCase();
+    const modelSelect = control.querySelector(`select[data-subagent-profile-model="${profileName}"]`);
+    const thinkingSelect = control.querySelector(`select[data-subagent-profile-thinking="${profileName}"]`);
+    if (!modelSelect || !thinkingSelect) return;
+
+    const rawModel = String(modelSelect.value || "");
+    if (rawModel === SUBAGENT_MODEL_UNAVAILABLE_VALUE) return;
+    const nextModel = normalizeSubagentModel(rawModel);
+    const nextThinking = normalizeSubagentThinking(thinkingSelect.value);
+
+    const prevOverride = state.overrides?.[profKey] || {};
+    const prevModel = normalizeSubagentModel(prevOverride.model);
+    const prevThinking = normalizeSubagentThinking(prevOverride.thinking);
+
+    if (nextModel === prevModel && nextThinking === prevThinking) return;
+
+    if (!state.savingProfiles) state.savingProfiles = new Set();
+    state.savingProfiles.add(profKey);
+
+    const statusNode = control.querySelector(`[data-subagent-row-status="${profileName}"]`);
+    if (statusNode) {
+      statusNode.textContent = "保存中…";
+      statusNode.style.color = "var(--text-muted)";
+    }
+    syncSubagentModelControlDisabled(control);
+
     try {
       const data = await fetchSubagentJson("/api/subagents/settings", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ defaultProfile: nextProfile }),
+        body: JSON.stringify({
+          profileOverride: {
+            profile: profileName,
+            model: nextModel,
+            thinking: nextThinking,
+          },
+        }),
         timeoutMs: 8000,
       });
-      if (!control.isConnected || control.__piEnhSubagentProfileState !== state) return;
-      state.defaultProfile = normalizeSubagentProfileName(data?.defaultProfile) || nextProfile;
-      state.saving = false;
-      renderSubagentProfileControl(control, state);
-      if (typeof showToast === "function") showToast("默认子 Agent profile 已保存到服务端");
+
+      if (!control.isConnected || control.__piEnhSubagentModelState !== state) return;
+
+      state.overrides = (data && typeof data === "object" && data.subagentOverrides && typeof data.subagentOverrides === "object")
+        ? data.subagentOverrides
+        : state.overrides || {};
+
+      state.savingProfiles.delete(profKey);
+      if (statusNode) {
+        statusNode.textContent = "✓ 已存";
+        statusNode.style.color = "#22c55e";
+        setTimeout(() => {
+          if (control.isConnected && statusNode.textContent === "✓ 已存") statusNode.textContent = "";
+        }, 2500);
+      }
+      syncSubagentModelControlDisabled(control);
+      if (typeof showToast === "function") {
+        showToast(`子 Agent [${profileName}] 配置已保存`);
+      }
     } catch (error) {
-      if (!control.isConnected || control.__piEnhSubagentProfileState !== state) return;
-      console.warn("[Pi Web Enhancements] 保存默认子 Agent profile 失败:", error);
-      state.defaultProfile = previousProfile;
-      state.saving = false;
-      renderSubagentProfileControl(control, state);
-      if (typeof showToast === "function") showToast("默认子 Agent profile 保存失败，请重试", null, 5000);
+      if (!control.isConnected || control.__piEnhSubagentModelState !== state) return;
+      console.warn(`[Pi Web Enhancements] 保存子 Agent ${profileName} 配置失败:`, error);
+      state.savingProfiles.delete(profKey);
+      // Rollback
+      if (prevModel) modelSelect.value = prevModel;
+      else modelSelect.value = "";
+      thinkingSelect.value = prevThinking || "";
+      if (statusNode) {
+        statusNode.textContent = "失败";
+        statusNode.style.color = "#ef4444";
+      }
+      syncSubagentModelControlDisabled(control);
+      if (typeof showToast === "function") {
+        showToast(`子 Agent [${profileName}] 配置保存失败，请重试`, null, 5000);
+      }
     }
   }
 
-  function bindSubagentProfileControls(panel) {
-    for (const control of panel.querySelectorAll("[data-subagent-profile-control]")) {
+  function bindSubagentModelControls(panel) {
+    for (const control of panel.querySelectorAll("[data-subagent-model-control]")) {
       const state = {
         cwd: getActiveSubagentCwd(),
-        defaultProfile: null,
         profiles: [],
+        models: [],
+        overrides: {},
+        globalModel: null,
         loading: false,
-        saving: false,
+        savingProfiles: new Set(),
         settingsLoaded: false,
         profilesLoaded: false,
         settingsError: null,
+        modelsError: null,
         profilesError: null,
         requestToken: 0,
         controller: null,
       };
-      control.__piEnhSubagentProfileState = state;
-      const select = control.querySelector("[data-subagent-profile-select]");
-      const reload = control.querySelector("[data-subagent-profile-reload]");
+      control.__piEnhSubagentModelState = state;
+      const reload = control.querySelector("[data-subagent-model-reload]");
       reload?.addEventListener("click", () => {
-        if (!state.loading && !state.saving) void loadSubagentProfileControl(control, state);
+        if (!state.loading && (!state.savingProfiles || state.savingProfiles.size === 0)) {
+          void loadSubagentModelControl(control, state);
+        }
       });
-      select?.addEventListener("change", () => {
-        void saveSubagentProfileSelection(control, state, select);
+
+      control.addEventListener("change", (event) => {
+        const target = event.target;
+        if (!target || target.tagName !== "SELECT") return;
+        const profName = target.getAttribute("data-subagent-profile-model") || target.getAttribute("data-subagent-profile-thinking");
+        if (profName) {
+          void saveSubagentProfileOverride(control, state, profName);
+        }
       });
-      void loadSubagentProfileControl(control, state);
+
+      void loadSubagentModelControl(control, state);
     }
   }
 
   function renderModuleSettingControl(setting, disabled) {
-    if (setting.kind === "subagent-profile") {
+    if (setting.kind === "subagent-model") {
       const featureId = escapeQuickActionHtml(setting.featureId || "");
-      const label = escapeQuickActionHtml(setting.label || "默认子 Agent profile");
-      const description = escapeQuickActionHtml(setting.description || "仅在调用未显式指定 subagent_type 时生效。");
-      return `<div class="pi-enh-subagent-profile-setting pi-enh-plugin-number-setting" style="width:100%;flex-wrap:wrap;white-space:normal;" data-subagent-profile-control data-subagent-profile-feature="${featureId}">
-        <div class="pi-enh-subagent-profile-copy" style="display:flex;flex:1 1 300px;flex-direction:column;gap:2px;min-width:220px;">
-          <span class="pi-enh-plugin-number-setting-label">${label}</span>
-          <span class="pi-enh-subagent-profile-description">${description}</span>
-          <span class="pi-enh-subagent-profile-cwd" data-subagent-profile-cwd>当前 cwd：读取中…</span>
+      const label = escapeQuickActionHtml(setting.label || "子 Agent 独立模型与思考深度");
+      const description = escapeQuickActionHtml(setting.description || "为每个子 Agent 独立配置专属模型与思考深度；单次调用显式参数优先。");
+      return `<div class="pi-enh-subagent-model-setting pi-enh-plugin-number-setting" style="width:100%;flex-direction:column;align-items:stretch;white-space:normal;gap:8px;" data-subagent-model-control data-subagent-model-feature="${featureId}">
+        <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:8px 12px;flex-wrap:wrap;">
+          <div class="pi-enh-subagent-model-copy" style="display:flex;flex:1 1 280px;flex-direction:column;gap:2px;min-width:200px;">
+            <span class="pi-enh-plugin-number-setting-label" style="font-weight:600;font-size:12.5px;">${label}</span>
+            <span class="pi-enh-subagent-model-description" style="font-size:11.5px;color:var(--text-muted);">${description}</span>
+            <span class="pi-enh-subagent-model-cwd" data-subagent-model-cwd style="font-size:11px;color:var(--text-dim);margin-top:2px;">当前 cwd：读取中…</span>
+          </div>
+          <button type="button" class="pi-enh-btn-sm" data-subagent-model-reload ${disabled ? "disabled" : ""}>重新读取</button>
         </div>
-        <select data-subagent-profile-select aria-label="${label}" ${disabled ? "disabled" : ""}>
-          <option value="">正在读取服务端状态…</option>
-        </select>
-        <button type="button" class="pi-enh-btn-sm" data-subagent-profile-reload ${disabled ? "disabled" : ""}>重新读取</button>
-        <span class="pi-enh-subagent-profile-status" data-subagent-profile-status role="status" aria-live="polite">正在读取服务端设置…</span>
+        <div class="pi-enh-subagent-matrix-body" data-subagent-matrix-body style="display:flex;flex-direction:column;gap:6px;width:100%;margin-top:4px;">
+          <div style="padding:10px;color:var(--text-muted);font-size:11.5px;text-align:center;">正在读取状态…</div>
+        </div>
+        <span class="pi-enh-subagent-model-status" data-subagent-model-status role="status" aria-live="polite" style="font-size:11px;color:var(--text-dim);margin-top:2px;">正在读取模型设置…</span>
       </div>`;
     }
     if (setting.kind === "action") {
@@ -54381,6 +63690,11 @@ window.__PI_ENH_RENDER_USAGE_PANEL__ = renderUsagePanel;
   }
 
   function syncEnhancementPanelControls() {
+    // This hook runs after every plugin change, even with an archived panel open.
+    const picker = document.querySelector("select.settings-mobile-section-picker");
+    if (picker && ENHANCEMENT_PICKER_SECTIONS.some((sec) => sec.isEnabled() !== Boolean(picker.querySelector(`option[value='${sec.value}']`)))) {
+      syncSettingsDialogEnhancements();
+    }
     const panel = document.querySelector(".pi-enh-plugins-panel");
     if (!panel) return;
     for (const row of panel.querySelectorAll("[data-module-row]")) {
@@ -54415,8 +63729,8 @@ window.__PI_ENH_RENDER_USAGE_PANEL__ = renderUsagePanel;
         range.disabled = disabled || !isPluginEnabled(featureId);
         if (document.activeElement !== range) range.value = String(getPluginSetting(featureId, key));
       }
-      for (const control of row.querySelectorAll("[data-subagent-profile-control]")) {
-        syncSubagentProfileControlDisabled(control);
+      for (const control of row.querySelectorAll("[data-subagent-model-control]")) {
+        syncSubagentModelControlDisabled(control);
       }
       for (const action of row.querySelectorAll("[data-plugin-action], [data-attention-sound-preview]")) action.disabled = disabled;
     }
@@ -54990,7 +64304,7 @@ window.__PI_ENH_RENDER_USAGE_PANEL__ = renderUsagePanel;
         }
       });
     }
-    bindSubagentProfileControls(panel);
+    bindSubagentModelControls(panel);
     syncEnhancementPanelControls();
     const syncCard = panel.querySelector("[data-pi-enh-sync-card]");
     if (syncCard) {
@@ -55327,6 +64641,43 @@ window.__PI_ENH_RENDER_USAGE_PANEL__ = renderUsagePanel;
   // 若需手动检查更新，可通过控制台调用 window.__PI_ENH_CHECK_UPDATE__()
   window.__PI_ENH_CHECK_UPDATE__ = checkScriptUpdate;
 
+  async function checkImmutableBundleAndHotSyncOnBoot() {
+    if (typeof window === "undefined" || isLoginPage()) return;
+    if (window.__PI_ENH_NATIVE_STATE_API__ === true && window.__PI_WEB_STANDALONE_EDITION__) {
+      // Standalone native 模式由运行时与 Next 静态构建内联锚定，跳过 legacy 探测
+      return;
+    }
+    try {
+      const res = await fetch(`/pi-web-enhancement-loader.js?t=${Date.now()}`, { cache: "no-store" });
+      if (!res.ok) return;
+      const text = await res.text();
+      const m = text.match(/window\.__PI_ENH_ASSET_BUILD__\s*=\s*"([a-f0-9]{16})"/);
+      const serverBuild = m ? m[1] : null;
+      const currentBuild = window.__PI_ENH_ASSET_BUILD__;
+      if (serverBuild && currentBuild && serverBuild !== currentBuild) {
+        console.warn(`[Pi Enh] Stale immutable bundle detected (local: ${currentBuild}, server: ${serverBuild}). Auto-healing browser disk cache...`);
+        try {
+          const scripts = Array.from(document.querySelectorAll("script[src]"))
+            .map((s) => s.getAttribute("src"))
+            .filter((src) => src && (src.includes("/chunks/app/layout-") || src.includes("/chunks/app/page-")));
+          for (const s of scripts) {
+            void fetch(s, { cache: "reload" }).catch(() => {});
+          }
+        } catch (_) {}
+        if (typeof window.__PI_ENH_RELOAD__ === "function") {
+          if (typeof window.__PI_WEB_ENHANCEMENTS_CLEANUP__ === "function") {
+            try { window.__PI_WEB_ENHANCEMENTS_CLEANUP__(); } catch (_) {}
+          }
+          window.__PI_ENH_RELOAD__(true);
+        }
+      }
+    } catch (_) {}
+  }
+
+  if (typeof window !== "undefined") {
+    setTimeout(checkImmutableBundleAndHotSyncOnBoot, 1200);
+  }
+
   // Register clean teardown hook for safe zero-downtime hot-reloads
   window.__PI_WEB_ENHANCEMENTS_CLEANUP__ = function () {
     if (isDisposed) return;
@@ -55487,8 +64838,39 @@ window.__PI_ENH_RENDER_USAGE_PANEL__ = renderUsagePanel;
       if (typeof dismissToast === "function") {
         try { dismissToast(true); } catch (e) {}
       }
-      for (const el of document.querySelectorAll(".pi-enh-menu, .pi-enh-quote-bar, #pi-enh-protocol-frame, .pi-enh-draft-badge, .pi-enh-plugins-panel, .pi-enh-notifications-panel, .pi-enh-archived-panel, [data-pi-enh-tab], .pi-enh-search-group-divider, .pi-enh-search-archived-badge, .pi-enh-search-restore-btn, .pi-enh-attachments-bar, .pi-enh-attachment-card, .pi-enh-video-preview-backdrop, dialog.pi-enh-image-zoom-dialog, .pi-enh-toast, .pi-enh-annotation-rail")) {
+      for (const el of document.querySelectorAll(".pi-enh-menu, .pi-enh-quote-bar, #pi-enh-protocol-frame, .pi-enh-draft-badge, .pi-enh-plugins-panel, .pi-enh-notifications-panel, .pi-enh-archived-panel, .pi-enh-usage-panel, .pi-enh-tags-panel, [data-pi-enh-tab], .pi-enh-search-group-divider, .pi-enh-search-archived-badge, .pi-enh-search-restore-btn, .pi-enh-attachments-bar, .pi-enh-attachment-card, .pi-enh-video-preview-backdrop, dialog.pi-enh-image-zoom-dialog, .pi-enh-toast, .pi-enh-annotation-rail")) {
         try { el.remove(); } catch (e) {}
+      }
+      cleanupSettingsDialogResizers();
+      for (const r of document.querySelectorAll(".pi-enh-sidebar-resizer, .pi-enh-dialog-resizer")) {
+        try { r.remove(); } catch (e) {}
+      }
+      for (const picker of document.querySelectorAll("select.settings-mobile-section-picker")) {
+        try {
+          if (picker.__piEnhChangeHandler) {
+            picker.removeEventListener("change", picker.__piEnhChangeHandler);
+            delete picker.__piEnhChangeHandler;
+          }
+          delete picker.__piEnhBound;
+
+          let targetNativeVal = picker.__piEnhNativeValue;
+          if (!targetNativeVal || !picker.querySelector(`option[value='${targetNativeVal}']`)) {
+            const firstNativeOpt = picker.querySelector("option:not([value='enhancements']):not([value='archived']):not([value='notifications']):not([value='usage']):not([value='tags'])");
+            targetNativeVal = firstNativeOpt ? firstNativeOpt.value : "general";
+          }
+
+          for (const opt of picker.querySelectorAll("option[value='enhancements'], option[value='archived'], option[value='notifications'], option[value='usage'], option[value='tags']")) {
+            opt.remove();
+          }
+
+          picker.value = targetNativeVal;
+          delete picker.__piEnhNativeValue;
+        } catch (e) {}
+      }
+      for (const m of document.querySelectorAll("main.settings-dialog-main:not(.pi-enh-plugins-panel):not(.pi-enh-notifications-panel):not(.pi-enh-archived-panel):not(.pi-enh-usage-panel):not(.pi-enh-tags-panel)")) {
+        try {
+          m.style.display = "";
+        } catch (e) {}
       }
       if (durationTooltip && durationTooltip.parentNode) {
         try { durationTooltip.parentNode.removeChild(durationTooltip); } catch (e) {}
@@ -55567,6 +64949,7 @@ window.__PI_ENH_RENDER_USAGE_PANEL__ = renderUsagePanel;
   };
   window.__PI_ENH_IS_PLUGIN_ENABLED__ = isPluginEnabled;
 
+
   const kernelHealth = window.__PI_ENH_KERNEL_HEALTH__ || {
     edition: `koxir-standalone-${ENHANCEMENT_SUITE_VERSION}`,
     version: ENHANCEMENT_SUITE_VERSION,
@@ -55613,5 +64996,28 @@ window.__PI_ENH_RENDER_USAGE_PANEL__ = renderUsagePanel;
       }
     }, { once: true });
   }
+
+  // 页面加载完成后后台静默预热模型设置数据（延迟 1.2s，避免首屏主资源竞争，确保后续点击 0ms 秒开）
+  if (typeof setTimeout === "function") {
+    setTimeout(() => {
+      try {
+        if (!isDisposed && !isLoginPage() && typeof window.__PI_ENH_PRELOAD_MODELS_CACHE__ === "function") {
+          window.__PI_ENH_PRELOAD_MODELS_CACHE__();
+        }
+      } catch (e) {}
+    }, 1200);
+  }
+
+  // 页面加载完成后后台静默探测上游更新（延迟 1.5s，避免首屏主资源竞争）
+  if (typeof setTimeout === "function") {
+    setTimeout(() => {
+      try {
+        if (!isDisposed && !isLoginPage() && typeof window.__PI_ENH_CHECK_AGENT_UPDATE__ === "function") {
+          window.__PI_ENH_CHECK_AGENT_UPDATE__(false);
+        }
+      } catch (e) {}
+    }, 1500);
+  }
+
   console.log(`[Pi Web Enhancements] v${ENHANCEMENT_SUITE_VERSION} Loaded: Module Settings Manager active.`);
 })();

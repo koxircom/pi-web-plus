@@ -2,6 +2,10 @@
 
 import { useEffect, useState, type ReactNode } from "react";
 import { useI18n } from "@/hooks/useI18n";
+import {
+  getEnhancementSearchResultDataProps,
+  processEnhancementSearchResults,
+} from "@/lib/enhancement-sidebar-bridge";
 import { formatRelativeTime } from "@/lib/i18n/format";
 import type { SessionInfo } from "@/lib/types";
 import type { SessionSearchResponse } from "@/lib/session-search";
@@ -43,7 +47,7 @@ export function SessionSearch({ open, query, children, selectedSessionId, onSele
     };
   }, [open, search]);
 
-  const results = (typeof window !== "undefined" && typeof (window as any).__PI_ENH_PROCESS_SEARCH_RESULTS__ === "function" ? (window as any).__PI_ENH_PROCESS_SEARCH_RESULTS__(response?.results) : response?.results) ?? [];
+  const results = processEnhancementSearchResults(response?.results);
 
   return !open || !search ? children : (
     <div className="min-h-20 flex-1 overflow-y-auto" aria-busy={!response && !failed}>
@@ -55,11 +59,13 @@ export function SessionSearch({ open, query, children, selectedSessionId, onSele
       {response?.truncated && (
         <div role="status" className="px-3 pb-2 text-xs text-text-muted">{t("sidebar.sessionSearchPartial")}</div>
       )}
-      {results.map(({ session, entryId, blockIndex, before, match, after }: NonNullable<SessionSearchResponse["results"]>[number]) => (
+      {results.map((item) => {
+        const { session, entryId, blockIndex, before, match, after } = item;
+        return (
         <button
           key={session.id}
           type="button"
-          data-search-session-id={session.id}
+          {...getEnhancementSearchResultDataProps(item)}
           onClick={() => onSelectSession(session, entryId, blockIndex)}
           aria-current={session.id === selectedSessionId ? "true" : undefined}
           className={`block w-full cursor-pointer border-b border-border px-3 py-2 text-left hover:bg-bg-hover focus-visible:outline-2 focus-visible:outline-accent ${session.id === selectedSessionId ? "bg-bg-selected" : ""}`}
@@ -73,7 +79,8 @@ export function SessionSearch({ open, query, children, selectedSessionId, onSele
             {before}<mark className="rounded-sm bg-accent/20 text-text">{match}</mark>{after}
           </span>
         </button>
-      ))}
+        );
+      })}
     </div>
   );
 }

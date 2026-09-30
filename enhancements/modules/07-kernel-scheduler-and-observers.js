@@ -44,9 +44,17 @@
             observedTarget = container;
           }
         }
-        if (isPluginEnabled("task-tool-auto-collapse")) {
-          syncAllTaskToolAutoCollapse();
-        }
+        withMutationGuard(() => {
+          if (isPluginEnabled("task-tool-auto-collapse")) {
+            syncAllTaskToolAutoCollapse();
+          }
+          if (isPluginEnabled("compaction-auto-collapse") && typeof syncCompactionCards === "function") {
+            syncCompactionCards();
+          }
+          if (isPluginEnabled("pi-mail-auto-collapse") && typeof syncPiMailCards === "function") {
+            syncPiMailCards();
+          }
+        });
 
         // 针对输入框、队列变动立即触发同步，消除 50ms 延时导致的界面跳动（带内部变更守卫防死循环）
         if (mutations && mutations.length > 0) {
@@ -70,16 +78,25 @@
             }
           }
           if (touchesComposer && !isMutatingInternally) {
-            withMutationGuard(() => {
-              syncCodexComposerLayout();
-              syncComposerMarkdownFormat();
-              syncComposerModes();
-              syncComposerQueuePanel();
-              syncComposerCleanPlaceholder();
-              const textarea = findComposerTextarea();
-              const card = textarea?.closest('fieldset > div[style*="max-width"]');
-              if (card && textarea) updateCardContentState(card, textarea);
-            });
+            // 输入保护：若当前活动焦点就在输入框内且卡片已打好标记，说明是打字/退格引发的 React 局部重排，
+            // 严禁在此高频执行耗时的全量布局扫描与重排！
+            const isTypingInComposer = Boolean(
+              document.activeElement &&
+              document.activeElement.closest?.("fieldset, .pi-enh-cursor-composer")
+            );
+            const cardReady = Boolean(document.querySelector(".pi-enh-cursor-composer"));
+            if (!isTypingInComposer || !cardReady) {
+              withMutationGuard(() => {
+                syncCodexComposerLayout();
+                syncComposerMarkdownFormat();
+                syncComposerModes();
+                syncComposerQueuePanel();
+                syncComposerCleanPlaceholder();
+                const textarea = findComposerTextarea();
+                const card = textarea?.closest('fieldset > div[style*="max-width"]');
+                if (card && textarea) updateCardContentState(card, textarea);
+              });
+            }
           }
           if (touchesDialog && isPluginEnabled("ask-user-web-native") && !isMutatingInternally) {
             withMutationGuard(() => {
@@ -154,6 +171,7 @@
       syncSessionColorEffects();
       syncSessionTags();
       syncSessionOdooAddons();
+      syncSessionSectionHeaders();
     });
   }
 
@@ -163,25 +181,60 @@
     try {
       sidebarObserver = new MutationObserver((mutations) => {
         if (isMutatingInternally) return;
-        let hasNewSessionRows = false;
+        let hasSidebarRowOrHeaderChange = false;
+        let hasSessionTagContentChange = false;
         for (let i = 0; i < mutations.length; i++) {
           const m = mutations[i];
-          if (m.type === "childList" && m.addedNodes && m.addedNodes.length > 0) {
-            for (let j = 0; j < m.addedNodes.length; j++) {
-              const node = m.addedNodes[j];
-              if (node.nodeType === 1) {
-                if (node.classList?.contains("pi-enh-session-row-host") ||
-                    (typeof node.querySelector === "function" && node.querySelector(".pi-enh-session-row-host"))) {
-                  hasNewSessionRows = true;
-                  break;
+          if (m.type === "childList") {
+            // React may prune the extension-owned tag node during a row-local update without replacing the row host.
+            const mutationTarget = m.target?.nodeType === 1 ? m.target : m.target?.parentElement;
+            const insideSessionRow = mutationTarget?.closest?.(".pi-enh-session-row-host[data-pi-enh-session-id]");
+            const insideSessionTagsRow = mutationTarget?.closest?.(".pi-enh-session-tags-row");
+            const changedNodes = [...(m.addedNodes || []), ...(m.removedNodes || [])];
+            if ((insideSessionRow || insideSessionTagsRow) && (insideSessionTagsRow || changedNodes.some((node) =>
+              node.nodeType === 1 && (
+                node.classList?.contains("pi-enh-session-tags-row") ||
+                (typeof node.querySelector === "function" && node.querySelector(".pi-enh-session-tags-row"))
+              )
+            ))) {
+              hasSessionTagContentChange = true;
+            }
+
+            if (m.addedNodes && m.addedNodes.length > 0) {
+              for (let j = 0; j < m.addedNodes.length; j++) {
+                const node = m.addedNodes[j];
+                if (node.nodeType === 1) {
+                  if (node.classList?.contains("pi-enh-session-row-host") ||
+                      (typeof node.querySelector === "function" && node.querySelector(".pi-enh-session-row-host"))) {
+                    hasSidebarRowOrHeaderChange = true;
+                    break;
+                  }
+                }
+              }
+            }
+            if (!hasSidebarRowOrHeaderChange && m.removedNodes && m.removedNodes.length > 0) {
+              for (let j = 0; j < m.removedNodes.length; j++) {
+                const node = m.removedNodes[j];
+                if (node.nodeType === 1) {
+                  if (node.classList?.contains("pi-enh-session-row-host") ||
+                      node.classList?.contains("pi-enh-session-section-header") ||
+                      (typeof node.querySelector === "function" &&
+                        node.querySelector(".pi-enh-session-row-host, .pi-enh-session-section-header"))) {
+                    hasSidebarRowOrHeaderChange = true;
+                    break;
+                  }
                 }
               }
             }
           }
-          if (hasNewSessionRows) break;
+          if (hasSidebarRowOrHeaderChange) break;
         }
-        if (hasNewSessionRows && !isMutatingInternally) {
+        if (hasSidebarRowOrHeaderChange && !isMutatingInternally) {
           syncSidebarRowsImmediate();
+        } else if (hasSessionTagContentChange && !isMutatingInternally) {
+          withMutationGuard(() => {
+            syncSessionTags();
+          });
         }
       });
       const root = document.querySelector(".sidebar-container") || document.documentElement || document.body;
@@ -451,13 +504,7 @@
     } catch (err) {}
     if (!turnUsage) return;
 
-    if (!turnUsage.model) {
-      const currentSessionId = getCurrentSessionId();
-      const currentSession = currentSessionId ? knownSessionsMap.get(currentSessionId) : null;
-      if (currentSession && currentSession.model) {
-        turnUsage.model = currentSession.model;
-      }
-    }
+    // 严禁用当前 session.model 给历史回合补模型；未知标未知，真实记录 cost/缓存必须完整保留
 
     const tt = getUsageTooltip();
     tt.__currentBadge = usageBadge;
@@ -711,6 +758,7 @@
     if (!m) return true;
     if (m.hasAttribute?.("data-pi-enh-completed")) return true;
     if (m.querySelector && m.querySelector(".pi-enh-duration-badge")) return true;
+    if (m.classList?.contains?.("pi-enh-duration-badge")) return true;
     const entryId = getMessageEntryId(m);
     if (entryId && knownTurnMetrics.has(entryId)) return true;
     return false;
@@ -835,10 +883,48 @@
     clearLiveStopwatchDom();
   }
 
+  function isCurrentEmptySession() {
+    try {
+      // 1. 若页面存在首屏 Brand 元素（包含 apple-touch-icon 图标或标题区域），说明处于新建/空会话初始状态
+      const brandLogo = document.querySelector('img[src*="apple-touch-icon"]');
+      if (brandLogo && isElementVisibleForLiveTimer(brandLogo)) {
+        return true;
+      }
+      // 2. 检查是否有任何实际对话消息（user 或 assistant）
+      const userMsgs = typeof findUserMessages === "function" ? findUserMessages() : [];
+      if (userMsgs.length > 0) return false;
+      const assistantMsgs = document.querySelectorAll ? document.querySelectorAll('div[data-message-role="assistant"]') : [];
+      if (assistantMsgs.length > 0) return false;
+      const allMsgs = document.querySelectorAll ? document.querySelectorAll('div[data-message-role]') : [];
+      if (allMsgs.length > 0) return false;
+      // 没有任何消息且处于页面中，断定为空会话
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   function isLiveRunning(sessionId) {
     const currentSid = getCurrentSessionId();
     const sid = sessionId || currentSid;
     const isCurrent = !sid || !currentSid || sid === currentSid;
+
+    // 物理铁律：新建空会话（页面处于初始状态、没有任何用户或助手消息）绝对不可能在运行！
+    if (isCurrent && isCurrentEmptySession()) {
+      window.__PI_ENH_LAST_RUNNING_REASON__ = "empty new session is idle";
+      return false;
+    }
+
+    // 权威终态保护优先于 DOM：若该会话有可验证的终态证据（agent_settled/prompt_done、或 fresh /state running:false），
+    // 则即使 DOM 残留陈旧的 stop 按钮、placeholder 或 spin 动画，也绝不复活秒表与运行态。
+    // 只有更新的 agent_start 或实际发送才能解除该终态。
+    const checkSettled = typeof isSessionTerminallySettled === "function"
+      ? isSessionTerminallySettled
+      : (typeof window !== "undefined" ? window.__PI_ENH_IS_SESSION_TERMINALLY_SETTLED__ : null);
+    if (typeof checkSettled === "function" && checkSettled(sid)) {
+      window.__PI_ENH_LAST_RUNNING_REASON__ = "terminally settled protected";
+      return false;
+    }
 
     if (isCurrent) {
       const stopBtn = findActiveStopButton();
@@ -846,7 +932,9 @@
         window.__PI_ENH_LAST_RUNNING_REASON__ = "active stop button: " + (stopBtn.outerHTML || stopBtn.textContent);
         return true;
       }
+    }
 
+    if (isCurrent) {
       const textarea = findComposerTextarea();
       if (textarea) {
         const ph = typeof getComposerEffectivePlaceholder === "function"
@@ -898,19 +986,33 @@
   }
   window.__PI_ENH_IS_LIVE_RUNNING__ = isLiveRunning;
 
+  let lastTrackedLiveSessionId = null;
+
   function tickLiveDuration() {
     if (!isPluginEnabled("live-stopwatch")) {
       clearLiveStopwatchDom();
       return;
     }
     const currentSessionId = getCurrentSessionId();
+    // 立即检测会话切换（比 800ms DOM 观察器更灵敏，每 400ms tick 即可探测）
+    if (lastTrackedLiveSessionId !== currentSessionId) {
+      lastTrackedLiveSessionId = currentSessionId;
+      handleSessionSwitchLiveCleanup();
+    }
+
+    // 物理级防御：如果是新建空会话，彻底重置秒表与运行态，绝不弹窗
+    if (isCurrentEmptySession()) {
+      handleSessionSwitchLiveCleanup();
+      return;
+    }
+
     const isRunning = isLiveRunning(currentSessionId);
     
     if (isRunning) {
       notRunningConsecutiveTicks = 0;
       let turnStartTime = getActiveTurnStartTime(currentSessionId);
       if (!turnStartTime) {
-        turnStartTime = activeTurnStartTime || Date.now();
+        turnStartTime = Date.now();
         recordActiveTurnStart(currentSessionId, turnStartTime, null, false);
         scheduleCurrentSessionMetrics(100);
       }
@@ -934,24 +1036,36 @@
       const lastUserMsg = userMsgs.length > 0 ? userMsgs[userMsgs.length - 1] : null;
       const assistantMsgs = document.querySelectorAll ? document.querySelectorAll('div[data-message-role="assistant"]') : [];
       const activeAssistantMsgs = [];
+      let hasCompletedAssistantAfterLastUser = false;
+
       for (let i = 0; i < assistantMsgs.length; i++) {
         const m = assistantMsgs[i];
         if (!isElementVisibleForLiveTimer(m)) continue;
-        if (isCompletedAssistantMsg(m)) continue;
+
+        let isFollowingLastUser = false;
         if (!lastUserMsg) {
-          // 若暂无已识别的 user 消息，仅将最后一条未完成的助手消息视作候选活跃卡片，绝不把历史已完成消息全部囊括
-          if (i === assistantMsgs.length - 1) {
-            activeAssistantMsgs.push(m);
-          }
+          // 若暂无已识别的 user 消息，仅将最后一条助手消息视作当前轮候选
+          isFollowingLastUser = (i === assistantMsgs.length - 1);
         } else if (typeof lastUserMsg.compareDocumentPosition === "function") {
           const pos = lastUserMsg.compareDocumentPosition(m);
           const isPreceding = Boolean(pos & 2);
           const isDisconnected = Boolean(pos & 1);
-          if (!isPreceding && !isDisconnected && m !== lastUserMsg) {
+          isFollowingLastUser = (!isPreceding && !isDisconnected && m !== lastUserMsg);
+        } else {
+          isFollowingLastUser = true;
+        }
+
+        if (isFollowingLastUser) {
+          if (isCompletedAssistantMsg(m)) {
+            const entryId = getMessageEntryId(m);
+            const hasTerminalTurnMetric = Boolean(entryId && knownTurnMetrics.has(entryId));
+            // An intermediate tool-use card may already have a static step badge; it is not
+            // proof that the agent's entire turn has settled. Keep the chat-tail timer available.
+            const isUnsettledToolStep = !hasTerminalTurnMetric && Boolean(m.querySelector?.('[data-pi-enh-tool-card="true"], [data-pi-enh-tool-card]'));
+            if (!isUnsettledToolStep) hasCompletedAssistantAfterLastUser = true;
+          } else {
             activeAssistantMsgs.push(m);
           }
-        } else {
-          activeAssistantMsgs.push(m);
         }
       }
 
@@ -971,7 +1085,9 @@
           footer = ensureLiveTimerFallbackFooter(latestActiveMsg);
           usingFallbackFooter = Boolean(footer);
         }
-      } else {
+      } else if (lastUserMsg && !hasCompletedAssistantAfterLastUser) {
+        // 关键不变量：必须存在未完成的真实 User 提问轮次，且新 User 提问之后尚未出现已完成 assistant 时才允许 fallback 到 chat tail。
+        // 空会话（lastUserMsg 为 null）绝对禁止挂载任何 fallback live timer！
         const tailHost = findChatTailFallbackHost(lastUserMsg);
         if (tailHost) {
           footer = ensureLiveTimerFallbackFooter(tailHost);
@@ -1057,6 +1173,8 @@
         for (const timer of allLiveTimers) {
           if (timer !== liveBadge) timer.remove();
         }
+      } else {
+        clearLiveStopwatchDom();
       }
     } else {
       clearLiveStopwatchDom();
@@ -1180,8 +1298,8 @@
           activeTurnStartTime = null;
           activeTurnEntryId = null;
 
-          // Clean up any stray live timers anywhere in the document
-          document.querySelectorAll(".pi-enh-live-timer").forEach((el) => el.remove());
+          // Clean up any stray live timers and fallback hosts anywhere in the document
+          clearLiveStopwatchDom();
 
           // Fetch exact metrics after the mobile navigation quiet period.
           scheduleCurrentSessionMetrics(600);
@@ -1201,11 +1319,82 @@
   }
   const liveStopwatchIntervalId = addManagedInterval(tickLiveDuration, 400);
 
+  // 监听侧边栏新建会话按钮及全局新建操作，捕获阶段微秒级立即清空秒表和重置运行态
+  try {
+    if (typeof document !== "undefined" && typeof document.addEventListener === "function") {
+      document.addEventListener("click", (e) => {
+        const target = e.target;
+        if (!target) return;
+        const btn = typeof target.closest === "function" ? target.closest("button, a") : null;
+        if (!btn) return;
+        const title = String(btn.getAttribute("title") || "");
+        const ariaLabel = String(btn.getAttribute("aria-label") || "");
+        const text = String(btn.textContent || "").trim();
+        const isNewSession =
+          title.includes("新建会话") ||
+          title.includes("New session") ||
+          ariaLabel.includes("新建会话") ||
+          ariaLabel.includes("New session") ||
+          text === "新建" ||
+          text === "New" ||
+          btn.hasAttribute("data-pi-enh-new-session");
+        if (isNewSession) {
+          handleSessionSwitchLiveCleanup();
+        }
+      }, true);
+    }
+  } catch {}
+
   // ==========================================
   // 5. Thinking Level Persistence & Auto-Restore (思考深度记忆与自动恢复)
   // ==========================================
   const THINKING_STORAGE_KEY = "pi-thinking-level";
+  const VALID_THINKING_LEVELS = ["high", "medium", "low", "minimal", "off", "xhigh", "max", "auto"];
   restoredThinkingSessionScopes = new Set();
+
+  function parseThinkingOptionLevel(opt) {
+    if (!opt) return null;
+    const hasDataAttr = typeof opt.hasAttribute === "function"
+      ? opt.hasAttribute("data-thinking-level")
+      : (opt.getAttribute && opt.getAttribute("data-thinking-level") !== null) || (opt.dataset && "thinkingLevel" in opt.dataset);
+
+    if (hasDataAttr) {
+      const rawAttr = (typeof opt.getAttribute === "function" ? opt.getAttribute("data-thinking-level") : null) ?? (opt.dataset ? opt.dataset.thinkingLevel : null);
+      if (rawAttr !== null && rawAttr !== undefined) {
+        const val = String(rawAttr).trim().toLowerCase();
+        if (VALID_THINKING_LEVELS.includes(val)) {
+          return val;
+        }
+      }
+      return null;
+    }
+
+    if (typeof opt.querySelectorAll === "function") {
+      const spans = opt.querySelectorAll("span");
+      for (const span of spans) {
+        const spanText = (span.textContent || "").trim().toLowerCase();
+        if (VALID_THINKING_LEVELS.includes(spanText)) {
+          return spanText;
+        }
+      }
+    }
+    const text = (opt.textContent || "").trim().toLowerCase();
+    for (const lvl of VALID_THINKING_LEVELS) {
+      if (text === lvl || text.startsWith(lvl + " ") || text.includes(`(${lvl})`) || text.startsWith(lvl + "(")) {
+        return lvl;
+      }
+    }
+    return null;
+  }
+
+  function isMatchingThinkingLevel(lvlA, lvlB) {
+    if (!lvlA || !lvlB) return false;
+    const a = lvlA.trim().toLowerCase();
+    const b = lvlB.trim().toLowerCase();
+    if (a === b) return true;
+    if ((a === "max" && b === "xhigh") || (a === "xhigh" && b === "max")) return true;
+    return false;
+  }
 
   function findThinkingButton() {
     const buttons = document.querySelectorAll("button");
@@ -1250,30 +1439,67 @@
 
   // Record user selection when clicking inside the reasoning popup menu
   addManagedListener(document, "click", (e) => {
+    if (!isPluginEnabled("thinking-persistence")) return;
     const target = e.target;
     if (!target) return;
-    const btn = target.closest("button");
+    let btn = null;
+    if (typeof target.closest === "function") {
+      btn = target.closest("button");
+    } else if (target.parentElement && typeof target.parentElement.closest === "function") {
+      btn = target.parentElement.closest("button");
+    }
     if (!btn) return;
 
     // Check if the clicked button is an option inside the reasoning menu
-    const popup = btn.closest('div[style*="boxShadow"], div[style*="box-shadow"], div[style*="box_shadow"]');
-    if (popup) {
-      const text = btn.textContent.trim().toLowerCase();
-      const levels = ["high", "medium", "low", "minimal", "off", "xhigh", "max", "auto"];
-      for (const lvl of levels) {
-        if (text === lvl || text.startsWith(lvl + " ") || text.includes(`(${lvl})`) || text.startsWith(lvl + "(")) {
-          try {
-            localStorage.setItem(THINKING_STORAGE_KEY, lvl);
-          } catch {}
-          const scope = getThinkingSessionScope();
-          if (scope) restoredThinkingSessionScopes.add(scope);
-          break;
-        }
-      }
-    }
+    const triggerBtn = findThinkingButton();
+    if (!triggerBtn) return;
+    const host = triggerBtn.parentElement || triggerBtn;
+    if (!host.contains(btn) || btn === triggerBtn || btn.contains(triggerBtn)) return;
+
+    const lvl = parseThinkingOptionLevel(btn);
+    if (!lvl) return;
+
+    try {
+      localStorage.setItem(THINKING_STORAGE_KEY, lvl);
+    } catch {}
+    const scope = getThinkingSessionScope();
+    if (scope) restoredThinkingSessionScopes.add(scope);
   }, true);
 
-  // Auto-restore preferred thinking level if UI falls back to "auto"
+  function isElementConnected(el) {
+    if (!el) return false;
+    if (typeof el.isConnected === "boolean") return el.isConnected;
+    try {
+      return Boolean(document && document.contains && document.contains(el));
+    } catch {
+      return false;
+    }
+  }
+
+  function hasOpenedNativeMenu(container, trigger) {
+    if (!container || typeof container.querySelectorAll !== "function") return false;
+    const buttons = container.querySelectorAll("button");
+    for (const b of buttons) {
+      if (b !== trigger && !b.contains(trigger) && !trigger.contains(b)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  function safeCloseCurrentMenu(targetBtn, targetHost, targetScope) {
+    if (
+      getThinkingSessionScope() === targetScope &&
+      isElementConnected(targetBtn) &&
+      isElementConnected(targetHost) &&
+      targetHost.getAttribute("data-pi-enh-thinking-silent") === "true" &&
+      hasOpenedNativeMenu(targetHost, targetBtn)
+    ) {
+      targetBtn.click();
+    }
+  }
+
+  // Restore the last user-selected thinking level even when native defaults initialize another level.
   isRestoringThinking = false;
 
   function autoRestoreThinkingLevel() {
@@ -1298,52 +1524,64 @@
     if (!btn || btn.disabled) return;
 
     const currentLevel = getButtonThinkingLevel(btn);
-    if (currentLevel === preferred) {
+    if (!currentLevel) return;
+    if (isMatchingThinkingLevel(currentLevel, preferred)) {
       restoredThinkingSessionScopes.add(scope);
       return;
     }
 
-    if (currentLevel === "auto") {
-      isRestoringThinking = true;
-      restoredThinkingSessionScopes.add(scope);
-      if (restoredThinkingSessionScopes.size > 200) {
-        const first = restoredThinkingSessionScopes.values().next().value;
-        if (first) restoredThinkingSessionScopes.delete(first);
-      }
-
-      const host = btn.parentElement || btn;
-      host.setAttribute("data-pi-enh-thinking-silent", "true");
-
-      btn.click();
-      addManagedTimeout(() => {
-        try {
-          const popups = document.querySelectorAll('div[style*="boxShadow"], div[style*="box-shadow"], div[style*="box_shadow"]');
-          let matchedBtn = null;
-          for (const popup of popups) {
-            const options = popup.querySelectorAll("button");
-            for (const opt of options) {
-              const optText = opt.textContent.trim().toLowerCase();
-              if (optText === preferred || optText.startsWith(preferred + " ") || optText.includes(`(${preferred})`)) {
-                matchedBtn = opt;
-                break;
-              }
-            }
-            if (matchedBtn) break;
-          }
-          if (matchedBtn) {
-            matchedBtn.click();
-          } else {
-            // 当前模型不支持该思考级别，安全关闭弹窗，不再重试
-            btn.click();
-          }
-        } finally {
-          host.removeAttribute("data-pi-enh-thinking-silent");
-          addManagedTimeout(() => {
-            isRestoringThinking = false;
-          }, 200);
-        }
-      }, 50);
+    isRestoringThinking = true;
+    restoredThinkingSessionScopes.add(scope);
+    if (restoredThinkingSessionScopes.size > 200) {
+      const first = restoredThinkingSessionScopes.values().next().value;
+      if (first) restoredThinkingSessionScopes.delete(first);
     }
+
+    const host = btn.parentElement || btn;
+    host.setAttribute("data-pi-enh-thinking-silent", "true");
+
+    btn.click();
+    addManagedTimeout(() => {
+      try {
+        const pluginEnabled = isPluginEnabled("thinking-persistence");
+        const sameScope = getThinkingSessionScope() === scope;
+        const connected = isElementConnected(btn) && isElementConnected(host);
+        let currentPref = null;
+        try {
+          currentPref = localStorage.getItem(THINKING_STORAGE_KEY);
+        } catch {}
+        const prefUnchanged = currentPref === preferred;
+
+        // 复核：插件仍开启、同session scope、btn/host仍连接以及存储偏好未变化
+        if (!pluginEnabled || !sameScope || !connected || !prefUnchanged || !restoredThinkingSessionScopes.has(scope)) {
+          safeCloseCurrentMenu(btn, host, scope);
+          return;
+        }
+
+        let matchedBtn = null;
+        const options = host.querySelectorAll("button");
+        for (const opt of options) {
+          if (opt === btn || opt.contains(btn) || btn.contains(opt)) continue;
+          const optLevel = parseThinkingOptionLevel(opt);
+          if (isMatchingThinkingLevel(optLevel, preferred)) {
+            matchedBtn = opt;
+            break;
+          }
+        }
+        if (matchedBtn) {
+          matchedBtn.click();
+        } else {
+          // 当前模型不支持该思考级别，安全关闭弹窗，不再重试
+          safeCloseCurrentMenu(btn, host, scope);
+        }
+      } finally {
+        if (host && typeof host.removeAttribute === "function") {
+          host.removeAttribute("data-pi-enh-thinking-silent");
+        }
+        addManagedTimeout(() => {
+          isRestoringThinking = false;
+        }, 200);
+      }
+    }, 50);
   }
   const thinkingIntervalId = addManagedInterval(autoRestoreThinkingLevel, 1000);
-

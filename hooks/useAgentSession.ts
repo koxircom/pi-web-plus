@@ -30,6 +30,7 @@ import {
   getSessionEpoch,
   isEpochFresh,
   isSessionMemoryCacheEnabled,
+  invalidatesSessionHistory,
   reconcileSyncResponse,
   viewMatchesBaseline,
 } from "@/lib/session-sync-client";
@@ -55,6 +56,13 @@ import {
   streamReducer,
   type ClientAssistantMessageEvent,
 } from "@/lib/streaming-message";
+import {
+  getEnhancementWindow,
+  markOptimisticUserMessage,
+  reconcileDeliveredUserMessage,
+  registerSessionReloadAliases,
+} from "@/lib/enhancement-chat-bridge";
+import { recallSessionQueue } from "@/lib/queue-recall-client";
 
 export interface SessionData {
   sessionId: string;
@@ -196,6 +204,17 @@ type ConcreteThinkingLevel = Exclude<ThinkingLevelOption, "auto">;
 function asConcreteThinkingLevel(value?: string | null): ConcreteThinkingLevel | null {
   if (!value || value === "auto") return null;
   return value as ConcreteThinkingLevel;
+}
+
+export function isAbortError(e: unknown): boolean {
+  if (!e) return false;
+  if (typeof DOMException !== "undefined" && e instanceof DOMException && e.name === "AbortError") {
+    return true;
+  }
+  if (typeof e === "object" && e !== null && "name" in e && (e as { name: unknown }).name === "AbortError") {
+    return true;
+  }
+  return false;
 }
 
 const PROMPT_SETTLE_INITIAL_DELAY_MS = 800;
@@ -407,6 +426,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const sessionHookMountedRef = useRef(true);
   // In-flight session reads, keyed by session id (or force:<id> for fresh reads).
   const loadFlightsRef = useRef(new Map<string, Promise<unknown>>());
+  const latestLoadRequestRef = useRef<object | null>(null);
   // Latest settled view state, readable from the unmount cleanup without
   // re-subscribing it. Assigned every render like sessionPropIdRef below.
   const dataRef = useRef<SessionData | null>(null);
@@ -542,7 +562,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } satisfies SessionStatsInfo;
   }, [messages, sessionStatsOverride, contextUsage, data?.context.messages, data?.filePath, data?.totalActiveMs, data?.stats, session?.id, session?.name]);
 
-  const loadSession = useCallback(async (sid: string, showLoading = false, includeState = false, options?: { force?: boolean }) => {
+  const loadSession = useCallback(async (sid: string, showLoading = false, includeState = false, options?: { force?: boolean; streamRetry?: boolean; abortRetry?: boolean; signal?: AbortSignal }): Promise<unknown> => {
     // Single-flight: concurrent reads for the same session (mount + SSE settle +
     // reconcile) share one request unless the caller forces a fresh read.
     const syncEnabled = isSessionMemoryCacheEnabled();
@@ -551,6 +571,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     const inflight = !options?.force ? loadFlightsRef.current.get(`${sid}:${previousEpoch}:${syncEnabled}`) : undefined;
     if (inflight) return await inflight;
     const requestEpoch = bumpSessionEpoch(sid);
+    const readOwner = {};
+    latestLoadRequestRef.current = readOwner;
+    const ownsCurrentView = () => sessionHookMountedRef.current && sessionIdRef.current === sid
+      && latestLoadRequestRef.current === readOwner && isSessionMemoryCacheEnabled() === syncEnabled;
     const flightKey = `${sid}:${requestEpoch}:${syncEnabled}`;
     const isCurrentRead = () => sessionHookMountedRef.current && sessionIdRef.current === sid
       && isEpochFresh(sid, requestEpoch) && isSessionMemoryCacheEnabled() === syncEnabled;
@@ -559,6 +583,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     let baseRevision = wireBaseline?.revision ?? null;
   const flight = (async (): Promise<unknown> => {
     let messagesLoaded = false;
+    let willRetryAbort = false;
     try {
       if (showLoading) setLoading(true);
       if (syncEnabled && !wireBaseline) {
@@ -581,7 +606,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       // Exactly one baseline-free repair attempt; never recurse with the same invalid base.
       for (let attempt = 0; attempt < 2; attempt++) {
         const url = buildSessionSyncUrl({ sessionId: sid, baseRevision, force: options?.force, syncEnabled, treeFormat: "summary" });
-        const res = await fetch(url);
+        const res = await fetch(url, options?.signal ? { signal: options.signal } : undefined);
         if (!isCurrentRead()) return null;
         if (res.status === 404 || res.status === 401 || res.status === 403) {
           if (res.status === 404) deleteSessionViewSnapshot(sid);
@@ -644,7 +669,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       if (!includeState) return null;
 
       try {
-        const stateRes = await fetch(`/api/sessions/${encodeURIComponent(sid)}/state`);
+        const stateRes = await fetch(`/api/sessions/${encodeURIComponent(sid)}/state`, options?.signal ? { signal: options.signal } : undefined);
         if (!stateRes.ok) throw new Error(`HTTP ${stateRes.status}`);
         const agentState = await stateRes.json() as { running: boolean; state?: AgentStateResponse };
         if (!isCurrentRead()) return null;
@@ -667,10 +692,40 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         return null;
       }
     } catch (e) {
+      if (isAbortError(e)) {
+        const isExplicitCallerAbort = Boolean(options?.signal?.aborted);
+        const canRetry = ownsCurrentView() && !options?.abortRetry && !isExplicitCallerAbort;
+        if (canRetry) {
+          willRetryAbort = true;
+          queueMicrotask(() => {
+            if (ownsCurrentView()) {
+              void loadSession(sid, showLoading && !dataRef.current, includeState, {
+                ...options,
+                force: true,
+                abortRetry: true,
+              });
+            }
+          });
+        }
+        return null;
+      }
       if (isCurrentRead()) setError(String(e));
       return "error";
     } finally {
-      if (isCurrentRead() && showLoading && !messagesLoaded) setLoading(false);
+      if (ownsCurrentView() && showLoading && !messagesLoaded) {
+        if (willRetryAbort) {
+          if (dataRef.current) setLoading(false);
+        } else if (!isEpochFresh(sid, requestEpoch) && !options?.streamRetry) {
+          queueMicrotask(() => {
+            if (ownsCurrentView()) void loadSession(sid, true, includeState, { force: true, streamRetry: true });
+          });
+        } else {
+          setLoading(false);
+          if (!isEpochFresh(sid, requestEpoch) && !dataRef.current) {
+            setError("History changed while loading; the next session refresh will reconcile it.");
+          }
+        }
+      }
     }
     })();
     loadFlightsRef.current.set(flightKey, flight);
@@ -692,7 +747,15 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       const res = await fetch(url, { signal: options?.signal });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const d = await res.json() as { context: SessionData["context"] };
-      if (sessionIdRef.current !== sid || options?.signal?.aborted || !sessionHookMountedRef.current) return;
+      if (
+        sessionIdRef.current !== sid
+        || (sessionPropIdRef.current !== null && sessionPropIdRef.current !== sid)
+        || (before ? (activeLeafIdRef.current !== leafId || historyCursorRef.current !== before) : false)
+        || options?.signal?.aborted
+        || !sessionHookMountedRef.current
+      ) return;
+      historyCursorRef.current = d.context.oldestEntryId ?? null;
+      hasEarlierMessagesRef.current = Boolean(d.context.hasMore);
       setHistoryCursor(d.context.oldestEntryId);
       setHasEarlierMessages(d.context.hasMore);
       setData((prev) => {
@@ -708,9 +771,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       });
       if (before) {
         // Older page: prepend so scroll position stays anchored.
+        messagesRef.current = [...d.context.messages, ...messagesRef.current];
+        entryIdsRef.current = [...d.context.entryIds, ...entryIdsRef.current];
         setMessages((prev) => [...d.context.messages, ...prev]);
         setEntryIds((prev) => [...d.context.entryIds, ...prev]);
       } else {
+        messagesRef.current = d.context.messages;
+        entryIdsRef.current = d.context.entryIds ?? [];
         setMessages(d.context.messages);
         setEntryIds(d.context.entryIds ?? []);
       }
@@ -1127,14 +1194,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       sdkAgentActiveRef.current = false;
       optimisticUserMessageKeyRef.current = null;
       const wasRunning = settleUiStage();
-      if (promptWasPending) {
+      if (promptWasPending || agentWasActive || wasRunning) {
         notifyPromptStage(runId);
-      } else if (agentWasActive && wasRunning) {
-        onAgentEnd?.();
       }
       if (sid) scheduleEventStreamClose(sid);
     }
-  }, [loadSession, notifyPromptStage, onAgentEnd, scheduleEventStreamClose, settleUiStage]);
+  }, [loadSession, notifyPromptStage, scheduleEventStreamClose, settleUiStage]);
 
   const waitForPromptSettlement = useCallback(async (sid: string, runId?: number) => {
     await delay(PROMPT_SETTLE_INITIAL_DELAY_MS);
@@ -1262,7 +1327,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   }, [agentRunning]);
 
   const handleAgentEvent = useCallback((event: AgentEvent) => {
-    if (sessionIdRef.current && /^(agent_start|message_start|message_update|message_end|compaction_start|auto_compaction_start|tool_execution_start|tool_execution_update|tool_execution_end)$/.test(event.type)) {
+    if (sessionIdRef.current && invalidatesSessionHistory(event.type)) {
       bumpSessionEpoch(sessionIdRef.current);
     }
     switch (event.type) {
@@ -1279,6 +1344,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       }
       case "agent_start":
         cancelEventStreamGrace();
+        if (!rpcPromptPendingRef.current) {
+          promptRunIdRef.current += 1;
+        }
         sdkAgentActiveRef.current = true;
         agentRunningRef.current = true;
         setAgentRunning(true);
@@ -1322,7 +1390,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           void loadSession(sid);
           scheduleEventStreamClose(sid);
         }
-        if (wasRunning) onAgentEnd?.();
+        if (wasRunning) {
+          notifyPromptStage(promptRunIdRef.current);
+        }
         break;
       }
       case "prompt_done":
@@ -1331,8 +1401,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           const promptWasPending = rpcPromptPendingRef.current;
           rpcPromptPendingRef.current = false;
           optimisticUserMessageKeyRef.current = null;
-          const firstNotification = notifyPromptStage(runId);
-          if (!promptWasPending && !firstNotification) break;
+          if (!promptWasPending && notifiedPromptRunIdRef.current === runId) break;
 
           const sid = sessionIdRef.current;
           if (sid) void loadSession(sid);
@@ -1341,6 +1410,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           // agent_settled event perform the next completion transition.
           if (!sdkAgentActiveRef.current) {
             settleUiStage();
+            notifyPromptStage(runId);
             if (sid) scheduleEventStreamClose(sid);
           }
         }
@@ -1410,13 +1480,21 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           const optimisticKey = optimisticUserMessageKeyRef.current;
           optimisticUserMessageKeyRef.current = null;
           setMessages((prev) => {
-            const last = prev[prev.length - 1];
-            if (optimisticKey && last?.role === "user" && userMessageKey(last) === optimisticKey) {
-              return optimisticKey === deliveredKey
-                ? prev
-                : [...prev.slice(0, -1), delivered];
-            }
-            return [...prev, delivered];
+            const fallback = () => {
+              const last = prev[prev.length - 1];
+              if (optimisticKey && last?.role === "user" && userMessageKey(last) === optimisticKey) {
+                return optimisticKey === deliveredKey
+                  ? prev
+                  : [...prev.slice(0, -1), delivered];
+              }
+              return [...prev, delivered];
+            };
+            return reconcileDeliveredUserMessage(prev, delivered, {
+              lastFingerprint: optimisticKey,
+              serverFingerprint: deliveredKey,
+              fingerprintFn: userMessageKey,
+              fallback,
+            });
           });
         } else if (completed) {
           setMessages((prev) => [...prev, normalizeToolCalls(completed)]);
@@ -1522,7 +1600,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         setExtensionDialog((current) => current?.id === event.id ? null : current);
         break;
     }
-  }, [addNotice, cancelEventStreamGrace, handleExtensionUiRequest, loadSession, notifyPromptStage, onAgentEnd, scheduleEventStreamClose, scrollToBottom, settleUiStage, syncLiveModel]);
+  }, [addNotice, cancelEventStreamGrace, handleExtensionUiRequest, loadSession, notifyPromptStage, scheduleEventStreamClose, scrollToBottom, settleUiStage, syncLiveModel]);
   handleAgentEventRef.current = handleAgentEvent;
 
   const handleSend = useCallback(async (message: string, images?: AttachedImage[]) => {
@@ -1559,6 +1637,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         : message,
       timestamp: Date.now(),
     };
+    markOptimisticUserMessage(userMsg);
     setMessages((prev) => [...prev, userMsg]);
     optimisticUserMessageKeyRef.current = userMessageKey(userMsg);
     promptRunIdRef.current = promptRunId;
@@ -2056,20 +2135,20 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const handleRecallQueue = useCallback(async () => {
     const sid = sessionIdRef.current;
     if (!sid) return;
-    try {
-      const result = await sendAgentCommand<{ steering?: string[]; followUp?: string[] }>(sid, { type: "clear_queue" });
-      // clearQueue also emits an empty queue_update, but that only reaches us
-      // while SSE is connected — clear locally so idle recalls update the UI.
-      setQueuedMessages({ steering: [], followUp: [] });
-      const texts = [...(result?.steering ?? []), ...(result?.followUp ?? [])];
-      if (texts.length > 0) {
-        opts.chatInputRef?.current?.prependText(texts.join("\n\n"));
-      }
-    } catch (e) {
-      console.error("Failed to recall queued messages:", e);
-      addNotice({ type: "error", message: "Failed to recall queued messages" });
-    }
-  }, [opts.chatInputRef, addNotice]);
+    const targetDraftKey = composerDraftKey ?? sid;
+    await recallSessionQueue({
+      sessionId: sid,
+      targetDraftKey,
+      sendCommand: sendAgentCommand,
+      restoreSubmission,
+      isSameSession: (originSid) => sessionHookMountedRef.current && sessionIdRef.current === originSid,
+      clearQueuedMessagesUi: () => setQueuedMessages({ steering: [], followUp: [] }),
+      onError: (message, e) => {
+        console.error("Failed to recall queued messages:", e);
+        addNotice({ type: "error", message });
+      },
+    });
+  }, [addNotice, composerDraftKey, restoreSubmission]);
 
   const handleThinkingLevelChange = useCallback(async (level: ThinkingLevelOption) => {
     if (level === "auto") {
@@ -2362,6 +2441,24 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (!onBranchDataChange) return;
     onBranchDataChange(data?.tree ?? [], activeLeafId, handleLeafChange);
   }, [data?.tree, activeLeafId, handleLeafChange, onBranchDataChange]);
+
+  const loadSessionRef = useRef(loadSession);
+  loadSessionRef.current = loadSession;
+  useLayoutEffect(() => {
+    return registerSessionReloadAliases(getEnhancementWindow(), {
+      getSessionId: () => sessionIdRef.current ?? sessionPropIdRef.current ?? null,
+      isActive: () => (
+        sessionHookMountedRef.current
+        && Boolean(
+          sessionIdRef.current
+          && (sessionPropIdRef.current === null || sessionPropIdRef.current === sessionIdRef.current),
+        )
+      ),
+      reloadSession: (sid, showLoading = false, includeState = true, options) => (
+        loadSessionRef.current(sid, showLoading, includeState, options)
+      ),
+    });
+  }, [session?.id]);
 
   useEffect(() => {
     const container = scrollContainerRef.current;

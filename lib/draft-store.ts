@@ -1,5 +1,4 @@
 import {
-  MAX_ATTACHED_IMAGES,
   isBase64ImageWithinLimits,
 } from "./image-attachments";
 
@@ -57,7 +56,6 @@ export function mergeRestoredSubmissionDraft(
 ): ChatDraft {
   const images = [...(submittedImages ?? []), ...currentImages]
     .filter(isBase64ImageWithinLimits)
-    .slice(0, MAX_ATTACHED_IMAGES)
     .map(({ data, mimeType }) => ({ data, mimeType }));
 
   return {

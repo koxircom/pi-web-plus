@@ -36,13 +36,68 @@
     } catch (e) {}
   }
 
+  let activeResizingSurface = null;
+  let cancelActiveResizing = null;
+
+  function isResizerActiveAndEligible(surface) {
+    if (!surface) return false;
+    let pluginEnabled = true;
+    if (typeof isPluginEnabled === "function") {
+      pluginEnabled = isPluginEnabled("settings-sidebar-layout");
+    } else if (typeof window !== "undefined" && typeof window.__PI_ENH_IS_PLUGIN_ENABLED__ === "function") {
+      pluginEnabled = window.__PI_ENH_IS_PLUGIN_ENABLED__("settings-sidebar-layout");
+    }
+    if (!pluginEnabled) return false;
+    if (surface.hasAttribute("disabled") || surface.getAttribute("aria-disabled") === "true") return false;
+    const connected = typeof surface.isConnected === "boolean"
+      ? surface.isConnected
+      : (typeof document !== "undefined" && document.body && document.body.contains(surface));
+    if (!connected) return false;
+    if (typeof window !== "undefined" && window.innerWidth <= 640) return false;
+    return true;
+  }
+
+  function unbindSettingsDialogResizable(surface) {
+    if (!surface) return;
+    if (typeof surface.__piEnhResizableCleanup === "function") {
+      try {
+        surface.__piEnhResizableCleanup();
+      } catch (err) {}
+    }
+    delete surface.__piEnhResizableCleanup;
+    delete surface.__piEnhResizableBound;
+  }
+
+  function cleanupDetachedSettingsResizeSurface() {
+    const surface = activeResizingSurface;
+    if (!surface) return;
+    const detached = typeof surface.isConnected === "boolean"
+      ? !surface.isConnected : !document.body?.contains(surface);
+    if (detached) unbindSettingsDialogResizable(surface);
+  }
+
+  function cleanupSettingsDialogResizers() {
+    if (activeResizingSurface) unbindSettingsDialogResizable(activeResizingSurface);
+    document.querySelectorAll(".settings-dialog-surface").forEach(unbindSettingsDialogResizable);
+  }
+
   function bindSettingsDialogResizable(surface) {
     if (!surface) return;
     // 防重复绑定与防反复重置：同一 surface 仅在首次挂载时恢复一次存储尺寸并绑定事件，防止后续 DOM Mutation 触发时将拖动中的尺寸覆盖
     if (surface.__piEnhResizableBound) return;
     surface.__piEnhResizableBound = true;
 
+    // 记录绑定前原始尺寸变量与优先级，以便在关闭布局 (off) 时精确还原原生样式
+    const origSidebarWidth = surface.style.getPropertyValue("--settings-sidebar-width");
+    const origSidebarWidthPriority = surface.style.getPropertyPriority("--settings-sidebar-width");
+    const origDialogWidth = surface.style.getPropertyValue("--settings-dialog-width");
+    const origDialogWidthPriority = surface.style.getPropertyPriority("--settings-dialog-width");
+    const origDialogHeight = surface.style.getPropertyValue("--settings-dialog-height");
+    const origDialogHeightPriority = surface.style.getPropertyPriority("--settings-dialog-height");
+
     applySavedSettingsDialogDimensions(surface);
+
+    const cleanups = [];
 
     // 1. 侧边栏可调节手柄 (Sidebar Splitter Resizer) - 防拉扯防回弹抗抖动架构
     let splitter = surface.querySelector(".pi-enh-sidebar-resizer");
@@ -63,6 +118,48 @@
       let lastDragEndTime = 0;
       let rafId = null;
       let latestTargetWidth = 200;
+      let isDraggingOwned = false;
+      let prevBodyCursor = "";
+      let prevBodyCursorPriority = "";
+      let prevBodyUserSelect = "";
+      let prevBodyUserSelectPriority = "";
+      let dragStartSidebarWidth = "";
+      let dragStartSidebarWidthPriority = "";
+
+      const restoreBodyStyles = () => {
+        if (!isDraggingOwned) return;
+        isDraggingOwned = false;
+        if (typeof document !== "undefined" && document.body) {
+          const curCursor = document.body.style.getPropertyValue("cursor");
+          const curCursorPri = document.body.style.getPropertyPriority("cursor");
+          if (curCursor === "col-resize" && curCursorPri === "important") {
+            if (prevBodyCursor) {
+              document.body.style.setProperty("cursor", prevBodyCursor, prevBodyCursorPriority);
+            } else {
+              document.body.style.removeProperty("cursor");
+            }
+          }
+          const curUserSelect = document.body.style.getPropertyValue("user-select");
+          const curUserSelectPri = document.body.style.getPropertyPriority("user-select");
+          if (curUserSelect === "none" && curUserSelectPri === "important") {
+            if (prevBodyUserSelect) {
+              document.body.style.setProperty("user-select", prevBodyUserSelect, prevBodyUserSelectPriority);
+            } else {
+              document.body.style.removeProperty("user-select");
+            }
+          }
+        }
+      };
+
+      const removeSplitterWindowListeners = () => {
+        if (typeof window !== "undefined") {
+          window.removeEventListener("pointermove", onSplitterMove, true);
+          window.removeEventListener("pointerup", onSplitterEnd, true);
+          window.removeEventListener("pointercancel", onSplitterCancel, true);
+          window.removeEventListener("mousemove", onSplitterMove, true);
+          window.removeEventListener("mouseup", onSplitterEnd, true);
+        }
+      };
 
       const applyWidthStyle = () => {
         rafId = null;
@@ -70,9 +167,56 @@
         surface.style.setProperty("--settings-sidebar-width", `${latestTargetWidth}px`);
       };
 
+      const cancelSplitterDrag = () => {
+        if (!isDraggingSplitter) return;
+        isDraggingSplitter = false;
+        if (rafId) {
+          if (typeof cancelAnimationFrame === "function") {
+            cancelAnimationFrame(rafId);
+          }
+          rafId = null;
+        }
+
+        // 取消正在进行的拖拽：还原拖拽前临时应用的尺寸变量与优先级，不写入 localStorage
+        if (dragStartSidebarWidth) {
+          surface.style.setProperty("--settings-sidebar-width", dragStartSidebarWidth, dragStartSidebarWidthPriority);
+        } else {
+          surface.style.removeProperty("--settings-sidebar-width");
+        }
+
+        surface.classList.remove("is-resizing");
+        splitter.classList.remove("is-dragging");
+        if (document.documentElement) {
+          if (!activeResizingSurface || activeResizingSurface === surface) {
+            document.documentElement.classList.remove("pi-enh-settings-resizing");
+          }
+        }
+        restoreBodyStyles();
+
+        if (activePointerId !== null && typeof splitter.releasePointerCapture === "function") {
+          try {
+            splitter.releasePointerCapture(activePointerId);
+          } catch (err) {}
+        }
+        activePointerId = null;
+
+        removeSplitterWindowListeners();
+
+        if (activeResizingSurface === surface) {
+          activeResizingSurface = null;
+          cancelActiveResizing = null;
+        }
+      };
+
       const onSplitterMove = (e) => {
         if (!isDraggingSplitter) return;
         if (activePointerId !== null && e.pointerId !== undefined && e.pointerId !== activePointerId) return;
+
+        // 若拖拽期间脱离 DOM、切至移动视图或插件已关闭/disabled，立即取消拖拽
+        if (!isResizerActiveAndEligible(surface)) {
+          cancelSplitterDrag();
+          return;
+        }
 
         const deltaX = e.clientX - startX;
         if (Math.abs(deltaX) > 2) {
@@ -83,18 +227,34 @@
         latestTargetWidth = newWidth;
 
         // 使用 requestAnimationFrame 单帧节流视觉写入，杜绝事件堆积与强制同步重排掉帧
-        if (!rafId) {
+        if (!rafId && typeof requestAnimationFrame === "function") {
           rafId = requestAnimationFrame(applyWidthStyle);
+        } else if (!rafId) {
+          applyWidthStyle();
         }
+      };
+
+      const onSplitterCancel = (e) => {
+        if (!isDraggingSplitter) return;
+        if (activePointerId !== null && e && e.pointerId !== undefined && e.pointerId !== activePointerId) return;
+        cancelSplitterDrag();
       };
 
       const onSplitterEnd = (e) => {
         if (!isDraggingSplitter) return;
         if (activePointerId !== null && e && e.pointerId !== undefined && e.pointerId !== activePointerId) return;
 
+        // 尤其鼠标 up 先于 observer 时不得提交断开/已关闭拖拽
+        if (!isResizerActiveAndEligible(surface)) {
+          cancelSplitterDrag();
+          return;
+        }
+
         isDraggingSplitter = false;
         if (rafId) {
-          cancelAnimationFrame(rafId);
+          if (typeof cancelAnimationFrame === "function") {
+            cancelAnimationFrame(rafId);
+          }
           rafId = null;
         }
 
@@ -109,10 +269,11 @@
         surface.classList.remove("is-resizing");
         splitter.classList.remove("is-dragging");
         if (document.documentElement) {
-          document.documentElement.classList.remove("pi-enh-settings-resizing");
+          if (!activeResizingSurface || activeResizingSurface === surface) {
+            document.documentElement.classList.remove("pi-enh-settings-resizing");
+          }
         }
-        document.body.style.removeProperty("cursor");
-        document.body.style.removeProperty("user-select");
+        restoreBodyStyles();
 
         // 释放 Pointer Capture
         if (activePointerId !== null && typeof splitter.releasePointerCapture === "function") {
@@ -122,11 +283,12 @@
         }
         activePointerId = null;
 
-        window.removeEventListener("pointermove", onSplitterMove, true);
-        window.removeEventListener("pointerup", onSplitterEnd, true);
-        window.removeEventListener("pointercancel", onSplitterEnd, true);
-        window.removeEventListener("mousemove", onSplitterMove, true);
-        window.removeEventListener("mouseup", onSplitterEnd, true);
+        removeSplitterWindowListeners();
+
+        if (activeResizingSurface === surface) {
+          activeResizingSurface = null;
+          cancelActiveResizing = null;
+        }
 
         // 立即持久化存储最新宽度，保证后续任何状态恢复均以本次调整为准
         try {
@@ -136,12 +298,19 @@
 
       const onSplitterStart = (e) => {
         if (e.button !== 0) return;
+        // 拒绝已有活跃拖拽 surface，保护首拖拽 owner 不被覆盖破坏
+        if (activeResizingSurface || isDraggingSplitter) return;
+        // 真实 flag / connected / mobile / disabled 检查
+        if (!isResizerActiveAndEligible(surface)) return;
+
         e.preventDefault();
         e.stopPropagation();
 
         isDraggingSplitter = true;
         hasMovedDuringDrag = false;
         startX = e.clientX;
+        dragStartSidebarWidth = surface.style.getPropertyValue("--settings-sidebar-width");
+        dragStartSidebarWidthPriority = surface.style.getPropertyPriority("--settings-sidebar-width");
 
         // 清除任何选区，防止文本选中导致指针行为畸变
         try {
@@ -176,8 +345,20 @@
         if (document.documentElement) {
           document.documentElement.classList.add("pi-enh-settings-resizing");
         }
-        document.body.style.setProperty("cursor", "col-resize", "important");
-        document.body.style.setProperty("user-select", "none", "important");
+
+        // 仅在拖拽时拥有并修改 body cursor/user-select
+        if (typeof document !== "undefined" && document.body) {
+          prevBodyCursor = document.body.style.getPropertyValue("cursor");
+          prevBodyCursorPriority = document.body.style.getPropertyPriority("cursor");
+          prevBodyUserSelect = document.body.style.getPropertyValue("user-select");
+          prevBodyUserSelectPriority = document.body.style.getPropertyPriority("user-select");
+          isDraggingOwned = true;
+          document.body.style.setProperty("cursor", "col-resize", "important");
+          document.body.style.setProperty("user-select", "none", "important");
+        }
+
+        activeResizingSurface = surface;
+        cancelActiveResizing = cancelSplitterDrag;
 
         // 优先使用 setPointerCapture 锁定指针，确保快速拖拽或滑出窗口边界时不丢失事件
         if (e.pointerId !== undefined && typeof splitter.setPointerCapture === "function") {
@@ -189,21 +370,21 @@
           activePointerId = null;
         }
 
-        window.addEventListener("pointermove", onSplitterMove, true);
-        window.addEventListener("pointerup", onSplitterEnd, true);
-        window.addEventListener("pointercancel", onSplitterEnd, true);
-        window.addEventListener("mousemove", onSplitterMove, true);
-        window.addEventListener("mouseup", onSplitterEnd, true);
+        if (typeof window !== "undefined") {
+          window.addEventListener("pointermove", onSplitterMove, true);
+          window.addEventListener("pointerup", onSplitterEnd, true);
+          window.addEventListener("pointercancel", onSplitterCancel, true);
+          window.addEventListener("mousemove", onSplitterMove, true);
+          window.addEventListener("mouseup", onSplitterEnd, true);
+        }
       };
 
-      if (window.PointerEvent) {
-        splitter.addEventListener("pointerdown", onSplitterStart);
-      } else {
-        splitter.addEventListener("mousedown", onSplitterStart);
-      }
+      const isPointer = typeof window !== "undefined" && !!window.PointerEvent;
+      const startEventType = isPointer ? "pointerdown" : "mousedown";
+      splitter.addEventListener(startEventType, onSplitterStart);
 
       // 双击恢复默认侧边栏宽度 200px (具备严格的防误触阻断：拖拽移动过或拖拽结束后 500ms 内禁止重置)
-      splitter.addEventListener("dblclick", (e) => {
+      const onSplitterDblClick = (e) => {
         e.preventDefault();
         e.stopPropagation();
 
@@ -219,6 +400,16 @@
         } catch (err) {}
         if (typeof showToast === "function") {
           showToast("已恢复默认侧边栏宽度 (200px)");
+        }
+      };
+      splitter.addEventListener("dblclick", onSplitterDblClick);
+
+      cleanups.push(() => {
+        cancelSplitterDrag();
+        splitter.removeEventListener(startEventType, onSplitterStart);
+        splitter.removeEventListener("dblclick", onSplitterDblClick);
+        if (splitter.parentNode) {
+          splitter.remove();
         }
       });
     }
@@ -255,9 +446,89 @@
         let startY = 0;
         let startWidth = 1220;
         let startHeight = 650;
+        let isDraggingOwned = false;
+        let prevBodyCursor = "";
+        let prevBodyCursorPriority = "";
+        let prevBodyUserSelect = "";
+        let prevBodyUserSelectPriority = "";
+        let dragStartDialogWidth = "";
+        let dragStartDialogWidthPriority = "";
+        let dragStartDialogHeight = "";
+        let dragStartDialogHeightPriority = "";
+
+        const restoreBodyStyles = () => {
+          if (!isDraggingOwned) return;
+          isDraggingOwned = false;
+          if (typeof document !== "undefined" && document.body) {
+            const curCursor = document.body.style.getPropertyValue("cursor");
+            const curCursorPri = document.body.style.getPropertyPriority("cursor");
+            if (curCursor === cursor && curCursorPri === "important") {
+              if (prevBodyCursor) {
+                document.body.style.setProperty("cursor", prevBodyCursor, prevBodyCursorPriority);
+              } else {
+                document.body.style.removeProperty("cursor");
+              }
+            }
+            const curUserSelect = document.body.style.getPropertyValue("user-select");
+            const curUserSelectPri = document.body.style.getPropertyPriority("user-select");
+            if (curUserSelect === "none" && curUserSelectPri === "important") {
+              if (prevBodyUserSelect) {
+                document.body.style.setProperty("user-select", prevBodyUserSelect, prevBodyUserSelectPriority);
+              } else {
+                document.body.style.removeProperty("user-select");
+              }
+            }
+          }
+        };
+
+        const removeDialogWindowListeners = () => {
+          if (typeof window !== "undefined") {
+            window.removeEventListener("mousemove", onDialogMouseMove, true);
+            window.removeEventListener("mouseup", onDialogMouseUp, true);
+          }
+        };
+
+        const cancelDialogDrag = () => {
+          if (!isResizingDialog) return;
+          isResizingDialog = false;
+
+          // 取消正在进行的拖拽：还原拖拽前临时应用的尺寸变量与优先级，不写入 localStorage
+          if (dragStartDialogWidth) {
+            surface.style.setProperty("--settings-dialog-width", dragStartDialogWidth, dragStartDialogWidthPriority);
+          } else {
+            surface.style.removeProperty("--settings-dialog-width");
+          }
+          if (dragStartDialogHeight) {
+            surface.style.setProperty("--settings-dialog-height", dragStartDialogHeight, dragStartDialogHeightPriority);
+          } else {
+            surface.style.removeProperty("--settings-dialog-height");
+          }
+
+          surface.classList.remove("is-resizing");
+          handle.classList.remove("is-dragging");
+          if (document.documentElement) {
+            if (!activeResizingSurface || activeResizingSurface === surface) {
+              document.documentElement.classList.remove("pi-enh-settings-resizing");
+            }
+          }
+          restoreBodyStyles();
+          removeDialogWindowListeners();
+
+          if (activeResizingSurface === surface) {
+            activeResizingSurface = null;
+            cancelActiveResizing = null;
+          }
+        };
 
         const onDialogMouseMove = (e) => {
           if (!isResizingDialog) return;
+
+          // 若拖拽期间脱离 DOM、切至移动视图或插件已关闭/disabled，立即取消拖拽
+          if (!isResizerActiveAndEligible(surface)) {
+            cancelDialogDrag();
+            return;
+          }
+
           e.preventDefault();
 
           const maxW = Math.max(760, (window.innerWidth || 1440) - 32);
@@ -278,13 +549,28 @@
 
         const onDialogMouseUp = (e) => {
           if (!isResizingDialog) return;
+
+          // 尤其鼠标 up 先于 observer 时不得提交断开/已关闭拖拽
+          if (!isResizerActiveAndEligible(surface)) {
+            cancelDialogDrag();
+            return;
+          }
+
           isResizingDialog = false;
           surface.classList.remove("is-resizing");
           handle.classList.remove("is-dragging");
-          document.body.style.removeProperty("cursor");
-          document.body.style.removeProperty("user-select");
-          window.removeEventListener("mousemove", onDialogMouseMove, true);
-          window.removeEventListener("mouseup", onDialogMouseUp, true);
+          if (document.documentElement) {
+            if (!activeResizingSurface || activeResizingSurface === surface) {
+              document.documentElement.classList.remove("pi-enh-settings-resizing");
+            }
+          }
+          restoreBodyStyles();
+          removeDialogWindowListeners();
+
+          if (activeResizingSurface === surface) {
+            activeResizingSurface = null;
+            cancelActiveResizing = null;
+          }
 
           try {
             const rect = surface.getBoundingClientRect();
@@ -294,12 +580,21 @@
           } catch (err) {}
         };
 
-        handle.addEventListener("mousedown", (e) => {
+        const onDialogMouseDown = (e) => {
           if (e.button !== 0) return;
+          // 拒绝已有活跃拖拽 surface，保护首拖拽 owner 不被覆盖破坏
+          if (activeResizingSurface || isResizingDialog) return;
+          // 真实 flag / connected / mobile / disabled 检查
+          if (!isResizerActiveAndEligible(surface)) return;
+
           e.preventDefault();
           isResizingDialog = true;
           startX = e.clientX;
           startY = e.clientY;
+          dragStartDialogWidth = surface.style.getPropertyValue("--settings-dialog-width");
+          dragStartDialogWidthPriority = surface.style.getPropertyPriority("--settings-dialog-width");
+          dragStartDialogHeight = surface.style.getPropertyValue("--settings-dialog-height");
+          dragStartDialogHeightPriority = surface.style.getPropertyPriority("--settings-dialog-height");
 
           const rect = surface.getBoundingClientRect();
           startWidth = rect.width;
@@ -307,26 +602,100 @@
 
           surface.classList.add("is-resizing");
           handle.classList.add("is-dragging");
-          document.body.style.setProperty("cursor", cursor, "important");
-          document.body.style.setProperty("user-select", "none", "important");
+          if (document.documentElement) {
+            document.documentElement.classList.add("pi-enh-settings-resizing");
+          }
 
-          window.addEventListener("mousemove", onDialogMouseMove, true);
-          window.addEventListener("mouseup", onDialogMouseUp, true);
-        });
+          // 仅在拖拽时拥有并修改 body cursor/user-select
+          if (typeof document !== "undefined" && document.body) {
+            prevBodyCursor = document.body.style.getPropertyValue("cursor");
+            prevBodyCursorPriority = document.body.style.getPropertyPriority("cursor");
+            prevBodyUserSelect = document.body.style.getPropertyValue("user-select");
+            prevBodyUserSelectPriority = document.body.style.getPropertyPriority("user-select");
+            isDraggingOwned = true;
+            document.body.style.setProperty("cursor", cursor, "important");
+            document.body.style.setProperty("user-select", "none", "important");
+          }
 
+          activeResizingSurface = surface;
+          cancelActiveResizing = cancelDialogDrag;
+
+          if (typeof window !== "undefined") {
+            window.addEventListener("mousemove", onDialogMouseMove, true);
+            window.addEventListener("mouseup", onDialogMouseUp, true);
+          }
+        };
+
+        handle.addEventListener("mousedown", onDialogMouseDown);
+
+        let onDialogDblClick = null;
         if (type === "se") {
-          handle.addEventListener("dblclick", (e) => {
+          onDialogDblClick = (e) => {
             e.preventDefault();
             surface.style.removeProperty("--settings-dialog-width");
             surface.style.removeProperty("--settings-dialog-height");
             try {
               localStorage.removeItem(SETTINGS_DIALOG_SIZE_KEY);
             } catch (err) {}
-            showToast("已恢复默认弹窗尺寸 (1220px × 86vh)");
-          });
+            if (typeof showToast === "function") {
+              showToast("已恢复默认弹窗尺寸 (1220px × 86vh)");
+            }
+          };
+          handle.addEventListener("dblclick", onDialogDblClick);
         }
+
+        cleanups.push(() => {
+          cancelDialogDrag();
+          handle.removeEventListener("mousedown", onDialogMouseDown);
+          if (onDialogDblClick) {
+            handle.removeEventListener("dblclick", onDialogDblClick);
+          }
+          if (handle.parentNode) {
+            handle.remove();
+          }
+        });
       }
     });
+
+    surface.__piEnhResizableCleanup = () => {
+      // 1. 执行所有句柄的销毁与解绑
+      while (cleanups.length > 0) {
+        try {
+          const fn = cleanups.pop();
+          fn();
+        } catch (e) {}
+      }
+
+      // 2. 恢复 surface 绑定前的 3 个 CSS 逻辑变量，恢复原生尺寸表现
+      if (origSidebarWidth) {
+        surface.style.setProperty("--settings-sidebar-width", origSidebarWidth, origSidebarWidthPriority);
+      } else {
+        surface.style.removeProperty("--settings-sidebar-width");
+      }
+      if (origDialogWidth) {
+        surface.style.setProperty("--settings-dialog-width", origDialogWidth, origDialogWidthPriority);
+      } else {
+        surface.style.removeProperty("--settings-dialog-width");
+      }
+      if (origDialogHeight) {
+        surface.style.setProperty("--settings-dialog-height", origDialogHeight, origDialogHeightPriority);
+      } else {
+        surface.style.removeProperty("--settings-dialog-height");
+      }
+
+      // 3. 清理 surface 与 documentElement 状态类
+      surface.classList.remove("is-resizing");
+      if (document.documentElement) {
+        if (!activeResizingSurface || activeResizingSurface === surface) {
+          document.documentElement.classList.remove("pi-enh-settings-resizing");
+        }
+      }
+
+      if (activeResizingSurface === surface) {
+        activeResizingSurface = null;
+        cancelActiveResizing = null;
+      }
+    };
   }
 
   SHORTCUT_TIP_STORAGE_KEY = "pi-enh-settings-shortcut-tip-dismissed";
@@ -430,8 +799,8 @@
   function syncSettingsSidebarCollapse(header) {
     if (!header || typeof header.querySelector !== "function") return;
 
-    // 直屏手机 / 移动端视图：彻底清除并严禁创建折叠按钮，退出折叠状态
-    if (isMobileSettingsView(header)) {
+    // 插件关闭或移动端视图：清除按钮，禁止后续同步重新创建。
+    if (!isPluginEnabled("settings-sidebar-layout") || isMobileSettingsView(header)) {
       const existingBtn = header.querySelector(".pi-enh-sidebar-collapse-btn");
       if (existingBtn) existingBtn.remove();
       const existingTip = header.querySelector(".pi-enh-sidebar-shortcut-tip");
@@ -492,9 +861,243 @@
   }
 
   // ==========================================
+  // 6.0 Mobile Section Picker & Active Enhancement Authority Helper
+  // ==========================================
+  const ENHANCEMENT_PICKER_SECTIONS = [
+    {
+      value: "enhancements",
+      label: "增强插件",
+      tabSelector: "[data-pi-enh-tab='plugins']",
+      panelSelector: ".pi-enh-plugins-panel",
+      isEnabled: () => true,
+    },
+    {
+      value: "archived",
+      label: "已归档",
+      tabSelector: "[data-pi-enh-tab='archived']",
+      panelSelector: ".pi-enh-archived-panel",
+      isEnabled: () => isPluginEnabled("session-pin-archive"),
+    },
+    {
+      value: "notifications",
+      label: "通知管理",
+      tabSelector: "[data-pi-enh-tab='notifications']",
+      panelSelector: ".pi-enh-notifications-panel",
+      isEnabled: () => isPluginEnabled("notification-center"),
+    },
+    {
+      value: "usage",
+      label: "Usage",
+      tabSelector: "[data-pi-enh-tab='usage']",
+      panelSelector: ".pi-enh-usage-panel",
+      isEnabled: () => isPluginEnabled("usage-cost-dashboard"),
+    },
+    {
+      value: "tags",
+      label: "会话标签",
+      tabSelector: "[data-pi-enh-tab='tags']",
+      panelSelector: ".pi-enh-tags-panel",
+      isEnabled: () => isPluginEnabled("session-tags"),
+    },
+  ];
+
+  function isEnhancementPickerValue(val) {
+    return ENHANCEMENT_PICKER_SECTIONS.some((sec) => sec.value === val);
+  }
+
+  function isPanelEffectivelyVisible(panel, dialog) {
+    if (!panel) return false;
+    if (panel.hidden) return false;
+    if (panel.style && (panel.style.display === "none" || panel.style.visibility === "hidden")) return false;
+    if (dialog && typeof dialog.contains === "function" && !dialog.contains(panel)) return false;
+    if (typeof panel.isConnected === "boolean" && panel.ownerDocument?.documentElement && !panel.isConnected) return false;
+
+    if (typeof panel.getClientRects === "function") {
+      try {
+        const rects = panel.getClientRects();
+        if (rects.length === 0) return false;
+        const r = rects[0];
+        if (r && r.width === 0 && r.height === 0) return false;
+      } catch (e) {}
+    }
+
+    const win = (panel.ownerDocument && panel.ownerDocument.defaultView) || (typeof window !== "undefined" ? window : null);
+    let curr = panel;
+    while (curr && curr !== dialog && curr !== curr.ownerDocument?.documentElement) {
+      if (curr.hidden) return false;
+      if (curr.style && (curr.style.display === "none" || curr.style.visibility === "hidden")) return false;
+      if (win && typeof win.getComputedStyle === "function") {
+        try {
+          const comp = win.getComputedStyle(curr);
+          if (comp && (comp.display === "none" || comp.visibility === "hidden")) {
+            return false;
+          }
+        } catch (e) {}
+      }
+      curr = curr.parentElement;
+    }
+    return true;
+  }
+
+  function resolveActiveEnhancementSection(dialog, nav) {
+    if (!dialog) return null;
+    const bodyEl = (dialog.ownerDocument && dialog.ownerDocument.body) || (typeof document !== "undefined" ? document.body : null);
+    if (nav && typeof dialog.contains === "function") {
+      let navRoot = nav;
+      while (navRoot.parentElement && navRoot.parentElement !== bodyEl && navRoot.parentElement.tagName !== "BODY" && navRoot.parentElement.tagName !== "HTML") {
+        navRoot = navRoot.parentElement;
+      }
+      if (navRoot !== nav && !navRoot.contains(dialog) && !dialog.contains(navRoot)) {
+        return null;
+      }
+    }
+    for (const sec of ENHANCEMENT_PICKER_SECTIONS) {
+      if (!sec.isEnabled()) continue;
+      const panel = dialog.querySelector(sec.panelSelector);
+      if (!panel || !isPanelEffectivelyVisible(panel, dialog)) {
+        continue;
+      }
+      if (nav) {
+        const tab = nav.querySelector(sec.tabSelector);
+        if (!tab || tab.getAttribute("aria-current") !== "page") {
+          continue;
+        }
+      }
+      return sec.value;
+    }
+    return null;
+  }
+
+  function getFallbackNativeSection(picker) {
+    if (!picker) return "general";
+    if (picker.__piEnhNativeValue && picker.querySelector(`option[value='${picker.__piEnhNativeValue}']`)) {
+      return picker.__piEnhNativeValue;
+    }
+    const nativeOpt = picker.querySelector("option:not([value='enhancements']):not([value='archived']):not([value='notifications']):not([value='usage']):not([value='tags'])");
+    return nativeOpt ? nativeOpt.value : "general";
+  }
+
+  function resolveActiveNativeSection(nav, picker) {
+    if (picker) return getFallbackNativeSection(picker);
+    if (nav) {
+      const header = (nav.closest && nav.closest(".settings-dialog-header")) || nav.parentElement;
+      const p = header ? header.querySelector("select.settings-mobile-section-picker") : null;
+      if (p) return getFallbackNativeSection(p);
+      const activeNativeTab = nav.querySelector(".settings-section-tab[aria-current='page']:not([data-pi-enh-tab])");
+      if (activeNativeTab) {
+        const text = (activeNativeTab.textContent || "").trim();
+        if (text.includes("插件") || text.includes("Plugins")) return "plugins";
+        if (text.includes("模型") || text.includes("Models")) return "models";
+        if (text.includes("技能") || text.includes("Skills")) return "skills";
+        if (text.includes("子代理") || text.includes("Agents")) return "agents";
+      }
+    }
+    return "general";
+  }
+
+  function syncMobilePickerState(header, nav, dialog) {
+    const mobilePicker = header ? header.querySelector("select.settings-mobile-section-picker") : null;
+    if (!mobilePicker) return;
+
+    const currentVal = mobilePicker.value;
+    if (currentVal && !isEnhancementPickerValue(currentVal)) {
+      mobilePicker.__piEnhNativeValue = currentVal;
+    }
+
+    let wasSelectedDisabledEnhancement = false;
+    for (const sec of ENHANCEMENT_PICKER_SECTIONS) {
+      const enabled = sec.isEnabled();
+      if (!enabled && currentVal === sec.value) {
+        wasSelectedDisabledEnhancement = true;
+      }
+    }
+
+    for (const sec of ENHANCEMENT_PICKER_SECTIONS) {
+      const existingOpt = mobilePicker.querySelector(`option[value='${sec.value}']`);
+      const enabled = sec.isEnabled();
+      if (enabled) {
+        if (!existingOpt) {
+          const opt = document.createElement("option");
+          opt.value = sec.value;
+          opt.textContent = sec.label;
+          mobilePicker.appendChild(opt);
+        }
+      } else if (existingOpt) {
+        existingOpt.remove();
+      }
+    }
+
+    if (!mobilePicker.__piEnhChangeHandler) {
+      const changeHandler = (e) => {
+        const val = mobilePicker.value;
+        if (isEnhancementPickerValue(val)) {
+          e.stopPropagation();
+          if (typeof e.stopImmediatePropagation === "function") {
+            e.stopImmediatePropagation();
+          }
+
+          const targetSec = ENHANCEMENT_PICKER_SECTIONS.find((s) => s.value === val);
+          if (targetSec) {
+            const tab = nav?.querySelector(targetSec.tabSelector);
+            tab?.click();
+          }
+
+          if (mobilePicker.value !== val) {
+            mobilePicker.value = val;
+          }
+        } else {
+          mobilePicker.__piEnhNativeValue = val;
+          hideEnhancementsPanel(nav);
+          hideNotificationPanel(nav);
+          hideArchivedPanel(nav);
+          hideUsagePanel(nav);
+          hideTagsPanel(nav);
+        }
+      };
+      mobilePicker.__piEnhChangeHandler = changeHandler;
+      mobilePicker.addEventListener("change", changeHandler);
+    }
+
+    const effectiveDialog = dialog || (nav?.closest && (nav.closest(".settings-dialog-backdrop") || nav.closest("[role='dialog']"))) || header?.closest?.(".settings-dialog-backdrop, [role='dialog']") || document.body;
+    const activeEnh = resolveActiveEnhancementSection(effectiveDialog, nav);
+    if (activeEnh) {
+      if (mobilePicker.value !== activeEnh && mobilePicker.querySelector(`option[value='${activeEnh}']`)) {
+        mobilePicker.value = activeEnh;
+      }
+    } else if (wasSelectedDisabledEnhancement || isEnhancementPickerValue(mobilePicker.value)) {
+      const nativeSec = getFallbackNativeSection(mobilePicker);
+      if (mobilePicker.value !== nativeSec) {
+        mobilePicker.value = nativeSec;
+      }
+      hideEnhancementsPanel(nav);
+      hideNotificationPanel(nav);
+      hideArchivedPanel(nav);
+      hideUsagePanel(nav);
+      hideTagsPanel(nav);
+      // Restore through the native tab owner, including React's selected tab/host.
+      const nativeOptions = Array.from(mobilePicker.options).filter((opt) => !isEnhancementPickerValue(opt.value));
+      const nativeIndex = nativeOptions.findIndex((opt) => opt.value === nativeSec);
+      const nativeTabs = nav?.querySelectorAll(".settings-section-tab:not([data-pi-enh-tab])");
+      if (nativeIndex >= 0 && nativeTabs?.[nativeIndex]) {
+        nativeTabs[nativeIndex].click();
+        // Enhancement activation cleared these DOM attributes; React may keep
+        // identical native props and therefore not write them back itself.
+        nativeTabs.forEach((tab, index) => {
+          if (index === nativeIndex) tab.setAttribute("aria-current", "page");
+          else tab.removeAttribute("aria-current");
+        });
+      }
+    }
+  }
+
+  // ==========================================
   // 6. Settings Dialog Enhancements & Archived Tabs (设置对话框增强与归档管理)
   // ==========================================
   function syncSettingsDialogEnhancements() {
+    // 弹窗打开瞬间立即静默并发预热模型数据，确保切换至模型标签页时 0ms 瞬间秒开
+    if (typeof window !== "undefined" && typeof window.__PI_ENH_PRELOAD_MODELS_CACHE__ === "function") {
+      void window.__PI_ENH_PRELOAD_MODELS_CACHE__();
+    }
     const isSidebarActive = isPluginEnabled("settings-sidebar-layout");
     const nav = document.querySelector(".settings-section-tabs");
     const header = (nav?.closest && nav.closest(".settings-dialog-header")) || (nav?.parentElement ? nav.parentElement : null) || document.querySelector(".settings-dialog-header");
@@ -516,6 +1119,8 @@
     const surface = nav.closest(".settings-dialog-surface") || document.querySelector(".settings-dialog-surface");
     if (surface && isSidebarActive && !isMobile) {
       bindSettingsDialogResizable(surface);
+    } else if (surface) {
+      unbindSettingsDialogResizable(surface);
     }
     if (header && isSidebarActive && !isMobile) {
       syncSidebarShortcutTip(header);
@@ -679,61 +1284,7 @@
     }
 
     // Mobile select picker sync
-    const mobilePicker = header ? header.querySelector("select.settings-mobile-section-picker") : null;
-    if (mobilePicker) {
-      if (!mobilePicker.querySelector("option[value='enhancements']")) {
-        const opt = document.createElement("option");
-        opt.value = "enhancements";
-        opt.textContent = "增强插件";
-        mobilePicker.appendChild(opt);
-      }
-      if (isPluginEnabled("session-pin-archive") && !mobilePicker.querySelector("option[value='archived']")) {
-        const optArch = document.createElement("option");
-        optArch.value = "archived";
-        optArch.textContent = "已归档";
-        mobilePicker.appendChild(optArch);
-      }
-      if (isPluginEnabled("notification-center") && !mobilePicker.querySelector("option[value='notifications']")) {
-        const optNotifications = document.createElement("option");
-        optNotifications.value = "notifications";
-        optNotifications.textContent = "通知管理";
-        mobilePicker.appendChild(optNotifications);
-      }
-      if (isPluginEnabled("usage-cost-dashboard") && !mobilePicker.querySelector("option[value='usage']")) {
-        const optUsage = document.createElement("option");
-        optUsage.value = "usage";
-        optUsage.textContent = "Usage";
-        mobilePicker.appendChild(optUsage);
-      }
-      if (isPluginEnabled("session-tags") && !mobilePicker.querySelector("option[value='tags']")) {
-        const optTags = document.createElement("option");
-        optTags.value = "tags";
-        optTags.textContent = "会话标签";
-        mobilePicker.appendChild(optTags);
-      }
-      if (!mobilePicker.__piEnhBound) {
-        mobilePicker.__piEnhBound = true;
-        mobilePicker.addEventListener("change", () => {
-          if (mobilePicker.value === "enhancements") {
-            enhTab?.click();
-          } else if (mobilePicker.value === "archived") {
-            nav.querySelector("[data-pi-enh-tab='archived']")?.click();
-          } else if (mobilePicker.value === "notifications") {
-            nav.querySelector("[data-pi-enh-tab='notifications']")?.click();
-          } else if (mobilePicker.value === "usage") {
-            nav.querySelector("[data-pi-enh-tab='usage']")?.click();
-          } else if (mobilePicker.value === "tags") {
-            nav.querySelector("[data-pi-enh-tab='tags']")?.click();
-          } else {
-            hideEnhancementsPanel(nav);
-            hideNotificationPanel(nav);
-            hideArchivedPanel(nav);
-            hideUsagePanel(nav);
-            hideTagsPanel(nav);
-          }
-        });
-      }
-    }
+    syncMobilePickerState(header, nav, surface?.parentElement || document.body);
 
     // 4. 在通用 (General) 设置面板构建自平衡双列仪表盘与运维卡片
     const generalPanel = document.querySelector(".settings-general");
@@ -802,6 +1353,105 @@
           generalPanel.appendChild(cacheSection);
         }
 
+        // 确保“系统版本与 Pi Agent 上游更新”卡片已存在
+        let versionSection = generalPanel.querySelector(".pi-enh-version-section");
+        if (!versionSection) {
+          versionSection = document.createElement("section");
+          versionSection.className = "settings-general-section pi-enh-version-section";
+          versionSection.setAttribute("data-pi-enh-section", "version-info");
+
+          const heading = document.createElement("h3");
+          heading.className = "settings-general-heading";
+          heading.innerHTML = `
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color: #10b981;">
+              <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/>
+            </svg>
+            <span>系统版本与上游更新</span>
+          `;
+
+          const desc = document.createElement("div");
+          desc.className = "settings-general-description";
+          desc.textContent = "监控上游官方 Pi Coding Agent (https://github.com/earendil-works/pi) 发布动态。当有新版本时在新建会话页面与设置中自动提示。";
+
+          const card = document.createElement("div");
+          card.className = "pi-enh-version-card";
+          card.style.cssText = "display: flex; flex-direction: column; gap: 8px; padding: 10px 12px; background: var(--bg-surface, rgba(255,255,255,0.03)); border: 1px solid var(--border, rgba(255,255,255,0.08)); border-radius: 8px; margin-top: 8px; font-size: 12px;";
+
+          versionSection.appendChild(heading);
+          versionSection.appendChild(desc);
+          versionSection.appendChild(card);
+          generalPanel.appendChild(versionSection);
+        }
+
+        if (versionSection) {
+          const card = versionSection.querySelector(".pi-enh-version-card");
+          if (card) {
+            const state = (typeof window !== "undefined" && window.__PI_AGENT_UPDATE_STATE__) || {
+              currentVersion: (typeof window !== "undefined" && window.__PI_OFFICIAL_AGENT_VERSION__) || "0.87.1",
+              latestVersion: null,
+              updateAvailable: false,
+              releaseUrl: "https://github.com/earendil-works/pi/releases",
+              isChecking: false,
+            };
+            const suiteVer = window.__PI_WEB_STANDALONE_VERSION__ || "1.0.5";
+            const updateTag = state.updateAvailable
+              ? `<span style="display:inline-flex;align-items:center;gap:3px;padding:1px 6px;border-radius:9999px;font-size:10px;font-weight:600;background:rgba(16,185,129,0.15);color:#10b981;border:1px solid rgba(16,185,129,0.4);"><span style="width:4px;height:4px;border-radius:50%;background:#10b981;"></span>可升级至 v${state.latestVersion}</span>`
+              : (state.latestVersion ? `<span style="display:inline-flex;padding:1px 6px;border-radius:9999px;font-size:10px;color:var(--text-muted);background:rgba(255,255,255,0.05);">已是最新</span>` : `<span style="font-size:10px;color:var(--text-muted);">未检测</span>`);
+
+            card.innerHTML = `
+              <div style="display: flex; justify-content: space-between; align-items: center; line-height: 1.5;">
+                <span style="color: var(--text-muted);">Web 前端发行版</span>
+                <span style="font-family: var(--font-mono, monospace); font-weight: 600;">v${suiteVer} (Koxir Standalone)</span>
+              </div>
+              <div style="display: flex; justify-content: space-between; align-items: center; line-height: 1.5;">
+                <span style="color: var(--text-muted);">Pi Agent 本地核心</span>
+                <span style="font-family: var(--font-mono, monospace); font-weight: 600;">v${state.currentVersion}</span>
+              </div>
+              <div style="display: flex; justify-content: space-between; align-items: center; line-height: 1.5;">
+                <span style="color: var(--text-muted);">官方上游最新版本</span>
+                <div style="display: flex; align-items: center; gap: 6px; font-family: var(--font-mono, monospace);">
+                  <span>${state.latestVersion ? `v${state.latestVersion}` : "检测中…"}</span>
+                  ${updateTag}
+                </div>
+              </div>
+              <div style="display: flex; gap: 8px; margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--border, rgba(255,255,255,0.06));">
+                <a href="${state.releaseUrl || 'https://github.com/earendil-works/pi/releases'}" target="_blank" rel="noopener noreferrer" class="pi-enh-btn-sm" style="flex: 1; text-align: center; text-decoration: none; display: inline-flex; align-items: center; justify-content: center; gap: 4px;">
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6M15 3h6v6M10 14L21 3"/></svg>
+                  <span>查看 Release Notes</span>
+                </a>
+                <button type="button" class="pi-enh-btn-sm pi-enh-check-agent-update-btn" style="flex: 1; display: inline-flex; align-items: center; justify-content: center; gap: 4px;">
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2"/></svg>
+                  <span>${state.isChecking ? "正在检测…" : "立即检查更新"}</span>
+                </button>
+              </div>
+            `;
+
+            const btnCheck = card.querySelector(".pi-enh-check-agent-update-btn");
+            if (btnCheck) {
+              btnCheck.addEventListener("click", async () => {
+                if (typeof window.__PI_ENH_CHECK_AGENT_UPDATE__ === "function") {
+                  btnCheck.disabled = true;
+                  btnCheck.innerHTML = `<span>⏳ 正在检测上游版本…</span>`;
+                  await window.__PI_ENH_CHECK_AGENT_UPDATE__(true);
+                  if (typeof showToast === "function") {
+                    const st = window.__PI_AGENT_UPDATE_STATE__;
+                    if (st && st.updateAvailable) {
+                      showToast(`发现 Pi Agent 新版本 v${st.latestVersion}！`);
+                    } else if (st && st.latestVersion) {
+                      showToast(`Pi Agent 已是最新版本 (v${st.latestVersion})`);
+                    } else if (st && st.error) {
+                      showToast(`检测失败: ${st.error}`);
+                    }
+                  }
+                  if (typeof scheduleDomSync === "function") {
+                    scheduleDomSync();
+                  }
+                }
+              });
+            }
+          }
+        }
+
         // 确保双列外壳容器存在
         let shell = generalPanel.querySelector(".pi-enh-dashboard-shell");
         if (!shell) {
@@ -840,6 +1490,9 @@
             colLeft.appendChild(sec);
           } else if (sec.classList.contains("pi-enh-cache-section")) {
             sec.setAttribute("data-pi-enh-section", "maintenance");
+            colLeft.appendChild(sec);
+          } else if (sec.classList.contains("pi-enh-version-section")) {
+            sec.setAttribute("data-pi-enh-section", "version-info");
             colLeft.appendChild(sec);
           } else if (sec.querySelector('#settings-chat-content-width') || sec.querySelector('.settings-chat-options')) {
             sec.setAttribute("data-pi-enh-section", "chat");
@@ -1223,6 +1876,17 @@
         pinBadge.remove();
       }
 
+      if (meta.id === "models" && !tab.__piEnhModelPrewarmBound) {
+        tab.__piEnhModelPrewarmBound = true;
+        const prewarm = () => {
+          if (typeof window !== "undefined" && typeof window.__PI_ENH_PRELOAD_MODELS_CACHE__ === "function") {
+            void window.__PI_ENH_PRELOAD_MODELS_CACHE__();
+          }
+        };
+        tab.addEventListener("pointerenter", prewarm, { passive: true });
+        tab.addEventListener("touchstart", prewarm, { passive: true });
+      }
+
       if (!tab.__piEnhShortcutDblBound) {
         tab.__piEnhShortcutDblBound = true;
         tab.style.userSelect = "none";
@@ -1366,6 +2030,17 @@
     for (const btn of renderedButtons) {
       const id = btn.getAttribute("data-shortcut-id");
 
+      if (id === "models" && !btn.__piEnhModelPrewarmBound) {
+        btn.__piEnhModelPrewarmBound = true;
+        const prewarm = () => {
+          if (typeof window !== "undefined" && typeof window.__PI_ENH_PRELOAD_MODELS_CACHE__ === "function") {
+            void window.__PI_ENH_PRELOAD_MODELS_CACHE__();
+          }
+        };
+        btn.addEventListener("pointerenter", prewarm, { passive: true });
+        btn.addEventListener("touchstart", prewarm, { passive: true });
+      }
+
       btn.addEventListener("click", (e) => {
         e.preventDefault();
         e.stopPropagation();
@@ -1400,6 +2075,9 @@
   }
 
   function triggerShortcutNavigation(shortcutId) {
+    if (shortcutId === "models" && typeof window !== "undefined" && typeof window.__PI_ENH_PRELOAD_MODELS_CACHE__ === "function") {
+      void window.__PI_ENH_PRELOAD_MODELS_CACHE__();
+    }
     const existingNav = document.querySelector(".settings-section-tabs");
     if (existingNav) {
       activateSettingsTab(existingNav, shortcutId);
@@ -1492,13 +2170,30 @@
       const header = (nav.closest && nav.closest(".settings-dialog-header")) || (nav.parentElement ? nav.parentElement : null);
       const mobilePicker = header ? header.querySelector("select.settings-mobile-section-picker") : null;
       if (mobilePicker && val) {
-        mobilePicker.value = val;
+        if (!isEnhancementPickerValue(mobilePicker.value)) {
+          mobilePicker.__piEnhNativeValue = mobilePicker.value;
+        }
+        if (!mobilePicker.querySelector(`option[value='${val}']`)) {
+          const matchedSec = ENHANCEMENT_PICKER_SECTIONS.find((sec) => sec.value === val);
+          if (matchedSec && matchedSec.isEnabled()) {
+            const opt = document.createElement("option");
+            opt.value = matchedSec.value;
+            opt.textContent = matchedSec.label;
+            mobilePicker.appendChild(opt);
+          }
+        }
+        if (mobilePicker.value !== val) {
+          mobilePicker.value = val;
+        }
       }
     } catch (e) {}
   }
 
   function activateSettingsTab(nav, shortcutId) {
     if (!nav) return false;
+    if (shortcutId === "models" && typeof window !== "undefined" && typeof window.__PI_ENH_PRELOAD_MODELS_CACHE__ === "function") {
+      void window.__PI_ENH_PRELOAD_MODELS_CACHE__();
+    }
 
     let enhTab = nav.querySelector("[data-pi-enh-tab='plugins']");
     let archTab = nav.querySelector("[data-pi-enh-tab='archived']");
@@ -1610,7 +2305,10 @@
     if (settingsDialogObserver || typeof MutationObserver !== "function") return;
     try {
       settingsDialogObserver = new MutationObserver((mutations) => {
+        // Detachment must also be cleaned during internal DOM updates.
+        cleanupDetachedSettingsResizeSurface();
         if (isMutatingInternally) return;
+
         let shouldSync = false;
         for (const m of mutations) {
           if (m.type === "childList" && m.addedNodes && m.addedNodes.length > 0) {
@@ -1651,11 +2349,34 @@
   initSettingsDialogObserver();
   syncSettingsDialogEnhancements();
   activeCleanups.push(() => {
+    cleanupSettingsDialogResizers();
     if (settingsDialogObserver) {
       settingsDialogObserver.disconnect();
       settingsDialogObserver = null;
     }
   });
+
+  let settingsResizeRaf = 0;
+  function handleCoalescedResize() {
+    if (settingsResizeRaf) return;
+    if (typeof requestAnimationFrame === "function") {
+      settingsResizeRaf = requestAnimationFrame(() => {
+        settingsResizeRaf = 0;
+        syncSettingsDialogEnhancements();
+      });
+    }
+  }
+  if (typeof window !== "undefined") {
+    addManagedListener(window, "resize", handleCoalescedResize, { passive: true });
+    activeCleanups.push(() => {
+      if (settingsResizeRaf) {
+        if (typeof cancelAnimationFrame === "function") {
+          cancelAnimationFrame(settingsResizeRaf);
+        }
+        settingsResizeRaf = 0;
+      }
+    });
+  }
 
   addManagedListener(document, "click", (e) => {
     const target = e.target;
@@ -1951,17 +2672,10 @@
         });
       }
 
-      // 仅以最新 HTML 所需的首屏静态资源 + 当前文档核心样式/app入口为刷新目标，
-      // 剔除历史会话期间按需懒加载的数 MB 非首屏 chunk，防止手机 VPN 下重复全量拉取超时
+      // 仅以最新 HTML 所需的首屏静态资源 (+ 可选增强脚本) 为刷新预热目标，
+      // 严禁将当前旧 DOM 已加载的历史静态资源（如旧哈希 CSS、旧 chunks）混入 staticUrls，
+      // 避免服务器已清理下线的旧文件 404 导致强制刷新被意外阻断。
       const staticUrls = new Set(latestHtmlUrls);
-      alreadyLoadedUrls.forEach((u) => {
-        try {
-          const p = new URL(u).pathname;
-          if (p.endsWith(".css") || p.includes("/chunks/app/") || p.includes("/chunks/pages/")) {
-            staticUrls.add(u);
-          }
-        } catch (_) {}
-      });
       if (latestEnhancementUrl) {
         staticUrls.add(latestEnhancementUrl);
       }
@@ -2113,7 +2827,7 @@
         type: "container",
         isSynology: true,
         displayName: "群晖同事端 Pi Web (30142)",
-        containerName: "pi-agent-colleague",
+        containerName: "pi-web-colleague",
         targetParam: "30142",
         port: 30142,
         bridgeCandidateUrls: [
@@ -2123,29 +2837,27 @@
         restartApi: "/restart-container",
         statusApi: "/container-status?target=30142",
         probePath: "/login",
-        manualScriptPath: "/volume1/docker/pi-agent-colleague/restart-container-30142.sh",
-        manualCommand: 'ssh root@127.0.0.1 -p 2222 "/volume1/docker/pi-agent-colleague/restart-container-30142.sh"',
+        manualScriptPath: "~/.pi/agent/scripts/restart-pi-web.sh --target 30142",
+        manualCommand: "bash ~/.pi/agent/scripts/restart-pi-web.sh --target 30142",
       };
     }
 
-    // 2. Windows 本地端：主机名为 127.0.0.1，或在 Windows 系统下的 localhost / 127.0.0.1
-    const isWindowsHost = hostname === "127.0.0.1";
+    // 2. Windows 本地端：在 Windows 系统下的 localhost / 127.0.0.1
     const isWindowsLocal = (hostname === "localhost" || hostname === "127.0.0.1") && platform.includes("win");
-    if (isWindowsHost || isWindowsLocal) {
-      const host = isWindowsHost ? "127.0.0.1" : "127.0.0.1";
+    if (isWindowsLocal) {
+      const parsedPort = Number(port) || 30141;
       return {
-        id: "windows-30141",
+        id: `windows-${parsedPort}`,
         type: "process",
         isSynology: false,
-        displayName: "Windows 本地 Pi Web (30141)",
+        displayName: `Windows 本地 Pi Web (${parsedPort})`,
         containerName: null,
         targetParam: "windows",
-        port: 30141,
+        port: parsedPort,
         bridgeCandidateUrls: [
-          `http://${host}:30149`,
+          `http://${hostname || "127.0.0.1"}:30149`,
           "http://127.0.0.1:30149",
           "http://localhost:30149",
-          "http://127.0.0.1:30149"
         ],
         restartApi: "/restart-pi-web",
         statusApi: "/pi-web-status",
@@ -2156,7 +2868,7 @@
     }
 
     // 3. MacBook 本地端：主机名为 127.0.0.1，或在 Mac 下的 localhost / 127.0.0.1
-    if (hostname === "127.0.0.1" || ((hostname === "localhost" || hostname === "127.0.0.1") && platform.includes("mac"))) {
+    if ((hostname === "localhost" || hostname === "127.0.0.1") && platform.includes("mac")) {
       return {
         id: "mac-30141",
         type: "process",
@@ -2173,19 +2885,19 @@
         restartApi: "/restart-pi-web",
         statusApi: "/pi-web-status",
         probePath: "/login",
-        manualScriptPath: "/Users/palhan/.pi/agent/scripts/restart-pi-web.sh",
-        manualCommand: "bash /Users/palhan/.pi/agent/scripts/restart-pi-web.sh",
+        manualScriptPath: "~/.pi/agent/scripts/restart-pi-web.sh",
+        manualCommand: "bash ~/.pi/agent/scripts/restart-pi-web.sh",
       };
     }
 
-    // 4. 群晖主开发端容器 (30141 / pi-agent)：默认全覆盖（127.0.0.1、手机/平板客户端访问、OpenVPN 127.0.0.1、外网域名）
+    // 4. 群晖主开发端容器 (30141 / pi-web)：默认全覆盖（127.0.0.1、手机/平板客户端访问、OpenVPN 127.0.0.1、外网域名）
     const bridgeHost = (hostname && !["localhost", "127.0.0.1"].includes(hostname)) ? hostname : "127.0.0.1";
     return {
       id: "synology-30141",
       type: "container",
       isSynology: true,
       displayName: "群晖 NAS Pi Web (30141)",
-      containerName: "pi-agent",
+      containerName: "pi-web",
       targetParam: "30141",
       port: 30141,
       bridgeCandidateUrls: [
@@ -2195,8 +2907,8 @@
       restartApi: "/restart-container",
       statusApi: "/container-status?target=30141",
       probePath: "/login",
-      manualScriptPath: "/volume1/docker/pi-agent/restart-container-30141.sh",
-      manualCommand: 'ssh root@127.0.0.1 -p 2222 "/volume1/docker/pi-agent/restart-container-30141.sh"',
+      manualScriptPath: "~/.pi/agent/scripts/restart-pi-web.sh --target 30141",
+      manualCommand: "bash ~/.pi/agent/scripts/restart-pi-web.sh --target 30141",
     };
   }
 
@@ -2788,6 +3500,7 @@ function showUsagePanel(nav, usageTab) {
     parent.appendChild(panel);
   }
   panel.style.display = "block";
+  syncMobilePickerOption(nav, "usage");
   renderUsagePanel(panel, nav);
 }
 
@@ -3810,15 +4523,24 @@ window.__PI_ENH_RENDER_USAGE_PANEL__ = renderUsagePanel;
       </div>`;
   }
 
-  const SUBAGENT_PROFILE_SCOPE_PRIORITY = Object.freeze({
-    builtin: 0,
-    global: 1,
-    workspace: 2,
-    project: 3,
-  });
+  const SUBAGENT_MODEL_UNAVAILABLE_VALUE = "__subagent_model_unavailable__";
+  const SUBAGENT_THINKING_LEVELS = [
+    { value: "", label: "遵循默认 (inherit)" },
+    { value: "off", label: "关闭 (off)" },
+    { value: "minimal", label: "极简 (minimal)" },
+    { value: "low", label: "低深度 (low)" },
+    { value: "medium", label: "中深度 (medium)" },
+    { value: "high", label: "高深度 (high)" },
+    { value: "xhigh", label: "超高深度 (xhigh)" },
+    { value: "max", label: "最大深度 (max)" },
+  ];
 
-  function normalizeSubagentProfileName(value) {
-    return typeof value === "string" && value.trim() ? value.trim() : "";
+  function normalizeSubagentModel(value) {
+    return typeof value === "string" && value.trim() ? value.trim() : null;
+  }
+
+  function normalizeSubagentThinking(value) {
+    return typeof value === "string" && value.trim() ? value.trim() : null;
   }
 
   function normalizeSubagentCwd(value) {
@@ -3864,29 +4586,6 @@ window.__PI_ENH_RENDER_USAGE_PANEL__ = renderUsagePanel;
     return "";
   }
 
-  function getEffectiveSubagentProfiles(rawProfiles) {
-    const byName = new Map();
-    for (const source of Array.isArray(rawProfiles) ? rawProfiles : []) {
-      const name = normalizeSubagentProfileName(source?.name);
-      const scope = typeof source?.scope === "string" ? source.scope.trim().toLowerCase() : "";
-      const priority = SUBAGENT_PROFILE_SCOPE_PRIORITY[scope];
-      if (!name || !Number.isInteger(priority)) continue;
-      const key = name.toLocaleLowerCase();
-      const previous = byName.get(key);
-      if (!previous || priority >= previous.priority) {
-        byName.set(key, { profile: { ...source, name, scope }, priority });
-      }
-    }
-    return [...byName.values()]
-      .map(({ profile }) => profile)
-      .filter((profile) => profile.enabled === true)
-      .sort((a, b) => {
-        const aLabel = normalizeSubagentProfileName(a.displayName) || a.name;
-        const bLabel = normalizeSubagentProfileName(b.displayName) || b.name;
-        return aLabel.localeCompare(bLabel, undefined, { sensitivity: "base" }) || a.name.localeCompare(b.name);
-      });
-  }
-
   async function fetchSubagentJson(url, options = {}) {
     const { timeoutMs = 8000, ...requestOptions } = options || {};
     let timeoutController = null;
@@ -3916,107 +4615,183 @@ window.__PI_ENH_RENDER_USAGE_PANEL__ = renderUsagePanel;
     }
   }
 
-  function appendSubagentProfileOption(select, value, label, disabled = false) {
-    const option = document.createElement("option");
-    option.value = String(value ?? "");
-    option.textContent = String(label ?? "");
-    option.disabled = Boolean(disabled);
-    select.appendChild(option);
-    return option;
-  }
-
-  function syncSubagentProfileControlDisabled(control) {
+  function syncSubagentModelControlDisabled(control) {
     if (!control) return;
-    const select = control.querySelector("[data-subagent-profile-select]");
-    if (!select) return;
-    const state = control.__piEnhSubagentProfileState;
-    const featureId = control.getAttribute("data-subagent-profile-feature") || "";
+    const state = control.__piEnhSubagentModelState;
+    const featureId = control.getAttribute("data-subagent-model-feature") || "";
     const row = control.closest("[data-module-row]");
     const moduleId = row?.getAttribute("data-module-row") || "";
     const moduleDisabled = moduleId ? !isModuleEnabled(moduleId) : false;
     const featureDisabled = featureId ? !isPluginEnabled(featureId) : false;
-    const busy = Boolean(state?.loading || state?.saving) || select.getAttribute("data-subagent-profile-busy") === "true";
-    const unavailable = select.getAttribute("data-subagent-profile-unavailable") === "true";
-    const ready = select.getAttribute("data-subagent-profile-ready") === "true";
-    select.disabled = moduleDisabled || featureDisabled || busy || !ready || unavailable;
-    const reload = control.querySelector("[data-subagent-profile-reload]");
-    if (reload) reload.disabled = moduleDisabled || featureDisabled || busy;
+    const busy = Boolean(state?.loading);
+    const disabled = moduleDisabled || featureDisabled || busy;
+
+    const reload = control.querySelector("[data-subagent-model-reload]");
+    if (reload) reload.disabled = disabled;
+
+    for (const select of control.querySelectorAll("select[data-subagent-profile-model], select[data-subagent-profile-thinking]")) {
+      const prof = select.getAttribute("data-subagent-profile-model") || select.getAttribute("data-subagent-profile-thinking") || "";
+      const isSavingThis = state?.savingProfiles?.has(prof.toLowerCase());
+      select.disabled = disabled || isSavingThis || !state?.settingsLoaded;
+    }
   }
 
-  function renderSubagentProfileControl(control, state) {
+  function renderSubagentModelControl(control, state) {
     if (!control || !state) return;
-    const select = control.querySelector("[data-subagent-profile-select]");
-    if (!select) return;
-    const cwdNode = control.querySelector("[data-subagent-profile-cwd]");
-    const statusNode = control.querySelector("[data-subagent-profile-status]");
+    const cwdNode = control.querySelector("[data-subagent-model-cwd]");
+    const statusNode = control.querySelector("[data-subagent-model-status]");
+    const matrixBody = control.querySelector("[data-subagent-matrix-body]");
     if (cwdNode) {
       cwdNode.textContent = state.cwd ? `当前 cwd：${state.cwd}` : "当前 cwd：未检测到有效工作目录";
       cwdNode.title = state.cwd || "";
     }
 
-    while (select.firstChild) select.removeChild(select.firstChild);
-    select.setAttribute("data-subagent-profile-ready", "false");
-    select.setAttribute("data-subagent-profile-unavailable", "true");
-    select.setAttribute("data-subagent-profile-busy", state.saving ? "true" : "false");
+    if (!matrixBody) return;
+    while (matrixBody.firstChild) matrixBody.removeChild(matrixBody.firstChild);
 
     if (state.loading) {
-      appendSubagentProfileOption(select, "", "正在读取服务端 profile…", true);
-      if (statusNode) statusNode.textContent = "正在读取当前 cwd 的生效 profile 与服务端默认值…";
-      syncSubagentProfileControlDisabled(control);
-      return;
-    }
-    if (!state.cwd) {
-      appendSubagentProfileOption(select, "", "当前没有可用 cwd", true);
-      if (statusNode) statusNode.textContent = "当前没有有效 cwd，无法读取项目 profile；请先打开一个工作区或会话。";
-      syncSubagentProfileControlDisabled(control);
-      return;
-    }
-    if (state.settingsError || !state.settingsLoaded) {
-      appendSubagentProfileOption(select, "", "服务端默认值读取失败", true);
-      if (statusNode) statusNode.textContent = "无法读取服务端默认 profile，暂不可保存；可点击“重新读取”。";
-      syncSubagentProfileControlDisabled(control);
-      return;
-    }
-    if (state.profilesError || !state.profilesLoaded) {
-      appendSubagentProfileOption(select, "", "当前 cwd 的 profile 读取失败", true);
-      if (statusNode) statusNode.textContent = "无法读取当前 cwd 下的 profile；可点击“重新读取”。";
-      syncSubagentProfileControlDisabled(control);
+      matrixBody.innerHTML = `<div style="padding:14px;color:var(--text-muted);font-size:12px;text-align:center;">正在读取子 Agent 列表、模型配置与服务端状态…</div>`;
+      if (statusNode) statusNode.textContent = "正在读取子 Agent 列表与可用模型…";
+      syncSubagentModelControlDisabled(control);
       return;
     }
 
-    const availableProfiles = Array.isArray(state.profiles) ? state.profiles : [];
-    const defaultProfile = normalizeSubagentProfileName(state.defaultProfile) || "general-purpose";
-    const selectedProfile = availableProfiles.find((profile) =>
-      normalizeSubagentProfileName(profile.name).toLocaleLowerCase() === defaultProfile.toLocaleLowerCase()
-    );
-
-    if (availableProfiles.length === 0) {
-      appendSubagentProfileOption(select, "", `当前默认 profile “${defaultProfile}” 在此 cwd 不可用`, true);
-      if (statusNode) statusNode.textContent = "当前 cwd 没有可用且已启用的 profile；服务端默认值在此 cwd 不会生效。";
-      syncSubagentProfileControlDisabled(control);
+    if (!state.settingsLoaded || state.settingsError) {
+      matrixBody.innerHTML = `<div style="padding:14px;color:#ef4444;font-size:12px;text-align:center;">无法读取服务端子任务设置；请检查连接后点击“重新读取”。</div>`;
+      if (statusNode) statusNode.textContent = "服务端设置读取失败。";
+      syncSubagentModelControlDisabled(control);
       return;
     }
-    if (!selectedProfile) {
-      appendSubagentProfileOption(select, "", `当前默认 profile “${defaultProfile}” 在此 cwd 不可用，请选择其他 profile`, true);
+
+    const profiles = Array.isArray(state.profiles) ? state.profiles : [];
+    if (profiles.length === 0) {
+      matrixBody.innerHTML = `<div style="padding:14px;color:var(--text-muted);font-size:12px;text-align:center;">${state.cwd ? "当前 cwd 下未检测到任何子 Agent profile。" : "当前没有有效 cwd，无法加载子 Agent 列表。"}</div>`;
+      if (statusNode) statusNode.textContent = state.cwd ? "未找到可配置的子 Agent。" : "请在有效工作区会话下配置子 Agent。";
+      syncSubagentModelControlDisabled(control);
+      return;
     }
-    for (const profile of availableProfiles) {
-      const name = normalizeSubagentProfileName(profile.name);
-      const displayName = normalizeSubagentProfileName(profile.displayName);
-      const label = displayName && displayName !== name ? `${displayName} (${name})` : name;
-      appendSubagentProfileOption(select, name, label);
+
+    const models = Array.isArray(state.models) ? state.models : [];
+    const modelOptions = models.map((m) => {
+      const provider = typeof m?.provider === "string" ? m.provider.trim() : "";
+      const id = typeof m?.id === "string" ? m.id.trim() : "";
+      if (!provider || !id) return null;
+      const value = `${provider}/${id}`;
+      const name = typeof m.name === "string" && m.name.trim() ? m.name.trim() : id;
+      return { value, label: `${name} (${value})` };
+    }).filter(Boolean);
+
+    const overrides = state.overrides && typeof state.overrides === "object" ? state.overrides : {};
+
+    for (const profile of profiles) {
+      const profName = String(profile?.name || "").trim();
+      if (!profName) continue;
+      const profKey = profName.toLowerCase();
+      const profOverride = overrides[profKey] || {};
+      const configuredModel = normalizeSubagentModel(profOverride.model);
+      const configuredThinking = normalizeSubagentThinking(profOverride.thinking) || "";
+      const isSaving = state.savingProfiles?.has(profKey);
+
+      const row = document.createElement("div");
+      row.className = "pi-enh-subagent-row";
+      row.setAttribute("data-subagent-row", profName);
+      row.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:8px 12px;padding:8px 10px;border-radius:6px;background:var(--bg-hover, rgba(255,255,255,0.04));border:1px solid var(--border, rgba(255,255,255,0.08));flex-wrap:wrap;";
+
+      const scopeText = profile.scope === "builtin" ? "内置" : profile.scope === "project" ? "项目" : "全局";
+      const displayName = profile.displayName || profName;
+      const desc = profile.description || "无描述";
+
+      const infoCol = document.createElement("div");
+      infoCol.className = "pi-enh-subagent-row-info";
+      infoCol.style.cssText = "display:flex;flex-direction:column;gap:2px;min-width:140px;flex:1 1 160px;";
+      infoCol.innerHTML = `
+        <div style="display:flex;align-items:center;gap:6px;">
+          <strong style="color:var(--text);font-size:12.5px;">${escapeQuickActionHtml(displayName)}</strong>
+          <span style="font-size:10px;padding:1px 5px;border-radius:3px;background:rgba(255,255,255,0.08);color:var(--text-muted);">${escapeQuickActionHtml(scopeText)}</span>
+          ${profile.model ? `<span style="font-size:10px;color:var(--text-dim);" title="Profile 自身默认模型: ${escapeQuickActionHtml(profile.model)}">(默认: ${escapeQuickActionHtml(profile.model)})</span>` : ""}
+        </div>
+        <span style="font-size:11px;color:var(--text-muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escapeQuickActionHtml(desc)}">${escapeQuickActionHtml(desc)}</span>
+      `;
+      row.appendChild(infoCol);
+
+      const ctrlCol = document.createElement("div");
+      ctrlCol.className = "pi-enh-subagent-row-controls";
+      ctrlCol.style.cssText = "display:flex;align-items:center;gap:8px;flex-wrap:wrap;";
+
+      // Model Select
+      const modelLabel = document.createElement("label");
+      modelLabel.style.cssText = "display:inline-flex;align-items:center;gap:4px;font-size:11.5px;color:var(--text-muted);";
+      modelLabel.innerHTML = `<span>模型:</span>`;
+      const modelSelect = document.createElement("select");
+      modelSelect.setAttribute("data-subagent-profile-model", profName);
+      modelSelect.setAttribute("aria-label", `${displayName} 模型`);
+      modelSelect.style.cssText = "min-width:140px;max-width:220px;height:26px;padding:2px 6px;border-radius:5px;border:1px solid var(--border);background:var(--bg, #1a1a1a);color:var(--text);font-size:11.5px;";
+
+      const defaultModelOpt = document.createElement("option");
+      defaultModelOpt.value = "";
+      defaultModelOpt.textContent = profile.model ? `遵循 profile (${profile.model})` : "遵循主会话模型";
+      modelSelect.appendChild(defaultModelOpt);
+
+      let foundConfigured = false;
+      for (const m of modelOptions) {
+        const opt = document.createElement("option");
+        opt.value = m.value;
+        opt.textContent = m.label;
+        if (m.value === configuredModel) {
+          opt.selected = true;
+          foundConfigured = true;
+        }
+        modelSelect.appendChild(opt);
+      }
+      if (configuredModel && !foundConfigured) {
+        const missingOpt = document.createElement("option");
+        missingOpt.value = SUBAGENT_MODEL_UNAVAILABLE_VALUE;
+        missingOpt.textContent = `不可用: ${configuredModel}`;
+        missingOpt.disabled = true;
+        missingOpt.selected = true;
+        modelSelect.appendChild(missingOpt);
+      }
+      if (!configuredModel) defaultModelOpt.selected = true;
+      modelLabel.appendChild(modelSelect);
+      ctrlCol.appendChild(modelLabel);
+
+      // Thinking Select
+      const thinkingLabel = document.createElement("label");
+      thinkingLabel.style.cssText = "display:inline-flex;align-items:center;gap:4px;font-size:11.5px;color:var(--text-muted);";
+      thinkingLabel.innerHTML = `<span>思考:</span>`;
+      const thinkingSelect = document.createElement("select");
+      thinkingSelect.setAttribute("data-subagent-profile-thinking", profName);
+      thinkingSelect.setAttribute("aria-label", `${displayName} 思考深度`);
+      thinkingSelect.style.cssText = "min-width:105px;height:26px;padding:2px 6px;border-radius:5px;border:1px solid var(--border);background:var(--bg, #1a1a1a);color:var(--text);font-size:11.5px;";
+
+      for (const lvl of SUBAGENT_THINKING_LEVELS) {
+        const opt = document.createElement("option");
+        opt.value = lvl.value;
+        opt.textContent = lvl.label;
+        if (lvl.value === configuredThinking) opt.selected = true;
+        thinkingSelect.appendChild(opt);
+      }
+      thinkingLabel.appendChild(thinkingSelect);
+      ctrlCol.appendChild(thinkingLabel);
+
+      // Status indicator
+      const statusSpan = document.createElement("span");
+      statusSpan.setAttribute("data-subagent-row-status", profName);
+      statusSpan.style.cssText = "font-size:11px;min-width:36px;color:var(--text-dim);";
+      if (isSaving) statusSpan.textContent = "保存中…";
+      ctrlCol.appendChild(statusSpan);
+
+      row.appendChild(ctrlCol);
+      matrixBody.appendChild(row);
     }
-    select.value = selectedProfile ? selectedProfile.name : "";
-    select.setAttribute("data-subagent-profile-ready", "true");
-    select.setAttribute("data-subagent-profile-unavailable", "false");
+
     if (statusNode) {
-      statusNode.textContent = selectedProfile
-        ? `服务端当前默认：${selectedProfile.name}`
-        : `当前默认 profile “${defaultProfile}” 不可用；请选择下方已启用 profile。`;
+      statusNode.textContent = "每个子 Agent 独立配置模型与思考深度；单次调用显式参数优先。";
     }
-    syncSubagentProfileControlDisabled(control);
+    syncSubagentModelControlDisabled(control);
   }
 
-  async function loadSubagentProfileControl(control, state) {
+  async function loadSubagentModelControl(control, state) {
     if (!control || !state) return;
     try { state.controller?.abort(); } catch (e) {}
     const token = (state.requestToken || 0) + 1;
@@ -4025,37 +4800,61 @@ window.__PI_ENH_RENDER_USAGE_PANEL__ = renderUsagePanel;
     state.settingsLoaded = false;
     state.profilesLoaded = false;
     state.settingsError = null;
+    state.modelsError = null;
     state.profilesError = null;
+    state.models = [];
     state.profiles = [];
+    state.overrides = {};
     const controller = typeof AbortController === "function" ? new AbortController() : null;
     state.controller = controller;
-    renderSubagentProfileControl(control, state);
+    renderSubagentModelControl(control, state);
     const timeoutId = controller ? setTimeout(() => controller.abort(), 8000) : null;
-    const isCurrent = () => control.isConnected && control.__piEnhSubagentProfileState === state && state.requestToken === token;
+    const isCurrent = () => control.isConnected && control.__piEnhSubagentModelState === state && state.requestToken === token;
 
     try {
       const settingsRequest = fetchSubagentJson("/api/subagents/settings", { signal: controller?.signal });
+      const modelsRequest = state.cwd
+        ? fetchSubagentJson(`/api/models?cwd=${encodeURIComponent(state.cwd)}`, { signal: controller?.signal })
+        : Promise.resolve({ modelList: [] });
       const profilesRequest = state.cwd
         ? fetchSubagentJson(`/api/subagents/profiles?cwd=${encodeURIComponent(state.cwd)}`, { signal: controller?.signal })
         : Promise.resolve({ profiles: [] });
-      const [settingsResult, profilesResult] = await Promise.allSettled([settingsRequest, profilesRequest]);
+
+      const [settingsResult, modelsResult, profilesResult] = await Promise.allSettled([
+        settingsRequest,
+        modelsRequest,
+        profilesRequest,
+      ]);
       if (!isCurrent()) return;
 
       if (settingsResult.status === "fulfilled") {
-        const value = normalizeSubagentProfileName(settingsResult.value?.defaultProfile);
-        state.defaultProfile = value || "general-purpose";
+        const settingsData = settingsResult.value;
+        state.overrides = (settingsData && typeof settingsData === "object" && settingsData.subagentOverrides && typeof settingsData.subagentOverrides === "object")
+          ? settingsData.subagentOverrides
+          : {};
+        state.globalModel = normalizeSubagentModel(settingsData?.subagentModel);
         state.settingsLoaded = true;
       } else {
         state.settingsError = settingsResult.reason;
       }
 
       if (!state.cwd) {
-        state.profilesLoaded = true;
-      } else if (profilesResult.status === "fulfilled" && Array.isArray(profilesResult.value?.profiles)) {
-        state.profiles = getEffectiveSubagentProfiles(profilesResult.value.profiles);
-        state.profilesLoaded = true;
+        state.modelsError = null;
+        state.profilesError = null;
       } else {
-        state.profilesError = profilesResult.status === "rejected" ? profilesResult.reason : new Error("Invalid profiles response");
+        if (modelsResult.status === "fulfilled" && Array.isArray(modelsResult.value?.modelList)) {
+          state.models = modelsResult.value.modelList;
+          state.modelsError = modelsResult.value.modelError ? new Error(String(modelsResult.value.modelError)) : null;
+        } else {
+          state.modelsError = modelsResult.status === "rejected" ? modelsResult.reason : new Error("Invalid model list response");
+        }
+
+        if (profilesResult.status === "fulfilled" && Array.isArray(profilesResult.value?.profiles)) {
+          state.profiles = profilesResult.value.profiles;
+          state.profilesLoaded = true;
+        } else {
+          state.profilesError = profilesResult.status === "rejected" ? profilesResult.reason : new Error("Invalid profiles response");
+        }
       }
     } catch (error) {
       if (isCurrent()) state.settingsError = error;
@@ -4064,85 +4863,146 @@ window.__PI_ENH_RENDER_USAGE_PANEL__ = renderUsagePanel;
       if (!isCurrent()) return;
       state.loading = false;
       if (state.controller === controller) state.controller = null;
-      renderSubagentProfileControl(control, state);
+      renderSubagentModelControl(control, state);
     }
   }
 
-  async function saveSubagentProfileSelection(control, state, select) {
-    const nextProfile = normalizeSubagentProfileName(select?.value);
-    if (!nextProfile || state.saving || !state.settingsLoaded) return;
-    const previousProfile = state.defaultProfile;
-    state.saving = true;
-    select.setAttribute("data-subagent-profile-busy", "true");
-    const statusNode = control.querySelector("[data-subagent-profile-status]");
-    if (statusNode) statusNode.textContent = "正在保存到服务端…";
-    syncSubagentProfileControlDisabled(control);
+  async function saveSubagentProfileOverride(control, state, profileName) {
+    if (!control || !state || !state.settingsLoaded || !profileName) return;
+    const profKey = profileName.toLowerCase();
+    const modelSelect = control.querySelector(`select[data-subagent-profile-model="${profileName}"]`);
+    const thinkingSelect = control.querySelector(`select[data-subagent-profile-thinking="${profileName}"]`);
+    if (!modelSelect || !thinkingSelect) return;
+
+    const rawModel = String(modelSelect.value || "");
+    if (rawModel === SUBAGENT_MODEL_UNAVAILABLE_VALUE) return;
+    const nextModel = normalizeSubagentModel(rawModel);
+    const nextThinking = normalizeSubagentThinking(thinkingSelect.value);
+
+    const prevOverride = state.overrides?.[profKey] || {};
+    const prevModel = normalizeSubagentModel(prevOverride.model);
+    const prevThinking = normalizeSubagentThinking(prevOverride.thinking);
+
+    if (nextModel === prevModel && nextThinking === prevThinking) return;
+
+    if (!state.savingProfiles) state.savingProfiles = new Set();
+    state.savingProfiles.add(profKey);
+
+    const statusNode = control.querySelector(`[data-subagent-row-status="${profileName}"]`);
+    if (statusNode) {
+      statusNode.textContent = "保存中…";
+      statusNode.style.color = "var(--text-muted)";
+    }
+    syncSubagentModelControlDisabled(control);
+
     try {
       const data = await fetchSubagentJson("/api/subagents/settings", {
         method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ defaultProfile: nextProfile }),
+        body: JSON.stringify({
+          profileOverride: {
+            profile: profileName,
+            model: nextModel,
+            thinking: nextThinking,
+          },
+        }),
         timeoutMs: 8000,
       });
-      if (!control.isConnected || control.__piEnhSubagentProfileState !== state) return;
-      state.defaultProfile = normalizeSubagentProfileName(data?.defaultProfile) || nextProfile;
-      state.saving = false;
-      renderSubagentProfileControl(control, state);
-      if (typeof showToast === "function") showToast("默认子 Agent profile 已保存到服务端");
+
+      if (!control.isConnected || control.__piEnhSubagentModelState !== state) return;
+
+      state.overrides = (data && typeof data === "object" && data.subagentOverrides && typeof data.subagentOverrides === "object")
+        ? data.subagentOverrides
+        : state.overrides || {};
+
+      state.savingProfiles.delete(profKey);
+      if (statusNode) {
+        statusNode.textContent = "✓ 已存";
+        statusNode.style.color = "#22c55e";
+        setTimeout(() => {
+          if (control.isConnected && statusNode.textContent === "✓ 已存") statusNode.textContent = "";
+        }, 2500);
+      }
+      syncSubagentModelControlDisabled(control);
+      if (typeof showToast === "function") {
+        showToast(`子 Agent [${profileName}] 配置已保存`);
+      }
     } catch (error) {
-      if (!control.isConnected || control.__piEnhSubagentProfileState !== state) return;
-      console.warn("[Pi Web Enhancements] 保存默认子 Agent profile 失败:", error);
-      state.defaultProfile = previousProfile;
-      state.saving = false;
-      renderSubagentProfileControl(control, state);
-      if (typeof showToast === "function") showToast("默认子 Agent profile 保存失败，请重试", null, 5000);
+      if (!control.isConnected || control.__piEnhSubagentModelState !== state) return;
+      console.warn(`[Pi Web Enhancements] 保存子 Agent ${profileName} 配置失败:`, error);
+      state.savingProfiles.delete(profKey);
+      // Rollback
+      if (prevModel) modelSelect.value = prevModel;
+      else modelSelect.value = "";
+      thinkingSelect.value = prevThinking || "";
+      if (statusNode) {
+        statusNode.textContent = "失败";
+        statusNode.style.color = "#ef4444";
+      }
+      syncSubagentModelControlDisabled(control);
+      if (typeof showToast === "function") {
+        showToast(`子 Agent [${profileName}] 配置保存失败，请重试`, null, 5000);
+      }
     }
   }
 
-  function bindSubagentProfileControls(panel) {
-    for (const control of panel.querySelectorAll("[data-subagent-profile-control]")) {
+  function bindSubagentModelControls(panel) {
+    for (const control of panel.querySelectorAll("[data-subagent-model-control]")) {
       const state = {
         cwd: getActiveSubagentCwd(),
-        defaultProfile: null,
         profiles: [],
+        models: [],
+        overrides: {},
+        globalModel: null,
         loading: false,
-        saving: false,
+        savingProfiles: new Set(),
         settingsLoaded: false,
         profilesLoaded: false,
         settingsError: null,
+        modelsError: null,
         profilesError: null,
         requestToken: 0,
         controller: null,
       };
-      control.__piEnhSubagentProfileState = state;
-      const select = control.querySelector("[data-subagent-profile-select]");
-      const reload = control.querySelector("[data-subagent-profile-reload]");
+      control.__piEnhSubagentModelState = state;
+      const reload = control.querySelector("[data-subagent-model-reload]");
       reload?.addEventListener("click", () => {
-        if (!state.loading && !state.saving) void loadSubagentProfileControl(control, state);
+        if (!state.loading && (!state.savingProfiles || state.savingProfiles.size === 0)) {
+          void loadSubagentModelControl(control, state);
+        }
       });
-      select?.addEventListener("change", () => {
-        void saveSubagentProfileSelection(control, state, select);
+
+      control.addEventListener("change", (event) => {
+        const target = event.target;
+        if (!target || target.tagName !== "SELECT") return;
+        const profName = target.getAttribute("data-subagent-profile-model") || target.getAttribute("data-subagent-profile-thinking");
+        if (profName) {
+          void saveSubagentProfileOverride(control, state, profName);
+        }
       });
-      void loadSubagentProfileControl(control, state);
+
+      void loadSubagentModelControl(control, state);
     }
   }
 
   function renderModuleSettingControl(setting, disabled) {
-    if (setting.kind === "subagent-profile") {
+    if (setting.kind === "subagent-model") {
       const featureId = escapeQuickActionHtml(setting.featureId || "");
-      const label = escapeQuickActionHtml(setting.label || "默认子 Agent profile");
-      const description = escapeQuickActionHtml(setting.description || "仅在调用未显式指定 subagent_type 时生效。");
-      return `<div class="pi-enh-subagent-profile-setting pi-enh-plugin-number-setting" style="width:100%;flex-wrap:wrap;white-space:normal;" data-subagent-profile-control data-subagent-profile-feature="${featureId}">
-        <div class="pi-enh-subagent-profile-copy" style="display:flex;flex:1 1 300px;flex-direction:column;gap:2px;min-width:220px;">
-          <span class="pi-enh-plugin-number-setting-label">${label}</span>
-          <span class="pi-enh-subagent-profile-description">${description}</span>
-          <span class="pi-enh-subagent-profile-cwd" data-subagent-profile-cwd>当前 cwd：读取中…</span>
+      const label = escapeQuickActionHtml(setting.label || "子 Agent 独立模型与思考深度");
+      const description = escapeQuickActionHtml(setting.description || "为每个子 Agent 独立配置专属模型与思考深度；单次调用显式参数优先。");
+      return `<div class="pi-enh-subagent-model-setting pi-enh-plugin-number-setting" style="width:100%;flex-direction:column;align-items:stretch;white-space:normal;gap:8px;" data-subagent-model-control data-subagent-model-feature="${featureId}">
+        <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:8px 12px;flex-wrap:wrap;">
+          <div class="pi-enh-subagent-model-copy" style="display:flex;flex:1 1 280px;flex-direction:column;gap:2px;min-width:200px;">
+            <span class="pi-enh-plugin-number-setting-label" style="font-weight:600;font-size:12.5px;">${label}</span>
+            <span class="pi-enh-subagent-model-description" style="font-size:11.5px;color:var(--text-muted);">${description}</span>
+            <span class="pi-enh-subagent-model-cwd" data-subagent-model-cwd style="font-size:11px;color:var(--text-dim);margin-top:2px;">当前 cwd：读取中…</span>
+          </div>
+          <button type="button" class="pi-enh-btn-sm" data-subagent-model-reload ${disabled ? "disabled" : ""}>重新读取</button>
         </div>
-        <select data-subagent-profile-select aria-label="${label}" ${disabled ? "disabled" : ""}>
-          <option value="">正在读取服务端状态…</option>
-        </select>
-        <button type="button" class="pi-enh-btn-sm" data-subagent-profile-reload ${disabled ? "disabled" : ""}>重新读取</button>
-        <span class="pi-enh-subagent-profile-status" data-subagent-profile-status role="status" aria-live="polite">正在读取服务端设置…</span>
+        <div class="pi-enh-subagent-matrix-body" data-subagent-matrix-body style="display:flex;flex-direction:column;gap:6px;width:100%;margin-top:4px;">
+          <div style="padding:10px;color:var(--text-muted);font-size:11.5px;text-align:center;">正在读取状态…</div>
+        </div>
+        <span class="pi-enh-subagent-model-status" data-subagent-model-status role="status" aria-live="polite" style="font-size:11px;color:var(--text-dim);margin-top:2px;">正在读取模型设置…</span>
       </div>`;
     }
     if (setting.kind === "action") {
@@ -4223,6 +5083,11 @@ window.__PI_ENH_RENDER_USAGE_PANEL__ = renderUsagePanel;
   }
 
   function syncEnhancementPanelControls() {
+    // This hook runs after every plugin change, even with an archived panel open.
+    const picker = document.querySelector("select.settings-mobile-section-picker");
+    if (picker && ENHANCEMENT_PICKER_SECTIONS.some((sec) => sec.isEnabled() !== Boolean(picker.querySelector(`option[value='${sec.value}']`)))) {
+      syncSettingsDialogEnhancements();
+    }
     const panel = document.querySelector(".pi-enh-plugins-panel");
     if (!panel) return;
     for (const row of panel.querySelectorAll("[data-module-row]")) {
@@ -4257,8 +5122,8 @@ window.__PI_ENH_RENDER_USAGE_PANEL__ = renderUsagePanel;
         range.disabled = disabled || !isPluginEnabled(featureId);
         if (document.activeElement !== range) range.value = String(getPluginSetting(featureId, key));
       }
-      for (const control of row.querySelectorAll("[data-subagent-profile-control]")) {
-        syncSubagentProfileControlDisabled(control);
+      for (const control of row.querySelectorAll("[data-subagent-model-control]")) {
+        syncSubagentModelControlDisabled(control);
       }
       for (const action of row.querySelectorAll("[data-plugin-action], [data-attention-sound-preview]")) action.disabled = disabled;
     }
@@ -4832,7 +5697,7 @@ window.__PI_ENH_RENDER_USAGE_PANEL__ = renderUsagePanel;
         }
       });
     }
-    bindSubagentProfileControls(panel);
+    bindSubagentModelControls(panel);
     syncEnhancementPanelControls();
     const syncCard = panel.querySelector("[data-pi-enh-sync-card]");
     if (syncCard) {
@@ -5169,6 +6034,43 @@ window.__PI_ENH_RENDER_USAGE_PANEL__ = renderUsagePanel;
   // 若需手动检查更新，可通过控制台调用 window.__PI_ENH_CHECK_UPDATE__()
   window.__PI_ENH_CHECK_UPDATE__ = checkScriptUpdate;
 
+  async function checkImmutableBundleAndHotSyncOnBoot() {
+    if (typeof window === "undefined" || isLoginPage()) return;
+    if (window.__PI_ENH_NATIVE_STATE_API__ === true && window.__PI_WEB_STANDALONE_EDITION__) {
+      // Standalone native 模式由运行时与 Next 静态构建内联锚定，跳过 legacy 探测
+      return;
+    }
+    try {
+      const res = await fetch(`/pi-web-enhancement-loader.js?t=${Date.now()}`, { cache: "no-store" });
+      if (!res.ok) return;
+      const text = await res.text();
+      const m = text.match(/window\.__PI_ENH_ASSET_BUILD__\s*=\s*"([a-f0-9]{16})"/);
+      const serverBuild = m ? m[1] : null;
+      const currentBuild = window.__PI_ENH_ASSET_BUILD__;
+      if (serverBuild && currentBuild && serverBuild !== currentBuild) {
+        console.warn(`[Pi Enh] Stale immutable bundle detected (local: ${currentBuild}, server: ${serverBuild}). Auto-healing browser disk cache...`);
+        try {
+          const scripts = Array.from(document.querySelectorAll("script[src]"))
+            .map((s) => s.getAttribute("src"))
+            .filter((src) => src && (src.includes("/chunks/app/layout-") || src.includes("/chunks/app/page-")));
+          for (const s of scripts) {
+            void fetch(s, { cache: "reload" }).catch(() => {});
+          }
+        } catch (_) {}
+        if (typeof window.__PI_ENH_RELOAD__ === "function") {
+          if (typeof window.__PI_WEB_ENHANCEMENTS_CLEANUP__ === "function") {
+            try { window.__PI_WEB_ENHANCEMENTS_CLEANUP__(); } catch (_) {}
+          }
+          window.__PI_ENH_RELOAD__(true);
+        }
+      }
+    } catch (_) {}
+  }
+
+  if (typeof window !== "undefined") {
+    setTimeout(checkImmutableBundleAndHotSyncOnBoot, 1200);
+  }
+
   // Register clean teardown hook for safe zero-downtime hot-reloads
   window.__PI_WEB_ENHANCEMENTS_CLEANUP__ = function () {
     if (isDisposed) return;
@@ -5329,8 +6231,39 @@ window.__PI_ENH_RENDER_USAGE_PANEL__ = renderUsagePanel;
       if (typeof dismissToast === "function") {
         try { dismissToast(true); } catch (e) {}
       }
-      for (const el of document.querySelectorAll(".pi-enh-menu, .pi-enh-quote-bar, #pi-enh-protocol-frame, .pi-enh-draft-badge, .pi-enh-plugins-panel, .pi-enh-notifications-panel, .pi-enh-archived-panel, [data-pi-enh-tab], .pi-enh-search-group-divider, .pi-enh-search-archived-badge, .pi-enh-search-restore-btn, .pi-enh-attachments-bar, .pi-enh-attachment-card, .pi-enh-video-preview-backdrop, dialog.pi-enh-image-zoom-dialog, .pi-enh-toast, .pi-enh-annotation-rail")) {
+      for (const el of document.querySelectorAll(".pi-enh-menu, .pi-enh-quote-bar, #pi-enh-protocol-frame, .pi-enh-draft-badge, .pi-enh-plugins-panel, .pi-enh-notifications-panel, .pi-enh-archived-panel, .pi-enh-usage-panel, .pi-enh-tags-panel, [data-pi-enh-tab], .pi-enh-search-group-divider, .pi-enh-search-archived-badge, .pi-enh-search-restore-btn, .pi-enh-attachments-bar, .pi-enh-attachment-card, .pi-enh-video-preview-backdrop, dialog.pi-enh-image-zoom-dialog, .pi-enh-toast, .pi-enh-annotation-rail")) {
         try { el.remove(); } catch (e) {}
+      }
+      cleanupSettingsDialogResizers();
+      for (const r of document.querySelectorAll(".pi-enh-sidebar-resizer, .pi-enh-dialog-resizer")) {
+        try { r.remove(); } catch (e) {}
+      }
+      for (const picker of document.querySelectorAll("select.settings-mobile-section-picker")) {
+        try {
+          if (picker.__piEnhChangeHandler) {
+            picker.removeEventListener("change", picker.__piEnhChangeHandler);
+            delete picker.__piEnhChangeHandler;
+          }
+          delete picker.__piEnhBound;
+
+          let targetNativeVal = picker.__piEnhNativeValue;
+          if (!targetNativeVal || !picker.querySelector(`option[value='${targetNativeVal}']`)) {
+            const firstNativeOpt = picker.querySelector("option:not([value='enhancements']):not([value='archived']):not([value='notifications']):not([value='usage']):not([value='tags'])");
+            targetNativeVal = firstNativeOpt ? firstNativeOpt.value : "general";
+          }
+
+          for (const opt of picker.querySelectorAll("option[value='enhancements'], option[value='archived'], option[value='notifications'], option[value='usage'], option[value='tags']")) {
+            opt.remove();
+          }
+
+          picker.value = targetNativeVal;
+          delete picker.__piEnhNativeValue;
+        } catch (e) {}
+      }
+      for (const m of document.querySelectorAll("main.settings-dialog-main:not(.pi-enh-plugins-panel):not(.pi-enh-notifications-panel):not(.pi-enh-archived-panel):not(.pi-enh-usage-panel):not(.pi-enh-tags-panel)")) {
+        try {
+          m.style.display = "";
+        } catch (e) {}
       }
       if (durationTooltip && durationTooltip.parentNode) {
         try { durationTooltip.parentNode.removeChild(durationTooltip); } catch (e) {}
@@ -5409,6 +6342,7 @@ window.__PI_ENH_RENDER_USAGE_PANEL__ = renderUsagePanel;
   };
   window.__PI_ENH_IS_PLUGIN_ENABLED__ = isPluginEnabled;
 
+
   const kernelHealth = window.__PI_ENH_KERNEL_HEALTH__ || {
     edition: `koxir-standalone-${ENHANCEMENT_SUITE_VERSION}`,
     version: ENHANCEMENT_SUITE_VERSION,
@@ -5455,5 +6389,28 @@ window.__PI_ENH_RENDER_USAGE_PANEL__ = renderUsagePanel;
       }
     }, { once: true });
   }
+
+  // 页面加载完成后后台静默预热模型设置数据（延迟 1.2s，避免首屏主资源竞争，确保后续点击 0ms 秒开）
+  if (typeof setTimeout === "function") {
+    setTimeout(() => {
+      try {
+        if (!isDisposed && !isLoginPage() && typeof window.__PI_ENH_PRELOAD_MODELS_CACHE__ === "function") {
+          window.__PI_ENH_PRELOAD_MODELS_CACHE__();
+        }
+      } catch (e) {}
+    }, 1200);
+  }
+
+  // 页面加载完成后后台静默探测上游更新（延迟 1.5s，避免首屏主资源竞争）
+  if (typeof setTimeout === "function") {
+    setTimeout(() => {
+      try {
+        if (!isDisposed && !isLoginPage() && typeof window.__PI_ENH_CHECK_AGENT_UPDATE__ === "function") {
+          window.__PI_ENH_CHECK_AGENT_UPDATE__(false);
+        }
+      } catch (e) {}
+    }, 1500);
+  }
+
   console.log(`[Pi Web Enhancements] v${ENHANCEMENT_SUITE_VERSION} Loaded: Module Settings Manager active.`);
 })();

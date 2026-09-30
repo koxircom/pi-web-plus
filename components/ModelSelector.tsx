@@ -170,9 +170,6 @@ export function ModelSelector({
         title={busy ? "Switching model" : locked ? currentName : sortedOptions.length > 0 || onClear ? "Change model" : "No available models"}
         style={buttonStyle}
         onClick={(event) => {
-          if (typeof document !== "undefined" && document.activeElement instanceof HTMLElement) {
-            document.activeElement.blur();
-          }
           const rect = event.currentTarget.getBoundingClientRect();
           setAnchorRect({ top: rect.top, right: rect.right, bottom: rect.bottom, left: rect.left, width: rect.width });
           setOpen((current) => {

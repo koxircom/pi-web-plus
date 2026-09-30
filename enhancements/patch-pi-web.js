@@ -630,9 +630,13 @@ function patchPackage(pkgDir, options = {}) {
       safeWriteFileSync(destPinned, fs.readFileSync(pinnedSource, "utf8"), "utf8");
     }
 
-    if (fs.existsSync(publicDir) && fs.existsSync(shortcutsSource)) {
+    if (fs.existsSync(publicDir)) {
       const destShortcuts = path.join(publicDir, "pi-shortcuts-manifest.json");
-      safeWriteFileSync(destShortcuts, fs.readFileSync(shortcutsSource, "utf8"), "utf8");
+      if (fs.existsSync(shortcutsSource)) {
+        safeWriteFileSync(destShortcuts, fs.readFileSync(shortcutsSource, "utf8"), "utf8");
+      } else if (!fs.existsSync(destShortcuts)) {
+        safeWriteFileSync(destShortcuts, JSON.stringify(shortcutsManifest, null, 2), "utf8");
+      }
     }
 
     if (fs.existsSync(publicDir) && fs.existsSync(usageLedgerSource)) {
@@ -663,14 +667,22 @@ function patchPackage(pkgDir, options = {}) {
       }
     }
 
-    if (fs.existsSync(publicDir) && fs.existsSync(odooAddonsSource)) {
+    if (fs.existsSync(publicDir)) {
       const destOdooAddons = path.join(publicDir, "pi-odoo-addons-manifest.json");
-      safeWriteFileSync(destOdooAddons, fs.readFileSync(odooAddonsSource, "utf8"), "utf8");
+      if (fs.existsSync(odooAddonsSource)) {
+        safeWriteFileSync(destOdooAddons, fs.readFileSync(odooAddonsSource, "utf8"), "utf8");
+      } else if (!fs.existsSync(destOdooAddons)) {
+        safeWriteFileSync(destOdooAddons, JSON.stringify(odooAddonsManifest || { revision: 0, updatedAt: "1970-01-01T00:00:00.000Z", sessions: {}, latestByAddon: {} }, null, 2), "utf8");
+      }
     }
 
-    if (fs.existsSync(publicDir) && fs.existsSync(tagsSource)) {
+    if (fs.existsSync(publicDir)) {
       const destTags = path.join(publicDir, "pi-tags-manifest.json");
-      safeWriteFileSync(destTags, fs.readFileSync(tagsSource, "utf8"), "utf8");
+      if (fs.existsSync(tagsSource)) {
+        safeWriteFileSync(destTags, fs.readFileSync(tagsSource, "utf8"), "utf8");
+      } else if (!fs.existsSync(destTags)) {
+        safeWriteFileSync(destTags, JSON.stringify(tagsManifest || { definitions: [], mappings: {}, revision: 0 }, null, 2), "utf8");
+      }
     }
 
     // Lightweight dynamic hot-loader definition with retry & watchdog

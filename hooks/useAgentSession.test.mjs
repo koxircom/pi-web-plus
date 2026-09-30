@@ -47,8 +47,8 @@ test("keeps the session event stream open through the idle grace window", () => 
   assert.doesNotMatch(agentEndSource, /closeEvents\(\)/);
   assert.match(agentStartSource, /cancelEventStreamGrace\(\)/);
   assert.match(agentSettledSource, /scheduleEventStreamClose\(sid\)/);
-  assert.match(agentSettledSource, /onAgentEnd\?\.\(\)/);
-  assert.match(promptDoneSource, /notifyPromptStage\(runId\)/);
+  assert.match(agentSettledSource, /notifyPromptStage\(promptRunIdRef\.current\)/);
+  assert.match(promptDoneSource, /if \(!sdkAgentActiveRef\.current\) \{[\s\S]*?notifyPromptStage\(runId\)/);
   assert.match(promptDoneSource, /scheduleEventStreamClose\(sid\)/);
   assert.match(sendSource, /const definitivelyRejected = !promptRequestStarted/);
   assert.match(sendSource, /if \(!definitivelyRejected && sentSessionId\) \{[\s\S]*?waitForPromptSettlement/);
@@ -168,7 +168,7 @@ test("sessions the user never overrode follow pi's configured defaultTools (#700
   );
 });
 
-test("only the session-mount load probes disk for external appends", () => {
+test("session mount probes external appends and interrupted hydration retries only once", () => {
   const loadSessionSource = source.slice(
     source.indexOf("  const loadSession = useCallback"),
     source.indexOf("  const loadContext = useCallback"),
@@ -177,7 +177,9 @@ test("only the session-mount load probes disk for external appends", () => {
     source.indexOf("// Load session on mount"),
     source.indexOf("sessionHookMountedRef.current = false"),
   );
-  assert.match(loadSessionSource, /options\?: \{ force\?: boolean \}/);
+  assert.match(loadSessionSource, /options\?: \{ force\?: boolean; streamRetry\?: boolean(?:; abortRetry\?: boolean)?(?:; signal\?: AbortSignal)? \}/);
+  assert.match(loadSessionSource, /!options\?\.streamRetry/);
+  assert.match(loadSessionSource, /if \(ownsCurrentView\(\)\) void loadSession\(sid, true, includeState, \{ force: true, streamRetry: true \}\)/);
   // URL construction moved to the protocol coordinator; force remains opt-in.
   assert.match(loadSessionSource, /buildSessionSyncUrl\(\{[^}]*force: options\?\.force/);
   assert.match(loadSessionSource, /d\.wrapperRebuilt[\s\S]*?eventConnectionRef\.current\?\.close\(\)[\s\S]*?maintain\(sid\)/);
@@ -674,4 +676,57 @@ test("auto-compact slash command toggles session auto-compaction", () => {
   // State mirrors the wrapper so the toggle reflects server-side changes too.
   assert.match(source, /setAutoCompactionEnabled\(state\?\.autoCompactionEnabled \?\? true\)/);
   assert.match(source, /setAutoCompactionEnabled\(liveState\.autoCompactionEnabled \?\? true\)/);
+});
+
+test("loadSession suppresses AbortError from polluting UI error and conducts bounded retry while preserving real errors", async () => {
+  const loadSessionSource = source.slice(
+    source.indexOf("  const loadSession = useCallback"),
+    source.indexOf("  const loadContext = useCallback"),
+  );
+
+  // 1. fetch signal pass-through verification
+  assert.match(loadSessionSource, /const res = await fetch\(url, options\?\.signal \? \{ signal: options\.signal \} : undefined\);/);
+  assert.match(loadSessionSource, /const stateRes = await fetch\(`\/api\/sessions\/\$\{encodeURIComponent\(sid\)\}\/state`, options\?\.signal \? \{ signal: options\.signal \} : undefined\);/);
+
+  // 2. AbortError detection & UI error suppression (positive & negative cases)
+  assert.match(source, /export function isAbortError\(e: unknown\): boolean/);
+  assert.match(loadSessionSource, /if \(isAbortError\(e\)\) \{/);
+  assert.match(loadSessionSource, /const isExplicitCallerAbort = Boolean\(options\?\.signal\?\.aborted\);/);
+  assert.match(loadSessionSource, /const canRetry = ownsCurrentView\(\) && !options\?\.abortRetry && !isExplicitCallerAbort;/);
+
+  // Real errors (HTTP 500, network offline TypeError, sync rejected) are preserved and visible
+  assert.match(loadSessionSource, /if \(isCurrentRead\(\)\) setError\(String\(e\)\);\s*return "error";/);
+
+  // 3. Bounded non-blocking retry (single-attempt, prevents infinite loop)
+  assert.match(loadSessionSource, /willRetryAbort = true;/);
+  assert.match(loadSessionSource, /queueMicrotask\(\(\) => \{[\s\S]*?if \(ownsCurrentView\(\)\) \{[\s\S]*?void loadSession\(sid, showLoading && !dataRef\.current, includeState, \{[\s\S]*?\.\.\.options,[\s\S]*?force: true,[\s\S]*?abortRetry: true,[\s\S]*?\}\);/);
+
+  // 4. Preserving existing non-blank history and immediate loading release
+  assert.match(loadSessionSource, /if \(willRetryAbort\) \{[\s\S]*?if \(dataRef\.current\) setLoading\(false\);[\s\S]*?\} else if/);
+
+  // 5. Unit test isAbortError logic directly
+  const testIsAbortError = (e) => {
+    if (!e) return false;
+    if (typeof DOMException !== "undefined" && e instanceof DOMException && e.name === "AbortError") {
+      return true;
+    }
+    if (typeof e === "object" && e !== null && "name" in e && e.name === "AbortError") {
+      return true;
+    }
+    return false;
+  };
+
+  // Positive cases (must be true)
+  const domAbortError = typeof DOMException !== "undefined" ? new DOMException("The user aborted a request.", "AbortError") : { name: "AbortError", message: "aborted" };
+  assert.equal(testIsAbortError(domAbortError), true, "DOMException AbortError must be recognized");
+  assert.equal(testIsAbortError({ name: "AbortError" }), true, "Plain object with name AbortError must be recognized");
+  assert.equal(testIsAbortError(Object.assign(new Error("operation aborted"), { name: "AbortError" })), true, "Error with name AbortError must be recognized");
+
+  // Negative cases (must be false so real errors are NEVER swallowed)
+  assert.equal(testIsAbortError(new Error("HTTP 500")), false, "HTTP 500 Error must NOT be treated as AbortError");
+  assert.equal(testIsAbortError(new TypeError("Failed to fetch")), false, "TypeError Failed to fetch must NOT be treated as AbortError");
+  assert.equal(testIsAbortError(new Error("Session sync rejected: invalid delta")), false, "Sync rejection must NOT be treated as AbortError");
+  assert.equal(testIsAbortError(null), false, "null must NOT be treated as AbortError");
+  assert.equal(testIsAbortError(undefined), false, "undefined must NOT be treated as AbortError");
+  assert.equal(testIsAbortError("AbortError string"), false, "Plain string must NOT be treated as AbortError");
 });

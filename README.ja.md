@@ -22,7 +22,7 @@
 Pi Web Standalone には Node.js 22.19.0 以降（`node >=22.19`）が必要です。`node --version` でバージョンを確認してから、[`koxircom/pi-web-standalone` GitHub Releases](https://github.com/koxircom/pi-web-standalone/releases) の公式 `.tgz` パッケージをグローバルにインストールして `pi-web` を起動します：
 
 ```bash
-npm install -g https://github.com/koxircom/pi-web-standalone/releases/download/v1.0.2/pi-web-standalone-1.0.2.tgz
+npm install -g https://github.com/koxircom/pi-web-standalone/releases/download/v1.1.0/pi-web-standalone-1.1.0.tgz
 pi-web
 ```
 
@@ -32,11 +32,15 @@ pi-web
 
 モデル Provider が未設定の場合は、**Models** パネルを開いてログインするか API Key を追加してください。
 
-上記のコマンドは計画バージョン `v1.0.2` のアセット（`pi-web-standalone-1.0.2.tgz`）を例にしています。特定バージョンのインストールやアップグレードを行う場合は、実行中のプロセスを `Ctrl+C` で停止し、URL 内の `v1.0.2` と `1.0.2` を [GitHub Releases](https://github.com/koxircom/pi-web-standalone/releases) 上の対象バージョン `<version>` に置き換えて再実行してください：
+上記のコマンドは標準バージョン `v1.1.0` のアセット（`pi-web-standalone-1.1.0.tgz`）を例にしています。特定バージョンのインストールやアップグレードを行う場合は、実行中のプロセスを `Ctrl+C` で停止し、URL 内の `v1.1.0` と `1.1.0` を [GitHub Releases](https://github.com/koxircom/pi-web-standalone/releases) 上の対象バージョン `<version>` に置き換えて再実行してください：
 
 ```bash
 npm install -g https://github.com/koxircom/pi-web-standalone/releases/download/v<version>/pi-web-standalone-<version>.tgz
 ```
+
+- **Web 依存 SDK とグローバル CLI の分離**：Pi Web `v1.1.0` は Web ランタイム依存として `@earendil-works/pi-*` SDK `0.99.1` を使用しますが、グローバルな `pi` Agent CLI を自動的にアップグレードすることはありません。
+- **`node_modules` 非同梱**：配布される `.tgz` パッケージには `node_modules/` が含まれていないため、通常の `npm install` による依存関係のインストールが必要です。
+- **カスタム manifest・セッション・台帳の保護**：アップグレード時はカスタム manifest（`public/pi-*-manifest.json`）、ローカルセッション（`~/.pi/agent/sessions/`）、および使用量台帳（`pi-usage-ledger.json` / `~/.pi/agent/state/`）が上書きされないよう保護してください。
 
 アンインストールするには `npm uninstall -g @agegr/pi-web` を実行します。
 
@@ -74,10 +78,10 @@ PI_WEB_PASSWORD='十分に長いランダムなパスワード' pi-web --hostnam
 
 サーバー側のモデルリクエストと API リクエストは、標準の `HTTP_PROXY`、`HTTPS_PROXY`、`NO_PROXY` 環境変数を使用します。
 
-macOS または Linux（[GitHub Release の `.tgz` パッケージ](https://github.com/koxircom/pi-web-standalone/releases/download/v1.0.2/pi-web-standalone-1.0.2.tgz)からインストールして起動）：
+macOS または Linux（[GitHub Release の `.tgz` パッケージ](https://github.com/koxircom/pi-web-standalone/releases/download/v1.1.0/pi-web-standalone-1.1.0.tgz)からインストールして起動）：
 
 ```bash
-npm install -g https://github.com/koxircom/pi-web-standalone/releases/download/v1.0.2/pi-web-standalone-1.0.2.tgz
+npm install -g https://github.com/koxircom/pi-web-standalone/releases/download/v1.1.0/pi-web-standalone-1.1.0.tgz
 HTTP_PROXY=http://127.0.0.1:7890 \
 HTTPS_PROXY=http://127.0.0.1:7890 \
 NO_PROXY=localhost,127.0.0.1 \
@@ -87,7 +91,7 @@ pi-web
 Windows PowerShell：
 
 ```powershell
-npm install -g https://github.com/koxircom/pi-web-standalone/releases/download/v1.0.2/pi-web-standalone-1.0.2.tgz
+npm install -g https://github.com/koxircom/pi-web-standalone/releases/download/v1.1.0/pi-web-standalone-1.1.0.tgz
 $env:HTTP_PROXY = "http://127.0.0.1:7890"
 $env:HTTPS_PROXY = "http://127.0.0.1:7890"
 $env:NO_PROXY = "localhost,127.0.0.1"

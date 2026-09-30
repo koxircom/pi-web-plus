@@ -6,7 +6,7 @@ import { createPortal } from "react-dom";
 import type { AgentMessage, AssistantContentBlock, AssistantMessage, BashExecutionMessage, BlockingExtensionUiRequest, ExtensionUiRequest, SessionInfo, SessionTreeNode, ToolResultMessage, UserMessage } from "@/lib/types";
 import { normalizeCustomPanelLines } from "@/lib/ansi";
 import { asBracketedPaste, toTerminalKeyData } from "@/lib/terminal-input";
-import { countToolCallBlocks, getAssistantErrorMessage, getDisplayableAssistantBlocks, isAssistantTruncated, isMessageGroupAnchor, splitFinalAssistantBlocks } from "@/lib/message-display";
+import { countToolCallBlocks, getDisplayableAssistantBlocks, isMessageGroupAnchor } from "@/lib/message-display";
 import { extractTurnWrittenFiles, type WrittenFile } from "@/lib/turn-written-files";
 import { buildQuotedSelection } from "@/lib/quoted-selection";
 import { MessageView } from "./MessageView";
@@ -34,6 +34,17 @@ import {
   VISIBLE_PAGE_SIZE,
 } from "@/lib/chat-lazy-load";
 import { getHistoryLoadAction } from "@/lib/chat-history-pagination";
+import {
+  buildEnhancementHistoryState,
+  createEarlierHistoryLoader,
+  getEnhancementWindow,
+  installNativeProcessCollapseFlag,
+  isEnhancementPluginEnabled,
+  registerHistoryViewportBridges,
+  resolveTurnGroupRange,
+  splitTurnMessagesForDisplay,
+  subscribeProcessCollapseChange,
+} from "@/lib/enhancement-chat-bridge";
 
 interface Props {
   session: SessionInfo | null;
@@ -156,23 +167,6 @@ function NewSessionUpdateLink({
   );
 }
 
-function hasFinalAssistantAnswer(message: AgentMessage): boolean {
-  if (message.role !== "assistant") return false;
-  return splitFinalAssistantBlocks(message as AssistantMessage).answerBlocks.some((block) => (
-    block.type === "image" || (block.type === "text" && block.text.trim().length > 0)
-  ));
-}
-
-function findFinalAssistantIndex(messages: AgentMessage[], userIdx: number, endIdx: number): number {
-  for (let candidateIdx = endIdx - 1; candidateIdx > userIdx; candidateIdx--) {
-    if (hasFinalAssistantAnswer(messages[candidateIdx])) return candidateIdx;
-  }
-  for (let candidateIdx = endIdx - 1; candidateIdx > userIdx; candidateIdx--) {
-    if (messages[candidateIdx]?.role === "assistant") return candidateIdx;
-  }
-  return -1;
-}
-
 function getUserInputText(message: AgentMessage): string | null {
   if (message.role !== "user") return null;
   if (typeof message.content === "string") {
@@ -187,28 +181,22 @@ function getUserInputText(message: AgentMessage): string | null {
   return text.length > 0 ? text : null;
 }
 
-function withAssistantBlocks(
-  message: AssistantMessage,
-  content: AssistantContentBlock[],
-  options: { omitUsage?: boolean } = {},
-): AssistantMessage {
-  const next = { ...message, content };
-  if (options.omitUsage) next.usage = undefined;
-  return next;
-}
-
 function ProcessDetailsGroup({ messageCount, toolCallCount, defaultExpanded = false, reveal = false, children, t }: { messageCount: number; toolCallCount: number; defaultExpanded?: boolean; reveal?: boolean; children: ReactNode; t: (key: string, params?: Record<string, string | number>) => string }) {
-  defaultExpanded = (typeof window !== "undefined" && (window as any).__PI_ENH_IS_PLUGIN_ENABLED__?.("task-tool-auto-collapse")) ? false : defaultExpanded;
+  const collapseEnabled = isEnhancementPluginEnabled("task-tool-auto-collapse");
+  defaultExpanded = collapseEnabled ? false : defaultExpanded;
+  reveal = collapseEnabled ? false : reveal;
   const [expanded, setExpanded] = useState(defaultExpanded);
   useLayoutEffect(() => {
-    if (typeof window !== "undefined" && (window as any).__PI_ENH_IS_PLUGIN_ENABLED__?.("task-tool-auto-collapse")) return;
+    setExpanded(defaultExpanded);
+  }, [collapseEnabled]);
+  useLayoutEffect(() => {
     if (reveal) setExpanded(true);
   }, [reveal]);
   const parts = [t("chat.processDetails"), `${messageCount} ${t(messageCount === 1 ? "chat.message" : "chat.messages")}`];
   if (toolCallCount > 0) parts.push(`${toolCallCount} ${t(toolCallCount === 1 ? "chat.toolCall" : "chat.toolCalls")}`);
 
   return (
-    <div style={{ marginBottom: 14 }}>
+    <div data-pi-enh-native-process="true" style={{ marginBottom: 14 }}>
       <button
         type="button"
         aria-expanded={expanded || reveal}
@@ -248,6 +236,11 @@ function ProcessDetailsGroup({ messageCount, toolCallCount, defaultExpanded = fa
 export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initialScrollPosition, onScrollPositionChange, sessionRunning, newSessionCwd, newSessionDraftKey, onAgentEnd, onAttentionNeeded, onSessionCreated, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSystemToolsChange, onSystemInfoLoaderChange, onSessionStatsChange, onSessionStatsPanelOpen, onContextUsageChange, onOpenFile, onOpenSession, onAskInNewChat, quoteSelectionEnabled = false, initialPrompt, onInitialPromptConsumed, soundEnabled = true, onSoundToggle, playDoneSound = () => {}, unlockAudio }: Props) {
   const { t } = useI18n();
   const isMobile = useIsMobile();
+  const [, bumpCollapsePolicy] = useState(0);
+  useEffect(() => {
+    installNativeProcessCollapseFlag();
+    return subscribeProcessCollapseChange(() => bumpCollapsePolicy((value) => value + 1));
+  }, []);
   const completionNotificationsEnabled = session?.relation?.kind !== "subagent";
 
   // Wrap onAgentEnd to play the completion sound. This is more reliable than
@@ -728,7 +721,7 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
     prevScrollDistanceRef.current = null;
     pendingHistoryVisibleCountRef.current = null;
     loadingOlderRef.current = false;
-  }, [messages.length, scrollContainerRef, visibleCount]);
+  }, [messages, messages.length, scrollContainerRef, visibleCount]);
   // Push session stats up to AppShell for the top bar.
   // Compare scalar fields to avoid loops from new object identity each render.
   const statsKey = sessionStats
@@ -804,6 +797,78 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
   const revealHistoryForMinimap = useCallback(() => {
     setVisibleCount((current) => Math.max(current, messages.length * 2));
   }, [messages.length]);
+
+  const historyBridgeRef = useRef({
+    sessionId: session?.id ?? sessionIdRef.current ?? null,
+    totalTurns: sessionStats?.userMessages ?? 0,
+    hasEarlierMessages,
+    entryIds,
+    oldestEntryId: historyCursor,
+    activeLeafId,
+    messagesLength: messages.length,
+    loadContext,
+  });
+  historyBridgeRef.current = {
+    sessionId: session?.id ?? sessionIdRef.current ?? null,
+    totalTurns: sessionStats?.userMessages ?? 0,
+    hasEarlierMessages,
+    entryIds,
+    oldestEntryId: historyCursor,
+    activeLeafId,
+    messagesLength: messages.length,
+    loadContext,
+  };
+
+  useLayoutEffect(() => {
+    const win = getEnhancementWindow();
+    const loadEarlier = createEarlierHistoryLoader({
+      isLoading: () => loadingOlderRef.current,
+      setLoading: (next) => {
+        loadingOlderRef.current = next;
+      },
+      hasEarlierMessages: () => historyBridgeRef.current.hasEarlierMessages,
+      getOldestEntryId: () => historyBridgeRef.current.oldestEntryId,
+      getSessionId: () => session?.id ?? sessionIdRef.current ?? historyBridgeRef.current.sessionId,
+      getActiveLeafId: () => historyBridgeRef.current.activeLeafId,
+      captureScrollAnchor: () => {
+        const container = scrollContainerRef.current;
+        if (container) {
+          prevScrollDistanceRef.current = captureScrollDistance(container.scrollHeight, container.scrollTop);
+        }
+      },
+      clearScrollAnchor: () => {
+        prevScrollDistanceRef.current = null;
+        pendingHistoryVisibleCountRef.current = null;
+      },
+      loadContext: (sid, leafId, before, options) => (
+        historyBridgeRef.current.loadContext(sid, leafId, before, options)
+      ),
+      onContextLoaded: (context) => {
+        if (context.messages.length > 0) {
+          setVisibleCount((current) => Math.max(
+            current,
+            (historyBridgeRef.current.messagesLength + context.messages.length) * 2,
+          ));
+        }
+      },
+    });
+    return registerHistoryViewportBridges(win, {
+      getHistoryState: () => buildEnhancementHistoryState({
+        sessionId: session?.id ?? sessionIdRef.current ?? historyBridgeRef.current.sessionId,
+        totalTurns: historyBridgeRef.current.totalTurns,
+        hasEarlierMessages: historyBridgeRef.current.hasEarlierMessages,
+        entryIds: historyBridgeRef.current.entryIds,
+        oldestEntryId: historyBridgeRef.current.oldestEntryId,
+      }),
+      loadEarlier,
+      prepareHistoryCommit: () => {
+        const container = scrollContainerRef.current;
+        if (container && isEnhancementPluginEnabled("history-scroll-stability", win)) {
+          prevScrollDistanceRef.current = captureScrollDistance(container.scrollHeight, container.scrollTop);
+        }
+      },
+    });
+  }, [scrollContainerRef, session?.id, sessionIdRef]);
 
   const isEmptyNew = isNew && messages.length === 0 && !streamState.isStreaming && !sessionBusy;
   useScrollbarVisibility(scrollContainerRef, Boolean(session?.id) || !isEmptyNew);
@@ -962,8 +1027,16 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
 
   if (loading) {
     return (
-      <div className="flex h-full items-center justify-center text-text-muted">
-         {t("chat.loadingSession")}
+      <div
+        className="chat-content relative flex h-full min-w-0 flex-col overflow-hidden"
+        style={{ paddingBottom: "env(safe-area-inset-bottom)" }}
+      >
+        <div className="relative flex min-h-0 min-w-0 flex-1 items-center justify-center overflow-hidden text-text-muted">
+          {t("chat.loadingSession")}
+        </div>
+        <div className="relative shrink-0">
+          {chatInputElement}
+        </div>
       </div>
     );
   }
@@ -1128,23 +1201,25 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
                 );
               };
 
+              const collapseEnabled = isEnhancementPluginEnabled("task-tool-auto-collapse");
               const rendered: ReactNode[] = [];
               for (let idx = 0; idx < messages.length;) {
-                const msg = messages[idx];
-                if (!isMessageGroupAnchor(msg)) {
+                const groupRange = resolveTurnGroupRange(messages, idx, collapseEnabled);
+                if (!groupRange) {
                   rendered.push(renderMessage(idx));
                   idx += 1;
                   continue;
                 }
 
-                const userIdx = idx;
-                let endIdx = userIdx + 1;
-                while (endIdx < messages.length && !isMessageGroupAnchor(messages[endIdx])) endIdx += 1;
-
-                const finalAssistantIdx = findFinalAssistantIndex(messages, userIdx, endIdx);
+                const { userIdx, endIdx } = groupRange;
+                const {
+                  finalAssistantIdx,
+                  finalAnswerMessage,
+                  getProcessAssistantMessage,
+                } = splitTurnMessagesForDisplay(messages, userIdx, endIdx, collapseEnabled);
 
                 if (finalAssistantIdx === -1) {
-                  for (let renderIdx = userIdx; renderIdx < endIdx; renderIdx++) {
+                  for (let renderIdx = Math.max(0, userIdx); renderIdx < endIdx; renderIdx++) {
                     rendered.push(renderMessage(renderIdx));
                   }
                   idx = endIdx;
@@ -1153,24 +1228,16 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
 
                 const isLiveTail = (sessionBusy || streamState.isStreaming) && endIdx === messages.length && userIdx === lastAnchorIdx;
                 if (isLiveTail) {
-                  for (let renderIdx = userIdx; renderIdx < endIdx; renderIdx++) {
+                  for (let renderIdx = Math.max(0, userIdx); renderIdx < endIdx; renderIdx++) {
                     rendered.push(renderMessage(renderIdx));
                   }
                   idx = endIdx;
                   continue;
                 }
 
-                rendered.push(renderMessage(userIdx));
-
-                const finalAssistant = messages[finalAssistantIdx] as AssistantMessage;
-                const finalSplit = splitFinalAssistantBlocks(finalAssistant);
-                const finalAnswerMessage = finalSplit.answerBlocks.length > 0 || getAssistantErrorMessage(finalAssistant) || isAssistantTruncated(finalAssistant)
-                  ? withAssistantBlocks(finalAssistant, finalSplit.answerBlocks)
-                  : null;
-
-                const finalProcessEnd = finalAssistant.content.indexOf(finalSplit.answerBlocks[0]);
-                // Keep the original prefix so deferred thinking retains its stored block indices.
-                const finalProcessBlocks = finalAssistant.content.slice(0, finalProcessEnd < 0 ? undefined : finalProcessEnd);
+                if (userIdx >= 0) {
+                  rendered.push(renderMessage(userIdx));
+                }
 
                 const processViews: ReactNode[] = [];
                 let processToolCount = 0;
@@ -1185,9 +1252,7 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
                     continue;
                   }
                   if (processMessage.role !== "assistant") continue;
-                  const message = processIdx === finalAssistantIdx
-                    ? withAssistantBlocks(processMessage, finalProcessBlocks, { omitUsage: Boolean(finalAnswerMessage) })
-                    : processMessage;
+                  const message = getProcessAssistantMessage(processIdx, processMessage);
                   const blocks = getDisplayableAssistantBlocks(message);
                   if (blocks.length === 0) continue;
                   processRefIdx ??= visibleRefIndexByMessage.get(processIdx);
@@ -1204,7 +1269,7 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
                 if (processViews.length > 0) {
                   rendered.push(
                     <div
-                      key={`process-group-${entryIds[userIdx] ?? userIdx}`}
+                      key={`process-group-${entryIds[finalAssistantIdx] ?? finalAssistantIdx}`}
                       ref={processRefIdx === undefined ? undefined : (el) => { messageRefs.current[processRefIdx] = el; }}
                     >
                       <ProcessDetailsGroup messageCount={processViews.length} toolCallCount={processToolCount} defaultExpanded={!finalAnswerMessage} reveal={revealProcess} t={t}>

@@ -99,13 +99,13 @@
   }
 
   function recordSessionReadWatermark(sessionId, meta = null) {
-    if (!sessionId) return;
+    if (!sessionId) return false;
     const sMeta = meta || getSessionMetaForWatermark(sessionId);
     const hasLoadedSession = (typeof knownSessionsMap !== "undefined" && knownSessionsMap.has(sessionId))
       || (typeof projectStatusCatalog !== "undefined" && projectStatusCatalog.has(sessionId));
     const hasValidMeta = Boolean(sMeta && (sMeta.runId || sMeta.messageCount));
     if (!hasLoadedSession && !hasValidMeta) {
-      return;
+      return false;
     }
 
     const watermarks = readSessionReadWatermarks();
@@ -114,7 +114,7 @@
     const newMessageCount = sMeta?.messageCount || 0;
 
     if (existing && existing.manualUnread === false && (existing.runId || "") === newRunId && (existing.messageCount || 0) === newMessageCount) {
-      return;
+      return false;
     }
 
     watermarks[sessionId] = {
@@ -127,6 +127,7 @@
     if (typeof persistReadWatermarksToServer === "function") {
       void persistReadWatermarksToServer();
     }
+    return true;
   }
 
   function recordSessionManualUnread(sessionId) {
@@ -194,13 +195,14 @@
       return;
     }
 
-    recordSessionReadWatermark(sessionId);
+    const wasUnread = Boolean(isSessionUnread(sessionId));
+    const watermarkChanged = Boolean(recordSessionReadWatermark(sessionId));
     if (typeof markProjectCompletionRead === "function") {
       markProjectCompletionRead(sessionId);
     }
 
     let markReadChanged = false;
-    if (isSessionUnread(sessionId)) {
+    if (wasUnread) {
       const ids = readUnreadSessionIds();
       if (ids.has(sessionId)) {
         ids.delete(sessionId);
@@ -219,16 +221,21 @@
       }
     }
 
-    try {
-      const sMeta = getSessionMetaForWatermark(sessionId);
-      crossDeviceSyncChannel?.postMessage({
-        type: "session_read_status_updated",
-        sessionId,
-        unread: false,
-        meta: sMeta,
-        revision: Date.now(),
-      });
-    } catch (e) {}
+    const unreadChanged = wasUnread !== Boolean(isSessionUnread(sessionId)) || markReadChanged;
+    const shouldBroadcast = Boolean(explicit || watermarkChanged || unreadChanged);
+
+    if (shouldBroadcast) {
+      try {
+        const sMeta = getSessionMetaForWatermark(sessionId);
+        crossDeviceSyncChannel?.postMessage({
+          type: "session_read_status_updated",
+          sessionId,
+          unread: false,
+          meta: sMeta,
+          revision: Date.now(),
+        });
+      } catch (e) {}
+    }
 
     if (markReadChanged && typeof persistReadWatermarksToServer === "function") {
       void persistReadWatermarksToServer();
@@ -1739,7 +1746,7 @@
           if (searchInput) {
             try { searchInput.blur(); } catch (err) {}
           }
-          const composer = document.querySelector(".chat-input-textarea, textarea.chat-input, textarea");
+          const composer = Array.from(document.querySelectorAll(".pi-enh-formatted-composer, .chat-input-textarea, textarea.chat-input, textarea")).find((el) => el.offsetWidth > 0 && el.offsetHeight > 0 && getComputedStyle(el).visibility !== "hidden");
           if (composer) {
             try { composer.focus(); } catch (err) {}
           }
@@ -1750,9 +1757,24 @@
 
     // 4. 底层兜底：esc-guard 拦截意外 Escape 导致的任务中断
     if (isPluginEnabled("esc-guard")) {
-      const isInput = e.target && (e.target.tagName === "INPUT" || e.target.tagName === "TEXTAREA" || e.target.isContentEditable);
+      const target = e.target;
+      const isInput = target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable);
+      const nativeTextarea = document.querySelector?.("textarea.chat-input-textarea");
+      const formattedComposer = target?.closest?.(".pi-enh-formatted-composer");
+      const nativeFieldset = nativeTextarea?.closest?.("fieldset");
+      const formattedFieldset = formattedComposer?.closest?.("fieldset");
+      const isMainComposer = target === nativeTextarea || Boolean(
+        formattedComposer && nativeFieldset && formattedFieldset === nativeFieldset
+      );
+      const isImeEscape = Boolean(
+        e.isComposing || e.keyCode === 229 || (typeof isComposingInput !== "undefined" && isComposingInput)
+      );
+      const completionOwnsEscape = isMainComposer && !isImeEscape
+        && typeof isComposerCompletionKey === "function"
+        && isComposerCompletionKey(e, nativeTextarea);
       const hasRunningTask = Boolean(typeof isLiveRunning === "function" ? isLiveRunning() : findActiveStopButton());
-      if (!isInput && hasRunningTask) {
+      if (hasRunningTask && !isImeEscape && !completionOwnsEscape && (isMainComposer || !isInput)) {
+        e.preventDefault();
         e.stopPropagation();
       }
     }
@@ -3621,14 +3643,15 @@
     for (const message of messages) {
       if (message?.role === "assistant") {
         for (const block of Array.isArray(message.content) ? message.content : []) {
-          const id = block.toolCallId || block.id;
-          if (block.type === "toolCall" && (block.toolName || block.name) === "ask_user" && id) {
+          const id = getAskUserToolCallId(block);
+          if (isAskUserToolCall(block) && id) {
             pending.set(id, block.input || block.arguments);
           }
         }
-      } else if (message?.role === "toolResult" && message.toolName === "ask_user") {
-        if (message.toolCallId) pending.delete(message.toolCallId);
-        else pending.clear();
+      } else if (isAskUserToolResult(message)) {
+        const resultId = getAskUserToolCallId(message);
+        // 没有真实 toolCallId 时禁止清空其它并行或历史 ask_user 请求。
+        if (resultId) pending.delete(resultId);
       }
     }
     const matches = [...pending.entries()].filter(([, args]) => {
@@ -4639,14 +4662,18 @@
       || String(session?.id || "").slice(0, 12) || "未命名会话";
     const key = value => String(value || "").replace(/\//g, "\\").replace(/\\+$/, "").toLowerCase();
     const empty = id => ({ id, status: "idle", execution: "idle", pendingRequests: [], runId: "", toolNames: [], observedAt: 0 });
-    const list = () => [...new Set([...catalog.keys(), ...entries.keys(), ...Object.keys(projectStatusState?.sessions || {})])].map(id => {
+    const buildEntry = id => {
       const stored = projectStatusState?.sessions?.[id];
       const item = entries.get(id) || (stored && sync.state !== "live" ? { ...empty(id), ...stored } : empty(id));
       const session = catalog.get(id) || {};
       return { ...item, projectKey: key(session.projectKey || session.projectRoot || session.cwd || item.projectKey),
         title: titleOf({ ...session, id, title: item.title }), cwd: session.cwd || item.cwd || "",
         unread: item.status === "completed" && !!item.runId && !isCompletedRead(id, item) };
-    });
+    };
+    const list = () => [...new Set([...catalog.keys(), ...entries.keys(), ...Object.keys(projectStatusState?.sessions || {})])].map(buildEntry);
+    const entry = id => (entries.has(id) || catalog.has(id) || Boolean(projectStatusState?.sessions && Object.hasOwn(projectStatusState.sessions, id)))
+      ? buildEntry(id)
+      : empty(id);
     // Native unread flags are session-level activity hints, not evidence of a
     // new assistant answer. Ended rounds remain factual row labels only.
     const items = (projectKey, status = null, others = false) => list().filter(entry =>
@@ -4713,7 +4740,7 @@
     };
     return {
       apply, list, items, titleOf, markAttention, clearAttention, setCatalog: sessions => { catalog = new Map(sessions.filter(s => s?.id).map(s => [s.id, s])); },
-      entry: id => list().find(item => item.id === id) || empty(id),
+      entry,
       setUnread: ids => { unread = new Set(ids); }, // Native activity is not completion-read evidence.
       setCompletedRead: keys => {
         const next = new Set();
@@ -4911,9 +4938,17 @@
     const requests = getDesktopPendingRequests();
     approvalSoundNotifier.reconcile(requests); void approvalSoundNotifier.notify(requests);
   }
+  let isApprovalSoundUnlocked = false;
   async function unlockApprovalSound(preview = false) {
+    if (isApprovalSoundUnlocked && !preview) return;
     if (!approvalSoundEnabled()) { if (preview) showToast("请开启审批提示音，并检查 Pi Web 声音总开关"); return; }
-    const sound = getApprovalSound(), unlocked = await sound.unlock();
+    const sound = getApprovalSound();
+    if (sound.ready() && !preview) {
+      isApprovalSoundUnlocked = true;
+      return;
+    }
+    const unlocked = await sound.unlock();
+    if (unlocked) isApprovalSoundUnlocked = true;
     if (preview) {
       if (unlocked) sound.play();
       else showToast("浏览器尚未允许播放声音，请点击页面后重试");
@@ -4921,7 +4956,12 @@
     syncApprovalSound();
   }
   addManagedListener(document, "pointerdown", event => { if (event.isTrusted) void unlockApprovalSound(); }, { passive: true });
-  addManagedListener(document, "keydown", event => { if (event.isTrusted) void unlockApprovalSound(); }, { passive: true });
+  addManagedListener(document, "keydown", event => {
+    if (!event.isTrusted || isApprovalSoundUnlocked) return;
+    const tag = event.target?.tagName;
+    if (tag === "TEXTAREA" || tag === "INPUT" || event.target?.isContentEditable) return;
+    void unlockApprovalSound();
+  }, { passive: true });
   addManagedListener(document, "click", event => { if (event.target?.closest?.("[data-attention-sound-preview]")) void unlockApprovalSound(true); });
   activeCleanups.push(disposeApprovalSound);
 
@@ -5520,8 +5560,11 @@
 
   function composeProjectWindowTitle(base, statusOverride = null) {
     const status = statusOverride !== null ? statusOverride : getCurrentEffectiveStatus();
+    if (projectStatusDisposed || !isPluginEnabled("project-status-indicator")) {
+      return window.__PI_WEB_NATIVE_TITLE_BASE__ || base || "Pi Web";
+    }
     const cleanBase = cleanSessionTitleBase(base);
-    if (projectStatusDisposed || !isPluginEnabled("project-status-indicator") || !status || status === "idle") {
+    if (!status || status === "idle") {
       return cleanBase || "work";
     }
 
@@ -5681,8 +5724,11 @@
     updateProjectStatusTitle(null);
   }
 
-  function clearSessionAttention(sessionId, nextStatus = null) {
+  function clearSessionAttention(sessionId, nextStatus = null, resolvedRequestIds = []) {
     if (!sessionId) return;
+    if (Array.isArray(resolvedRequestIds) && resolvedRequestIds.length > 0) {
+      rememberResolvedAskUserRequests(sessionId, resolvedRequestIds);
+    }
     projectStatusModel.clearAttention(sessionId, nextStatus);
     if (projectStatusState.sessions[sessionId]) {
       const current = projectStatusState.sessions[sessionId];
@@ -5711,8 +5757,68 @@
     void refreshProjectInteractions(true);
   }
 
+  function resolveAskUserToolResult(sessionId, toolCallId, broadcast = true) {
+    if (!sessionId || !toolCallId) return false;
+    const current = getEffectiveProjectStatusEntry(sessionId);
+    const pending = current?.status === "attention" ? current.pendingRequests || [] : [];
+    const matched = pending.some(request => request?.id === toolCallId || request?.id === "local-ask" || request?.id === "pending-ask");
+    if (!matched) return false;
+    rememberResolvedAskUserRequests(sessionId, [toolCallId]);
+    const remaining = pending.filter(request => request?.id !== toolCallId && request?.id !== "local-ask" && request?.id !== "pending-ask");
+    if (remaining.length) {
+      markLocalActiveSessionAttention(sessionId, { pendingRequests: remaining, broadcast: false, notify: false });
+    } else {
+      clearSessionAttention(sessionId, null, [toolCallId]);
+    }
+    if (broadcast) projectStatusChannel?.postMessage({ type: "resolved-ask-user", sessionId, toolCallId });
+    return true;
+  }
+
   projectStatusLeader = false; projectStatusChannel = null; let projectStatusLockController = null, releaseProjectStatusLock = null;
   projectStatusLastPayload = null; let projectStatusCatalogVersion = null, projectStatusNextPoll = 0, projectStatusFailures = 0;
+  const projectStatusResolvedAskUserRequests = new Map();
+
+  function getProjectStatusAskUserRequestBucketKey(sessionId, epoch = null) {
+    const resolvedEpoch = String(epoch || projectStatusLastPayload?.statusSnapshot?.epoch || "local");
+    return JSON.stringify([resolvedEpoch, String(sessionId || "")]);
+  }
+
+  function rememberResolvedAskUserRequests(sessionId, requestIds, epoch = null) {
+    if (!sessionId || !Array.isArray(requestIds) || requestIds.length === 0) return;
+    const key = getProjectStatusAskUserRequestBucketKey(sessionId, epoch);
+    const resolved = projectStatusResolvedAskUserRequests.get(key) || new Set();
+    for (const requestId of requestIds) {
+      if (requestId !== undefined && requestId !== null && requestId !== "") resolved.add(String(requestId));
+    }
+    if (resolved.size > 0) projectStatusResolvedAskUserRequests.set(key, resolved);
+    while (projectStatusResolvedAskUserRequests.size > 128) {
+      const oldest = projectStatusResolvedAskUserRequests.keys().next().value;
+      if (oldest === undefined) break;
+      projectStatusResolvedAskUserRequests.delete(oldest);
+    }
+  }
+
+  function filterResolvedAskUserRequests(payload) {
+    const sessions = payload?.interactionState?.sessions;
+    if (!Array.isArray(sessions) || sessions.length === 0) return payload;
+    const epoch = payload?.statusSnapshot?.epoch || "local";
+    let changed = false;
+    const nextSessions = sessions.map(session => {
+      const pendingRequests = session?.pendingRequests;
+      const resolved = projectStatusResolvedAskUserRequests.get(getProjectStatusAskUserRequestBucketKey(session?.sessionId, epoch));
+      if (!resolved || !Array.isArray(pendingRequests) || pendingRequests.length === 0) return session;
+      const filtered = pendingRequests.filter(request => {
+        const requestId = request?.id;
+        return requestId === undefined || requestId === null || requestId === "" || !resolved.has(String(requestId));
+      });
+      if (filtered.length === pendingRequests.length) return session;
+      changed = true;
+      return { ...session, pendingRequests: filtered };
+    });
+    return changed
+      ? { ...payload, interactionState: { ...payload.interactionState, sessions: nextSessions } }
+      : payload;
+  }
   let projectStatusCatalogController = null, projectStatusRefreshQueued = false;
   const COMPLETED_READ_KEY = "pi-enh-completed-read-v1";
   function readCompletedTokens() {
@@ -5752,9 +5858,10 @@
   }
 
   function receiveProjectStatus(payload, catalog = null) {
-    const result = projectStatusModel.apply(payload, Date.now());
+    const reconciledPayload = filterResolvedAskUserRequests(payload);
+    const result = projectStatusModel.apply(reconciledPayload, Date.now());
     if (result.accepted) {
-      projectStatusLastPayload = payload;
+      projectStatusLastPayload = reconciledPayload;
       if (catalog) refreshProjectStatusCatalog(catalog);
       projectStatusModel.setUnread([...readUnreadSessionIds()]);
       projectStatusModel.setCompletedRead(readCompletedTokens());
@@ -5787,6 +5894,9 @@
       } catch (e) {}
     }
     syncProjectStatusIndicators();
+    if (typeof schedulePrioritySessionPreloads === "function") {
+      schedulePrioritySessionPreloads();
+    }
     return result.accepted || (payload && Array.isArray(payload.runningSessionIds));
   }
 
@@ -5825,6 +5935,7 @@
         }
         if (data?.type === "refresh" && projectStatusLeader) requestProjectStatusRefresh();
         if (data?.type === "clear-attention" && data.sessionId) clearSessionAttention(data.sessionId);
+        if (data?.type === "resolved-ask-user" && data.sessionId && data.toolCallId) resolveAskUserToolResult(data.sessionId, data.toolCallId, false);
         if (data?.type === "unavailable") { projectStatusModel.unavailable("unavailable"); syncProjectStatusIndicators(); }
       };
       projectStatusChannel.postMessage({ type: "hello" });
@@ -5886,9 +5997,8 @@
       if (generation !== projectInteractionGeneration || projectStatusDisposed || controller.signal.aborted) return;
       const accepted = receiveProjectStatus(payload);
       refreshProjectStatusCatalogInBackground(payload.sessionListVersion);
-      // 仅在无 interactionState 的旧模式下执行扫描核验；权威新协议绝不能被 context 扫描覆盖
-      const hasInteractionState = Boolean(payload?.interactionState || payload?.statusSnapshot);
-      if (!hasInteractionState && typeof refreshPendingAskUserSessions === "function") {
+      // 权威状态仍负责提供 pending 候选；context 扫描只用真实 toolResult.toolCallId 做补充核销，不能以空/失败响应清除状态。
+      if (typeof refreshPendingAskUserSessions === "function") {
         void refreshPendingAskUserSessions(Array.from(projectStatusCatalog.values()), payload.runningSessionIds || []);
       }
       if (accepted) {
@@ -5946,6 +6056,20 @@
   const projectStatusAskUserLastChecked = new Map();
   const PROJECT_STATUS_ATTENTION_SCAN_LIMIT = 5;
 
+  function getAskUserToolCallId(value) {
+    if (!value || typeof value !== "object") return null;
+    const rawId = value.toolCallId ?? value.tool_call_id ?? value.id;
+    return rawId === undefined || rawId === null || rawId === "" ? null : String(rawId);
+  }
+
+  function isAskUserToolCall(block) {
+    return block?.type === "toolCall" && (block.name === "ask_user" || block.toolName === "ask_user");
+  }
+
+  function isAskUserToolResult(message) {
+    return message?.role === "toolResult" && (message.toolName === "ask_user" || message.name === "ask_user");
+  }
+
   function getPendingAskUserRequests(messages) {
     if (!Array.isArray(messages) || messages.length === 0) return [];
     // 从后往前定位最近一轮交互：寻找最近一个非 toolResult 的消息
@@ -5970,26 +6094,73 @@
     const askCalls = [];
     const content = Array.isArray(assistantMsg.content) ? assistantMsg.content : [];
     for (const block of content) {
-      if (block?.type === "toolCall" && (block.name === "ask_user" || block.toolName === "ask_user")) {
-        const id = block.id || block.toolCallId;
-        if (id) askCalls.push({ id: String(id), method: "select" });
+      if (isAskUserToolCall(block)) {
+        const id = getAskUserToolCallId(block);
+        if (id) askCalls.push({ id, method: "select" });
       }
     }
     if (askCalls.length === 0) return [];
 
-    // 检查该 assistant 之后是否有对应的 toolResult（兼容并行其它工具结果）
+    // 检查该 assistant 之后是否有对应的 toolResult（兼容并行其它工具结果）。
+    // 只有真实 toolCallId 才能核销，缺 ID 的结果不得误清其它请求。
     const resolvedIds = new Set();
     for (let i = targetAssistantIdx + 1; i < messages.length; i++) {
       const msg = messages[i];
       if (msg?.role === "toolResult") {
-        if (msg.toolCallId) resolvedIds.add(String(msg.toolCallId));
-        else if (msg.toolName === "ask_user") {
-          askCalls.forEach(c => resolvedIds.add(c.id));
-        }
+        const resultId = getAskUserToolCallId(msg);
+        if (resultId) resolvedIds.add(resultId);
       }
     }
 
     return askCalls.filter(c => !resolvedIds.has(c.id));
+  }
+
+  // 仅在历史中出现可验证的 ask_user toolResult 时返回 resolved；空/失败响应保持 unknown，调用方不得清除 attention。
+  function getAskUserResolutionState(messages, trackedRequests = []) {
+    if (!Array.isArray(messages) || messages.length === 0) {
+      return { state: "unknown", pendingRequests: [], resolvedIds: [] };
+    }
+
+    const pendingRequests = getPendingAskUserRequests(messages);
+    if (pendingRequests.length > 0) {
+      return { state: "pending", pendingRequests, resolvedIds: [] };
+    }
+
+    const askCallIds = new Set();
+    let latestAskCallIds = new Set();
+    const resultIds = new Set();
+    for (const message of messages) {
+      if (message?.role === "assistant") {
+        const assistantAskIds = new Set();
+        for (const block of Array.isArray(message.content) ? message.content : []) {
+          if (isAskUserToolCall(block)) {
+            const id = getAskUserToolCallId(block);
+            if (id) {
+              askCallIds.add(id);
+              assistantAskIds.add(id);
+            }
+          }
+        }
+        if (assistantAskIds.size > 0) latestAskCallIds = assistantAskIds;
+      }
+      if (isAskUserToolResult(message)) {
+        const resultId = getAskUserToolCallId(message);
+        if (resultId) resultIds.add(resultId);
+      }
+    }
+
+    const trackedIds = new Set((Array.isArray(trackedRequests) ? trackedRequests : [])
+      .map(request => getAskUserToolCallId(request))
+      .filter(Boolean));
+    // 存在真实待决 ID 时，历史中旧的已答复 ask_user 不能清除另一条待决请求。
+    // 只有 legacy 占位 ID 才回退到最近一条 ask_user 的请求 ID。
+    const explicitTrackedIds = [...trackedIds].filter(id => id !== "local-ask" && id !== "pending-ask");
+    const knownIds = explicitTrackedIds.length > 0 ? new Set(explicitTrackedIds) : latestAskCallIds;
+    const resolvedIds = [...resultIds].filter(id => knownIds.has(id));
+    if (resolvedIds.length === 0 || explicitTrackedIds.some(id => !resultIds.has(id))) {
+      return { state: "unknown", pendingRequests: [], resolvedIds: [] };
+    }
+    return { state: "resolved", pendingRequests: [], resolvedIds };
   }
 
   function hasPendingAskUser(messages) {
@@ -6040,7 +6211,7 @@
   }
 
   async function refreshPendingAskUserSessions(sessions, runningSessionIds = []) {
-    if (projectStatusDisposed || isLoginPage() || !isPluginEnabled("project-status-indicator") || projectStatusLastPayload?.interactionState || projectStatusLastPayload?.statusSnapshot) return;
+    if (projectStatusDisposed || isLoginPage() || !isPluginEnabled("project-status-indicator")) return;
     const generation = projectInteractionGeneration;
     const candidates = getPendingAskUserScanCandidates(sessions, runningSessionIds);
 
@@ -6059,19 +6230,24 @@
         });
         if (!response?.ok) return;
         const data = await response.json();
-        if (generation !== projectInteractionGeneration || projectStatusDisposed || scanController.signal.aborted || projectStatusLastPayload?.interactionState || projectStatusLastPayload?.statusSnapshot) return;
+        if (generation !== projectInteractionGeneration || projectStatusDisposed || scanController.signal.aborted) return;
         if (!Array.isArray(data?.context?.messages)) return;
 
         projectStatusAttentionScanTokens.set(session.id, getProjectStatusAttentionScanToken(session));
-        const pendingRequests = getPendingAskUserRequests(data?.context?.messages);
-        if (pendingRequests.length > 0) {
-          markLocalActiveSessionAttention(session.id, { pendingRequests });
+        const messages = data.context.messages;
+        const currentEntry = getEffectiveProjectStatusEntry(session.id);
+        const trackedRequests = [
+          ...(currentEntry?.pendingRequests || []),
+          ...(projectStatusState.sessions?.[session.id]?.pendingRequests || []),
+        ];
+        const resolution = getAskUserResolutionState(messages, trackedRequests);
+        if (resolution.state === "pending") {
+          markLocalActiveSessionAttention(session.id, { pendingRequests: resolution.pendingRequests });
           syncProjectStatusIndicators();
-        } else {
-          const currentEntry = getEffectiveProjectStatusEntry(session.id);
-          if (currentEntry?.status === "attention" || projectStatusState.sessions[session.id]?.status === "attention") {
-            clearSessionAttention(session.id);
-          }
+        } else if (resolution.state === "resolved"
+          && (currentEntry?.status === "attention" || projectStatusState.sessions?.[session.id]?.status === "attention")) {
+          const acknowledgedRequestIds = resolution.resolvedIds;
+          clearSessionAttention(session.id, null, acknowledgedRequestIds);
         }
       } catch (e) {
         // 断网不误清：网络失败或超时保留原有 attention 状态，绝不清除

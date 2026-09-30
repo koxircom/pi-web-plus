@@ -3,12 +3,18 @@ import { dirname, join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import { writePrivateFileAtomicSync } from "./atomic-file";
 
+export interface SubagentOverride {
+  model?: string | null;
+  thinking?: string | null;
+}
+
 export interface SubagentSettings {
   builtInEnabled: boolean;
   /** Built-in profiles switched off, in the spelling the file uses. */
   disabledBuiltIns: string[];
   maxConcurrent: number;
-  defaultProfile: string;
+  subagentModel: string | null;
+  subagentOverrides: Record<string, SubagentOverride>;
 }
 
 type StoredSubagentSettings = Record<string, unknown> & {
@@ -16,12 +22,12 @@ type StoredSubagentSettings = Record<string, unknown> & {
   builtInEnabled?: unknown;
   disabledBuiltIns?: unknown;
   maxConcurrent?: unknown;
-  defaultProfile?: unknown;
+  subagentModel?: unknown;
+  subagentOverrides?: unknown;
 };
 
 export const DEFAULT_SUBAGENT_MAX_CONCURRENT = 10;
 export const MAX_SUBAGENT_MAX_CONCURRENT = 32;
-export const DEFAULT_SUBAGENT_PROFILE = "general-purpose";
 
 function readMaxConcurrent(value: unknown): number {
   return typeof value === "number" && Number.isInteger(value) && value >= 1 && value <= MAX_SUBAGENT_MAX_CONCURRENT
@@ -50,25 +56,48 @@ function readDisabledBuiltIns(value: unknown): string[] {
   return names;
 }
 
-function readDefaultProfile(value: unknown): string {
-  if (typeof value !== "string") return DEFAULT_SUBAGENT_PROFILE;
-  const profile = value.trim();
-  return profile || DEFAULT_SUBAGENT_PROFILE;
+function readSubagentModel(value: unknown): string | null {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function readSubagentOverrides(value: unknown): Record<string, SubagentOverride> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const overrides: Record<string, SubagentOverride> = {};
+  for (const [rawKey, rawVal] of Object.entries(value)) {
+    const key = rawKey.trim().toLowerCase();
+    if (!key || !rawVal || typeof rawVal !== "object" || Array.isArray(rawVal)) continue;
+    const val = rawVal as Record<string, unknown>;
+    const model = typeof val.model === "string" && val.model.trim() ? val.model.trim() : null;
+    const thinking = typeof val.thinking === "string" && val.thinking.trim() ? val.thinking.trim() : null;
+    if (model || thinking) {
+      overrides[key] = {
+        ...(model ? { model } : {}),
+        ...(thinking ? { thinking } : {}),
+      };
+    }
+  }
+  return overrides;
 }
 
 function settingsValue(
   builtInEnabled: boolean,
   maxConcurrent: number,
   disabledBuiltIns: string[],
-  defaultProfile: string,
+  subagentModel: string | null,
+  subagentOverrides: Record<string, SubagentOverride> = {},
 ): SubagentSettings {
   const settings = Object.defineProperty({ builtInEnabled, disabledBuiltIns }, "maxConcurrent", {
     value: maxConcurrent,
     enumerable: false,
     configurable: true,
   });
-  return Object.defineProperty(settings, "defaultProfile", {
-    value: defaultProfile,
+  Object.defineProperty(settings, "subagentModel", {
+    value: subagentModel,
+    enumerable: false,
+    configurable: true,
+  });
+  return Object.defineProperty(settings, "subagentOverrides", {
+    value: subagentOverrides,
     enumerable: false,
     configurable: true,
   }) as SubagentSettings;
@@ -95,7 +124,8 @@ export function readSubagentSettings(
     stored.builtInEnabled === true,
     readMaxConcurrent(stored.maxConcurrent),
     readDisabledBuiltIns(stored.disabledBuiltIns),
-    readDefaultProfile(stored.defaultProfile),
+    readSubagentModel(stored.subagentModel),
+    readSubagentOverrides(stored.subagentOverrides),
   );
 }
 
@@ -183,18 +213,92 @@ export function writeSubagentMaxConcurrent(
   return readSubagentSettings(settingsPath);
 }
 
-export function writeSubagentDefaultProfile(
-  defaultProfile: string,
+export function writeSubagentModelOverride(
+  subagentModel: string | null,
   settingsPath = getSubagentSettingsPath(),
 ): SubagentSettings {
-  const normalized = defaultProfile.trim();
-  if (!normalized) throw new Error("defaultProfile must be a non-empty string");
+  const normalized = typeof subagentModel === "string" ? subagentModel.trim() : null;
+  if (subagentModel !== null && !normalized) throw new Error("subagentModel must be null or a non-empty string");
   const stored = readStoredSettings(settingsPath);
+  const next: StoredSubagentSettings = { ...stored, version: 1 };
+  delete next.defaultProfile;
+  if (normalized) next.subagentModel = normalized;
+  else delete next.subagentModel;
   mkdirSync(dirname(settingsPath), { recursive: true });
-  writePrivateFileAtomicSync(settingsPath, JSON.stringify({
-    ...stored,
-    version: 1,
-    defaultProfile: normalized,
-  }, null, 2));
+  writePrivateFileAtomicSync(settingsPath, JSON.stringify(next, null, 2));
+  return readSubagentSettings(settingsPath);
+}
+
+export function writeSubagentProfileOverride(
+  profileName: string,
+  override: SubagentOverride | null,
+  settingsPath = getSubagentSettingsPath(),
+): SubagentSettings {
+  const key = typeof profileName === "string" ? profileName.trim().toLowerCase() : "";
+  if (!key) throw new Error("profileName must be a non-empty string");
+
+  const stored = readStoredSettings(settingsPath);
+  const existingOverrides = readSubagentOverrides(stored.subagentOverrides);
+  const nextOverrides: Record<string, SubagentOverride> = { ...existingOverrides };
+
+  const model = typeof override?.model === "string" && override.model.trim() ? override.model.trim() : null;
+  const thinking = typeof override?.thinking === "string" && override.thinking.trim() ? override.thinking.trim() : null;
+
+  if (override === null || (!model && !thinking)) {
+    delete nextOverrides[key];
+  } else {
+    nextOverrides[key] = {
+      ...(model ? { model } : {}),
+      ...(thinking ? { thinking } : {}),
+    };
+  }
+
+  const next: StoredSubagentSettings = { ...stored, version: 1 };
+  if (Object.keys(nextOverrides).length > 0) {
+    next.subagentOverrides = nextOverrides;
+  } else {
+    delete next.subagentOverrides;
+  }
+
+  mkdirSync(dirname(settingsPath), { recursive: true });
+  writePrivateFileAtomicSync(settingsPath, JSON.stringify(next, null, 2));
+  return readSubagentSettings(settingsPath);
+}
+
+export function writeSubagentOverrides(
+  overrides: Record<string, SubagentOverride | null>,
+  settingsPath = getSubagentSettingsPath(),
+): SubagentSettings {
+  if (!overrides || typeof overrides !== "object" || Array.isArray(overrides)) {
+    throw new Error("overrides must be an object");
+  }
+  const stored = readStoredSettings(settingsPath);
+  const existingOverrides = readSubagentOverrides(stored.subagentOverrides);
+  const nextOverrides: Record<string, SubagentOverride> = { ...existingOverrides };
+
+  for (const [rawKey, override] of Object.entries(overrides)) {
+    const key = rawKey.trim().toLowerCase();
+    if (!key) continue;
+    const model = typeof override?.model === "string" && override.model.trim() ? override.model.trim() : null;
+    const thinking = typeof override?.thinking === "string" && override.thinking.trim() ? override.thinking.trim() : null;
+    if (override === null || (!model && !thinking)) {
+      delete nextOverrides[key];
+    } else {
+      nextOverrides[key] = {
+        ...(model ? { model } : {}),
+        ...(thinking ? { thinking } : {}),
+      };
+    }
+  }
+
+  const next: StoredSubagentSettings = { ...stored, version: 1 };
+  if (Object.keys(nextOverrides).length > 0) {
+    next.subagentOverrides = nextOverrides;
+  } else {
+    delete next.subagentOverrides;
+  }
+
+  mkdirSync(dirname(settingsPath), { recursive: true });
+  writePrivateFileAtomicSync(settingsPath, JSON.stringify(next, null, 2));
   return readSubagentSettings(settingsPath);
 }

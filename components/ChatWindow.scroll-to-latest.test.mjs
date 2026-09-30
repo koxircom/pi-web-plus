@@ -16,6 +16,11 @@ function elementBlock() {
   return source.slice(buttonStart, buttonEnd);
 }
 
+test("centers a new empty composer and keeps a loading session composer at the bottom", () => {
+  assert.match(source, /\{isEmptyNew && <div className="min-h-0 flex-1" \/>\}/);
+  assert.match(source, /if \(loading\)[\s\S]*?className="chat-content relative flex h-full min-w-0 flex-col overflow-hidden"[\s\S]*?<div className="relative shrink-0">\s*\{chatInputElement\}/);
+});
+
 test("shows the scroll-to-latest button only when the viewport is detached from the tail", () => {
   assert.match(
     source,

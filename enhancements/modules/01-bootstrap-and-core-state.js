@@ -52,19 +52,88 @@
     }
   } catch (e) {}
 
-  // 0.5 物理级去除标签页中的 Pi Web 标识与防止标题抖动
+  // 0.2 Logo 浏览器缓存与首屏秒开常驻加速引擎 (Instant Logo Preload & Cache Engine)
+  (function initLogoInstantCache() {
+    if (typeof window === "undefined") return;
+    const LOGO_PATH = "/icons/apple-touch-icon.png";
+
+    // A. 动态注入 <link rel="preload"> 提升网络层解析优先级
+    try {
+      if (document.head && !document.querySelector(`link[rel="preload"][href*="${LOGO_PATH}"]`)) {
+        const link = document.createElement("link");
+        link.rel = "preload";
+        link.as = "image";
+        link.href = LOGO_PATH;
+        link.type = "image/png";
+        link.setAttribute("fetchpriority", "high");
+        document.head.appendChild(link);
+      }
+    } catch {}
+
+    // B. 浏览器内存 Image 常驻与位图提前解码 (Pre-decoded in Memory)
+    try {
+      if (typeof Image !== "undefined") {
+        const logoImg = new Image();
+        logoImg.src = LOGO_PATH;
+        if (typeof logoImg.decode === "function") {
+          logoImg.decode().catch(() => {});
+        }
+        window.__PI_ENH_LOGO_PRELOAD_IMG__ = logoImg;
+      }
+    } catch {}
+
+    // C. 浏览器现代 CacheStorage 主动预存 (PWA / CacheStorage 强缓存)
+    try {
+      if ("caches" in window && typeof caches.open === "function") {
+        caches.open("pi-web-logo-cache-v1").then((cache) => {
+          cache.match(LOGO_PATH).then((existing) => {
+            if (!existing) {
+              fetch(LOGO_PATH, { cache: "force-cache" })
+                .then((resp) => {
+                  if (resp && resp.ok) cache.put(LOGO_PATH, resp.clone());
+                })
+                .catch(() => {});
+            }
+          });
+        }).catch(() => {});
+      }
+    } catch {}
+
+    // D. DOM 渲染优化：一旦页面挂载该 Logo，立即附加高速渲染属性 (fetchpriority/decoding/eager)
+    function optimizeLogoElement(el) {
+      if (!el || el.__pi_logo_optimized) return;
+      el.__pi_logo_optimized = true;
+      try {
+        if (!el.getAttribute("fetchpriority")) el.setAttribute("fetchpriority", "high");
+        if (!el.getAttribute("decoding")) el.setAttribute("decoding", "async");
+        if (el.loading === "lazy") el.loading = "eager";
+      } catch {}
+    }
+
+    if (typeof document !== "undefined") {
+      const applyExisting = () => {
+        for (const img of document.querySelectorAll(`img[src*="${LOGO_PATH}"]`)) {
+          optimizeLogoElement(img);
+        }
+      };
+      if (document.readyState === "loading") {
+        document.addEventListener("DOMContentLoaded", applyExisting, { once: true });
+      } else {
+        applyExisting();
+      }
+    }
+  })();
+
+  // 0.5 物理级去除标签页中的 Pi Web 标识与防止标题抖动（保留状态文字 🔵/🟠/🔴/🟢 等）
   function sanitizePageTitle(rawTitle) {
-    if (!rawTitle) return "work";
+    if (!rawTitle) return "";
     let clean = String(rawTitle)
       .replace(/\s*[-·|_]\s*Pi\s*Web\b/gi, "")
       .replace(/\bPi\s*Web\s*[-·|_]\s*/gi, "")
       .replace(/\bPi\s*Web\b/gi, "")
-      .replace(/^\(⏱️.*?\)\s*/, "")
-      .replace(/^⏱️\s+[\d.]+s\s+·\s+/, "")
-      .replace(/^✅\s*\(.*?\)\s*/, "")
-      .replace(/^(?:🟠【等待答复】|⚠️\s*需要确认)\s*(?:·\s*)?/, "")
+      .replace(/\s*[-·|_]\s*$/, "")
       .trim();
-    return clean || "work";
+    return clean;
   }
 
   // Safe Hot-Reloading: Clean up any previous instance before re-initializing
@@ -167,6 +236,204 @@
     bridgeBaseSyncUrl = null,
     currentScriptTag = null,
     pollerIntervalId = null;
+
+  function isProjectStatusIndicatorActive() {
+    if (isDisposed) return false;
+    if (typeof isPluginEnabled === "function") {
+      try {
+        return Boolean(isPluginEnabled("project-status-indicator"));
+      } catch (e) {}
+    }
+    try {
+      if (typeof localStorage !== "undefined") {
+        const direct = localStorage.getItem("pi-enh-plugin-project-status-indicator");
+        if (direct === "false") return false;
+        if (direct === "true") return true;
+        const raw = localStorage.getItem("pi-enh-settings-v1") || localStorage.getItem("pi-enh-features");
+        if (raw) {
+          const cfg = JSON.parse(raw);
+          if (cfg && cfg.features && cfg.features["project-status-indicator"] && cfg.features["project-status-indicator"].enabled === false) {
+            return false;
+          }
+          if (cfg && cfg["project-status-indicator"] && cfg["project-status-indicator"].enabled === false) {
+            return false;
+          }
+        }
+      }
+    } catch (e) {}
+    return true;
+  }
+
+  // 0.6 document.title setter 拦截与 DOM 更新防护（去除 Pi Web 尾缀并防止与原生 MutationObserver 死循环）
+  try {
+    if (typeof document !== "undefined") {
+      hadOwnTitleDesc = Object.prototype.hasOwnProperty.call(document, "title");
+      let desc = hadOwnTitleDesc
+        ? Object.getOwnPropertyDescriptor(document, "title")
+        : (Object.getOwnPropertyDescriptor(Document.prototype, "title") ||
+           (typeof HTMLDocument !== "undefined" && Object.getOwnPropertyDescriptor(HTMLDocument.prototype, "title")) ||
+           Object.getOwnPropertyDescriptor(Object.getPrototypeOf(document) || Document.prototype, "title"));
+
+      let origGet = null;
+      let origSet = null;
+
+      if (desc && (desc.get || desc.set)) {
+        origGet = desc.get;
+        origSet = desc.set;
+      } else if (desc && "value" in desc) {
+        let storedVal = desc.value;
+        origGet = function () { return storedVal; };
+        origSet = function (val) { storedVal = val; };
+      }
+
+      if (origSet) {
+        // 防止热重载重复 defineProperty 套娃，解包最底层原始方法
+        if (origGet && origGet.__pi_enh_orig_get) {
+          origGet = origGet.__pi_enh_orig_get;
+        }
+        if (origSet && origSet.__pi_enh_orig_set) {
+          origSet = origSet.__pi_enh_orig_set;
+        }
+
+        prevOwnTitleDesc = hadOwnTitleDesc ? Object.getOwnPropertyDescriptor(document, "title") : null;
+
+        let isSettingTitleInternally = false;
+
+        installedTitleGetter = function () {
+          const raw = origGet ? origGet.call(this) : "";
+          if (!isProjectStatusIndicatorActive()) {
+            return raw;
+          }
+          const sanitized = sanitizePageTitle(raw);
+          return sanitized || raw;
+        };
+        installedTitleGetter.__pi_enh_title__ = true;
+        installedTitleGetter.__pi_enh_orig_get = origGet;
+
+        installedTitleSetter = function (val) {
+          window.__PI_WEB_NATIVE_TITLE_RAW__ = val;
+          // Preserve the native title before sanitizing the enhanced display.
+          // Legacy cores publish it through document.title, newer cores also
+          // provide __PI_WEB_NATIVE_TITLE_BASE__ directly.
+          if (typeof val === "string" && (val === "Pi Web" || val.endsWith(" - Pi Web"))) {
+            window.__PI_WEB_NATIVE_TITLE_BASE__ = val;
+          }
+
+          if (!isProjectStatusIndicatorActive()) {
+            origSet.call(this, val);
+            return;
+          }
+
+          const cleanBase = sanitizePageTitle(val);
+          // A sanitized enhancer write must not replace an authoritative native base.
+          if (!window.__PI_WEB_NATIVE_TITLE_BASE__ && cleanBase && !/^(?:🔵|🟠|🔴|🟢|⚠️)/.test(cleanBase)) {
+            window.__PI_WEB_NATIVE_TITLE_BASE__ = cleanBase;
+          }
+
+          // 状态前缀保护：若当前 val 本身已带有状态前缀（如 🔵、🟠 需要确认、🟢 已完成等），直接使用 cleanBase
+          let targetTitle = cleanBase;
+          const hasStatusPrefix = /^(?:🔵|🟠|🔴|🟢|⚠️)/.test(cleanBase);
+
+          if (!hasStatusPrefix && typeof window.__PI_ENH_COMPOSE_WINDOW_TITLE__ === "function") {
+            try {
+              const composed = window.__PI_ENH_COMPOSE_WINDOW_TITLE__(cleanBase);
+              if (composed) targetTitle = composed;
+            } catch (e) {}
+          }
+
+          if (!targetTitle) {
+            targetTitle = cleanBase || (val ? sanitizePageTitle(val) : "") || "work";
+          }
+
+          // 获取当前底层真实的 title，若已等于目标值则禁止重复写入（防止与原生 MutationObserver 死循环）
+          const currentTitle = origGet ? origGet.call(this) : (document.querySelector("title")?.textContent || "");
+          if (currentTitle === targetTitle) {
+            return;
+          }
+
+          if (isSettingTitleInternally) {
+            origSet.call(this, targetTitle);
+            return;
+          }
+
+          isSettingTitleInternally = true;
+          try {
+            origSet.call(this, targetTitle);
+          } finally {
+            isSettingTitleInternally = false;
+          }
+        };
+        installedTitleSetter.__pi_enh_title__ = true;
+        installedTitleSetter.__pi_enh_orig_set = origSet;
+
+        Object.defineProperty(document, "title", {
+          configurable: true,
+          enumerable: true,
+          get: installedTitleGetter,
+          set: installedTitleSetter,
+        });
+
+        // 初始若已有标题且开启增强，同步一次净化
+        if (isProjectStatusIndicatorActive() && document.title) {
+          const initClean = sanitizePageTitle(document.title);
+          if (initClean && initClean !== document.title) {
+            installedTitleSetter.call(document, document.title);
+          }
+        }
+      }
+
+      let isSanitizingDomTitle = false;
+      const cleanDomTitle = () => {
+        if (isDisposed || isSanitizingDomTitle) return;
+        if (!isProjectStatusIndicatorActive()) return;
+        const titleEl = document.querySelector("title");
+        if (!titleEl) return;
+        const currentText = titleEl.textContent || "";
+        if (!/Pi\s*Web/i.test(currentText)) return;
+        let cleaned = sanitizePageTitle(currentText);
+        if (!cleaned) return;
+        const hasStatus = /^(?:🔵|🟠|🔴|🟢|⚠️)/.test(cleaned);
+        if (!hasStatus && typeof window.__PI_ENH_COMPOSE_WINDOW_TITLE__ === "function") {
+          try {
+            const composed = window.__PI_ENH_COMPOSE_WINDOW_TITLE__(cleaned);
+            if (composed) cleaned = composed;
+          } catch (e) {}
+        }
+        if (titleEl.textContent !== cleaned) {
+          isSanitizingDomTitle = true;
+          try {
+            titleEl.textContent = cleaned;
+          } finally {
+            isSanitizingDomTitle = false;
+          }
+        }
+      };
+
+      if (typeof MutationObserver !== "undefined") {
+        titleObserver = new MutationObserver(cleanDomTitle);
+        const attachTitleObserver = () => {
+          if (isDisposed) return;
+          const t = document.querySelector("title");
+          if (t) {
+            titleObserver.observe(t, { childList: true, characterData: true, subtree: true });
+            cleanDomTitle();
+          }
+        };
+
+        if (document.head) {
+          headObserver = new MutationObserver(() => {
+            if (isDisposed) return;
+            const t = document.querySelector("title");
+            if (t) {
+              attachTitleObserver();
+            }
+          });
+          headObserver.observe(document.head, { childList: true });
+        }
+        attachTitleObserver();
+      }
+    }
+  } catch (e) {}
 
   // --- Managed Lifecycle & Zero-Leak Teardown Registry ---
   const activeCleanups = [];
@@ -282,6 +549,7 @@
       --safe-left: env(safe-area-inset-left, 0px);
       --safe-right: env(safe-area-inset-right, 0px);
     }
+
 
     /* 优雅的发送/排队微光流动画 (Sent Micro-pulse Transition) */
     @keyframes pi-enh-sent-pulse {
@@ -1821,12 +2089,29 @@
       background: rgba(255, 255, 255, 0.2);
     }
 
-    /* 会话压缩卡片默认折叠与交互样式 */
+    /* 会话压缩卡片默认折叠与交互样式（含首帧 0ms 原生结构直折，杜绝先展开再折叠造成的高度跳变） */
+    html.pi-enh-compaction-collapse-active .chat-content div[style*="border-radius: 8px"]:has(.markdown-compaction-message) > div:nth-child(2):not([data-user-expanded="true"]),
     html.pi-enh-compaction-collapse-active .pi-enh-compaction-body:not([data-user-expanded="true"]) {
       display: none !important;
     }
+    html.pi-enh-compaction-collapse-active .chat-content div[style*="border-radius: 8px"]:has(.markdown-compaction-message) > div:first-child:not([data-user-expanded="true"]),
     html.pi-enh-compaction-collapse-active .pi-enh-compaction-header:not([data-user-expanded="true"]) {
       border-bottom: none !important;
+    }
+
+    /* 孤立纯过程消息与前置过程块首帧 0ms 原生直折（加载即以折叠态出现，对齐原生 React eI() 过程块判定，杜绝先加载展开再异步折叠引发的往返跳动） */
+    html.pi-enh-tool-collapse-active:not(.pi-enh-chat-running) .chat-content [data-entry-id]:has(> div[data-message-role="assistant"] button):not(:has([data-message-text="true"])):not(:has([role="alert"])):not([data-pi-enh-orphan-expanded="true"]),
+    html.pi-enh-tool-collapse-active:not(.pi-enh-chat-running) .chat-content [data-entry-id]:has(> div[data-message-role="assistant"] > div[style*="flex-direction: column"] > div:last-child:not([data-message-text="true"]):has(button)):not(:has([role="alert"])):not([data-pi-enh-orphan-expanded="true"]),
+    html.pi-enh-tool-collapse-active .chat-content [data-entry-id]:has(> div[data-message-role="assistant"] button):not(:has([data-message-text="true"])):not(:has([role="alert"])):not([data-pi-enh-orphan-expanded="true"]):has(~ [data-entry-id] [data-message-text="true"], ~ [data-entry-id] .markdown-compaction-message, ~ [data-entry-id] [data-message-role="user"], ~ [data-entry-id] .markdown-user-message),
+    html.pi-enh-tool-collapse-active .chat-content [data-entry-id]:has(> div[data-message-role="assistant"] > div[style*="flex-direction: column"] > div:last-child:not([data-message-text="true"]):has(button)):not(:has([role="alert"])):not([data-pi-enh-orphan-expanded="true"]):has(~ [data-entry-id] [data-message-text="true"], ~ [data-entry-id] .markdown-compaction-message, ~ [data-entry-id] [data-message-role="user"], ~ [data-entry-id] .markdown-user-message),
+    html.pi-enh-tool-collapse-active .chat-content [data-pi-enh-orphan-grouped="true"]:not([data-pi-enh-orphan-expanded="true"]) {
+      display: none !important;
+    }
+    html.pi-enh-tool-collapse-active:not(.pi-enh-chat-running) .chat-content div[data-message-role="assistant"] > div[style*="flex-direction: column"] > div:has(~ div:not([data-message-text="true"]) button):not([data-pi-enh-orphan-expanded="true"]),
+    html.pi-enh-tool-collapse-active:not(.pi-enh-chat-running) .chat-content div[data-message-role="assistant"] > div[style*="flex-direction: column"] > div:not([data-message-text="true"]):has(button):has(~ [data-message-text="true"]):not([data-pi-enh-orphan-expanded="true"]),
+    html.pi-enh-tool-collapse-active .chat-content [data-entry-id]:has(~ [data-entry-id]) div[data-message-role="assistant"] > div[style*="flex-direction: column"] > div:has(~ div:not([data-message-text="true"]) button):not([data-pi-enh-orphan-expanded="true"]),
+    html.pi-enh-tool-collapse-active .chat-content [data-entry-id]:has(~ [data-entry-id]) div[data-message-role="assistant"] > div[style*="flex-direction: column"] > div:not([data-message-text="true"]):has(button):has(~ [data-message-text="true"]):not([data-pi-enh-orphan-expanded="true"]) {
+      display: none !important;
     }
 
     /* 消息底部 footer 容器：移动端与窄屏弹性自适应与防挤压换行（精确命中包含 margin-top: 4px 的 footer，杜绝误伤工具列容器） */
@@ -1892,7 +2177,7 @@
 
     /* 恢复助手正文原生字号；不触碰消息 footer、时间或 Token 消耗 */
     .pi-enh-native-message-font-active div[data-message-role="assistant"] .markdown-body {
-      font-size: 14px !important;
+      font-size: var(--chat-content-font-size, 14px) !important;
       line-height: 1.7 !important;
       font-family: inherit !important;
       font-weight: inherit !important;
@@ -1962,6 +2247,29 @@
       font-size: 10px !important;
       user-select: none !important;
       margin: 0 1px !important;
+    }
+
+    /* 对话轮次序号徽章 (Turn Number Indicator) */
+    .pi-enh-turn-number-badge {
+      display: inline-flex !important;
+      align-items: center !important;
+      font-size: 11px !important;
+      line-height: 1.2 !important;
+      font-weight: 500 !important;
+      font-variant-numeric: tabular-nums !important;
+      color: var(--text-muted, #a1a1aa) !important;
+      opacity: 0.82 !important;
+      margin-right: 5px !important;
+      user-select: none !important;
+      white-space: nowrap !important;
+      letter-spacing: -0.01em !important;
+      transition: opacity 0.15s ease, color 0.15s ease !important;
+      cursor: default !important;
+      flex-shrink: 0 !important;
+    }
+    .pi-enh-turn-number-badge:hover {
+      opacity: 1 !important;
+      color: var(--text, #f4f4f5) !important;
     }
 
     /* 子 Agent 省钱摘要卡片（独立全宽紧凑区域） */
@@ -2477,7 +2785,7 @@
       overflow: hidden !important;
       text-overflow: ellipsis !important;
       white-space: nowrap !important;
-      line-height: 1.4 !important;
+      line-height: 20px !important;
     }
 
     /* 元数据行：强制单行、高度锁定最大 18px，彻底杜绝任何折行撑高与挤爆 */
@@ -2837,10 +3145,20 @@
       box-shadow: 0 0 5px #ffffff, 0 0 8px rgba(255, 255, 255, 0.6);
       flex-shrink: 0;
     }
+    .pi-enh-odoo-addon-pill.is-latest,
+    html:not(.dark) .pi-enh-odoo-addon-pill.is-latest {
+      border-color: #65c988;
+      box-shadow: 0 0 4px rgba(132, 174, 144, 0.11), inset 0 0 3px rgba(132, 174, 144, 0.07);
+    }
+    .pi-enh-odoo-addon-pill.is-latest:hover,
+    html:not(.dark) .pi-enh-odoo-addon-pill.is-latest:hover {
+      border-color: #83dda2;
+      box-shadow: 0 0 7px rgba(132, 174, 144, 0.19), inset 0 0 4px rgba(132, 174, 144, 0.1);
+    }
     .pi-enh-odoo-addon-pill.is-latest .pi-enh-odoo-addon-dot,
     html:not(.dark) .pi-enh-odoo-addon-pill.is-latest .pi-enh-odoo-addon-dot {
       background-color: #22c55e;
-      box-shadow: 0 0 5px #22c55e, 0 0 9px rgba(34, 197, 94, 0.85);
+      box-shadow: 0 0 3px rgba(34, 197, 94, 0.32);
     }
     .pi-enh-odoo-addon-name {
       font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
@@ -3239,6 +3557,9 @@
       justify-content: space-between;
       gap: 16px;
       margin-bottom: 12px;
+    }
+    @media (min-width: 641px) {
+      .pi-enh-archived-header-row { padding-right: 32px; }
     }
     .pi-enh-archived-item {
       display: flex;
@@ -3922,7 +4243,7 @@
       }
     }
     /* 侧边栏底部快捷入口与设置选项卡双击快捷 */
-    [data-pi-enh-shortcuts-host="true"] > button:not(.pi-enh-shortcut-btn),
+    [data-pi-enh-shortcuts-host="true"]:not([data-pi-enh-shortcuts-disabled="true"]) > button:not(.pi-enh-shortcut-btn),
     .sidebar-container > div:last-child:not([data-pi-enh-shortcuts-disabled="true"]) > button:not(.pi-enh-shortcut-btn) {
       display: none !important;
     }
@@ -4443,12 +4764,21 @@
 
       html.pi-enh-settings-sidebar-active .agents-feature-actions,
       html.pi-enh-settings-sidebar-active .config-detail-actions,
+      html.pi-enh-settings-sidebar-active .enabled-models-banner,
+      html.pi-enh-settings-sidebar-active .config-panel-header,
       html.pi-enh-settings-sidebar-active .pi-enh-plugins-toolbar,
       html.pi-enh-settings-sidebar-active .pi-enh-archived-header-actions,
       html.pi-enh-settings-sidebar-active .pi-enh-tags-header-actions,
       html.pi-enh-settings-sidebar-active .pi-enh-notifications-header-actions,
       html.pi-enh-settings-sidebar-active .pi-enh-usage-title-row {
-        padding-right: 44px !important;
+        padding-right: 52px !important;
+        box-sizing: border-box !important;
+      }
+
+      html.pi-enh-settings-sidebar-active .enabled-models-banner-text {
+        min-width: 0 !important;
+        flex: 1 1 auto !important;
+        overflow: hidden !important;
       }
 
       /* 侧边栏底部快捷入口双击提示 */
@@ -6655,6 +6985,8 @@
     }
 
     /* 回到底部悬浮快捷按钮 (Scroll-to-Bottom Button - Codex 风格) */
+    /* Enhancement owns this action only while its control exists; off/dispose restores native CSS. */
+    .chat-content:has(> .pi-enh-scroll-bottom-btn) .chat-scroll-to-bottom { display: none; }
     .pi-enh-scroll-bottom-btn {
       position: absolute;
       left: 50%;
@@ -7854,6 +8186,251 @@
     }
 
     /* ==========================================================================
+       Excel Sheet Interactive Preview (Excel 在线交互表格预览)
+       ========================================================================== */
+    .pi-enh-excel-container {
+      display: flex;
+      flex-direction: column;
+      width: 100%;
+      height: 100%;
+      background: var(--bg-panel, #18181b);
+      color: var(--text, #f4f4f5);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+      overflow: hidden;
+      position: absolute;
+      top: 0;
+      left: 0;
+      right: 0;
+      bottom: 0;
+      z-index: 10;
+    }
+    .pi-enh-excel-toolbar {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 6px 14px;
+      background: var(--bg, #09090b);
+      border-bottom: 1px solid var(--border, #27272a);
+      font-size: 12px;
+      flex-shrink: 0;
+      user-select: none;
+    }
+    .pi-enh-excel-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      padding: 2px 7px;
+      border-radius: 4px;
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.02em;
+      background: rgba(16, 185, 129, 0.15);
+      color: #34d399;
+      border: 1px solid rgba(16, 185, 129, 0.3);
+      flex-shrink: 0;
+    }
+    .pi-enh-excel-meta {
+      color: var(--text-dim, #71717a);
+      font-size: 11px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      margin-right: auto;
+    }
+    .pi-enh-excel-search {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      background: var(--bg-panel, #18181b);
+      border: 1px solid var(--border, #27272a);
+      border-radius: 6px;
+      padding: 2px 8px;
+      color: var(--text, #f4f4f5);
+      font-size: 12px;
+      width: 160px;
+      transition: border-color 0.15s, width 0.15s;
+    }
+    .pi-enh-excel-search:focus-within {
+      border-color: #10b981;
+      width: 200px;
+    }
+    .pi-enh-excel-search input {
+      background: transparent;
+      border: none;
+      outline: none;
+      color: inherit;
+      font-size: 11px;
+      width: 100%;
+    }
+    .pi-enh-excel-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      padding: 3px 8px;
+      border-radius: 5px;
+      border: 1px solid var(--border, #27272a);
+      background: var(--bg-panel, #18181b);
+      color: var(--text, #f4f4f5);
+      font-size: 11px;
+      cursor: pointer;
+      transition: background 0.15s, border-color 0.15s, color 0.15s;
+      flex-shrink: 0;
+    }
+    .pi-enh-excel-btn:hover {
+      background: var(--border, #27272a);
+      color: #fff;
+    }
+    .pi-enh-excel-btn.is-active {
+      background: rgba(16, 185, 129, 0.2);
+      border-color: #10b981;
+      color: #34d399;
+    }
+    .pi-enh-excel-grid-wrap {
+      flex: 1;
+      min-height: 0;
+      overflow: auto;
+      position: relative;
+      background: var(--bg-panel, #18181b);
+      scrollbar-gutter: stable;
+    }
+    .pi-enh-excel-table {
+      border-collapse: separate;
+      border-spacing: 0;
+      min-width: 100%;
+      table-layout: auto;
+      font-size: 12px;
+      color: var(--text, #f4f4f5);
+    }
+    .pi-enh-excel-th {
+      position: sticky;
+      top: 0;
+      background: var(--bg, #121214) !important;
+      color: var(--text-dim, #a1a1aa);
+      font-family: var(--font-mono, monospace);
+      font-weight: 600;
+      font-size: 11px;
+      padding: 5px 10px;
+      border-right: 1px solid var(--border, #27272a);
+      border-bottom: 1px solid var(--border, #27272a);
+      text-align: center;
+      user-select: none;
+      z-index: 5;
+      white-space: nowrap;
+    }
+    .pi-enh-excel-row-num {
+      position: sticky;
+      left: 0;
+      background: var(--bg, #121214) !important;
+      color: var(--text-dim, #71717a);
+      font-family: var(--font-mono, monospace);
+      font-size: 11px;
+      padding: 5px 8px;
+      border-right: 1px solid var(--border, #27272a);
+      border-bottom: 1px solid var(--border, #27272a);
+      text-align: center;
+      user-select: none;
+      z-index: 6;
+      width: 44px;
+      min-width: 44px;
+      box-sizing: border-box;
+    }
+    .pi-enh-excel-corner {
+      position: sticky;
+      top: 0;
+      left: 0;
+      z-index: 7 !important;
+      background: var(--bg, #09090b) !important;
+    }
+    .pi-enh-excel-td {
+      padding: 4px 10px;
+      border-right: 1px solid var(--border, #27272a);
+      border-bottom: 1px solid var(--border, #27272a);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      max-width: 420px;
+      line-height: 1.5;
+      box-sizing: border-box;
+      user-select: text;
+    }
+    .pi-enh-excel-td.num {
+      text-align: right;
+      font-family: var(--font-mono, monospace);
+      color: #1d4ed8;
+    }
+    .pi-enh-excel-td.date {
+      text-align: center;
+      color: #be185d;
+    }
+    html.dark .pi-enh-excel-td.num { color: #93c5fd; }
+    html.dark .pi-enh-excel-td.date { color: #fbcfe8; }
+    .pi-enh-excel-tr:hover .pi-enh-excel-td {
+      background: rgba(255, 255, 255, 0.035);
+    }
+    .pi-enh-excel-tr:hover .pi-enh-excel-row-num {
+      color: #34d399;
+      background: var(--bg-hover, #18181b) !important;
+    }
+    .pi-enh-excel-td.is-match {
+      background: rgba(234, 179, 8, 0.28) !important;
+      color: #fef08a !important;
+      font-weight: 600;
+      outline: 1px solid #eab308;
+    }
+    .pi-enh-excel-td.is-selected {
+      outline: 2px solid #10b981 !important;
+      outline-offset: -2px;
+      background: rgba(16, 185, 129, 0.12) !important;
+    }
+    .pi-enh-excel-bottom-bar {
+      display: flex;
+      align-items: center;
+      gap: 4px;
+      padding: 4px 10px;
+      background: var(--bg, #09090b);
+      border-top: 1px solid var(--border, #27272a);
+      flex-shrink: 0;
+      overflow-x: auto;
+      scrollbar-width: thin;
+      user-select: none;
+    }
+    .pi-enh-excel-tab {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 12px;
+      font-size: 11px;
+      font-weight: 500;
+      color: var(--text-dim, #a1a1aa);
+      border-radius: 4px;
+      cursor: pointer;
+      transition: all 0.15s;
+      white-space: nowrap;
+      border: 1px solid transparent;
+    }
+    .pi-enh-excel-tab:hover {
+      background: var(--bg-panel, #18181b);
+      color: var(--text, #f4f4f5);
+    }
+    .pi-enh-excel-tab.is-active {
+      color: #34d399;
+      font-weight: 600;
+      background: var(--bg-panel, #18181b);
+      border-color: rgba(16, 185, 129, 0.4);
+      border-bottom: 2px solid #10b981;
+    }
+    .pi-enh-excel-status-spinner {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      gap: 12px;
+      height: 100%;
+      color: var(--text-dim, #a1a1aa);
+      font-size: 13px;
+    }
+
+    /* ==========================================================================
        General Settings Dashboard Layout & Modern Dual-Column Containers
        (常规设置现代化自平衡双列卡片架构 - 杜绝网格行高对齐断层与留白空洞)
        ========================================================================== */
@@ -8276,6 +8853,23 @@
       background: var(--accent, #a4c2f4) !important;
       border-color: var(--accent, #a4c2f4) !important;
       box-shadow: 0 0 0 2px var(--bg-panel), 0 0 8px color-mix(in srgb, var(--accent, #a4c2f4) 55%, transparent) !important;
+    }
+
+    /* 移动端与嵌套滚动触控链优化 (Nested Scroll Chaining & Mobile Bubble View) */
+    @media (max-width: 768px) {
+      div[style*="maxHeight: 300"],
+      div[style*="max-height: 300px"],
+      div[style*="var(--user-bg)"],
+      div[style*="var(--bg-user)"] {
+        max-height: min(75vh, 600px) !important;
+      }
+    }
+    div[style*="var(--user-bg)"],
+    div[style*="var(--bg-user)"],
+    .chat-content [class*="overflow-y-auto"],
+    .chat-content pre {
+      overscroll-behavior-y: auto !important;
+      -webkit-overflow-scrolling: touch !important;
     }
   `;
   document.head.appendChild(styleEl);

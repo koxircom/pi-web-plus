@@ -39,7 +39,7 @@ import {
   SUBAGENT_CONTROL_TOOL_NAMES,
 } from "./subagents";
 import { createSubagentController } from "./subagent-runtime";
-import { isBuiltInSubagentsEnabled, readSubagentSettings } from "./subagent-settings";
+import { isBuiltInSubagentsEnabled } from "./subagent-settings";
 import { resolveShellTools } from "./powershell-settings";
 import { CHAT_ONLY_RESOURCE_LOADER_OPTIONS, contextFilesSystemPrompt } from "./chat-only";
 import { createExactSystemPromptExtension } from "./exact-system-prompt";
@@ -49,6 +49,14 @@ import {
   readSessionToolSelection,
   validateSessionToolSelection,
 } from "./session-tool-selection";
+import {
+  deleteQueued,
+  getQueuedMessage,
+  promote,
+  recall,
+  recallAll,
+  snapshot,
+} from "./queue-actions";
 
 // ============================================================================
 // Types
@@ -869,6 +877,30 @@ export class AgentSessionWrapper {
       case "set_auto_compaction": {
         this.inner.setAutoCompactionEnabled(command.enabled as boolean);
         return null;
+      }
+
+      case "get_queue_actions": {
+        return snapshot(this.inner);
+      }
+
+      case "get_queued_message": {
+        return getQueuedMessage(this.inner, command.token as string);
+      }
+
+      case "promote_queued_message": {
+        return promote(this.inner, command.token as string);
+      }
+
+      case "recall_queued_message": {
+        return recall(this.inner, command.token as string);
+      }
+
+      case "delete_queued_message": {
+        return deleteQueued(this.inner, command.token as string);
+      }
+
+      case "recall_all_queued_messages": {
+        return recallAll(this.inner, command.tokens as string[]);
       }
 
       case "clear_queue": {
@@ -2061,7 +2093,6 @@ export async function startRpcSession(
                 SUBAGENT_CONTROLLER.extensionRuntime,
                 () => listSubagentProfiles(sessionCwd),
                 isBuiltInSubagentsEnabled,
-                () => readSubagentSettings().defaultProfile,
               ),
             ],
             extensionsOverride: (base) => preferUserBashExtension(preferPiWebSubagentExtension(base)),

@@ -144,6 +144,43 @@ function parseSubagentModel(runtime: ModelRuntime, value: string | undefined) {
   throw new Error(`Subagent model is ambiguous; use provider/modelId: ${requested}`);
 }
 
+export function resolveSubagentModel(
+  runtime: ModelRuntime,
+  requestModel: string | undefined,
+  profileOverrideModel: string | null | undefined,
+  configuredModel: string | null | undefined,
+  profileModel: string | undefined,
+) {
+  const explicit = typeof requestModel === "string" && requestModel.trim()
+    ? requestModel.trim()
+    : undefined;
+  if (explicit) return parseSubagentModel(runtime, explicit);
+
+  const profileOverride = typeof profileOverrideModel === "string" && profileOverrideModel.trim()
+    ? profileOverrideModel.trim()
+    : undefined;
+  if (profileOverride) return parseSubagentModel(runtime, profileOverride);
+
+  const globalModel = typeof configuredModel === "string" && configuredModel.trim()
+    ? configuredModel.trim()
+    : undefined;
+  if (globalModel) return parseSubagentModel(runtime, globalModel);
+
+  return parseSubagentModel(runtime, profileModel);
+}
+
+export function resolveSubagentThinking(
+  requestThinking: string | undefined,
+  profileOverrideThinking: string | null | undefined,
+  profileThinking: string | undefined,
+  parentThinking: string | undefined,
+): string | undefined {
+  if (typeof requestThinking === "string" && requestThinking.trim()) return requestThinking.trim();
+  if (typeof profileOverrideThinking === "string" && profileOverrideThinking.trim()) return profileOverrideThinking.trim();
+  if (typeof profileThinking === "string" && profileThinking.trim()) return profileThinking.trim();
+  return parentThinking;
+}
+
 function parentContextText(parent: HostSession): string {
   const messages = parent.inner.sessionManager.buildSessionContext().messages;
   const serialized = JSON.stringify(messages);
@@ -192,7 +229,15 @@ export function createSubagentController(
         throw new Error("max_turns must be a non-negative number");
       }
       const turnLimit = maxTurns && maxTurns > 0 ? Math.floor(maxTurns) : undefined;
-      const thinking = request.thinking ?? profile.thinking ?? parent.inner.agent.state?.thinkingLevel;
+      const settings = readSubagentSettings();
+      const profileOverride = settings.subagentOverrides?.[profile.name.toLowerCase()];
+
+      const thinking = resolveSubagentThinking(
+        request.thinking,
+        profileOverride?.thinking,
+        profile.thinking,
+        parent.inner.agent.state?.thinkingLevel,
+      );
       if (thinking && !THINKING_LEVELS.has(thinking as ThinkingLevel)) {
         throw new Error(`Invalid subagent thinking level: ${thinking}`);
       }
@@ -280,7 +325,13 @@ export function createSubagentController(
       sessionManager.appendCustomEntry(SUBAGENT_META_TYPE, metadata);
       sessionManager.appendSessionInfo(metadata.description);
 
-      const requestedModel = parseSubagentModel(parentModelRuntime, request.model ?? profile.model);
+      const requestedModel = resolveSubagentModel(
+        parentModelRuntime,
+        request.model,
+        profileOverride?.model,
+        settings.subagentModel,
+        profile.model,
+      );
       const parentModel = parent.inner.model as ReturnType<ModelRuntime["getModel"]>;
       const { session: inner } = await createAgentSessionFromServices({
         services,

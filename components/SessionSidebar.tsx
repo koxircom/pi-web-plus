@@ -9,6 +9,14 @@ import { skillExpansionToCommand } from "@/lib/slash-display";
 import { getProjectActivity, getRecentProjects, sessionsForProject } from "@/lib/project-groups";
 import { workspaceKeyOf } from "@/lib/workspace-memory";
 import { formatRelativeTime } from "@/lib/i18n/format";
+import {
+  createSidebarShortcutsFallbackHandler,
+  getEnhancementSessionHeadersHeight,
+  getEnhancementSessionItemTop,
+  processEnhancementSessionGroups,
+  registerEnhancementOpenSettings,
+  registerEnhancementSidebarBridge,
+} from "@/lib/enhancement-sidebar-bridge";
 import { useI18n } from "@/hooks/useI18n";
 import { useResizablePanel } from "@/hooks/useResizablePanel";
 import { useScrollbarVisibility } from "@/hooks/useScrollbarVisibility";
@@ -549,6 +557,46 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     }
   }, []);
 
+  const sidebarBridgeStateRef = useRef({
+    loadSessions,
+    allSessions,
+    onSessionDeleted,
+    unreadSessionIds,
+  });
+  sidebarBridgeStateRef.current = {
+    loadSessions,
+    allSessions,
+    onSessionDeleted,
+    unreadSessionIds,
+  };
+
+  useEffect(() => {
+    return registerEnhancementSidebarBridge({
+      refreshSessions: (showLoading = false, force = false) =>
+        sidebarBridgeStateRef.current.loadSessions(showLoading, force),
+      getRawSessions: () => sidebarBridgeStateRef.current.allSessions,
+      rerenderSessions: () => {
+        setAllSessions((prev) => (Array.isArray(prev) ? [...prev] : prev));
+      },
+      notifySessionDeleted: (sessionId: string) => {
+        sidebarBridgeStateRef.current.onSessionDeleted?.(sessionId);
+      },
+      setUnreadSession: (sessionId: string, isUnread: boolean) => {
+        setUnreadSessionIds((prev) => {
+          if (!sessionId) return prev;
+          const shouldBeUnread = Boolean(isUnread);
+          if (prev.has(sessionId) === shouldBeUnread) return prev;
+          const next = new Set(prev);
+          if (shouldBeUnread) next.add(sessionId);
+          else next.delete(sessionId);
+          return next;
+        });
+      },
+      isSessionUnread: (sessionId: string) =>
+        Boolean(sessionId && sidebarBridgeStateRef.current.unreadSessionIds.has(sessionId)),
+    });
+  }, []);
+
   const initialLoadDone = useRef(false);
   useEffect(() => {
     const isFirst = !initialLoadDone.current;
@@ -1016,14 +1064,15 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   }, [onSelectSession]);
 
   const handleNewSession = useCallback(() => {
-    if (!selectedCwd) return;
+    const effectiveCwd = selectedCwd ?? selectedCwdProp ?? allSessions[0]?.cwd ?? (homeDir || null);
+    if (!effectiveCwd) return;
     // Generate a temporary UUID client-side — no backend call needed.
     // Pi will be spawned lazily when the user sends the first message.
     const tempId = typeof crypto.randomUUID === "function"
       ? crypto.randomUUID()
       : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}-${Math.random().toString(36).slice(2)}`;
-    onNewSession?.(tempId, selectedCwd);
-  }, [selectedCwd, onNewSession]);
+    onNewSession?.(tempId, effectiveCwd);
+  }, [selectedCwd, selectedCwdProp, allSessions, homeDir, onNewSession]);
 
   const recentProjects = useMemo(() => getRecentProjects(allSessions), [allSessions]);
   const showProjectFilter = recentProjects.length > 8;
@@ -1089,7 +1138,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
 
   const sessionFamilies = useMemo(() => listSessionFamilies(filteredSessions) && (() => {
     const sorted = listSessionFamilies(filteredSessions);
-    return ((typeof window !== "undefined" ? (window as any).__PI_ENH_PROCESS_SESSION_GROUPS__?.(sorted) : undefined) ?? sorted) as typeof sorted;
+    return processEnhancementSessionGroups(sorted);
   })(), [filteredSessions]);
 
   const virtualIndices = useMemo(() => getSessionListIndices(
@@ -1099,29 +1148,19 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     sessionFamilies.findIndex((family) => family.root.id === focusedSessionId),
   ), [focusedSessionId, listScrollTop, listViewportH, sessionFamilies]);
 
+  useEffect(() => {
+    const shortcutsHost = sessionPaneResizer.panelRef.current?.nextElementSibling as HTMLElement | null;
+    if (!shortcutsHost) return;
+    shortcutsHost.setAttribute("data-pi-enh-shortcuts-host", "true");
+    return registerEnhancementOpenSettings(
+      createSidebarShortcutsFallbackHandler(shortcutsHost),
+      { fallback: true },
+    );
+  }, [sessionPaneResizer.panelRef]);
+
   return (
     <div
-      ref={(el) => {
-        sessionPaneResizer.panelRef.current = el;
-        const shortcutsHost = el?.nextElementSibling as HTMLElement | null;
-        if (shortcutsHost && typeof window !== "undefined") {
-          shortcutsHost.setAttribute("data-pi-enh-shortcuts-host", "true");
-          const setSettingsSection = (section: string) => {
-            const buttons = shortcutsHost.querySelectorAll<HTMLButtonElement>("button:not(.pi-enh-shortcut-btn)");
-            if (section === "models" && buttons[0]) {
-              buttons[0].click();
-              return;
-            }
-            if (section === "skills" && buttons[1] && !buttons[1].disabled) {
-              buttons[1].click();
-              return;
-            }
-            const settingsBtn = buttons[buttons.length - 1];
-            if (settingsBtn) settingsBtn.click();
-          };
-          (window as any).__PI_OPEN_SETTINGS__ = setSettingsSection;
-        }
-      }}
+      ref={sessionPaneResizer.panelRef}
       style={{
         display: "flex",
         flexDirection: "column",
@@ -1833,7 +1872,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
           <div
             style={{
               position: "relative",
-              height: sessionFamilies.length * SESSION_LIST_ITEM_HEIGHT + (typeof window !== "undefined" ? ((window as any).__PI_ENH_GET_SESSION_HEADERS_HEIGHT__?.(sessionFamilies) || 0) : 0),
+              height: sessionFamilies.length * SESSION_LIST_ITEM_HEIGHT + getEnhancementSessionHeadersHeight(sessionFamilies),
             }}
           >
             {virtualIndices.map((index) => {
@@ -1850,7 +1889,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
                   onBlur={() => setFocusedSessionId(null)}
                   style={{
                     position: "absolute",
-                    top: (typeof window !== "undefined" ? (window as any).__PI_ENH_GET_SESSION_ITEM_TOP__?.(index, sessionFamilies) : undefined) ?? index * SESSION_LIST_ITEM_HEIGHT,
+                    top: getEnhancementSessionItemTop(index, sessionFamilies, SESSION_LIST_ITEM_HEIGHT),
                     left: 0,
                     right: 0,
                   }}
@@ -2444,7 +2483,7 @@ function SessionItem({
 
           {/* Action buttons — shown on hover */}
           {hovered && !session.transient && (
-            <div style={{ display: "flex", gap: 4, flexShrink: 0 }}>
+            <div className="pi-enh-native-session-actions" style={{ display: "flex", gap: 4, flexShrink: 0 }}>
               <button
                 onClick={startRename}
                 title={t("sidebar.rename")}
@@ -2500,6 +2539,11 @@ function SessionItem({
                   <path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" />
                 </svg>
               </button>
+            </div>
+          )}
+          {!hovered && !session.transient && (
+            <div className="pi-enh-native-session-actions" hidden aria-hidden="true" style={{ display: "none" }}>
+              <button type="button" onClick={startRename} title={t("sidebar.rename")} tabIndex={-1} />
             </div>
           )}
         </>

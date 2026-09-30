@@ -1,6 +1,6 @@
 {
   "name": "@agegr/pi-web",
-  "version": "1.0.5",
+  "version": "1.1.0",
   "piWebEdition": "koxir-standalone",
   "standalone": true,
   "description": "Pi Web Standalone Edition — Web UI for the pi coding agent",
@@ -43,10 +43,10 @@
     "release": "npm run build && npm pack"
   },
   "dependencies": {
-    "@earendil-works/pi-agent-core": "0.87.1",
-    "@earendil-works/pi-ai": "0.87.1",
-    "@earendil-works/pi-coding-agent": "0.87.1",
-    "@earendil-works/pi-tui": "0.87.1",
+    "@earendil-works/pi-agent-core": "0.99.1",
+    "@earendil-works/pi-ai": "0.99.1",
+    "@earendil-works/pi-coding-agent": "0.99.1",
+    "@earendil-works/pi-tui": "0.99.1",
     "@xterm/addon-fit": "0.11.0",
     "@xterm/xterm": "6.0.0",
     "js-yaml": "^5.2.3",

@@ -8,6 +8,8 @@ export interface SubagentProfilesResponse {
 export interface SubagentSettingsResponse {
   enabled: boolean;
   maxConcurrent: number;
+  subagentModel: string | null;
+  subagentOverrides?: Record<string, { model?: string | null; thinking?: string | null }>;
 }
 
 export interface ShellToolSettingsResponse {

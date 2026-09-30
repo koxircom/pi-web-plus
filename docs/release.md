@@ -2,15 +2,18 @@
 
 Pi Web Standalone Edition releases are distributed exclusively through [`koxircom/pi-web-standalone` GitHub Releases](https://github.com/koxircom/pi-web-standalone/releases):
 
-- GitHub Release tag: `v<version>` in `koxircom/pi-web-standalone` (for example, planned release `v1.0.5`)
-- Release tarball asset: `pi-web-standalone-<version>.tgz` (for example, `pi-web-standalone-1.0.5.tgz`)
+- GitHub Release tag: `v<version>` in `koxircom/pi-web-standalone` (for example, `v1.1.0`)
+- Release tarball asset: `pi-web-standalone-<version>.tgz` (for example, `pi-web-standalone-1.1.0.tgz`)
 - Official install command (replace `<version>` when targeting another release):
   ```bash
-  npm install -g https://github.com/koxircom/pi-web-standalone/releases/download/v1.0.5/pi-web-standalone-1.0.5.tgz
+  npm install -g https://github.com/koxircom/pi-web-standalone/releases/download/v1.1.0/pi-web-standalone-1.1.0.tgz
   ```
 
 > **Release Invariants**:
 > - `package.json` keeps `"name": "@agegr/pi-web"` (alongside `"piWebEdition": "koxir-standalone"` and `"standalone": true`) for internal runtime compatibility, but **never publish to or pull from the public npm registry**.
+> - **Web SDK `0.99.1` vs. Global Pi Agent CLI**: Pi Web `v1.1.0` unifies `@earendil-works/pi-*` Web dependencies at `0.99.1`; installing Pi Web does **not** automatically upgrade the global `pi` Agent CLI on the host.
+> - **Tarball excludes `node_modules/`**: `pi-web-standalone-1.1.0.tgz` ships prebuilt `.next/`, `bin/`, and `public/` assets without `node_modules/`, requiring standard dependency installation (or verified offline `node_modules/` reuse).
+> - **Protect custom manifests, sessions, and ledgers**: Staging and instance upgrades must preserve instance-specific `public/pi-*-manifest.json`, session files (`~/.pi/agent/sessions/`), and usage ledgers (`pi-usage-ledger.json` / `~/.pi/agent/state/`).
 > - **Pushing `main` alone is not a release**: every release must complete all 5 steps below — preflight & version preparation, offline build + `npm pack` + tarball verification, clean install verification, GitHub Release asset upload + `Latest` verification, and running-instance synchronization.
 
 Use this 5-step checklist from a clean `main` checkout with Node.js `>=22.19.0`.
@@ -33,7 +36,7 @@ npm run lint
 Expected:
 
 - Node.js is `22.19.0` or newer (`>=22.19.0`).
-- `git status` is clean, or only contains the intentional version bump (`package.json` and `package-lock.json`, e.g. `1.0.5`).
+- `git status` is clean, or only contains the intentional version bump (`package.json` and `package-lock.json`, e.g. `1.1.0`).
 - `package.json` retains `"name": "@agegr/pi-web"`, `"piWebEdition": "koxir-standalone"`, and `"standalone": true`.
 - GitHub CLI is authenticated with write/release access to `koxircom/pi-web-standalone`.
 
@@ -115,7 +118,7 @@ Expected:
 
 ## 5. Synchronize Running Instances
 
-Pushing `main` or publishing a GitHub Release does **not** automatically update running Pi Web environments. After verifying the release asset and `Latest` status, upgrade target running instances from the official GitHub Release tarball (for example, `v1.0.5`):
+Pushing `main` or publishing a GitHub Release does **not** automatically update running Pi Web environments. After verifying the release asset and `Latest` status, upgrade target running instances from the official GitHub Release tarball (for example, `v1.1.0`):
 
 ```bash
 npm install -g "https://github.com/koxircom/pi-web-standalone/releases/download/v${VERSION}/pi-web-standalone-${VERSION}.tgz"

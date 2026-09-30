@@ -376,11 +376,29 @@ function draftImageToAttachedImage(image: ChatDraftImage): AttachedImage {
   };
 }
 
-function draftImagesToAttachedImages(images: ChatDraftImage[] | undefined): AttachedImage[] {
+export function draftImagesToAttachedImages(images: ChatDraftImage[] | undefined): AttachedImage[] {
   return (images ?? [])
     .filter(isBase64ImageWithinLimits)
-    .slice(0, MAX_ATTACHED_IMAGES)
     .map(draftImageToAttachedImage);
+}
+
+export function getTooManyImagesNotice(
+  imageCount: number,
+  maxImages = MAX_ATTACHED_IMAGES,
+  locale = "en",
+): { title: string; body: string } | null {
+  if (imageCount <= maxImages) return null;
+  const excess = imageCount - maxImages;
+  if (locale === "zh-CN" || locale === "zh-TW") {
+    return {
+      title: `已附加 ${imageCount} 张图片（单次发送上限 ${maxImages} 张）`,
+      body: `单条消息最多可发送 ${maxImages} 张图片（当前超出 ${excess} 张）。请先删减多余图片或分批发送。`,
+    };
+  }
+  return {
+    title: `Too many images attached (${imageCount}/${maxImages})`,
+    body: `A message can include at most ${maxImages} images. Remove ${excess} image${excess === 1 ? "" : "s"} or send in batches before submitting.`,
+  };
 }
 
 export function canRestoreUserMessage(
@@ -561,7 +579,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   cwd,
   compact = false,
 }: Props, ref) {
-  const { t } = useI18n();
+  const { t, locale } = useI18n();
   const { fontSize } = useChatAppearance();
   const isMobile = useIsMobile();
   const [value, setValue] = useState(() => (draftKey ? getDraft(draftKey)?.value ?? "" : ""));
@@ -733,14 +751,12 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
       // not lost if this instance is the one being unmounted.
       if (destinationDraftKey) setDraft(destinationDraftKey, restoredDraft);
       if (!targetsCurrentComposer) return;
-      const restoredImages = images?.length
+      const restoredIncomingImages = draftImagesToAttachedImages(images);
+      const restoredImages = restoredIncomingImages.length
         ? [
-            ...draftImagesToAttachedImages(images).slice(
-              0,
-              Math.max(0, MAX_ATTACHED_IMAGES - attachedImagesRef.current.length),
-            ),
+            ...restoredIncomingImages,
             ...attachedImagesRef.current,
-          ].slice(0, MAX_ATTACHED_IMAGES)
+          ]
         : attachedImagesRef.current;
       // Session promotion can rekey this composer before React flushes the
       // functional updates below, so update the imperative snapshot first.
@@ -753,12 +769,9 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
       });
       setAtQuery(null);
       setHistoryMenuOpen(false);
-      if (images?.length) {
+      if (restoredIncomingImages.length) {
         setAttachedImages((current) => {
-          const available = Math.max(0, MAX_ATTACHED_IMAGES - current.length);
-          const restored = draftImagesToAttachedImages(images)
-            .slice(0, available);
-          const next = restored.length > 0 ? [...restored, ...current] : current;
+          const next = [...restoredIncomingImages, ...current];
           attachedImagesRef.current = next;
           return next;
         });
@@ -943,7 +956,12 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
 
   const handleSend = useCallback(async () => {
     const msg = value.trim();
-    if (!msg && !attachedImages.length) return;
+    const currentImageCount = Math.max(
+      attachedImages.length,
+      typeof attachedImagesRef !== "undefined" ? attachedImagesRef.current.length : 0,
+    );
+    if (!msg && !currentImageCount) return;
+    if (currentImageCount > MAX_ATTACHED_IMAGES) return;
     onAudioUnlock?.();
     const builtinAllowed = !isStreaming || canRunBuiltinSlashCommandWhileStreaming(msg);
     if (builtinAllowed && await runBuiltinCommand(msg)) return;
@@ -985,7 +1003,9 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     ? t(slashQuery ? "chat.match" : "chat.command")
     : t(slashQuery ? "chat.matches" : "chat.commands", { count: filteredSlashCommands.length });
   const hasInputText = Boolean(value.trim());
-  const canQueueStreamingMessage = hasInputText || attachedImages.length > 0;
+  const tooManyImagesNotice = getTooManyImagesNotice(attachedImages.length, MAX_ATTACHED_IMAGES, locale);
+  const canSendMessage = (hasInputText || attachedImages.length > 0) && !tooManyImagesNotice;
+  const canQueueStreamingMessage = (hasInputText || attachedImages.length > 0) && !tooManyImagesNotice;
   // Warn when images are attached but the selected model is known not to accept
   // image input (#584), including a resolved default. Unknown models stay silent.
   const showImageUnsupportedWarning = (
@@ -1185,9 +1205,14 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
 
   const sendQueued = useCallback((mode: "steer" | "followup") => {
     const msg = value.trim();
-    if (!msg && !attachedImages.length) return;
+    const currentImageCount = Math.max(
+      attachedImages.length,
+      typeof attachedImagesRef !== "undefined" ? attachedImagesRef.current.length : 0,
+    );
+    if (!msg && !currentImageCount) return;
+    if (currentImageCount > MAX_ATTACHED_IMAGES) return;
     onAudioUnlock?.();
-    if (!attachedImages.length && onBuiltinCommand && canRunBuiltinSlashCommandWhileStreaming(msg)) {
+    if (!currentImageCount && onBuiltinCommand && canRunBuiltinSlashCommandWhileStreaming(msg)) {
       void runBuiltinCommand(msg);
       return;
     }
@@ -1608,6 +1633,13 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
       <div className="pi-enh-cursor-composer pi-enh-composer-model-pill" style={{ maxWidth: "var(--chat-content-max-width, 820px)", margin: "0 auto" }}>
         <ModelErrorBanner error={modelError} />
         <ModelScopeWarningBanner warnings={modelScopeWarnings} />
+        {tooManyImagesNotice && (
+          <ModelNoticeBanner
+            tone="error"
+            title={tooManyImagesNotice.title}
+            body={tooManyImagesNotice.body}
+          />
+        )}
         {showImageUnsupportedWarning && (() => {
           const entry = modelList?.find((m) => m.provider === model?.provider && m.id === model?.modelId);
           return (
@@ -2235,21 +2267,22 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
           ) : (
             <button
               onClick={handleSend}
-              disabled={!value.trim() && !attachedImages.length}
+              disabled={!canSendMessage}
+              title={tooManyImagesNotice ? `${tooManyImagesNotice.title} — ${tooManyImagesNotice.body}` : undefined}
               style={{
                 flexShrink: 0,
                 alignSelf: "flex-end",
                 display: "flex", alignItems: "center", gap: 6,
                 padding: "7px 14px",
-                background: (value.trim() || attachedImages.length) ? "var(--accent)" : "var(--bg-panel)",
+                background: canSendMessage ? "var(--accent)" : "var(--bg-panel)",
                 border: "none",
                 borderRadius: 8,
-                color: (value.trim() || attachedImages.length) ? "var(--accent-contrast)" : "var(--text-dim)",
-                cursor: (value.trim() || attachedImages.length) ? "pointer" : "not-allowed",
+                color: canSendMessage ? "var(--accent-contrast)" : "var(--text-dim)",
+                cursor: canSendMessage ? "pointer" : "not-allowed",
                 fontSize: 13,
                 fontWeight: 600,
                 letterSpacing: "-0.01em",
-                boxShadow: (value.trim() || attachedImages.length) ? "0 1px 3px color-mix(in srgb, var(--accent) 25%, transparent)" : "none",
+                boxShadow: canSendMessage ? "0 1px 3px color-mix(in srgb, var(--accent) 25%, transparent)" : "none",
                 transition: "background 0.15s, box-shadow 0.15s",
               }}
             >

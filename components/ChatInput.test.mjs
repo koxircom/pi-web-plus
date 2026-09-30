@@ -11,7 +11,7 @@ const jiti = createJiti(import.meta.url, {
 });
 const React = await jiti.import("react");
 const { renderToStaticMarkup } = await jiti.import("react-dom/server");
-const { ChatInput, ModelErrorBanner, ModelScopeWarningBanner, canClearBuiltinCommandInput, canRestoreUserMessage, canRunBuiltinSlashCommandWhileStreaming, compressImageFile, cycleListIndex, filterModelOptions, getUpwardMenuMaxHeight, getUserMessageText, getUserMessageDraftImages, isExactSlashCommand, modelSupportsImageInput, replaceLinksWithMarkdown, shouldCompressImageFile } = await jiti.import("./ChatInput.tsx");
+const { ChatInput, ModelErrorBanner, ModelScopeWarningBanner, canClearBuiltinCommandInput, canRestoreUserMessage, canRunBuiltinSlashCommandWhileStreaming, compressImageFile, cycleListIndex, draftImagesToAttachedImages, filterModelOptions, getTooManyImagesNotice, getUpwardMenuMaxHeight, getUserMessageText, getUserMessageDraftImages, isExactSlashCommand, modelSupportsImageInput, replaceLinksWithMarkdown, shouldCompressImageFile } = await jiti.import("./ChatInput.tsx");
 const { ModelSelector } = await jiti.import("./ModelSelector.tsx");
 const { clearDraft, getDraft, mergeRestoredSubmissionDraft, mergeRestoredSubmissionText, rekeyDraft, setDraft } = await jiti.import("@/lib/draft-store.ts");
 const { I18nProvider } = await jiti.import("@/hooks/useI18n");
@@ -698,6 +698,369 @@ test("renders image warnings for known text-only defaults without an explicit mo
         assert.ok(html.indexOf('role="alert"') < html.indexOf("<textarea"));
       }
     }
+  } finally {
+    clearDraft(draftKey);
+  }
+});
+
+test("draftImagesToAttachedImages preserves all valid images beyond 10 while filtering invalid ones", () => {
+  const makeImg = (idx) => ({
+    data: Buffer.from(`img-${idx}`, "utf8").toString("base64"),
+    mimeType: "image/png",
+  });
+  const elevenValid = Array.from({ length: 11 }, (_, i) => makeImg(i + 1));
+  const decoded = draftImagesToAttachedImages([
+    ...elevenValid,
+    { data: "invalid-base64!", mimeType: "image/png" },
+  ]);
+
+  assert.equal(decoded.length, 11);
+  assert.deepEqual(
+    decoded.map(({ data, mimeType }) => ({ data, mimeType })),
+    elevenValid,
+  );
+  assert.equal(getTooManyImagesNotice(10), null);
+  assert.match(getTooManyImagesNotice(11)?.title ?? "", /11\/10/);
+  assert.match(getTooManyImagesNotice(11)?.body ?? "", /Remove 1 image or send in batches/);
+});
+
+test("ChatInput restoreSubmission preserves all 11 images and text when draft grows from 1 to 9 during delayed recall, and handles 2+1, failed submission, and different draftKey", async () => {
+  const { recallSessionQueue } = await jiti.import("@/lib/queue-recall-client.ts");
+  const queueActions = await jiti.import("@/lib/queue-actions.ts");
+  const { Agent } = await jiti.import("@earendil-works/pi-agent-core");
+
+  const sourceText = readFileSync(new URL("./ChatInput.tsx", import.meta.url), "utf8");
+  const source = ts.createSourceFile("ChatInput.tsx", sourceText, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  function findRestoreMethod(node) {
+    if (ts.isMethodDeclaration(node) && node.name.getText(source) === "restoreSubmission") {
+      return node;
+    }
+    return ts.forEachChild(node, findRestoreMethod);
+  }
+  const methodNode = findRestoreMethod(source);
+  assert.ok(methodNode, "restoreSubmission method must exist in ChatInput.tsx");
+  const fnExpr = `(${methodNode.parameters.map((p) => p.getText(source)).join(", ")}) => ${methodNode.body.getText(source)}`;
+  const restoreScript = new Script(ts.transpileModule(fnExpr, {
+    compilerOptions: { target: ts.ScriptTarget.ES2020 },
+  }).outputText);
+
+  const makeImg = (idx) => ({
+    data: Buffer.from(`chatinput-img-${idx}`, "utf8").toString("base64"),
+    mimeType: "image/png",
+  });
+  const toAttached = (img) => ({
+    ...img,
+    previewUrl: `data:${img.mimeType};base64,${img.data}`,
+  });
+
+  function createHarness(initialDraftKey, initialText, initialImages) {
+    const state = {
+      draftKeyRef: { current: initialDraftKey },
+      valueRef: { current: initialText },
+      attachedImagesRef: { current: initialImages.map(toAttached) },
+      valueState: initialText,
+      attachedImagesState: initialImages.map(toAttached),
+      textareaRef: { current: null },
+    };
+    setDraft(initialDraftKey, { value: initialText, images: initialImages });
+    const restoreSubmission = restoreScript.runInNewContext({
+      Array,
+      Object,
+      Math,
+      draftKeyRef: state.draftKeyRef,
+      valueRef: state.valueRef,
+      attachedImagesRef: state.attachedImagesRef,
+      textareaRef: state.textareaRef,
+      getDraft,
+      setDraft,
+      mergeRestoredSubmissionDraft,
+      mergeRestoredSubmissionText,
+      draftImagesToAttachedImages,
+      imageToDraftImage: (img) => ({ data: img.data, mimeType: img.mimeType }),
+      setValue(updater) {
+        state.valueState = typeof updater === "function" ? updater(state.valueState) : updater;
+      },
+      setAttachedImages(updater) {
+        state.attachedImagesState = typeof updater === "function" ? updater(state.attachedImagesState) : updater;
+      },
+      setAtQuery() {},
+      setHistoryMenuOpen() {},
+      requestAnimationFrame() {},
+    });
+    return { state, restoreSubmission };
+  }
+
+  // 1. Delayed RPC race: draft grows from 1 to 9 images while recall_all_queued_messages is in flight, returns 2 -> 11 kept
+  const raceKey = "chatinput-race-sid";
+  clearDraft(raceKey);
+  const initialImg = makeImg(1);
+  const addedDuringRpc = Array.from({ length: 8 }, (_, i) => makeImg(i + 2)); // 2..9
+  const recalled1 = makeImg(10);
+  const recalled2 = makeImg(11);
+  const { state: raceState, restoreSubmission: raceRestore } = createHarness(
+    raceKey,
+    "existing user text",
+    [initialImg],
+  );
+
+  const agent = new Agent({ streamFn: async () => { throw new Error("unused"); } });
+  agent.state.isStreaming = true;
+  const fakeSession = {
+    sessionId: raceKey,
+    isStreaming: true,
+    isCompacting: false,
+    agent,
+    _steeringMessages: ["recalled steer"],
+    _followUpMessages: ["recalled followup"],
+    _emitQueueUpdate() {},
+  };
+  agent.steer({
+    role: "user",
+    content: [{ type: "text", text: "recalled steer" }, { type: "image", ...recalled1 }],
+    timestamp: Date.now(),
+  });
+  agent.followUp({
+    role: "user",
+    content: [{ type: "text", text: "recalled followup" }, { type: "image", ...recalled2 }],
+    timestamp: Date.now(),
+  });
+
+  const outcome = await recallSessionQueue({
+    sessionId: raceKey,
+    targetDraftKey: raceKey,
+    getExistingDraftImageCount: () => raceState.attachedImagesRef.current.length,
+    sendCommand: async (_sid, cmd) => {
+      if (cmd.type === "get_queue_actions") {
+        return queueActions.snapshot(fakeSession);
+      }
+      if (cmd.type === "recall_all_queued_messages") {
+        await new Promise((r) => setTimeout(r, 10));
+        // User adds 8 images while recall RPC is in flight -> draft now has 9 images
+        const nineImages = [initialImg, ...addedDuringRpc];
+        raceState.attachedImagesRef.current = nineImages.map(toAttached);
+        raceState.attachedImagesState = nineImages.map(toAttached);
+        setDraft(raceKey, { value: raceState.valueRef.current, images: nineImages });
+        return queueActions.recallAll(fakeSession, cmd.tokens);
+      }
+      throw new Error(`Unexpected: ${cmd.type}`);
+    },
+    restoreSubmission: (text, images, targetDraftKey) => {
+      raceRestore(text, images?.map(({ data, mimeType }) => ({ data, mimeType })), targetDraftKey);
+    },
+  });
+
+  assert.equal(outcome.recalled, true);
+  assert.equal(raceState.valueState, "recalled steer\n\nrecalled followup\n\nexisting user text");
+  assert.equal(raceState.attachedImagesState.length, 11);
+  assert.equal(raceState.attachedImagesRef.current.length, 11);
+  assert.deepEqual(
+    Array.from(raceState.attachedImagesState, ({ data, mimeType }) => ({ data, mimeType })),
+    [recalled1, recalled2, initialImg, ...addedDuringRpc],
+  );
+  assert.deepEqual(getDraft(raceKey), {
+    value: "recalled steer\n\nrecalled followup\n\nexisting user text",
+    images: [recalled1, recalled2, initialImg, ...addedDuringRpc],
+  });
+  clearDraft(raceKey);
+
+  // 2. Normal 2+1 recall
+  const normalKey = "chatinput-normal-2plus1";
+  clearDraft(normalKey);
+  const { state: normalState, restoreSubmission: normalRestore } = createHarness(
+    normalKey,
+    "draft one",
+    [makeImg(3)],
+  );
+  normalRestore("queued two", [makeImg(1), makeImg(2)], normalKey);
+  assert.equal(normalState.valueState, "queued two\n\ndraft one");
+  assert.equal(normalState.attachedImagesState.length, 3);
+  assert.deepEqual(getDraft(normalKey)?.images, [makeImg(1), makeImg(2), makeImg(3)]);
+  clearDraft(normalKey);
+
+  // 3. Failed submission recovery and different draft key isolation
+  const activeKey = "chatinput-active-session";
+  const backgroundKey = "chatinput-background-session";
+  clearDraft(activeKey);
+  clearDraft(backgroundKey);
+  setDraft(backgroundKey, { value: "bg draft", images: [makeImg(20)] });
+  const { state: activeState, restoreSubmission: activeRestore } = createHarness(
+    activeKey,
+    "",
+    [],
+  );
+  // Restore into background draft key without touching active composer
+  activeRestore("failed bg submit", [makeImg(19)], backgroundKey);
+  assert.equal(activeState.valueState, "");
+  assert.equal(activeState.attachedImagesState.length, 0);
+  assert.deepEqual(getDraft(backgroundKey), {
+    value: "failed bg submit\n\nbg draft",
+    images: [makeImg(19), makeImg(20)],
+  });
+  // Restore failed submission into active composer
+  activeRestore("failed active submit", [makeImg(18)], activeKey);
+  assert.equal(activeState.valueState, "failed active submit");
+  assert.deepEqual(getDraft(activeKey)?.images, [makeImg(18)]);
+  clearDraft(activeKey);
+  clearDraft(backgroundKey);
+});
+
+test("over-limit draft (>10 images) renders all previews and warning banner, blocks handleSend and sendQueued without clearing draft, and keeps addImages capped at 10", async () => {
+  const draftKey = "over-limit-submit-guard";
+  clearDraft(draftKey);
+  const makeImg = (idx) => ({
+    data: Buffer.from(`guard-img-${idx}`, "utf8").toString("base64"),
+    mimeType: "image/png",
+  });
+  const elevenImages = Array.from({ length: 11 }, (_, i) => makeImg(i + 1));
+  setDraft(draftKey, {
+    value: "preserve this text and 11 images",
+    images: elevenImages,
+  });
+
+  try {
+    // 1. SSR render check: all 11 images rendered, warning banner visible, Send button disabled
+    const html = renderToStaticMarkup(
+      React.createElement(
+        I18nProvider,
+        null,
+        React.createElement(ChatInput, {
+          onSend() {},
+          onAbort() {},
+          isStreaming: false,
+          draftKey,
+        }),
+      ),
+    );
+    assert.equal((html.match(/<img\b/g) ?? []).length, 11);
+    assert.match(html, /Too many images attached \(11\/10\)/);
+    assert.match(html, /Remove 1 image or send in batches before submitting/);
+    assert.match(html, /disabled=""[^>]*>.*?Send<\/button>/);
+
+    // 2. Execute actual handleSend & sendQueued from ChatInput.tsx
+    const sourceText = readFileSync(new URL("./ChatInput.tsx", import.meta.url), "utf8");
+    const source = ts.createSourceFile("ChatInput.tsx", sourceText, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+    function findCallback(name, node = source) {
+      if (ts.isVariableDeclaration(node) && node.name.getText(source) === name) {
+        return node.initializer.arguments[0];
+      }
+      return ts.forEachChild(node, (child) => findCallback(name, child));
+    }
+
+    const MAX_ATTACHED_IMAGES = 10;
+    const MAX_ATTACHED_IMAGE_BYTES = 10 * 1024 * 1024;
+    let sendCalls = 0;
+    let steerCalls = 0;
+    let followUpCalls = 0;
+    let clearCalls = 0;
+
+    const attachedEleven = draftImagesToAttachedImages(elevenImages);
+    const handleSendFn = new Script(ts.transpileModule(findCallback("handleSend").getText(source), {
+      compilerOptions: { target: ts.ScriptTarget.ES2020 },
+    }).outputText).runInNewContext({
+      value: "preserve this text and 11 images",
+      attachedImages: attachedEleven,
+      attachedImagesRef: { current: attachedEleven },
+      MAX_ATTACHED_IMAGES,
+      onAudioUnlock() {},
+      isStreaming: false,
+      canRunBuiltinSlashCommandWhileStreaming,
+      runBuiltinCommand: async () => false,
+      clearInput() {
+        clearCalls += 1;
+        clearDraft(draftKey);
+      },
+      onSend() {
+        sendCalls += 1;
+      },
+    });
+
+    const sendQueuedFn = new Script(ts.transpileModule(findCallback("sendQueued").getText(source), {
+      compilerOptions: { target: ts.ScriptTarget.ES2020 },
+    }).outputText).runInNewContext({
+      value: "preserve this text and 11 images",
+      attachedImages: attachedEleven,
+      attachedImagesRef: { current: attachedEleven },
+      MAX_ATTACHED_IMAGES,
+      onAudioUnlock() {},
+      onBuiltinCommand: undefined,
+      canRunBuiltinSlashCommandWhileStreaming,
+      runBuiltinCommand: async () => false,
+      onPromptWithStreamingBehavior: undefined,
+      clearInput() {
+        clearCalls += 1;
+        clearDraft(draftKey);
+      },
+      onSteer() {
+        steerCalls += 1;
+      },
+      onFollowUp() {
+        followUpCalls += 1;
+      },
+    });
+
+    await handleSendFn();
+    sendQueuedFn("steer");
+    sendQueuedFn("followup");
+
+    assert.equal(sendCalls, 0, "must not call onSend when images > 10");
+    assert.equal(steerCalls, 0, "must not call onSteer when images > 10");
+    assert.equal(followUpCalls, 0, "must not call onFollowUp when images > 10");
+    assert.equal(clearCalls, 0, "must not clear input or draft when images > 10");
+    assert.equal(getDraft(draftKey)?.images.length, 11, "draft in store must remain intact with 11 images");
+
+    // Once user removes 1 image (down to 10), handleSend succeeds
+    const attachedTen = attachedEleven.slice(0, 10);
+    const handleSendTenFn = new Script(ts.transpileModule(findCallback("handleSend").getText(source), {
+      compilerOptions: { target: ts.ScriptTarget.ES2020 },
+    }).outputText).runInNewContext({
+      value: "preserve this text and 11 images",
+      attachedImages: attachedTen,
+      attachedImagesRef: { current: attachedTen },
+      MAX_ATTACHED_IMAGES,
+      onAudioUnlock() {},
+      isStreaming: false,
+      canRunBuiltinSlashCommandWhileStreaming,
+      runBuiltinCommand: async () => false,
+      clearInput() {
+        clearCalls += 1;
+      },
+      onSend(_msg, imgs) {
+        sendCalls += 1;
+        assert.equal(imgs.length, 10);
+      },
+    });
+    await handleSendTenFn();
+    assert.equal(sendCalls, 1);
+    assert.equal(clearCalls, 1);
+
+    // 3. Ordinary addImages (processImageFiles) still enforces strict 10-image cap
+    let currentAttached = attachedTen.slice(0, 8);
+    const attachedImagesRef = { current: currentAttached };
+    const pendingImageCountRef = { current: 0 };
+    const processImageFilesFn = new Script(ts.transpileModule(findCallback("processImageFiles").getText(source), {
+      compilerOptions: { target: ts.ScriptTarget.ES2020 },
+    }).outputText).runInNewContext({
+      compact: false,
+      MAX_ATTACHED_IMAGES,
+      MAX_ATTACHED_IMAGE_BYTES,
+      attachedImagesRef,
+      pendingImageCountRef,
+      compressImageFile: async (file) => ({ data: file.data, mimeType: file.type }),
+      URL: { createObjectURL: (file) => `blob:${file.name}`, revokeObjectURL() {} },
+      revokeImagePreview() {},
+      setAttachedImages(updater) {
+        currentAttached = updater(currentAttached);
+      },
+    });
+
+    await processImageFilesFn([
+      { name: "a.png", type: "image/png", size: 100, data: makeImg(21).data },
+      { name: "b.png", type: "image/png", size: 100, data: makeImg(22).data },
+      { name: "c.png", type: "image/png", size: 100, data: makeImg(23).data },
+      { name: "d.png", type: "image/png", size: 100, data: makeImg(24).data },
+    ]);
+    assert.equal(currentAttached.length, 10, "ordinary addImages must cap at 10");
+    assert.equal(pendingImageCountRef.current, 0);
   } finally {
     clearDraft(draftKey);
   }

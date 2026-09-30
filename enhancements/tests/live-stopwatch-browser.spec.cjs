@@ -261,6 +261,27 @@ test("live-stopwatch in real Chromium: mixed user DOM order, missing footer fall
     assert.ok(step1.timerRect && step1.timerRect.width > 0 && step1.timerRect.height > 0, "Live timer must be visibly rendered with non-zero bounding box");
     assert.ok(step1.editRect && step1.timerRect.top >= step1.editRect.bottom, `Live timer (${step1.timerRect.top}) must be positioned below edit card (${step1.editRect.bottom}) without overlap`);
 
+    // New agent run must not inherit the preceding turn's authoritative clock.
+    const turnBoundary = await page.evaluate(() => {
+      const sid = "live-stopwatch-test";
+      const oldStart = Date.now() - (18 * 60 + 45) * 1000;
+      window.__PI_ENH_RECORD_ACTIVE_TURN_START__(sid, oldStart, "entry-u1", true);
+      window.__PI_ENH_RECORD_ACTIVE_TURN_START__(sid, Date.now(), null, false);
+      const rejectedBeforeStart = window.__PI_ENH_GET_ACTIVE_TURN_START__(sid);
+      window.__PI_ENH_HANDLE_MODEL_SPEED_STREAM_EVENT__(sid, { type: "agent_start" });
+      const newStart = window.__PI_ENH_GET_ACTIVE_TURN_START__(sid);
+      window.__PI_ENH_RECORD_ACTIVE_TURN_START__(sid, Date.now() + 1000, null, false);
+      const afterSteering = window.__PI_ENH_GET_ACTIVE_TURN_START__(sid);
+      return { oldStart, rejectedBeforeStart, newStart, afterSteering, now: Date.now() };
+    });
+    assert.equal(turnBoundary.rejectedBeforeStart, turnBoundary.oldStart, "Old authoritative turn must reproduce the reported 18-minute clock before agent_start");
+    assert.ok(turnBoundary.newStart > turnBoundary.oldStart && turnBoundary.now - turnBoundary.newStart < 2000,
+      "agent_start must reset the running clock to this new run");
+    assert.equal(turnBoundary.afterSteering, turnBoundary.newStart, "Steering within one run must preserve its start time");
+    await page.waitForFunction(() => /^⏱️ 运行中 [\d.]+s$/.test(document.querySelector(".pi-enh-live-timer")?.textContent || ""), undefined, { timeout: 1800 });
+    const historicalTimerCount = await page.evaluate(() => document.getElementById("msg-a1")?.querySelectorAll(".pi-enh-live-timer").length);
+    assert.equal(historicalTimerCount, 0, "New turn must not attach its stopwatch to historical assistant messages");
+
     // =========================================================================
     // 2. 验证连活跃 assistant 消息都尚未生成（仅有最新 user 消息 + 聊天区尾部）时的聊天区尾部可见兜底
     // =========================================================================

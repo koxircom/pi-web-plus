@@ -38,6 +38,13 @@
       defaultEnabled: true,
     },
     {
+      id: "turn-number-indicator",
+      name: "对话轮次序号",
+      desc: "在每一轮用户消息下面的时间左边显示轮次序号（如 #1、#2），直观掌握对话轮次与上下文深度。",
+      category: "显示增强",
+      defaultEnabled: true,
+    },
+    {
       id: "task-tool-auto-collapse",
       name: "任务完成自动折叠工具过程",
       desc: "任务处理、等待模型及工具调用期间保持全部过程展开；仅任务完成后自动折叠本轮过程（bash、wiki 等）。最终答复保持可见，工具卡片仍可按需手动展开。", 
@@ -59,9 +66,9 @@
       defaultEnabled: true,
     },
     {
-      id: "subagent-default-profile",
-      name: "默认子 Agent profile",
-      desc: "从当前工作目录下实际生效且已启用的 profile 中选择服务端默认值；显式指定 subagent_type 的调用不受影响。",
+      id: "subagent-model-override",
+      name: "子任务模型",
+      desc: "统一设置所有子 Agent profile 使用的模型；单次 Agent 调用显式指定 model 时优先。",
       category: "偏好记忆",
       defaultEnabled: true,
     },
@@ -91,6 +98,13 @@
       id: "compaction-auto-collapse",
       name: "会话压缩摘要自动折叠",
       desc: "会话历史压缩（compaction）卡片默认自动收起大段长篇摘要，仅保留一行标题横条；点击顶部栏随时展开或重新收起。",
+      category: "显示增强",
+      defaultEnabled: true,
+    },
+    {
+      id: "pi-mail-auto-collapse",
+      name: "协作消息自动折叠",
+      desc: "跨会话协作消息长卡片默认收起为单行亲民摘要，仅呈现「协作消息 · 已收到」并支持随时展开/收起及原文复制。",
       category: "显示增强",
       defaultEnabled: true,
     },
@@ -188,7 +202,7 @@
     {
       id: "mobile-model-keyboard-guard",
       name: "移动端模型切换防弹软键盘",
-      desc: "移动端点击切换模型时自动收起软键盘并禁用搜索框自动聚焦，限制下拉菜单顶部视口边界，防止菜单被软键盘顶出屏幕。",
+      desc: "移动端点击切换模型时保持软键盘展开不打断输入，下拉菜单物理锚定紧挨在按钮正上方，键盘收起时自适应同步跟随，防止菜单脱节悬空。",
       category: "交互增强",
       defaultEnabled: true,
     },
@@ -349,7 +363,7 @@
     {
       id: "session-odoo-addons",
       name: "Odoo 插件更新状态胶囊",
-      desc: "在会话项下方展示该会话更新的 Odoo 插件圆角药丸标签（白色边框、纯白文字、微光发光底纹，每行一个插件）。",
+      desc: "在会话项下方展示该会话更新的 Odoo 插件圆角药丸标签（最新插件显示绿点与绿色边框、历史修改显示白点与白框，纯白文字、微光发光底纹，每行一个插件）。",
       category: "显示增强",
       defaultEnabled: true,
     },
@@ -522,6 +536,13 @@
       defaultEnabled: true,
     },
     {
+      id: "excel-sheet-preview",
+      name: "Excel 表格在线预览",
+      desc: "在右侧文件面板中直接交互式预览 Excel（.xlsx / .xls / .csv）工作簿，支持多工作表标签切换、冻结表头、行列标尺与单元格搜索。",
+      category: "显示增强",
+      defaultEnabled: true,
+    },
+    {
       id: "workspace-picker-hover",
       name: "工作区菜单悬停高亮",
       desc: "为侧边栏工作区/项目下拉菜单中的所有选项（历史路径、使用默认目录、自定义路径）添加平滑悬停与点击交互反馈，防止视觉上产生卡顿感。",
@@ -533,6 +554,13 @@
       name: "会话批量管理与删除",
       desc: "支持在左侧会话列表进行鼠标多选、Shift 范围连续选择、全选并一键批量彻底删除会话。",
       category: "快捷操作",
+      defaultEnabled: true,
+    },
+    {
+      id: "pi-agent-update-notice",
+      name: "Pi Agent 更新提示",
+      desc: "实时检测上游官方 Pi Coding Agent (https://github.com/earendil-works/pi) 的版本发布。当有新版本时，在新建会话页面与设置面板中以轻量徽章形式醒目提示，并提供直达 Release 链接。",
+      category: "运行监控",
       defaultEnabled: true,
     },
   ];
@@ -561,9 +589,9 @@
     },
   };
   const ENHANCEMENT_MODULES = [
-    { id: "task-insights", name: "任务运行信息", desc: "集中管理任务耗时、速度和回合用量信息。", category: "运行监控", version: "1.0.0", defaultEnabled: true, features: ["model-generation-speed", "turn-duration", "live-stopwatch", "turn-usage-total", "usage-cost-dashboard"] },
-    { id: "conversation-navigation", name: "对话阅读与导航", desc: "管理过程折叠、工具卡片布局、滚动稳定、会话导航和回到底部工具。", category: "交互增强", version: "1.0.0", defaultEnabled: true, features: ["task-tool-auto-collapse", "tool-card-layout-stability", "subagent-dispatch-cards", "history-scroll-stability", "session-scroll-restore", "session-virtual-scroll", "compaction-auto-collapse", "chat-scrollbar", "native-message-font", "minimap-full-nav", "scroll-to-bottom", "image-dblclick-preview"] },
-    { id: "subagent-dispatch", name: "子 Agent 调度", desc: "管理未显式指定 subagent_type 时使用的服务端默认 profile；实际调度始终由服务端动态读取。", category: "偏好记忆", version: "1.0.0", defaultEnabled: true, features: ["subagent-default-profile"] },
+    { id: "task-insights", name: "任务运行信息", desc: "集中管理任务耗时、速度和回合用量信息。", category: "运行监控", version: "1.0.0", defaultEnabled: true, features: ["model-generation-speed", "turn-duration", "turn-number-indicator", "live-stopwatch", "turn-usage-total", "usage-cost-dashboard", "pi-agent-update-notice"] },
+    { id: "conversation-navigation", name: "对话阅读与导航", desc: "管理过程折叠、工具卡片布局、滚动稳定、会话导航和回到底部工具。", category: "交互增强", version: "1.0.0", defaultEnabled: true, features: ["user-message-reconcile", "task-tool-auto-collapse", "tool-card-layout-stability", "subagent-dispatch-cards", "history-scroll-stability", "session-scroll-restore", "session-virtual-scroll", "compaction-auto-collapse", "pi-mail-auto-collapse", "chat-scrollbar", "native-message-font", "minimap-full-nav", "scroll-to-bottom", "image-dblclick-preview"] },
+    { id: "subagent-dispatch", name: "子 Agent 调度", desc: "管理全部子任务统一使用的服务端模型；实际模型由服务端动态读取。", category: "偏好记忆", version: "1.0.0", defaultEnabled: true, features: ["subagent-model-override"] },
     { id: "selection-context", name: "划选引用与上下文", desc: "管理文本划选引用、注释与发送上下文。", category: "交互增强", version: "1.0.0", defaultEnabled: true, features: ["quick-quote"] },
     { id: "session-sidebar", name: "会话列表增强", desc: "管理会话列表的快捷菜单、归档、标签、布局、颜色、快捷入口和搜索。", category: "交互增强", version: "1.0.0", defaultEnabled: true, features: ["context-menu", "session-pin-archive", "session-section-headers", "session-model-label", "session-item-compact", "session-color", "session-tags", "session-odoo-addons", "session-dblclick-rename", "session-search-shortcut", "session-search-project-folding", "session-batch-actions", "settings-tab-shortcuts", "mobile-swipe-drawer"] },
     { id: "composer-workflow", name: "输入与附件增强", desc: "管理编辑器快捷操作、草稿、附件和移动端输入保护。", category: "交互增强", version: "1.0.0", defaultEnabled: true, features: ["quick-action-buttons", "empty-send-continue", "composer-draft-cache", "composer-file-paste", "composer-image-zoom", "mobile-enter-newline", "mobile-model-keyboard-guard", "composer-clean-placeholder", "codex-composer-layout", "composer-model-reasoning-pill", "composer-queue-panel", "running-model-switch", "composer-markdown-format", "composer-format-toggle", "composer-compact-button", "composer-tool-preset", "composer-modes", "at-mention-plugins"] },
@@ -571,7 +599,7 @@
     { id: "background-attention", name: "后台会话提醒", desc: "管理跨项目状态、提示音与桌面通知。", category: "运行监控", version: "1.0.0", defaultEnabled: true, features: ["project-status-indicator", "session-attention-sound", "session-attention-desktop"] },
     { id: "notification-management", name: "通知管理", desc: "管理所有站内通知、网页操作提示、提示音与桌面提醒，并查看通知历史。", category: "偏好记忆", version: "1.0.0", defaultEnabled: true, features: ["notification-center"] },
     { id: "safety-performance", name: "安全与性能保护", desc: "管理误触保护、模型警告可见性和代码块扫描保护。", category: "安全防护", version: "1.0.0", defaultEnabled: true, features: ["model-scope-warning", "esc-guard", "code-block-scan-guard", "streaming-thinking-guard", "client-crash-diagnostics"] },
-    { id: "local-workspace", name: "本地工作区工具", desc: "管理本地路径直达和会话缓存。", category: "快捷操作", version: "1.0.0", defaultEnabled: true, features: ["local-path-launcher", "obsidian-markdown-viewer", "session-memory-cache", "session-history-integrity", "session-history-order-guard", "cross-device-session-sync", "session-panel-binding", "file-panel-overlay-guard", "general-settings-dashboard", "workspace-picker-hover", "settings-sidebar-layout"] },
+    { id: "local-workspace", name: "本地工作区工具", desc: "管理本地路径直达和会话缓存。", category: "快捷操作", version: "1.0.0", defaultEnabled: true, features: ["local-path-launcher", "obsidian-markdown-viewer", "excel-sheet-preview", "session-memory-cache", "session-history-integrity", "session-history-order-guard", "cross-device-session-sync", "session-panel-binding", "file-panel-overlay-guard", "general-settings-dashboard", "workspace-picker-hover", "settings-sidebar-layout"] },
     { id: "preference-memory", name: "偏好记忆", desc: "管理思考深度的跨会话记忆与浏览器增强设置归档。", category: "偏好记忆", version: "1.0.0", defaultEnabled: true, features: ["thinking-persistence", "enhancement-settings-archive"] },
   ];
   const ENHANCEMENT_MODULE_SETTINGS = {
@@ -579,7 +607,7 @@
       { kind: "action", action: "download-crash-diagnostics", label: "导出客户端异常记录（仅本地）" },
     ],
     "subagent-dispatch": [
-      { kind: "subagent-profile", featureId: "subagent-default-profile", key: "defaultProfile", label: "默认子 Agent profile", description: "仅在调用未显式指定 subagent_type 时生效；选项来自当前 cwd 下实际生效且已启用的 profile。" },
+      { kind: "subagent-model", featureId: "subagent-model-override", key: "subagentModel", label: "子任务模型", description: "覆盖 worker、scout 等所有 profile 自带的模型；单次 Agent 调用显式传入 model 时仍优先。" },
     ],
     "composer-workflow": [
       { kind: "setting", featureId: "mobile-enter-newline", key: "deviceMode", label: "回车设备模式" },
@@ -917,6 +945,7 @@
   }
 
   function onPluginStateChanged(id, enabled) {
+    if (id === "settings-tab-shortcuts") syncBottomShortcutsBar(true);
     if (id === "settings-sidebar-layout") {
       if (document.documentElement) {
         document.documentElement.classList.toggle("pi-enh-settings-sidebar-active", Boolean(enabled));
@@ -956,6 +985,9 @@
     } else if (id === "obsidian-markdown-viewer") {
       if (!enabled) removeMarkdownViewerEnhancements();
       else syncMarkdownViewerMode();
+    } else if (id === "excel-sheet-preview") {
+      if (!enabled && typeof removeExcelViewerEnhancements === "function") removeExcelViewerEnhancements();
+      else if (typeof syncExcelViewerMode === "function") syncExcelViewerMode();
     } else if (id === "model-scope-warning") {
       syncModelScopeWarnings();
     } else if (id === "turn-duration") {
@@ -965,6 +997,20 @@
         }
       } else {
         syncAllDurationBadges();
+      }
+    } else if (id === "turn-number-indicator") {
+      if (!enabled) {
+        if (typeof clearAllTurnNumberBadges === "function") {
+          clearAllTurnNumberBadges();
+        } else if (typeof window !== "undefined" && typeof window.__PI_ENH_CLEAR_TURN_NUMBERS__ === "function") {
+          window.__PI_ENH_CLEAR_TURN_NUMBERS__();
+        }
+      } else {
+        if (typeof syncAllTurnNumberBadges === "function") {
+          syncAllTurnNumberBadges();
+        } else if (typeof window !== "undefined" && typeof window.__PI_ENH_SYNC_TURN_NUMBERS__ === "function") {
+          window.__PI_ENH_SYNC_TURN_NUMBERS__();
+        }
       }
     } else if (id === "model-generation-speed") {
       if (!enabled) {
@@ -1006,6 +1052,25 @@
         syncCompactionCards();
       } else {
         removeCompactionEnhancements();
+      }
+    } else if (id === "pi-mail-auto-collapse") {
+      if (typeof syncPiMailActiveState === "function") {
+        syncPiMailActiveState();
+      } else if (typeof window !== "undefined" && typeof window.__PI_ENH_SYNC_PI_MAIL_ACTIVE_STATE__ === "function") {
+        window.__PI_ENH_SYNC_PI_MAIL_ACTIVE_STATE__();
+      }
+      if (enabled) {
+        if (typeof syncPiMailCards === "function") {
+          syncPiMailCards();
+        } else if (typeof window !== "undefined" && typeof window.__PI_ENH_SYNC_PI_MAIL_CARDS__ === "function") {
+          window.__PI_ENH_SYNC_PI_MAIL_CARDS__();
+        }
+      } else {
+        if (typeof removePiMailEnhancements === "function") {
+          removePiMailEnhancements();
+        } else if (typeof window !== "undefined" && typeof window.__PI_ENH_REMOVE_PI_MAIL_ENHANCEMENTS__ === "function") {
+          window.__PI_ENH_REMOVE_PI_MAIL_ENHANCEMENTS__();
+        }
       }
     } else if (id === "live-stopwatch") {
       if (!enabled) {
@@ -1103,14 +1168,21 @@
     } else if (id === "streaming-thinking-guard") {
       syncStreamingThinkingGuard(enabled);
     } else if (id === "session-pin-archive") {
-      if (!enabled) removeSessionPinArchiveControls();
-      else {
+      if (!enabled) {
+        removeSessionPinArchiveControls();
+        removeSessionSectionHeaders();
+      } else {
         syncSessionPinArchiveControls();
         void syncManifestPinnedEntries();
         void syncManifestArchivedEntries();
       }
+      syncSessionOdooAddonsLayout();
+      syncSessionSectionHeaders();
       requestSessionListRefresh();
     } else if (id === "session-section-headers") {
+      if (!enabled) removeSessionSectionHeaders();
+      syncSessionOdooAddonsLayout();
+      syncSessionSectionHeaders();
       requestSessionListRefresh();
     } else if (id === "session-model-label") {
       if (!enabled) removeSessionModelLabels();
@@ -1125,6 +1197,12 @@
       if (!enabled) {
         removeSessionTagsRowAll();
         closeSessionTagsPopover();
+        const tagMenuItem = activeMenu?.querySelector('[data-action="open-session-tags"]');
+        if (tagMenuItem) {
+          clearTimeout(tagMenuItem._openSubmenuTimer);
+          clearTimeout(tagMenuItem._closeSubmenuTimer);
+          tagMenuItem.remove();
+        }
         const tagsTab = document.querySelector(".settings-section-tabs [data-pi-enh-tab='tags']");
         if (tagsTab) tagsTab.remove();
         const tagsPanel = document.querySelector(".pi-enh-tags-panel");
@@ -2088,6 +2166,7 @@
   function isDurableStateEnabled() {
     if (typeof window === "undefined" || !window) return false;
     if (window.__PI_ENH_DURABLE_STATE_ENABLED__ !== true) return false;
+    if (window.__PI_ENH_NATIVE_STATE_API__ === true) return true;
     try {
       const loc = window.location;
       if (!loc) return false;
@@ -2103,6 +2182,7 @@
   }
 
   function getDurableStateBaseUrl() {
+    if (window.__PI_ENH_NATIVE_STATE_API__ === true) return "/api";
     try {
       const loc = window.location;
       const protocol = loc.protocol || "http:";
@@ -2115,7 +2195,7 @@
 
   function getDurableStateInstanceParam() {
     try {
-      const port = window.location?.port;
+      const port = String(window.location?.port || "");
       if (port === "30142") return "30142";
       return "30141";
     } catch (e) {
@@ -2267,8 +2347,19 @@
     const values = snapshotValues || collectPreferenceSnapshotValues();
     if (Object.keys(values).length === 0) return;
     const serialized = JSON.stringify(values);
-    try { if (localStorage.getItem("pi-enh-preferences-archived-v1") === serialized) return; } catch (e) {}
-    if (pendingDecorationOperations.some(op => op.type === "preferences_snapshot" && op.clientId === clientId && JSON.stringify(op.values) === serialized)) return;
+    let lastPendingSnapshot = null;
+    for (let i = pendingDecorationOperations.length - 1; i >= 0; i--) {
+      const op = pendingDecorationOperations[i];
+      if (op && op.type === "preferences_snapshot" && op.clientId === clientId) {
+        lastPendingSnapshot = op;
+        break;
+      }
+    }
+    if (lastPendingSnapshot) {
+      if (JSON.stringify(lastPendingSnapshot.values) === serialized) return;
+    } else {
+      try { if (localStorage.getItem("pi-enh-preferences-archived-v1") === serialized) return; } catch (e) {}
+    }
 
     recordDecorationOperation({
       type: "preferences_snapshot",
@@ -2362,10 +2453,14 @@
   let activeDurableStateSyncPromise = null;
   async function syncDurableState(force = false) {
     if (isDisposed) return Promise.resolve();
+    if (window.__PI_ENH_NATIVE_STATE_API__ === true && window.__PI_ENH_DURABLE_STATE_ENABLED__ === false) return Promise.resolve();
     if (activeDurableStateSyncPromise) return activeDurableStateSyncPromise;
     activeDurableStateSyncPromise = (async () => {
       try {
-        const endpoint = `${getDurableStateBaseUrl()}/enhancement-state?instance=${getDurableStateInstanceParam()}`;
+        const isNative = window.__PI_ENH_NATIVE_STATE_API__ === true;
+        const endpoint = isNative
+          ? `${getDurableStateBaseUrl()}/enhancement-state`
+          : `${getDurableStateBaseUrl()}/enhancement-state?instance=${getDurableStateInstanceParam()}`;
         let res, data;
         try {
           const fetchRes = await fetchModelsConfigBounded(endpoint, {
@@ -2382,6 +2477,10 @@
         }
 
         if (!res?.ok || !isValidDurablePostResponse({ ...data, acknowledgedOpIds: [] }, [])) {
+          if (res?.status === 409 && data?.error === "NOT_INITIALIZED") {
+            // 状态服务未初始化（空库正常状态），保留本地状态，不打印异常警告
+            return;
+          }
           console.warn("[pi-enh] 独立状态服务返回异常或格式错误:", res?.status);
           return;
         }
@@ -2710,7 +2809,10 @@
             const sentOpIds = sanitizedOperations.map((o) => o.opId);
 
             try {
-              const endpoint = `${getDurableStateBaseUrl()}/enhancement-state/operations?instance=${getDurableStateInstanceParam()}`;
+              const isNative = window.__PI_ENH_NATIVE_STATE_API__ === true;
+              const endpoint = isNative
+                ? `${getDurableStateBaseUrl()}/enhancement-state/operations`
+                : `${getDurableStateBaseUrl()}/enhancement-state/operations?instance=${getDurableStateInstanceParam()}`;
               let resp, result;
               try {
                 const fetchRes = await fetchModelsConfigBounded(endpoint, {
@@ -4528,13 +4630,52 @@
     return latestSid === sessionId.trim();
   }
 
+  function isConfirmedOdooAddonStatus(status) {
+    if (typeof status !== "string") return false;
+    const s = status.trim();
+    if (!s) return false;
+
+    // 排除明确的未安装、失败、未改动、需人工审核、纯兼容但未改
+    if (/未安装|uninstalled|not\s+installed/i.test(s)) return false;
+    if (/需人工审核|待讨论|未成功|部署失败|升级失败|failed/i.test(s)) return false;
+    if (/未改动|未改|未更新|未升级|无变动|无变化|未变动|unchanged/i.test(s)) return false;
+    if (/兼容但未改|保持兼容[，,\s]+未改|兼容[，,\s]+无变动/i.test(s)) return false;
+
+    const hasUpdateWord = /已更新|已升级|已部署|已发布|已修改|updated|upgraded/i.test(s);
+    const hasCompatWord = /保持兼容|已保持兼容|兼容|compatible/i.test(s);
+    const hasVersionChange =
+      /(?:\d+\.)+\d+.*?(?:->|→|至|=>).*?(?:\d+\.)+\d+/i.test(s) ||
+      /v?\d+(?:\.\d+)+.*?(?:->|→|至|=>).*?v?\d+(?:\.\d+)+/i.test(s);
+
+    if (hasUpdateWord) {
+      return true;
+    }
+
+    // 只有状态中有可证明版本变动的 X→Y 且兼容时保留；纯兼容带单个版本号（如 18.0.1.1.426（已保持兼容））属未改隐藏
+    if (hasCompatWord && hasVersionChange) {
+      return true;
+    }
+
+    // 纯安装-only（如已安装、installed、`.90` 已安装、(installed)）或纯版本号无更新证据均返回 false 隐藏
+    return false;
+  }
+
   function normalizeSessionOdooAddonItems(items, sessionId = "", manifest = window.__PI_ENH_ODOO_ADDONS_MANIFEST__) {
     if (!Array.isArray(items)) return [];
     const unique = new Map();
     for (const item of items) {
       const technical = typeof item === "string" ? item : item?.technical;
       if (typeof technical !== "string" || !/^[a-z][a-z0-9_]*$/.test(technical)) continue;
-      const normalizedItem = { technical, status: typeof item?.status === "string" ? item.status : "" };
+      const status = typeof item?.status === "string" ? item.status : "";
+      if (!isConfirmedOdooAddonStatus(status)) continue;
+
+      const normalizedItem = { technical, status };
+      if (item?.updatedAt) {
+        normalizedItem.updatedAt = item.updatedAt;
+      }
+      if (item?.name) {
+        normalizedItem.name = item.name;
+      }
       const isLatest = sessionId ? isLatestSessionForOdooAddon(sessionId, technical, manifest) : false;
       Object.defineProperty(normalizedItem, "isLatest", {
         value: isLatest,
@@ -4643,7 +4784,7 @@
       if (!tech) continue;
       const isLatest = isLatestSessionForOdooAddon(sessionId, tech, activeManifest);
       const baseTooltip = addon.status ? `${tech} · ${addon.status}` : tech;
-      const tooltip = isLatest ? `${baseTooltip} · 最新实际更新会话` : baseTooltip;
+      const tooltip = isLatest ? `${baseTooltip} · 最新实际更新会话` : `${baseTooltip} · 历史更新会话`;
       const ariaLabel = isLatest ? `${tech}（最新实际更新会话）` : `${tech}（历史更新会话）`;
       const pillClass = isLatest ? "pi-enh-odoo-addon-pill is-latest" : "pi-enh-odoo-addon-pill";
 
@@ -4681,7 +4822,10 @@
     }
 
     const rows = document.querySelectorAll(".pi-enh-session-row-host[data-pi-enh-session-id]");
-    if (!rows || rows.length === 0) return;
+    if (!rows || rows.length === 0) {
+      if (typeof removeSessionSectionHeaders === "function") removeSessionSectionHeaders();
+      return;
+    }
 
     // 按其所属虚拟列表容器 container = row.parentElement?.parentElement 分组
     const containerMap = new Map();
@@ -4698,8 +4842,11 @@
       list.push({ row, wrapper, sid: row.dataset.piEnhSessionId });
     }
 
-    const hasKnownGroups = Array.isArray(latestKnownSessionGroups) && latestKnownSessionGroups.length > 0;
-    const indices = hasKnownGroups ? new Map(latestKnownSessionGroups.map((group, index) => [group.root?.id, index])) : null;
+    const hasKnownGroups =
+      Array.isArray(latestKnownSessionGroups) &&
+      latestKnownSessionGroups.length > 0 &&
+      latestKnownSessionGroups.every((group) => Boolean(group?.root?.id));
+    const indices = hasKnownGroups ? new Map(latestKnownSessionGroups.map((group, index) => [group.root.id, index])) : null;
 
     for (const [container, entries] of containerMap.entries()) {
       let allHit = hasKnownGroups && indices !== null;
@@ -4724,34 +4871,16 @@
         if (container.style.height !== height) container.style.height = height;
         const pinnedCount = getPinnedSessionCount(groups);
         const recents = container.querySelector(".pi-enh-session-section-recents");
-        if (recents && pinnedCount) {
+        if (recents && pinnedCount && recents.getAttribute("data-pi-enh-fallback") === "true") {
           const top = (getSessionItemTop(pinnedCount, groups) - SESSION_RECENTS_HEADER_HEIGHT) + "px";
           if (recents.style.top !== top) recents.style.top = top;
         }
-      } else {
-        // 兜底保护，绝不直接 return！按视觉顺序排序构造 fallbackGroups
-        const orderedEntries = entries.slice().sort((a, b) => {
-          const topA = parseFloat(a.wrapper.style.top) || 0;
-          const topB = parseFloat(b.wrapper.style.top) || 0;
-          if (topA !== topB) return topA - topB;
-          return 0; // 相等时保持 DOM 顺序
-        });
-        const fallbackGroups = orderedEntries.map((e) => ({ root: { id: e.sid } }));
-        for (let idx = 0; idx < orderedEntries.length; idx++) {
-          const entry = orderedEntries[idx];
-          const top = getSessionItemTop(idx, fallbackGroups) + "px";
-          if (entry.wrapper.style.top !== top) entry.wrapper.style.top = top;
-          syncSessionOdooAddonsHeight(entry.row, entry.sid);
-        }
-        const height = (SESSION_NORMAL_ITEM_HEIGHT * fallbackGroups.length + getSessionHeadersHeight(fallbackGroups)) + "px";
-        if (container.style.height !== height) container.style.height = height;
-        const pinnedCount = getPinnedSessionCount(fallbackGroups);
-        const recents = container.querySelector(".pi-enh-session-section-recents");
-        if (recents && pinnedCount) {
-          const top = (getSessionItemTop(pinnedCount, fallbackGroups) - SESSION_RECENTS_HEADER_HEIGHT) + "px";
-          if (recents.style.top !== top) recents.style.top = top;
-        }
+      } else if (typeof removeSessionSectionHeaders === "function") {
+        removeSessionSectionHeaders(container);
       }
+    }
+    if (typeof syncSessionSectionHeaders === "function") {
+      syncSessionSectionHeaders();
     }
   }
 
@@ -5823,6 +5952,8 @@
       if (isDisposed) return;
       if (typeof syncSidebarRowsImmediate === "function") {
         syncSidebarRowsImmediate();
+      } else if (typeof syncSessionSectionHeaders === "function") {
+        syncSessionSectionHeaders();
       }
     });
   }
@@ -5886,8 +6017,202 @@
   SESSION_TAGGED_ITEM_HEIGHT = 72;
   const SESSION_TAG_ROW_EXTRA = 18; // 72 - 54
 
+  // 虚拟列表布局快照与前缀高度缓存 (单次布局批次 O(N+K)，零 TTL 强一致性)
+  let sessionLayoutSnapshot = null;
+
+  function safeGetLocalStorageItem(key) {
+    try {
+      return (typeof localStorage !== "undefined" && typeof localStorage?.getItem === "function")
+        ? localStorage.getItem(key)
+        : null;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function getPinnedManifestSignature() {
+    const m = (typeof window !== "undefined" && window?.__PI_ENH_PINNED_MANIFEST__) || null;
+    if (!m) return null;
+    if (Array.isArray(m)) {
+      return m.map((item) => (typeof item === "string" ? item : (item?.id || ""))).join(",");
+    }
+    if (typeof m === "object" && Array.isArray(m.pinned)) {
+      return m.pinned.map((item) => (typeof item === "string" ? item : (item?.id || ""))).join(",");
+    }
+    return String(m);
+  }
+
+  function isSessionLayoutSnapshotValid(snapshot) {
+    if (!snapshot) return false;
+
+    const rawPinned = safeGetLocalStorageItem(PINNED_SESSION_STORAGE_KEY);
+    if (snapshot.rawPinned !== rawPinned) return false;
+    if (rawPinned === null && snapshot.pinnedManifestSig !== getPinnedManifestSignature()) return false;
+
+    const rawTagMappings = safeGetLocalStorageItem(SESSION_TAG_MAPPING_STORAGE_KEY);
+    if (snapshot.rawTagMappings !== rawTagMappings) return false;
+
+    const rawTagDefs = safeGetLocalStorageItem(SESSION_TAGS_STORAGE_KEY);
+    if (snapshot.rawTagDefs !== rawTagDefs) return false;
+
+    const tagsEnabled = isPluginEnabled("session-tags");
+    if (snapshot.tagsEnabled !== tagsEnabled) return false;
+
+    const addonsEnabled = isPluginEnabled("session-odoo-addons");
+    if (snapshot.addonsEnabled !== addonsEnabled) return false;
+
+    const pinArchiveEnabled = isPluginEnabled("session-pin-archive");
+    if (snapshot.pinArchiveEnabled !== pinArchiveEnabled) return false;
+
+    const sectionHeadersEnabled = isPluginEnabled("session-section-headers");
+    if (snapshot.sectionHeadersEnabled !== sectionHeadersEnabled) return false;
+
+    const manifest = (typeof window !== "undefined" && window?.__PI_ENH_ODOO_ADDONS_MANIFEST__) || null;
+    if (snapshot.manifest !== manifest) return false;
+
+    return true;
+  }
+
+  function ensureSessionLayoutSnapshot(groups) {
+    if (!Array.isArray(groups)) return null;
+
+    if (
+      sessionLayoutSnapshot &&
+      sessionLayoutSnapshot.groups === groups &&
+      sessionLayoutSnapshot.groupsLength === groups.length &&
+      isSessionLayoutSnapshotValid(sessionLayoutSnapshot)
+    ) {
+      return sessionLayoutSnapshot;
+    }
+
+    const rawPinned = safeGetLocalStorageItem(PINNED_SESSION_STORAGE_KEY);
+    const pinnedManifestSig = rawPinned === null ? getPinnedManifestSignature() : null;
+    const rawTagMappings = safeGetLocalStorageItem(SESSION_TAG_MAPPING_STORAGE_KEY);
+    const rawTagDefs = safeGetLocalStorageItem(SESSION_TAGS_STORAGE_KEY);
+
+    const tagsEnabled = isPluginEnabled("session-tags");
+    const addonsEnabled = isPluginEnabled("session-odoo-addons");
+    const pinArchiveEnabled = isPluginEnabled("session-pin-archive");
+    const sectionHeadersEnabled = isPluginEnabled("session-section-headers");
+    const manifest = (typeof window !== "undefined" && window?.__PI_ENH_ODOO_ADDONS_MANIFEST__) || null;
+
+    // 1. 置顶统计 (单次批次仅读取/解析 1 次)
+    let pinnedCount = 0;
+    if (pinArchiveEnabled && sectionHeadersEnabled) {
+      const pinnedIds = readStoredSessionIds(PINNED_SESSION_STORAGE_KEY);
+      if (pinnedIds && pinnedIds.size > 0) {
+        for (const group of groups) {
+          const rootId = group?.root?.id;
+          if (rootId && pinnedIds.has(rootId)) {
+            pinnedCount += 1;
+          } else {
+            break;
+          }
+        }
+      }
+    }
+
+    // 2. 标签定义与映射解析 (单次批次各仅解析 1 次，内部只读查表，不写全局可变缓存)
+    let tagMappings = null;
+    let validTagIds = null;
+    if (tagsEnabled) {
+      try {
+        tagMappings = readSessionTagMappings();
+      } catch (e) {}
+      try {
+        const validTags = readSessionTagsDefinitions();
+        if (Array.isArray(validTags) && validTags.length > 0) {
+          validTagIds = new Set(validTags.map((t) => t?.id).filter(Boolean));
+        }
+      } catch (e) {}
+    }
+
+    const total = groups.length;
+    let baseHeadersHeight = 0;
+    if (pinnedCount > 0) {
+      baseHeadersHeight = (pinnedCount < total)
+        ? (SESSION_PINNED_HEADER_HEIGHT + SESSION_RECENTS_HEADER_HEIGHT)
+        : SESSION_PINNED_HEADER_HEIGHT;
+    }
+
+    // 3. 单次 O(N) 遍历预计算：单项高度、前缀 Top 累加数组、Recents 标题位置与总高度补偿
+    const itemHeightsMap = new Map();
+    const itemTops = new Array(total + 1);
+    let extraHeight = 0;
+
+    let currentTop = pinnedCount > 0 ? SESSION_PINNED_HEADER_HEIGHT : 0;
+    itemTops[0] = currentTop;
+    let recentsHeaderTop = 0;
+
+    for (let i = 0; i < total; i++) {
+      const group = groups[i];
+      const rootId = group?.root?.id;
+      let h = SESSION_NORMAL_ITEM_HEIGHT;
+
+      if (rootId) {
+        if (tagsEnabled && tagMappings && validTagIds) {
+          const tIds = tagMappings[rootId];
+          if (Array.isArray(tIds) && tIds.some((id) => validTagIds.has(id))) {
+            h += SESSION_TAG_ROW_EXTRA;
+          }
+        }
+        if (addonsEnabled) {
+          try {
+            const addons = getSessionOdooAddons(rootId);
+            if (addons && addons.length > 0) {
+              h += getSessionOdooAddonsExtraHeight(addons.length);
+            }
+          } catch (e) {}
+        }
+        itemHeightsMap.set(rootId, h);
+      }
+
+      if (h > SESSION_NORMAL_ITEM_HEIGHT) {
+        extraHeight += (h - SESSION_NORMAL_ITEM_HEIGHT);
+      }
+
+      currentTop += h;
+      if (pinnedCount > 0 && i === pinnedCount - 1 && pinnedCount < total) {
+        recentsHeaderTop = currentTop;
+        currentTop += SESSION_RECENTS_HEADER_HEIGHT;
+      }
+      itemTops[i + 1] = currentTop;
+    }
+
+    const headersHeight = baseHeadersHeight + extraHeight;
+
+    sessionLayoutSnapshot = {
+      groups,
+      groupsLength: total,
+      rawPinned,
+      pinnedManifestSig,
+      rawTagMappings,
+      rawTagDefs,
+      tagsEnabled,
+      addonsEnabled,
+      pinArchiveEnabled,
+      sectionHeadersEnabled,
+      manifest,
+      pinnedCount,
+      headersHeight,
+      itemHeightsMap,
+      itemTops,
+      recentsHeaderTop,
+    };
+
+    return sessionLayoutSnapshot;
+  }
+
   function getSessionItemHeight(sessionId) {
     if (!sessionId) return SESSION_NORMAL_ITEM_HEIGHT;
+    if (sessionLayoutSnapshot && isSessionLayoutSnapshotValid(sessionLayoutSnapshot)) {
+      if (sessionLayoutSnapshot.itemHeightsMap && sessionLayoutSnapshot.itemHeightsMap.has(sessionId)) {
+        return sessionLayoutSnapshot.itemHeightsMap.get(sessionId);
+      }
+    } else {
+      sessionLayoutSnapshot = null;
+    }
+
     let h = SESSION_NORMAL_ITEM_HEIGHT;
     if (isPluginEnabled("session-tags")) {
       try {
@@ -5915,7 +6240,15 @@
 
   function getPinnedSessionCount(groups) {
     if (!Array.isArray(groups) || groups.length === 0) return 0;
-    if (!isPluginEnabled("session-pin-archive") || !isPluginEnabled("session-section-headers")) return 0;
+    const isPinArchiveEnabled = isPluginEnabled("session-pin-archive");
+    const isSectionHeadersEnabled = isPluginEnabled("session-section-headers");
+    if (!isPinArchiveEnabled || !isSectionHeadersEnabled) return 0;
+
+    const snapshot = ensureSessionLayoutSnapshot(groups);
+    if (snapshot) {
+      return snapshot.pinnedCount;
+    }
+
     const pinnedIds = readStoredSessionIds(PINNED_SESSION_STORAGE_KEY);
     if (!pinnedIds || pinnedIds.size === 0) return 0;
     let count = 0;
@@ -5931,61 +6264,33 @@
   }
 
   function getSessionHeadersHeight(groups) {
-    const pinnedCount = getPinnedSessionCount(groups);
-    let baseHeadersHeight = 0;
-    if (pinnedCount > 0) {
-      const total = Array.isArray(groups) ? groups.length : 0;
-      baseHeadersHeight = (pinnedCount < total)
-        ? (SESSION_PINNED_HEADER_HEIGHT + SESSION_RECENTS_HEADER_HEIGHT)
-        : SESSION_PINNED_HEADER_HEIGHT;
-    }
-
-    // 动态补偿：累加所有带标签或Odoo插件胶囊会话扩充出来的额外高度，确保虚拟列表总容器绝对对齐防截断
-    let extraHeight = 0;
-    if (Array.isArray(groups)) {
-      for (const group of groups) {
-        const rootId = group?.root?.id;
-        const itemH = getSessionItemHeight(rootId);
-        if (itemH > SESSION_NORMAL_ITEM_HEIGHT) {
-          extraHeight += (itemH - SESSION_NORMAL_ITEM_HEIGHT);
-        }
-      }
-    }
-
-    return baseHeadersHeight + extraHeight;
+    if (!Array.isArray(groups) || groups.length === 0) return 0;
+    const snapshot = ensureSessionLayoutSnapshot(groups);
+    return snapshot ? snapshot.headersHeight : 0;
   }
 
   function getSessionItemTop(index, groups) {
-    const pinnedCount = getPinnedSessionCount(groups);
-    let top = 0;
-
     if (Array.isArray(groups)) {
-      if (pinnedCount > 0) {
-        top += SESSION_PINNED_HEADER_HEIGHT;
+      const snapshot = ensureSessionLayoutSnapshot(groups);
+      if (snapshot && Array.isArray(snapshot.itemTops)) {
+        if (index <= 0) return snapshot.itemTops[0] || 0;
+        if (index < snapshot.itemTops.length) return snapshot.itemTops[index];
+        return snapshot.itemTops[snapshot.itemTops.length - 1];
       }
-      for (let i = 0; i < index && i < groups.length; i++) {
-        const rootId = groups[i]?.root?.id;
-        top += getSessionItemHeight(rootId);
-        if (pinnedCount > 0 && i === pinnedCount - 1 && pinnedCount < groups.length) {
-          top += SESSION_RECENTS_HEADER_HEIGHT;
-        }
-      }
-    } else {
-      const defaultTop = 54 * index;
-      if (pinnedCount <= 0) return defaultTop;
-      if (index < pinnedCount) {
-        return SESSION_PINNED_HEADER_HEIGHT + defaultTop;
-      }
-      return SESSION_PINNED_HEADER_HEIGHT + SESSION_RECENTS_HEADER_HEIGHT + defaultTop;
     }
-
-    return top;
+    const pinnedCount = getPinnedSessionCount(groups);
+    const defaultTop = 54 * index;
+    if (pinnedCount <= 0) return defaultTop;
+    if (index < pinnedCount) {
+      return SESSION_PINNED_HEADER_HEIGHT + defaultTop;
+    }
+    return SESSION_PINNED_HEADER_HEIGHT + SESSION_RECENTS_HEADER_HEIGHT + defaultTop;
   }
 
   function getSessionHeaders(r, groups) {
     const pinnedCount = getPinnedSessionCount(groups);
     if (pinnedCount <= 0 || !r || typeof r.jsx !== "function") return [];
-    const total = groups.length;
+    const total = Array.isArray(groups) ? groups.length : 0;
     const headers = [];
 
     // Pinned Header
@@ -6017,12 +6322,22 @@
 
     // Recents Header (仅当存在非置顶的最近会话时才渲染)
     if (pinnedCount < total) {
-      let pinnedSessionsHeight = 0;
-      for (let i = 0; i < pinnedCount && i < groups.length; i++) {
-        const rootId = groups[i]?.root?.id;
-        pinnedSessionsHeight += getSessionItemHeight(rootId);
+      let recentsTop = 0;
+      if (
+        sessionLayoutSnapshot &&
+        sessionLayoutSnapshot.groups === groups &&
+        sessionLayoutSnapshot.pinnedCount === pinnedCount &&
+        isSessionLayoutSnapshotValid(sessionLayoutSnapshot)
+      ) {
+        recentsTop = sessionLayoutSnapshot.recentsHeaderTop;
+      } else {
+        let pinnedSessionsHeight = 0;
+        for (let i = 0; i < pinnedCount && i < groups.length; i++) {
+          const rootId = groups[i]?.root?.id;
+          pinnedSessionsHeight += getSessionItemHeight(rootId);
+        }
+        recentsTop = SESSION_PINNED_HEADER_HEIGHT + pinnedSessionsHeight;
       }
-      const recentsTop = SESSION_PINNED_HEADER_HEIGHT + pinnedSessionsHeight;
       headers.push(
         r.jsx("div", {
           key: "pi-enh-header-recents",
@@ -6054,11 +6369,232 @@
     return headers;
   }
 
+  function resolveVirtualContainerSessionGroups(entries) {
+    if (!Array.isArray(entries) || entries.length === 0) return null;
+    if (
+      !Array.isArray(latestKnownSessionGroups) ||
+      latestKnownSessionGroups.length === 0 ||
+      !latestKnownSessionGroups.every((group) => Boolean(group?.root?.id))
+    ) {
+      return null;
+    }
+
+    const indices = new Map(
+      latestKnownSessionGroups.map((group, index) => [group.root.id, index])
+    );
+
+    for (const entry of entries) {
+      if (!entry.sid || !indices.has(entry.sid)) {
+        return null;
+      }
+    }
+
+    return {
+      groups: latestKnownSessionGroups,
+      indices,
+    };
+  }
+
+  function removeSessionSectionHeaders(targetContainer = null) {
+    if (typeof document === "undefined") return;
+    const scope = targetContainer && typeof targetContainer.querySelectorAll === "function" ? targetContainer : document;
+    const fallbackNodes = scope.querySelectorAll('.pi-enh-session-section-header[data-pi-enh-fallback="true"]');
+    if (!fallbackNodes || fallbackNodes.length === 0) return;
+    const doRemove = () => {
+      for (const node of fallbackNodes) {
+        if (targetContainer && node.parentElement !== targetContainer) continue;
+        node.remove();
+      }
+    };
+    if (typeof withMutationGuard === "function") {
+      withMutationGuard(doRemove);
+    } else {
+      doRemove();
+    }
+  }
+
+  function applySessionSectionHeaderStyle(el, section, topPx) {
+    if (!el || !el.style) return;
+    const isPinned = section === "pinned";
+    const expectedHeight = (isPinned ? SESSION_PINNED_HEADER_HEIGHT : SESSION_RECENTS_HEADER_HEIGHT) + "px";
+    const expectedTop = isPinned ? "0px" : topPx;
+    const expectedAlign = isPinned ? "center" : "flex-end";
+    const expectedText = isPinned ? "Pinned" : "Recents";
+
+    if (el.style.position !== "absolute") el.style.position = "absolute";
+    if (el.style.top !== expectedTop) el.style.top = expectedTop;
+    if (el.style.left !== "0px") el.style.left = "0px";
+    if (el.style.right !== "0px") el.style.right = "0px";
+    if (el.style.height !== expectedHeight) el.style.height = expectedHeight;
+    if (el.style.display !== "flex") el.style.display = "flex";
+    if (el.style.alignItems !== expectedAlign) el.style.alignItems = expectedAlign;
+    if (el.style.paddingLeft !== "14px") el.style.paddingLeft = "14px";
+    if (el.style.paddingRight !== "8px") el.style.paddingRight = "8px";
+    if (!isPinned && el.style.paddingBottom !== "5px") el.style.paddingBottom = "5px";
+    if (el.style.fontSize !== "12px") el.style.fontSize = "12px";
+    if (el.style.fontWeight !== "400") el.style.fontWeight = "400";
+    if (el.style.color !== "var(--text-muted, #71717a)") el.style.color = "var(--text-muted, #71717a)";
+    if (el.style.userSelect !== "none") el.style.userSelect = "none";
+    if (el.style.pointerEvents !== "none") el.style.pointerEvents = "none";
+    if (el.style.letterSpacing !== "0.01em") el.style.letterSpacing = "0.01em";
+    if (el.textContent !== expectedText) el.textContent = expectedText;
+  }
+
+  function syncSessionSectionHeaders() {
+    if (isDisposed || typeof document === "undefined") return;
+
+    if (!Array.isArray(latestKnownSessionGroups) || !latestKnownSessionGroups.length) {
+      if (Array.isArray(window.__PI_ENH_EARLY_SESSION_GROUPS__) && window.__PI_ENH_EARLY_SESSION_GROUPS__.length > 0) {
+        processSessionGroups(window.__PI_ENH_EARLY_SESSION_GROUPS__);
+      }
+    }
+
+    const rows = document.querySelectorAll(".pi-enh-session-row-host[data-pi-enh-session-id]");
+    if (!rows || rows.length === 0) {
+      removeSessionSectionHeaders();
+      return;
+    }
+
+    const containerMap = new Map();
+    for (const row of rows) {
+      const sid = row.getAttribute("data-pi-enh-session-id") || row.dataset?.piEnhSessionId;
+      if (!sid) continue;
+      const wrapper = row.parentElement;
+      if (!wrapper || wrapper.tagName !== "DIV" || wrapper.style.position !== "absolute") continue;
+      const container = wrapper.parentElement;
+      if (!container || container.tagName !== "DIV" || container.style.position !== "relative") continue;
+      if (typeof container.closest === "function" && container.closest(".settings-dialog-backdrop, [role='dialog']")) continue;
+      let list = containerMap.get(container);
+      if (!list) {
+        list = [];
+        containerMap.set(container, list);
+      }
+      list.push({ row, wrapper, sid });
+    }
+
+    if (containerMap.size === 0) {
+      removeSessionSectionHeaders();
+      return;
+    }
+
+    const headersFeatureActive = isPluginEnabled("session-pin-archive") && isPluginEnabled("session-section-headers");
+
+    const syncDom = () => {
+      const activePinnedContainers = new Set();
+
+      for (const [container, entries] of containerMap.entries()) {
+        const childHeaders = Array.from(container.children).filter(
+          (el) => el.classList && el.classList.contains("pi-enh-session-section-header")
+        );
+        const nativeHeaders = childHeaders.filter(
+          (el) => el.getAttribute("data-pi-enh-fallback") !== "true"
+        );
+        const fallbackHeaders = childHeaders.filter(
+          (el) => el.getAttribute("data-pi-enh-fallback") === "true"
+        );
+
+        if (nativeHeaders.length > 0) {
+          for (const fh of fallbackHeaders) fh.remove();
+          continue;
+        }
+
+        const resolved = headersFeatureActive
+          ? resolveVirtualContainerSessionGroups(entries)
+          : null;
+
+        if (!resolved) {
+          for (const fh of fallbackHeaders) fh.remove();
+          continue;
+        }
+
+        const groups = resolved.groups;
+        const pinnedCount = getPinnedSessionCount(groups);
+        const total = groups.length;
+
+        if (pinnedCount <= 0) {
+          for (const fh of fallbackHeaders) fh.remove();
+          continue;
+        }
+
+        activePinnedContainers.add(container);
+
+        const pinnedCandidates = fallbackHeaders.filter(
+          (el) => el.classList.contains("pi-enh-session-section-pinned") || el.getAttribute("data-pi-enh-section") === "pinned"
+        );
+        let pinnedEl = pinnedCandidates[0] || null;
+        for (let i = 1; i < pinnedCandidates.length; i++) {
+          pinnedCandidates[i].remove();
+        }
+        if (!pinnedEl) {
+          pinnedEl = document.createElement("div");
+          pinnedEl.className = "pi-enh-session-section-header pi-enh-session-section-pinned";
+          pinnedEl.setAttribute("data-pi-enh-section", "pinned");
+          pinnedEl.setAttribute("data-pi-enh-fallback", "true");
+        }
+        applySessionSectionHeaderStyle(pinnedEl, "pinned", "0px");
+        if (pinnedEl.parentElement !== container) {
+          container.insertBefore(pinnedEl, container.firstChild);
+        }
+
+        const recentsCandidates = fallbackHeaders.filter(
+          (el) => el.classList.contains("pi-enh-session-section-recents") || el.getAttribute("data-pi-enh-section") === "recents"
+        );
+        let recentsEl = recentsCandidates[0] || null;
+        for (let i = 1; i < recentsCandidates.length; i++) {
+          recentsCandidates[i].remove();
+        }
+
+        if (pinnedCount < total) {
+          const recentsTopPx = (getSessionItemTop(pinnedCount, groups) - SESSION_RECENTS_HEADER_HEIGHT) + "px";
+          if (!recentsEl) {
+            recentsEl = document.createElement("div");
+            recentsEl.className = "pi-enh-session-section-header pi-enh-session-section-recents";
+            recentsEl.setAttribute("data-pi-enh-section", "recents");
+            recentsEl.setAttribute("data-pi-enh-fallback", "true");
+          }
+          applySessionSectionHeaderStyle(recentsEl, "recents", recentsTopPx);
+          if (recentsEl.parentElement !== container) {
+            container.insertBefore(recentsEl, pinnedEl.nextSibling);
+          }
+        } else if (recentsEl) {
+          recentsEl.remove();
+          recentsEl = null;
+        }
+
+        for (const fh of fallbackHeaders) {
+          if (fh !== pinnedEl && fh !== recentsEl && fh.parentElement === container) {
+            fh.remove();
+          }
+        }
+      }
+
+      for (const stray of document.querySelectorAll('.pi-enh-session-section-header[data-pi-enh-fallback="true"]')) {
+        if (!stray.parentElement || !activePinnedContainers.has(stray.parentElement)) {
+          stray.remove();
+        }
+      }
+    };
+
+    if (typeof withMutationGuard === "function") {
+      withMutationGuard(syncDom);
+    } else {
+      syncDom();
+    }
+  }
+
+  if (Array.isArray(activeCleanups)) {
+    activeCleanups.push(() => {
+      removeSessionSectionHeaders();
+    });
+  }
+
   window.__PI_ENH_GET_SESSION_HEADERS_HEIGHT__ = getSessionHeadersHeight;
   window.__PI_ENH_GET_SESSION_HEADERS__ = getSessionHeaders;
   window.__PI_ENH_GET_SESSION_ITEM_TOP__ = getSessionItemTop;
   window.__PI_ENH_GET_SESSION_ITEM_HEIGHT__ = getSessionItemHeight;
   window.__PI_ENH_GET_PINNED_SESSION_COUNT__ = getPinnedSessionCount;
+  window.__PI_ENH_SYNC_SESSION_SECTION_HEADERS__ = syncSessionSectionHeaders;
+  window.__PI_ENH_REMOVE_SESSION_SECTION_HEADERS__ = removeSessionSectionHeaders;
 
   function toggleSessionPin(sessionId) {
     if (!sessionId) return false;
@@ -6071,6 +6607,11 @@
       window.__PI_ENH_PINNED_MANIFEST__ = window.__PI_ENH_PINNED_MANIFEST__.filter((e) => (typeof e === "string" ? e !== sessionId : e?.id !== sessionId));
       if (!isPinned) window.__PI_ENH_PINNED_MANIFEST__.push(sessionId);
     }
+    if (Array.isArray(latestKnownSessionGroups) && latestKnownSessionGroups.length > 0) {
+      processSessionGroups(latestKnownSessionGroups);
+    }
+    syncSessionOdooAddonsLayout();
+    syncSessionSectionHeaders();
     void persistPinnedSessionsToServer(pinnedIds);
     return !isPinned;
   }

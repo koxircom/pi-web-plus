@@ -22,7 +22,7 @@
 Для работы Pi Web Standalone требуется Node.js 22.19.0 или новее (`node >=22.19`). Проверьте версию командой `node --version`, затем установите официальный пакет `.tgz` из [`koxircom/pi-web-standalone` GitHub Releases](https://github.com/koxircom/pi-web-standalone/releases) и запустите `pi-web`:
 
 ```bash
-npm install -g https://github.com/koxircom/pi-web-standalone/releases/download/v1.0.2/pi-web-standalone-1.0.2.tgz
+npm install -g https://github.com/koxircom/pi-web-standalone/releases/download/v1.1.0/pi-web-standalone-1.1.0.tgz
 pi-web
 ```
 
@@ -32,11 +32,15 @@ pi-web
 
 Если Provider модели ещё не настроен, откройте панель **Models**, войдите в учётную запись или добавьте API Key.
 
-В примере выше указан планируемый архив релиза `v1.0.2` (`pi-web-standalone-1.0.2.tgz`). Для установки нужной версии или обновления остановите запущенный процесс с помощью `Ctrl+C`, замените `v1.0.2` и `1.0.2` в ссылке на целевую версию `<version>` из [GitHub Releases](https://github.com/koxircom/pi-web-standalone/releases) и повторите команду установки:
+В примере выше указан стандартный архив релиза `v1.1.0` (`pi-web-standalone-1.1.0.tgz`). Для установки нужной версии или обновления остановите запущенный процесс с помощью `Ctrl+C`, замените `v1.1.0` и `1.1.0` в ссылке на целевую версию `<version>` из [GitHub Releases](https://github.com/koxircom/pi-web-standalone/releases) и повторите команду установки:
 
 ```bash
 npm install -g https://github.com/koxircom/pi-web-standalone/releases/download/v<version>/pi-web-standalone-<version>.tgz
 ```
+
+- **SDK `0.99.1` и глобальный CLI**: Pi Web `v1.1.0` использует зависимости `@earendil-works/pi-*` SDK версии `0.99.1` для Web-интерфейса и **не** обновляет автоматически глобально установленный CLI `pi`.
+- **Пакет без `node_modules`**: архив `.tgz` не включает каталог `node_modules/`, поэтому требуется стандартная установка зависимостей через `npm install`.
+- **Защита пользовательских manifest, сессий и журнала учёта**: при обновлении сохраняйте пользовательские манифесты (`public/pi-*-manifest.json`), сессии (`~/.pi/agent/sessions/`) и журнал использования (`pi-usage-ledger.json` / `~/.pi/agent/state/`).
 
 Для удаления выполните `npm uninstall -g @agegr/pi-web`.
 
@@ -74,10 +78,10 @@ PI_WEB_PASSWORD='длинный-случайный-пароль' pi-web --hostna
 
 Для серверных запросов к моделям и API используются стандартные переменные окружения `HTTP_PROXY`, `HTTPS_PROXY` и `NO_PROXY`.
 
-В macOS и Linux (установка из [`.tgz`-релиза на GitHub](https://github.com/koxircom/pi-web-standalone/releases/download/v1.0.2/pi-web-standalone-1.0.2.tgz) и запуск):
+В macOS и Linux (установка из [`.tgz`-релиза на GitHub](https://github.com/koxircom/pi-web-standalone/releases/download/v1.1.0/pi-web-standalone-1.1.0.tgz) и запуск):
 
 ```bash
-npm install -g https://github.com/koxircom/pi-web-standalone/releases/download/v1.0.2/pi-web-standalone-1.0.2.tgz
+npm install -g https://github.com/koxircom/pi-web-standalone/releases/download/v1.1.0/pi-web-standalone-1.1.0.tgz
 HTTP_PROXY=http://127.0.0.1:7890 \
 HTTPS_PROXY=http://127.0.0.1:7890 \
 NO_PROXY=localhost,127.0.0.1 \
@@ -87,7 +91,7 @@ pi-web
 В Windows PowerShell:
 
 ```powershell
-npm install -g https://github.com/koxircom/pi-web-standalone/releases/download/v1.0.2/pi-web-standalone-1.0.2.tgz
+npm install -g https://github.com/koxircom/pi-web-standalone/releases/download/v1.1.0/pi-web-standalone-1.1.0.tgz
 $env:HTTP_PROXY = "http://127.0.0.1:7890"
 $env:HTTPS_PROXY = "http://127.0.0.1:7890"
 $env:NO_PROXY = "localhost,127.0.0.1"

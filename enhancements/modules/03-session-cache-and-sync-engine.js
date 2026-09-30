@@ -211,6 +211,25 @@
     }
   }
 
+  function isSimpleCoalesceableGet(input, init) {
+    if (typeof input !== "string") return false;
+    if (init == null) return true;
+    if (typeof init !== "object") return false;
+    const proto = Object.getPrototypeOf(init);
+    if (proto !== Object.prototype && proto !== null) return false;
+    const keys = Object.getOwnPropertyNames(init);
+    for (let i = 0; i < keys.length; i++) {
+      const k = keys[i];
+      if (init[k] === undefined) continue;
+      if (k === "method") {
+        if (String(init.method || "GET").toUpperCase() !== "GET") return false;
+      } else if (k !== "cache") {
+        return false;
+      }
+    }
+    return true;
+  }
+
   function isWarmSessionSnapshotUrl(urlStr) {
     const path = getSessionRequestPath(urlStr);
     if (!/\/api\/sessions\/[^/?#]+(?:[?#]|$)/.test(urlStr) || path.endsWith("/context")) return true;
@@ -582,8 +601,26 @@
     savePersistentSessionManifest();
   }
 
+  function hasTransientBlobImage(data) {
+    if (!data || typeof data !== "object") return false;
+    const target = data.data && typeof data.data === "object" ? data.data : data;
+    const messages = target?.context?.messages;
+    if (!Array.isArray(messages)) return false;
+    for (let i = 0; i < messages.length; i++) {
+      const msg = messages[i];
+      if (!msg || !Array.isArray(msg.content)) continue;
+      for (let j = 0; j < msg.content.length; j++) {
+        const part = msg.content[j];
+        if (!part || typeof part !== "object" || part.type !== "image") continue;
+        const sourceUrl = part.source && typeof part.source === "object" ? part.source.url : null;
+        if (typeof sourceUrl === "string" && sourceUrl.startsWith("blob:")) return true;
+      }
+    }
+    return false;
+  }
+
   function persistSessionDetail(sessionId, urlStr, data) {
-    if (!canUsePersistentSessionCache() || !isPersistableSessionUrl(urlStr) || !isWarmSessionSnapshotUrl(urlStr)) return Promise.resolve();
+    if (!canUsePersistentSessionCache() || !isPersistableSessionUrl(urlStr) || !isWarmSessionSnapshotUrl(urlStr) || hasTransientBlobImage(data)) return Promise.resolve();
     const stampedData = withSessionCacheTimestamp(data, Number(data?._cachedAt) > 0 ? Number(data._cachedAt) : Date.now());
     const cacheKey = getPersistentCacheKey(urlStr);
     const sessionEpoch = persistentSessionEpochs.get(sessionId) || 0;
@@ -629,6 +666,10 @@
         }
       }
       if (!data) return null;
+      if (hasTransientBlobImage(data)) {
+        void invalidatePersistentSession(sessionId);
+        return null;
+      }
       metadata.lastAccessed = Date.now();
       savePersistentSessionManifest();
       return data;
@@ -696,6 +737,62 @@
     return handle;
   }
 
+  function bridgeToNativeViewCache(sessionId, data) {
+    if (!sessionId || !data || !data.snapshotRevision || !data.context?.messages) return;
+    try {
+      if (typeof globalThis !== "undefined") {
+        if (!globalThis.__piSessionViewCache) globalThis.__piSessionViewCache = new Map();
+        if (!globalThis.__piSessionWireBaselines) globalThis.__piSessionWireBaselines = new Map();
+        const messages = Array.isArray(data.context.messages) ? data.context.messages : [];
+        const entryIds = Array.isArray(data.context.entryIds) ? data.context.entryIds : [];
+        const revision = String(data.snapshotRevision || "");
+        if (!revision) return;
+        const now = Date.now();
+
+        const viewSnapshot = {
+          sessionId,
+          revision,
+          messages,
+          entryIds,
+          leafId: data.leafId ?? null,
+          oldestEntryId: data.context.oldestEntryId ?? null,
+          hasMore: Boolean(data.context.hasMore),
+          summaryTree: data.tree,
+          thinkingLevel: data.context.thinkingLevel || "off",
+          model: data.context.model || null,
+          stats: data.stats,
+          totalActiveMs: data.totalActiveMs || 0,
+          loadedEntryIds: entryIds,
+          savedAt: now,
+        };
+
+        globalThis.__piSessionViewCache.delete(sessionId);
+        globalThis.__piSessionViewCache.set(sessionId, viewSnapshot);
+        while (globalThis.__piSessionViewCache.size > 8) {
+          const oldest = globalThis.__piSessionViewCache.keys().next().value;
+          if (oldest === undefined) break;
+          globalThis.__piSessionViewCache.delete(oldest);
+        }
+
+        const wireBaseline = {
+          sessionId,
+          revision,
+          messages,
+          entryIds,
+          data,
+          savedAt: now,
+        };
+        globalThis.__piSessionWireBaselines.delete(sessionId);
+        globalThis.__piSessionWireBaselines.set(sessionId, wireBaseline);
+        while (globalThis.__piSessionWireBaselines.size > 8) {
+          const oldest = globalThis.__piSessionWireBaselines.keys().next().value;
+          if (oldest === undefined) break;
+          globalThis.__piSessionWireBaselines.delete(oldest);
+        }
+      }
+    } catch (_) {}
+  }
+
   function commitSessionDetailSnapshot(sessionId, entry, urlStr, stampedData, now = Date.now()) {
     if (!entry || !stampedData) return;
     entry.detailRequests.set(urlStr, { data: stampedData, timestamp: now });
@@ -713,6 +810,7 @@
         }
       }
     }
+    bridgeToNativeViewCache(sessionId, stampedData);
     if (typeof window !== "undefined" && typeof window.__PI_ENH_INVALIDATE_DOM_SESSION_SNAPSHOT__ === "function") {
       try { window.__PI_ENH_INVALIDATE_DOM_SESSION_SNAPSHOT__(sessionId); } catch (e) {}
     }
@@ -773,6 +871,10 @@
         needsFreshSync: false,
         hasPendingAttention: false,
         completedAt: null,
+        isSettled: false,
+        settledAt: null,
+        runGeneration: 0,
+        settledGeneration: 0,
       };
       sessionMemoryCache.set(sessionId, entry);
     } else {
@@ -857,8 +959,8 @@
         }
       }
       const detailUrlBare = `/api/sessions/${encodedId}`;
-      const contextUrl80 = `/api/sessions/${encodedId}/context?tail=80`;
-      const contextUrl1000 = `/api/sessions/${encodedId}/context?tail=1000`;
+      const contextUrl80 = `/api/sessions/${encodedId}/context?deferThinking=1&deferMedia=1&tail=80`;
+      const contextUrl1000 = `/api/sessions/${encodedId}/context?deferThinking=1&deferMedia=1&tail=1000`;
       const primaryContextUrl = isCurrentActive ? contextUrl1000 : contextUrl80;
       const stateUrl = `/api/sessions/${encodedId}/state`;
 
@@ -1039,7 +1141,13 @@
 
         const url1000 = `/api/sessions/${encodeURIComponent(sid)}?deferThinking=1&deferMedia=1&tail=1000`;
         try {
-          await cachedSessionFetch(url1000, { cache: "no-store" });
+          const resp = await cachedSessionFetch(url1000, { cache: "no-store" });
+          if (resp && resp.ok) {
+            try {
+              const freshJson = await resp.clone().json();
+              bridgeToNativeViewCache(sid, freshJson);
+            } catch (_) {}
+          }
         } catch (_) {}
 
         // 每个预加载之间留出 120ms 呼吸缓冲，绝不拥堵网络连接池
@@ -1052,13 +1160,50 @@
 
   const scheduleVisibleSessionsBackgroundPrewarm = schedulePrioritySessionPreloads;
 
+  function isSessionTerminallySettled(sessionId) {
+    if (!sessionId) return false;
+    const entry = sessionMemoryCache.get(sessionId);
+    if (!entry || !entry.isSettled) return false;
+
+    // 终态证据在没有真实新轮 agent_start 或实际发送解除之前持续有效；
+    // 终态检查本身不能因陈旧 DOM 残留的 stop 按钮而删除证据。
+    return true;
+  }
+
+  function markSessionSettled(sessionId, options = {}) {
+    if (!sessionId) return;
+    const entry = getOrCreateSessionEntry(sessionId);
+    entry.isSettled = true;
+    entry.settledAt = Date.now();
+    entry.runGeneration = (entry.runGeneration || 0) + 1;
+    entry.settledGeneration = entry.runGeneration;
+    entry.isRunning = false;
+    entry.completedAt = Date.now();
+    entry.hasPendingAgentEnd = false;
+    entry.hasPendingAttention = false;
+  }
+
   function markSessionRunning(sessionId, running, options = {}) {
     if (!sessionId) return;
     const entry = getOrCreateSessionEntry(sessionId);
     const wasRunning = entry.isRunning;
     const nextRunning = Boolean(running);
-    entry.isRunning = nextRunning;
+
     if (nextRunning) {
+      // 若当前会话处于终态保护中，且调用未携带明确的新轮次信号（非 explicit/start），
+      // 则判定为陈旧状态轮询/滞后的 runningSessionIds，拒绝复活 running。
+      if (!options.explicit && !options.start) {
+        if (isSessionTerminallySettled(sessionId)) {
+          return;
+        }
+      }
+      entry.isSettled = false;
+      entry.settledAt = null;
+      if (options.explicit || options.start) {
+        entry.runGeneration = (entry.runGeneration || 0) + 1;
+        entry.state = null;
+      }
+      entry.isRunning = true;
       entry.completedAt = null;
       // 状态轮询可能在 agent_end 后仍报告 running；只有真正开始新一轮才清掉上一轮的校准证据。
       if (!wasRunning && !entry.hasPendingAgentEnd) {
@@ -1077,10 +1222,45 @@
         // 状态轮询晚于 agent_end 到达时仍可能报告 running，不能覆盖本轮待落盘标记。
         entry.needsFreshSync = false;
       }
-    } else if (wasRunning) {
-      entry.completedAt = Date.now();
-      // 完成瞬间仍需让原生最终同步拿到最新消息，但保留旧快照作为断网/重启兜底。
-      entry.needsFreshSync = true;
+    } else {
+      entry.isRunning = false;
+      if (options.settled) {
+        entry.isSettled = true;
+        entry.settledAt = Date.now();
+        entry.runGeneration = (entry.runGeneration || 0) + 1;
+        entry.settledGeneration = entry.runGeneration;
+
+        // 终态事件可能晚于最近一次 /api/agent 缓存读取；空闲快路径会复用 entry.state。
+        // 只归零任务状态并保留模型/上下文元数据，顶层 running 仍表示 RPC 包装器存活。
+        const cachedData = entry.state?.data;
+        if (cachedData && typeof cachedData === "object" && !Array.isArray(cachedData)) {
+          const taskFlags = ["isStreaming", "isPromptRunning", "isBashRunning", "isCompacting"];
+          const settledData = { ...cachedData };
+          for (const key of taskFlags) {
+            if (typeof settledData[key] === "boolean") settledData[key] = false;
+          }
+          settledData.state = {
+            ...(cachedData.state && typeof cachedData.state === "object" && !Array.isArray(cachedData.state)
+              ? cachedData.state
+              : {}),
+            isStreaming: false,
+            isPromptRunning: false,
+            isBashRunning: false,
+            isCompacting: false,
+          };
+          entry.state = {
+            ...entry.state,
+            data: settledData,
+            timestamp: Date.now(),
+            isRunning: false,
+          };
+        }
+      }
+      if (wasRunning) {
+        entry.completedAt = Date.now();
+        // 完成瞬间仍需让原生最终同步拿到最新消息，但保留旧快照作为断网/重启兜底。
+        entry.needsFreshSync = true;
+      }
     }
   }
 
@@ -1349,6 +1529,21 @@
     return state;
   }
 
+  function parseOrderGuardTimestamp(rawTs) {
+    if (rawTs === undefined || rawTs === null || rawTs === "") return null;
+    if (typeof rawTs === "number") {
+      return Number.isFinite(rawTs) && rawTs > 0 ? rawTs : null;
+    }
+    if (typeof rawTs === "string") {
+      const n = Number(rawTs);
+      if (Number.isFinite(n) && n > 0) return n;
+      const p = Date.parse(rawTs);
+      if (Number.isFinite(p) && p > 0) return p;
+      return null;
+    }
+    return null;
+  }
+
   function handleSessionHistoryOrderStreamEvent(sessionId, data) {
     if (!sessionId || !data) return;
     if (!isPluginEnabled("session-history-order-guard")) return;
@@ -1365,9 +1560,10 @@
       state.revision++;
       const msg = data.message;
       if (msg && typeof msg === "object") {
-        const id = msg.id || msg.entryId || null;
-        const rawTs = msg.timestamp || msg.createdAt;
-        const ts = rawTs !== undefined && rawTs !== null && !isNaN(Number(rawTs)) ? Number(rawTs) : null;
+        if (msg.role === "system") return; // 忽略 system 消息，服务端历史记录接口会过滤 system 消息
+        const id = msg.id || msg.entryId || data.entryId || data.id || null;
+        const rawTs = msg.timestamp ?? msg.createdAt ?? data.timestamp;
+        const ts = parseOrderGuardTimestamp(rawTs);
         if (id || (ts !== null && ts > 0)) {
           state.latestWatermark = {
             id,
@@ -1421,15 +1617,20 @@
     }
     if (!Array.isArray(messages) || messages.length === 0) return false;
 
+    const wTs = parseOrderGuardTimestamp(watermark.timestamp) || 0;
+
     for (let i = messages.length - 1; i >= 0; i--) {
       const m = messages[i];
       if (!m || typeof m !== "object") continue;
       if (watermark.id && (m.id === watermark.id || m.entryId === watermark.id)) {
         return true;
       }
-      const mTs = Number(m.timestamp || m.createdAt || 0);
-      const wTs = Number(watermark.timestamp || 0);
-      if (wTs > 0 && mTs === wTs) {
+      const mTs = parseOrderGuardTimestamp(m.timestamp ?? m.createdAt) || 0;
+      const isTsMatched = wTs > 0 && (
+        mTs === wTs ||
+        (!watermark.id && mTs > 0 && Math.abs(mTs - wTs) <= 120000)
+      );
+      if (isTsMatched) {
         if (!watermark.role || m.role === watermark.role) {
           if (!watermark.toolCallId || m.toolCallId === watermark.toolCallId || m.tool_call_id === watermark.toolCallId) {
             return true;
@@ -1439,13 +1640,90 @@
     }
 
     const lastMsg = messages[messages.length - 1];
-    const lastTs = Number(lastMsg?.timestamp || lastMsg?.createdAt || 0);
-    const wTs = Number(watermark.timestamp || 0);
+    const lastTs = parseOrderGuardTimestamp(lastMsg?.timestamp ?? lastMsg?.createdAt) || 0;
     if (wTs > 0 && lastTs > wTs) {
       return true;
     }
 
     return false;
+  }
+
+  function extractOrderGuardMessagesAndEntryIds(json, sessionId) {
+    if (json && json.protocol === 1) {
+      const wireBaselines =
+        (typeof globalThis !== "undefined" && globalThis.__piSessionWireBaselines instanceof Map
+          ? globalThis.__piSessionWireBaselines
+          : null) ||
+        (typeof window !== "undefined" && window.__piSessionWireBaselines instanceof Map
+          ? window.__piSessionWireBaselines
+          : null);
+      const baseline = sessionId && wireBaselines ? wireBaselines.get(sessionId) : null;
+
+      if (json.mode === "reset") {
+        const messages = Array.isArray(json?.data?.context?.messages)
+          ? json.data.context.messages
+          : (Array.isArray(json?.data?.messages) ? json.data.messages : []);
+        const entryIds = Array.isArray(json?.data?.context?.entryIds)
+          ? json.data.context.entryIds
+          : (Array.isArray(json?.data?.entryIds) ? json.data.entryIds : []);
+        return { messages, entryIds, isUnchangedEnvelope: false };
+      }
+
+      if (json.mode === "delta") {
+        const baseMsgs = Array.isArray(baseline?.messages)
+          ? baseline.messages
+          : (Array.isArray(baseline?.data?.context?.messages) ? baseline.data.context.messages : []);
+        const tailMessages = Array.isArray(json?.tailMessages) ? json.tailMessages : [];
+        const messages = (Number.isInteger(json.dropCount) && Number.isInteger(json.keepCount))
+          ? baseMsgs.slice(json.dropCount, json.dropCount + json.keepCount).concat(tailMessages)
+          : tailMessages;
+        const entryIds = Array.isArray(json?.data?.context?.entryIds)
+          ? json.data.context.entryIds
+          : (Array.isArray(json?.data?.entryIds) ? json.data.entryIds : []);
+        return { messages, entryIds, isUnchangedEnvelope: false };
+      }
+
+      if (json.mode === "unchanged") {
+        let messages = Array.isArray(baseline?.messages)
+          ? baseline.messages
+          : (Array.isArray(baseline?.data?.context?.messages) ? baseline.data.context.messages : []);
+        let entryIds = Array.isArray(baseline?.entryIds)
+          ? baseline.entryIds
+          : (Array.isArray(baseline?.data?.context?.entryIds) ? baseline.data.context.entryIds : []);
+
+        if (messages.length === 0 && entryIds.length === 0 && sessionId) {
+          const memCache = typeof sessionMemoryCache !== "undefined" && sessionMemoryCache instanceof Map
+            ? sessionMemoryCache.get(sessionId)
+            : null;
+          if (memCache && memCache.detailRequests instanceof Map) {
+            for (const slot of memCache.detailRequests.values()) {
+              const ctx = slot?.data?.context;
+              if (Array.isArray(ctx?.messages) && ctx.messages.length > 0) {
+                messages = ctx.messages;
+                entryIds = Array.isArray(ctx.entryIds) ? ctx.entryIds : [];
+                break;
+              }
+            }
+          }
+        }
+        if (messages.length === 0 && entryIds.length === 0 && sessionId) {
+          const accepted = SESSION_HISTORY_ORDER_STATES.get(sessionId)?.latestAccepted;
+          if (accepted) {
+            if (Array.isArray(accepted.messages) && accepted.messages.length > 0) messages = accepted.messages;
+            if (Array.isArray(accepted.entryIds) && accepted.entryIds.length > 0) entryIds = accepted.entryIds;
+          }
+        }
+        return { messages, entryIds, isUnchangedEnvelope: true };
+      }
+    }
+
+    const messages = Array.isArray(json?.context?.messages)
+      ? json.context.messages
+      : (Array.isArray(json?.messages) ? json.messages : []);
+    const entryIds = Array.isArray(json?.context?.entryIds)
+      ? json.context.entryIds
+      : (Array.isArray(json?.entryIds) ? json.entryIds : []);
+    return { messages, entryIds, isUnchangedEnvelope: false };
   }
 
   function extractNormalizedHistoryKey(url) {
@@ -1497,6 +1775,29 @@
     return true;
   }
 
+  function safeCreateOrderGuardResponse(bodyText, status, statusText, rawHeaders) {
+    const headers = new Headers();
+    if (rawHeaders) {
+      try {
+        const entries = typeof rawHeaders.entries === "function" ? rawHeaders.entries() : Object.entries(rawHeaders);
+        for (const [k, v] of entries) {
+          const lk = String(k).toLowerCase();
+          if (lk !== "content-encoding" && lk !== "content-length" && lk !== "transfer-encoding") {
+            headers.set(k, v);
+          }
+        }
+      } catch (_) {}
+    }
+    if (!headers.get("Content-Type")) {
+      headers.set("Content-Type", "application/json; charset=utf-8");
+    }
+    return new Response(bodyText, {
+      status: status || 200,
+      statusText: statusText || "OK",
+      headers,
+    });
+  }
+
   async function wrapSessionHistoryOrderGuard(input, init, url, sessionId, fetchInitial) {
     checkOrderGuardAborted(init, input);
 
@@ -1539,12 +1840,11 @@
       return response;
     }
 
-    const messages = Array.isArray(json?.context?.messages)
-      ? json.context.messages
-      : (Array.isArray(json?.messages) ? json.messages : []);
-    const entryIds = Array.isArray(json?.context?.entryIds)
-      ? json.context.entryIds
-      : (Array.isArray(json?.entryIds) ? json.entryIds : []);
+    const {
+      messages,
+      entryIds,
+      isUnchangedEnvelope,
+    } = extractOrderGuardMessagesAndEntryIds(json, sessionId);
 
     // 2. 检查并发请求乱序覆盖（反序两个 GET）：
     const accepted = state.latestAccepted;
@@ -1572,12 +1872,15 @@
     }
 
     // 3. 检查当前响应是否落后于 SSE watermark、或请求期间有新 revision、或反序且 accepted 已过期
-    const isBehindWatermark = Boolean(
-      state.latestWatermark && !isMessagesUpToDateWithWatermark(messages, state.latestWatermark, entryIds)
-    );
     const hasNewRevision = state.revision > startRevision;
+    const isInitialUpToDate = (isUnchangedEnvelope && messages.length === 0 && entryIds.length === 0 && !hasNewRevision)
+      ? true
+      : isMessagesUpToDateWithWatermark(messages, state.latestWatermark, entryIds);
+    const isBehindWatermark = Boolean(
+      state.latestWatermark && !isInitialUpToDate
+    );
     const isOutdatedByRevision = Boolean(
-      hasNewRevision && state.latestWatermark && !isMessagesUpToDateWithWatermark(messages, state.latestWatermark, entryIds)
+      hasNewRevision && state.latestWatermark && !isInitialUpToDate
     );
     const isBehindAcceptedStale = Boolean(
       accepted && reqEpoch === accepted.epoch && reqSeq < accepted.seq && accepted.key === reqKey
@@ -1607,7 +1910,12 @@
     // 4. 明确落后时，使用 baseFetch/originalWindowFetch no-store 重新读，最多 3 次
     const activeFetch = baseFetch || originalWindowFetch || (typeof window !== "undefined" ? window.fetch : null);
     if (!activeFetch) {
-      throw new Error("[session-history-order-guard] 会话历史记录落后于流式消息版本，且无可用的重读客户端");
+      const err = new Error("[session-history-order-guard] 会话历史记录落后于流式消息版本，且无可用的重读客户端");
+      err.isOrderGuardError = true;
+      err.fallbackResponse = bodyText
+        ? safeCreateOrderGuardResponse(bodyText, response.status, response.statusText, response.headers)
+        : null;
+      throw err;
     }
 
     let freshResponse = null;
@@ -1625,8 +1933,15 @@
         return freshResponse || response;
       }
       attempts++;
+
+      let reqInput = input;
+      if (attempts >= 2 && typeof input === "string" && input.includes("sync=1") && input.includes("baseRevision=")) {
+        reqInput = input.replace(/[?&]baseRevision=[^&#]+/g, "").replace(/\?&/, "?");
+        if (!reqInput.includes("force=1")) reqInput += "&force=1";
+      }
+
       try {
-        freshResponse = await activeFetch(input, {
+        freshResponse = await activeFetch(reqInput, {
           ...init,
           cache: "no-store",
         });
@@ -1648,13 +1963,13 @@
             return freshResponse;
           }
           freshJson = JSON.parse(freshBodyText);
-          freshMessages = Array.isArray(freshJson?.context?.messages)
-            ? freshJson.context.messages
-            : (Array.isArray(freshJson?.messages) ? freshJson.messages : []);
-          freshEntryIds = Array.isArray(freshJson?.context?.entryIds)
-            ? freshJson.context.entryIds
-            : (Array.isArray(freshJson?.entryIds) ? freshJson.entryIds : []);
-          if (isMessagesUpToDateWithWatermark(freshMessages, state.latestWatermark, freshEntryIds)) {
+          const extractedFresh = extractOrderGuardMessagesAndEntryIds(freshJson, sessionId);
+          freshMessages = extractedFresh.messages;
+          freshEntryIds = extractedFresh.entryIds;
+          const isFreshUpToDate = (extractedFresh.isUnchangedEnvelope && freshMessages.length === 0 && freshEntryIds.length === 0 && state.revision === startRevision)
+            ? true
+            : isMessagesUpToDateWithWatermark(freshMessages, state.latestWatermark, freshEntryIds);
+          if (isFreshUpToDate) {
             freshSuccess = true;
             break;
           }
@@ -1668,7 +1983,14 @@
     }
 
     if (!freshSuccess || !freshResponse || !freshResponse.ok || !freshBodyText) {
-      throw new Error("[session-history-order-guard] 会话历史记录落后于流式消息版本，已阻止过期快照覆盖界面");
+      const err = new Error("[session-history-order-guard] 会话历史记录落后于流式消息版本，已阻止过期快照覆盖界面");
+      err.isOrderGuardError = true;
+      err.fallbackResponse = (freshResponse && freshResponse.ok && freshBodyText)
+        ? safeCreateOrderGuardResponse(freshBodyText, freshResponse.status, freshResponse.statusText, freshResponse.headers)
+        : (bodyText
+          ? safeCreateOrderGuardResponse(bodyText, response.status, response.statusText, response.headers)
+          : null);
+      throw err;
     }
 
     const prevSeq = state.latestAccepted?.seq || 0;
@@ -1692,22 +2014,246 @@
   // React replaces its history with this fetch result. A stale-while-revalidate
   // cache cannot be authoritative without a React subscription/commit bridge.
   // Keep this guard independent of SSE invalidation and the legacy cache toggle.
+  let lastKnownSessionListPayload = {
+    sessionListVersion: 0,
+    runningSessionIds: [],
+    completionNotificationSuppressedSessionIds: [],
+  };
+
+  function isTransientFetchError(err, init, input) {
+    if (!err || isRequestAborted(err, init, input)) return false;
+    if (err instanceof TypeError) return true;
+    const msg = String(err?.message || err || "");
+    return /failed to fetch|load failed|networkerror|network request failed|fetch failed/i.test(msg);
+  }
+
+  function normalizeFallbackSessionData(rawData, sessionId) {
+    if (!rawData || typeof rawData !== "object") return null;
+    const base = rawData.protocol === 1 && rawData.data && typeof rawData.data === "object"
+      ? rawData.data
+      : rawData;
+    const rawMessages = Array.isArray(base?.context?.messages)
+      ? base.context.messages
+      : (Array.isArray(base?.messages) ? base.messages : null);
+    if (!Array.isArray(rawMessages)) return null;
+    const rawEntryIds = Array.isArray(base?.context?.entryIds)
+      ? base.context.entryIds
+      : (Array.isArray(base?.entryIds) ? base.entryIds : []);
+    const alignedEntryIds = rawEntryIds.length === rawMessages.length && rawEntryIds.every(id => typeof id === "string" && id.length > 0)
+      ? rawEntryIds
+      : rawMessages.map((m, idx) => {
+          const cand = rawEntryIds[idx] || m?.id || m?.entryId;
+          return typeof cand === "string" && cand.length > 0 ? cand : `fallback-entry-${idx}`;
+        });
+    return {
+      ...base,
+      sessionId: base.sessionId || sessionId,
+      leafId: base.leafId ?? (alignedEntryIds.at(-1) || null),
+      context: {
+        ...(base.context || {}),
+        messages: rawMessages,
+        entryIds: alignedEntryIds,
+        oldestEntryId: base.context?.oldestEntryId ?? (alignedEntryIds[0] || null),
+        hasMore: Boolean(base.context?.hasMore),
+      },
+    };
+  }
+
+  async function buildFallbackSessionHistoryResponse(sessionId, requestUrl) {
+    if (!sessionId) return null;
+    const urlStr = String(requestUrl || "");
+    const isSyncReq = /[?&]sync=1(?:&|$)/.test(urlStr);
+    let reqBaseRev = null;
+    try {
+      reqBaseRev = new URL(urlStr, typeof window !== "undefined" && window.location ? window.location.href : "http://localhost").searchParams.get("baseRevision");
+    } catch (_) {
+      const m = urlStr.match(/[?&]baseRevision=([^&#]+)/);
+      if (m) reqBaseRev = decodeURIComponent(m[1]);
+    }
+
+    const wireBaselines =
+      (typeof globalThis !== "undefined" && globalThis.__piSessionWireBaselines instanceof Map
+        ? globalThis.__piSessionWireBaselines
+        : null) ||
+      (typeof window !== "undefined" && window.__piSessionWireBaselines instanceof Map
+        ? window.__piSessionWireBaselines
+        : null);
+    const baseline = wireBaselines ? wireBaselines.get(sessionId) : null;
+
+    // 1. 检查 SESSION_HISTORY_ORDER_STATES.get(sessionId)?.latestAccepted
+    const accepted = SESSION_HISTORY_ORDER_STATES.get(sessionId)?.latestAccepted;
+    if (accepted && accepted.bodyText) {
+      let canUseAcceptedRaw = true;
+      try {
+        const parsedAcc = JSON.parse(accepted.bodyText);
+        if (parsedAcc && parsedAcc.protocol === 1) {
+          if (parsedAcc.mode === "unchanged" || parsedAcc.mode === "delta") {
+            const targetRev = parsedAcc.mode === "unchanged" ? parsedAcc.revision : parsedAcc.baseRevision;
+            if (!baseline || !baseline.revision || baseline.revision !== targetRev) {
+              canUseAcceptedRaw = false;
+            }
+          }
+        }
+      } catch (_) {}
+      if (canUseAcceptedRaw) {
+        return new Response(accepted.bodyText, {
+          status: accepted.status || 200,
+          statusText: accepted.statusText || "OK",
+          headers: new Headers(accepted.headers || { "Content-Type": "application/json" }),
+        });
+      }
+    }
+
+    // 2. 检查 globalThis.__piSessionWireBaselines?.get?.(sessionId)
+    if (baseline) {
+      if (isSyncReq) {
+        if (reqBaseRev && baseline.revision && reqBaseRev === baseline.revision) {
+          return createCachedResponse(
+            { protocol: 1, mode: "unchanged", revision: baseline.revision },
+            {},
+            "FALLBACK_WIRE_UNCHANGED"
+          );
+        }
+        if (baseline.data) {
+          const normData = normalizeFallbackSessionData(baseline.data, sessionId) || baseline.data;
+          return createCachedResponse(
+            {
+              protocol: 1,
+              mode: "reset",
+              revision: baseline.revision || normData.snapshotRevision || "fallback",
+              data: normData,
+            },
+            {},
+            "FALLBACK_WIRE_RESET"
+          );
+        }
+      } else if (baseline.data) {
+        const normData = normalizeFallbackSessionData(baseline.data, sessionId) || baseline.data;
+        return createCachedResponse(normData, {}, "FALLBACK_WIRE_DATA");
+      }
+    }
+
+    // 3. 检查 globalThis.__piSessionViewCache?.get?.(sessionId)
+    const viewCache =
+      (typeof globalThis !== "undefined" && globalThis.__piSessionViewCache instanceof Map
+        ? globalThis.__piSessionViewCache
+        : null) ||
+      (typeof window !== "undefined" && window.__piSessionViewCache instanceof Map
+        ? window.__piSessionViewCache
+        : null);
+    const viewEntry = viewCache ? viewCache.get(sessionId) : null;
+    if (viewEntry && Array.isArray(viewEntry.messages)) {
+      const sessionData = normalizeFallbackSessionData(
+        {
+          sessionId,
+          snapshotRevision: viewEntry.revision || "fallback",
+          leafId: viewEntry.leafId ?? null,
+          tree: viewEntry.summaryTree,
+          treeFormat: "summary",
+          stats: viewEntry.stats,
+          totalActiveMs: viewEntry.totalActiveMs,
+          context: {
+            messages: viewEntry.messages,
+            entryIds: Array.isArray(viewEntry.entryIds)
+              ? viewEntry.entryIds
+              : (Array.isArray(viewEntry.loadedEntryIds) ? viewEntry.loadedEntryIds : []),
+            oldestEntryId: viewEntry.oldestEntryId ?? null,
+            hasMore: Boolean(viewEntry.hasMore),
+            thinkingLevel: viewEntry.thinkingLevel || "off",
+            model: viewEntry.model ?? null,
+          },
+        },
+        sessionId
+      );
+      if (sessionData) {
+        if (isSyncReq) {
+          return createCachedResponse(
+            {
+              protocol: 1,
+              mode: "reset",
+              revision: viewEntry.revision || "fallback",
+              data: sessionData,
+            },
+            {},
+            "FALLBACK_VIEW_CACHE"
+          );
+        }
+        return createCachedResponse(sessionData, {}, "FALLBACK_VIEW_CACHE");
+      }
+    }
+
+    // 4. 检查 sessionMemoryCache.get(sessionId) 的 findCompatibleSessionDetail（或 readPersistentSessionDetail）
+    const memEntry = typeof sessionMemoryCache !== "undefined" ? sessionMemoryCache.get(sessionId) : null;
+    let cachedData = memEntry ? findCompatibleSessionDetail(memEntry, urlStr)?.data : null;
+    if (!cachedData && memEntry && memEntry.detailRequests instanceof Map) {
+      for (const slot of memEntry.detailRequests.values()) {
+        if (slot?.data && isSnapshotComplete(slot.data)) {
+          cachedData = slot.data;
+          break;
+        }
+      }
+    }
+    if (!cachedData && typeof readPersistentSessionDetail === "function") {
+      try {
+        cachedData = await readPersistentSessionDetail(sessionId, urlStr);
+      } catch (_) {}
+    }
+    if (cachedData) {
+      const normData = normalizeFallbackSessionData(cachedData, sessionId) || cachedData;
+      if (isSyncReq) {
+        return createCachedResponse(
+          {
+            protocol: 1,
+            mode: "reset",
+            revision: normData.snapshotRevision || "fallback",
+            data: normData,
+          },
+          {},
+          "FALLBACK_CACHE"
+        );
+      }
+      return createCachedResponse(normData, {}, "FALLBACK_CACHE");
+    }
+
+    return null;
+  }
+
   async function fetchAuthoritativeHistory(input, init, url) {
     const sessionId = extractSessionIdFromUrl(url);
     const isPrimary = isPrimaryHistoryRequest(url);
     const activeFetch = baseFetch || originalWindowFetch;
-    const warning = document.querySelector('[data-pi-enh-history-sync-warning]');
+    const warning = typeof document !== "undefined" ? document.querySelector('[data-pi-enh-history-sync-warning]') : null;
     if (warning && warning.getAttribute('data-pi-enh-history-sync-warning') !== getActiveSessionId()) clearHistorySyncWarning();
+    const runFetch = async () => isPluginEnabled('session-memory-cache')
+      ? await cachedSessionFetch.call(this, input, init)
+      : await activeFetch(input, { ...init, cache: 'no-store' });
     try {
-      const response = isPluginEnabled('session-memory-cache')
-        ? await cachedSessionFetch.call(this, input, init)
-        : await activeFetch(input, { ...init, cache: 'no-store' });
+      let response;
+      try {
+        response = await runFetch();
+      } catch (firstErr) {
+        if (isTransientFetchError(firstErr, init, input) && activeFetch) {
+          await new Promise((r) => setTimeout(r, 220));
+          response = await activeFetch(input, { ...init, cache: 'no-store' });
+        } else {
+          throw firstErr;
+        }
+      }
       if (isPrimary && sessionId === getActiveSessionId()) {
         if (response.ok) clearHistorySyncWarning();
         else showHistorySyncWarning(sessionId);
       }
       return response;
     } catch (error) {
+      if (isPrimary && sessionId && isTransientFetchError(error, init, input)) {
+        const fallbackResp = await buildFallbackSessionHistoryResponse(sessionId, url);
+        if (fallbackResp) {
+          if (typeof scheduleTerminalSyncCheck === "function") {
+            scheduleTerminalSyncCheck(sessionId, { reason: "network_fallback", force: true });
+          }
+          return fallbackResp;
+        }
+      }
       if (isPrimary && !isRequestAborted(error, init, input) && sessionId === getActiveSessionId()) {
         showHistorySyncWarning(sessionId);
       }
@@ -1813,6 +2359,217 @@
   if (typeof window !== "undefined") {
     setTimeout(prewarmSessionSearchIndex, 1200);
     window.addEventListener("pointerdown", () => prewarmSessionSearchIndex(), { once: true, passive: true });
+  }
+
+  // ==========================================
+  // 模型设置与配置极速内存秒开缓存 (Models Fast SWR Cache)
+  // 解决模型标签页点击打开慢、网络往返等待与界面空白抖动问题
+  // ==========================================
+  const MODELS_FAST_CACHE_TTL = 300000; // 5分钟有效缓存
+  const modelsFastMemoryCache = new Map(); // cacheKey -> { data, headers, timestamp }
+  const inFlightModelsFetches = new Map(); // cacheKey -> Promise
+  const MODELS_STORAGE_PREFIX = "pi-enh-models-cache-v1:";
+
+  function normalizeModelsCacheKey(url) {
+    if (!url || typeof url !== "string") return "";
+    try {
+      const u = new URL(url, typeof window !== "undefined" ? window.location.href : "http://localhost");
+      const cwd = u.searchParams.get("cwd");
+      return cwd ? `${u.pathname}?cwd=${encodeURIComponent(cwd)}` : u.pathname;
+    } catch (_) {
+      return url.split("#")[0].split("?")[0];
+    }
+  }
+
+  function isModelsFastCacheUrl(url) {
+    if (!url || typeof url !== "string") return false;
+    return (
+      url.includes("/api/models-config") ||
+      url.includes("/api/models/enabled") ||
+      url.includes("/api/auth/providers")
+    );
+  }
+
+  function readModelsPersistentSnapshot(cacheKey) {
+    if (typeof localStorage === "undefined") return null;
+    try {
+      const raw = localStorage.getItem(MODELS_STORAGE_PREFIX + cacheKey);
+      if (!raw) return null;
+      const parsed = JSON.parse(raw);
+      if (parsed && parsed.data && typeof parsed.data === "object") {
+        return parsed;
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  function writeModelsPersistentSnapshot(cacheKey, data) {
+    if (typeof localStorage === "undefined") return;
+    try {
+      localStorage.setItem(MODELS_STORAGE_PREFIX + cacheKey, JSON.stringify({
+        data,
+        timestamp: Date.now()
+      }));
+    } catch (_) {}
+  }
+
+  function findCandidateModelsSnapshot(cacheKey) {
+    let entry = modelsFastMemoryCache.get(cacheKey);
+    if (entry && entry.data) return entry;
+
+    if (cacheKey.startsWith("/api/models/enabled")) {
+      for (const [k, v] of modelsFastMemoryCache.entries()) {
+        if (k.startsWith("/api/models/enabled") && v && v.data && v.data.scope !== "project") {
+          return v;
+        }
+      }
+    }
+
+    const persisted = readModelsPersistentSnapshot(cacheKey);
+    if (persisted && persisted.data) {
+      modelsFastMemoryCache.set(cacheKey, {
+        data: persisted.data,
+        headers: { "Content-Type": "application/json" },
+        timestamp: persisted.timestamp || 0
+      });
+      return modelsFastMemoryCache.get(cacheKey);
+    }
+
+    if (cacheKey.startsWith("/api/models/enabled")) {
+      const genericPersisted = readModelsPersistentSnapshot("/api/models/enabled");
+      if (genericPersisted && genericPersisted.data) {
+        modelsFastMemoryCache.set(cacheKey, {
+          data: genericPersisted.data,
+          headers: { "Content-Type": "application/json" },
+          timestamp: genericPersisted.timestamp || 0
+        });
+        return modelsFastMemoryCache.get(cacheKey);
+      }
+    }
+
+    return null;
+  }
+
+  function invalidateModelsFastCache(urlPattern) {
+    if (!urlPattern) {
+      modelsFastMemoryCache.clear();
+      return;
+    }
+    for (const key of Array.from(modelsFastMemoryCache.keys())) {
+      if (key.includes(urlPattern)) {
+        modelsFastMemoryCache.delete(key);
+        try {
+          localStorage.removeItem(MODELS_STORAGE_PREFIX + key);
+        } catch (_) {}
+      }
+    }
+  }
+
+  async function handleModelsFastCacheGet(input, init, requestUrl) {
+    const cacheKey = normalizeModelsCacheKey(requestUrl);
+    const activeFetch = baseFetch || originalWindowFetch || (typeof window !== "undefined" && typeof window.fetch === "function" ? window.fetch : null);
+    if (!activeFetch) return null;
+
+    const candidate = findCandidateModelsSnapshot(cacheKey);
+    const now = Date.now();
+
+    // 1. 命中内存或持久化快照：0ms 瞬间直出给 React
+    if (candidate && candidate.data) {
+      if (now - (candidate.timestamp || 0) > 4000 && !inFlightModelsFetches.has(cacheKey)) {
+        const bgPromise = (async () => {
+          try {
+            const resp = await activeFetch(requestUrl, { ...init, cache: "no-store" });
+            if (resp && (resp.ok || resp.status === 200)) {
+              const freshData = await resp.json();
+              if (freshData && typeof freshData === "object") {
+                const updatedEntry = {
+                  data: freshData,
+                  headers: { "Content-Type": "application/json" },
+                  timestamp: Date.now()
+                };
+                modelsFastMemoryCache.set(cacheKey, updatedEntry);
+                if (cacheKey.startsWith("/api/models/enabled")) {
+                  modelsFastMemoryCache.set("/api/models/enabled", updatedEntry);
+                  writeModelsPersistentSnapshot("/api/models/enabled", freshData);
+                }
+                writeModelsPersistentSnapshot(cacheKey, freshData);
+              }
+            }
+          } catch (_) {} finally {
+            inFlightModelsFetches.delete(cacheKey);
+          }
+        })();
+        inFlightModelsFetches.set(cacheKey, bgPromise);
+      }
+
+      return createCachedResponse(candidate.data, candidate.headers || { "Content-Type": "application/json" }, "MODELS_FAST_CACHE_HIT");
+    }
+
+    // 2. 缓存未命中但有正在进行的同向网络请求：合并请求 (Coalesce)
+    if (inFlightModelsFetches.has(cacheKey)) {
+      try {
+        const sharedData = await inFlightModelsFetches.get(cacheKey);
+        if (sharedData) {
+          return createCachedResponse(sharedData, { "Content-Type": "application/json" }, "MODELS_COALESCED_HIT");
+        }
+      } catch (_) {}
+    }
+
+    // 3. 全新网络拉取
+    let resolveInFlight = null;
+    const inFlightPromise = new Promise(r => { resolveInFlight = r; });
+    inFlightModelsFetches.set(cacheKey, inFlightPromise);
+
+    try {
+      const resp = await activeFetch(input, { ...init, cache: "no-store" });
+      if (resp && (resp.ok || resp.status === 200)) {
+        try {
+          const clone = typeof resp.clone === "function" ? resp.clone() : resp;
+          const freshData = await clone.json();
+          if (freshData && typeof freshData === "object") {
+            const entry = {
+              data: freshData,
+              headers: { "Content-Type": "application/json" },
+              timestamp: Date.now()
+            };
+            modelsFastMemoryCache.set(cacheKey, entry);
+            if (cacheKey.startsWith("/api/models/enabled")) {
+              modelsFastMemoryCache.set("/api/models/enabled", entry);
+              writeModelsPersistentSnapshot("/api/models/enabled", freshData);
+            }
+            writeModelsPersistentSnapshot(cacheKey, freshData);
+            if (resolveInFlight) resolveInFlight(freshData);
+            return createCachedResponse(freshData, resp.headers, "MODELS_LIVE");
+          }
+        } catch (_) {}
+      }
+      if (resolveInFlight) resolveInFlight(null);
+      return resp;
+    } catch (err) {
+      if (resolveInFlight) resolveInFlight(null);
+      throw err;
+    } finally {
+      inFlightModelsFetches.delete(cacheKey);
+    }
+  }
+
+  async function preloadModelsFastCache(customCwd) {
+    try {
+      const activeFetch = baseFetch || originalWindowFetch || (typeof window !== "undefined" && typeof window.fetch === "function" ? window.fetch : null);
+      if (!activeFetch) return;
+      const cwd = customCwd || (typeof window !== "undefined" ? new URLSearchParams(window.location.search).get("cwd") : "");
+      const urls = [
+        "/api/models-config",
+        "/api/auth/providers",
+        "/api/models/enabled",
+        cwd ? `/api/models/enabled?cwd=${encodeURIComponent(cwd)}` : null
+      ].filter(Boolean);
+      await Promise.allSettled(urls.map(u => handleModelsFastCacheGet(u, { method: "GET" }, u)));
+    } catch (_) {}
+  }
+  if (typeof window !== "undefined") {
+    window.__PI_ENH_PRELOAD_MODELS_CACHE__ = preloadModelsFastCache;
+    window.__PI_ENH_INVALIDATE_MODELS_CACHE__ = invalidateModelsFastCache;
   }
 
   let activeSearchAbortController = null;
@@ -2767,17 +3524,32 @@
       }
     }
 
+    // 模型标签页秒开加速：拦截 GET /api/models-config, /api/models/enabled, /api/auth/providers
+    if (requestMethod === "GET" && isModelsFastCacheUrl(requestUrl)) {
+      return await handleModelsFastCacheGet(input, init, requestUrl);
+    }
+    if (requestMethod === "PUT" && (requestUrl.includes("/api/models-config") || requestUrl.includes("/api/models/enabled"))) {
+      invalidateModelsFastCache();
+    }
+
     // 优先拦截并增强会话搜索：自动召回标题、首条消息与会话ID
     if (requestMethod === "GET" && /\/api\/sessions\/search(?:[?#]|$)/.test(requestUrl)) {
       return await handleEnhancedSessionSearch(input, init, requestUrl);
     }
 
+    const callerSignal = init?.signal || input?.signal;
     const reloadSignal = sessionHistoryReloadSignals.get(extractSessionIdFromUrl(requestUrl));
-    if (requestMethod === 'GET' && reloadSignal && /\/api\/sessions\/[^/?#]+(?:\/(?:context|state))?(?:[?#]|$)/.test(requestUrl)) {
-      const callerSignal = init?.signal || input?.signal;
-      init = { ...init, cache: 'no-store', signal: callerSignal
-        ? AbortSignal.any([callerSignal, reloadSignal]) : reloadSignal };
+    if (requestMethod === 'GET' && reloadSignal && callerSignal && /\/api\/sessions\/[^/?#]+(?:\/(?:context|state))?(?:[?#]|$)/.test(requestUrl)) {
+      init = { ...init, cache: 'no-store', signal: AbortSignal.any([callerSignal, reloadSignal]) };
+    } else if (requestMethod === 'GET' && reloadSignal && /\/api\/sessions\/[^/?#]+\/state(?:[?#]|$)/.test(requestUrl)) {
+      init = { ...init, cache: 'no-store', signal: reloadSignal };
     }
+    const isSessionsListGet =
+      requestMethod === "GET" &&
+      /\/api\/sessions(?:\?.*)?$/.test(requestUrl) &&
+      !requestUrl.includes("/search") &&
+      !requestUrl.includes("/context") &&
+      !extractSessionIdFromUrl(requestUrl);
     const isHistoryGet = requestMethod === 'GET' &&
       /\/api\/sessions\/[^/?#]+(?:\/context)?(?:[?#]|$)/.test(requestUrl);
     const targetSessionId = isHistoryGet ? extractSessionIdFromUrl(requestUrl) : null;
@@ -2788,10 +3560,158 @@
       : cachedSessionFetch.call(this, input, init);
 
     let response;
-    if (isPluginEnabled('session-history-order-guard') && shouldProtectSessionHistoryOrder(requestUrl, targetSessionId)) {
-      response = await wrapSessionHistoryOrderGuard(input, init, requestUrl, targetSessionId, fetchInitial);
-    } else {
-      response = await fetchInitial();
+    try {
+      if (isPluginEnabled('session-history-order-guard') && shouldProtectSessionHistoryOrder(requestUrl, targetSessionId)) {
+        response = await wrapSessionHistoryOrderGuard(input, init, requestUrl, targetSessionId, fetchInitial);
+      } else {
+        response = await fetchInitial();
+      }
+    } catch (historyErr) {
+      if (isSessionsListGet && isTransientFetchError(historyErr, init, input)) {
+        const activeFetch = baseFetch || originalWindowFetch;
+        if (activeFetch) {
+          try {
+            await new Promise((r) => setTimeout(r, 200));
+            response = await activeFetch(input, { ...init, cache: "no-store" });
+          } catch (_) {}
+        }
+        if (!response && knownSessionsMap.size > 0) {
+          const fallbackSessions = Array.from(knownSessionsMap.values()).filter(
+            (s) => s?.id && !isSessionDeleted(s.id)
+          );
+          return createCachedResponse(
+            {
+              sessions: fallbackSessions,
+              sessionListVersion: lastKnownSessionListPayload.sessionListVersion || 0,
+              runningSessionIds: Array.isArray(lastKnownSessionListPayload.runningSessionIds)
+                ? lastKnownSessionListPayload.runningSessionIds
+                : [],
+              completionNotificationSuppressedSessionIds: Array.isArray(
+                lastKnownSessionListPayload.completionNotificationSuppressedSessionIds
+              )
+                ? lastKnownSessionListPayload.completionNotificationSuppressedSessionIds
+                : [],
+            },
+            {},
+            "FALLBACK_SESSIONS_LIST"
+          );
+        }
+      }
+
+      if (isHistoryGet && targetSessionId) {
+        const isOrderGuardErr = Boolean(
+          historyErr?.isOrderGuardError ||
+          String(historyErr?.message || "").includes("[session-history-order-guard]")
+        );
+        const isReloadAbortOnly = Boolean(
+          reloadSignal?.aborted && !callerSignal?.aborted && isRequestAborted(historyErr, init, input)
+        );
+        if (isOrderGuardErr || isTransientFetchError(historyErr, init, input) || isReloadAbortOnly) {
+          let fallbackResp = null;
+          try {
+            fallbackResp = await buildFallbackSessionHistoryResponse(targetSessionId, requestUrl);
+          } catch (_) {}
+          fallbackResp = fallbackResp || historyErr?.fallbackResponse || null;
+          if (fallbackResp) {
+            if (typeof scheduleTerminalSyncCheck === "function") {
+              try {
+                scheduleTerminalSyncCheck(targetSessionId, {
+                  reason: isOrderGuardErr ? "order_guard_fallback" : "network_fallback",
+                  force: true,
+                });
+              } catch (_) {}
+            }
+            response = fallbackResp;
+          } else if (isOrderGuardErr) {
+            // 终极防红字熔断：无论如何绝不允许向原生 React 抛出 order-guard 异常，
+            // 否则 React tG 的 catch(e) 会调用 setLoadError(String(e)) 卸载整个聊天窗口并渲染全屏红字！
+            const isSyncReq = /[?&]sync=1(?:&|$)/.test(String(requestUrl || ""));
+            const emptyPayload = isSyncReq
+              ? {
+                  protocol: 1,
+                  mode: "reset",
+                  revision: "fallback",
+                  data: {
+                    sessionId: targetSessionId,
+                    snapshotRevision: "fallback",
+                    context: { messages: [], entryIds: [], oldestEntryId: null, hasMore: false },
+                  },
+                }
+              : {
+                  sessionId: targetSessionId,
+                  snapshotRevision: "fallback",
+                  context: { messages: [], entryIds: [], oldestEntryId: null, hasMore: false },
+                };
+            response = createCachedResponse(emptyPayload, {}, "FALLBACK_ORDER_GUARD_CIRCUIT_BREAKER");
+          }
+        }
+      }
+
+      if (!response) {
+        throw historyErr;
+      }
+    }
+
+    if (
+      response?.ok &&
+      isHistoryGet &&
+      targetSessionId &&
+      !requestUrl.includes("/context") &&
+      /[?&]sync=1(?:&|$)/.test(requestUrl) &&
+      isPluginEnabled("session-memory-cache")
+    ) {
+      try {
+        const cloned = typeof response.clone === "function" ? response.clone() : null;
+        if (cloned) {
+          cloned.json().then((rawPayload) => {
+            try {
+              let fullData = null;
+              if (rawPayload && rawPayload.protocol === 1) {
+                if (rawPayload.mode === "reset" && rawPayload.data?.context?.messages) {
+                  fullData = {
+                    ...rawPayload.data,
+                    snapshotRevision: rawPayload.revision || rawPayload.data.snapshotRevision || null,
+                  };
+                } else {
+                  const wireBase =
+                    (typeof globalThis !== "undefined" && globalThis.__piSessionWireBaselines instanceof Map
+                      ? globalThis.__piSessionWireBaselines.get(targetSessionId)
+                      : null) ||
+                    (typeof window !== "undefined" && window.__piSessionWireBaselines instanceof Map
+                      ? window.__piSessionWireBaselines.get(targetSessionId)
+                      : null);
+                  if (wireBase?.data?.context?.messages) {
+                    fullData = wireBase.data;
+                  } else if (rawPayload.mode === "delta" && rawPayload.data?.context?.entryIds) {
+                    const extracted = extractOrderGuardMessagesAndEntryIds(rawPayload, targetSessionId);
+                    if (extracted.messages.length === rawPayload.data.context.entryIds.length) {
+                      fullData = {
+                        ...rawPayload.data,
+                        snapshotRevision: rawPayload.revision || null,
+                        context: {
+                          ...rawPayload.data.context,
+                          messages: extracted.messages,
+                          entryIds: extracted.entryIds,
+                        },
+                      };
+                    }
+                  }
+                }
+              } else if (rawPayload?.context?.messages) {
+                fullData = rawPayload;
+              }
+              if (fullData && isSnapshotComplete(fullData)) {
+                const memEntry = getOrCreateSessionEntry(targetSessionId);
+                const now = Date.now();
+                const stamped = withSessionCacheTimestamp(fullData, now);
+                const canonicalUrl = `/api/sessions/${encodeURIComponent(targetSessionId)}?deferThinking=1&deferMedia=1&tail=1000`;
+                commitSessionDetailSnapshot(targetSessionId, memEntry, canonicalUrl, stamped, now);
+                recordSessionModelMetadataFromPayload(targetSessionId, stamped);
+              }
+            } catch (_) {}
+          }).catch(() => {});
+        }
+      } catch (_) {}
     }
 
     if (response?.ok && requestMethod === "POST" && /\/api\/agent\/new(?:[?#]|$)/.test(requestUrl) && pendingNewComposerMode) {
@@ -2813,6 +3733,16 @@
     if (response?.ok && requestMethod === "GET" && /\/api\/sessions(?:\?.*)?$/.test(requestUrl) && !requestUrl.includes("/search") && !requestUrl.includes("/context")) {
       try {
         const rawJson = await response.clone().json();
+        if (typeof rawJson?.sessionListVersion === "number") {
+          lastKnownSessionListPayload.sessionListVersion = rawJson.sessionListVersion;
+        }
+        if (Array.isArray(rawJson?.runningSessionIds)) {
+          lastKnownSessionListPayload.runningSessionIds = rawJson.runningSessionIds;
+        }
+        if (Array.isArray(rawJson?.completionNotificationSuppressedSessionIds)) {
+          lastKnownSessionListPayload.completionNotificationSuppressedSessionIds =
+            rawJson.completionNotificationSuppressedSessionIds;
+        }
         if (Array.isArray(rawJson?.sessions)) {
           let hasDeleted = false;
           const cleanSessions = [];
@@ -2971,6 +3901,60 @@
     return false;
   }
 
+  function readSessionRunningState(payload) {
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+      return null;
+    }
+    if (payload.error) {
+      return null;
+    }
+
+    // 1. 优先 nested state 明确布尔 isStreaming / isPromptRunning / isBashRunning 的 OR
+    // /api/sessions/:id/state 接口规范：rpc?.isAlive() 返回 { running: true, state: await rpc.send(get_state) }
+    // 此时顶层 running: true 仅代表 RPC 进程存活，不能作为任务正在运行的依据；
+    // 当 state 内明确提供布尔字段时，全 false 表示 idle，即便外层 running: true
+    const stateObj = payload.state;
+    if (stateObj && typeof stateObj === "object" && !Array.isArray(stateObj)) {
+      const isStreamingBool = typeof stateObj.isStreaming === "boolean";
+      const isPromptBool = typeof stateObj.isPromptRunning === "boolean";
+      const isBashBool = typeof stateObj.isBashRunning === "boolean";
+      const isCompactingBool = typeof stateObj.isCompacting === "boolean";
+
+      if (isStreamingBool || isPromptBool || isBashBool || isCompactingBool) {
+        return Boolean(
+          (isStreamingBool && stateObj.isStreaming) ||
+          (isPromptBool && stateObj.isPromptRunning) ||
+          (isBashBool && stateObj.isBashRunning) ||
+          (isCompactingBool && stateObj.isCompacting)
+        );
+      }
+    }
+
+    // 2. 支持 agent GET 顶层明确任务布尔状态字段 (isStreaming / isPromptRunning / isBashRunning / isCompacting)
+    const topStreamingBool = typeof payload.isStreaming === "boolean";
+    const topPromptBool = typeof payload.isPromptRunning === "boolean";
+    const topBashBool = typeof payload.isBashRunning === "boolean";
+    const topCompactingBool = typeof payload.isCompacting === "boolean";
+    if (topStreamingBool || topPromptBool || topBashBool || topCompactingBool) {
+      return Boolean(
+        (topStreamingBool && payload.isStreaming) ||
+        (topPromptBool && payload.isPromptRunning) ||
+        (topBashBool && payload.isBashRunning) ||
+        (topCompactingBool && payload.isCompacting)
+      );
+    }
+
+    // 3. 只有外层 running: false 可作为未连/未运行证据；running: true 单独不当任务运行，字段缺失或 error 返回 null
+    if (typeof payload.running === "boolean") {
+      if (payload.running === false) {
+        return false;
+      }
+      return null;
+    }
+
+    return null;
+  }
+
   async function cachedSessionFetch(input, init) {
     const activeFetch = baseFetch || originalWindowFetch || (typeof fetch === "function" ? fetch : null);
     if (!activeFetch) return Promise.reject(new Error("fetch unavailable"));
@@ -2981,8 +3965,10 @@
       "GET"
     ).toUpperCase();
     const urlStr = typeof input === "string" ? input : input?.url ? input.url : String(input);
-    // Native versioned envelopes own their exact baseline; never cache them as legacy SessionData.
-    if (method === "GET" && /\/api\/sessions\/[^/?#]+\?[^#]*\bsync=1(?:&|$)/.test(urlStr)) return activeFetch(input, init);
+    // Native versioned envelopes own their exact baseline; directly return activeFetch without caching or rewriting.
+    if (method === "GET" && /\/api\/sessions\/[^/?#]+\?(?:[^#]*&)?sync=1(?=[&#]|$)/.test(urlStr)) {
+      return activeFetch(input, init);
+    }
 
     // 场景 0: 拦截外部文件/UNC路径请求，由本地桥接服务兜底读取，彻底解决 Access denied
     if (method === "GET" && urlStr.includes("/api/files/")) {
@@ -3039,7 +4025,7 @@
             if (lazyEs && typeof lazyEs.upgradeToReal === "function") {
               try { await lazyEs.upgradeToReal(); } catch (_) {}
             }
-            markSessionRunning(targetSessionId, true, { skipPreload: true });
+            markSessionRunning(targetSessionId, true, { skipPreload: true, explicit: true });
             void invalidateSessionCache(targetSessionId);
           }
         }
@@ -3086,18 +4072,18 @@
       ) {
         return createCachedResponse(entry.state?.data || { running: false }, {}, "IDLE_STATE");
       }
+      const reqGeneration = entry.runGeneration;
       const realResp = await activeFetch(input, { ...init, cache: "no-store" });
       if (realResp && (realResp.ok || realResp.status === 200)) {
         try {
           const clone = typeof realResp.clone === "function" ? realResp.clone() : realResp;
           clone.json().then(data => {
-            const isActuallyRunning = Boolean(
-              data?.state?.isStreaming ||
-              data?.state?.isPromptRunning ||
-              data?.state?.isBashRunning
-            );
-            if (typeof data?.running === "boolean") {
-              markSessionRunning(sessionId, isActuallyRunning);
+            if (reqGeneration !== entry.runGeneration) return;
+            const runningState = readSessionRunningState(data);
+            if (runningState === true) {
+              markSessionRunning(sessionId, true);
+            } else if (runningState === false) {
+              markSessionRunning(sessionId, false, { settled: true });
             }
           }).catch(() => {});
         } catch (e) {}
@@ -3135,25 +4121,32 @@
       ) {
         return createCachedResponse(entry.state?.data || { running: false }, {}, "IDLE_STATE");
       }
+      const reqGeneration = entry.runGeneration;
       const realResp = await activeFetch(input, { ...init, cache: "no-store" });
       if (realResp && (realResp.ok || realResp.status === 200)) {
         try {
           const clone = typeof realResp.clone === "function" ? realResp.clone() : realResp;
           const json = await clone.json();
-          entry.state = { data: json, timestamp: Date.now() };
-          const isRunning = Boolean(
-            json?.state?.isStreaming ||
-            json?.state?.isPromptRunning ||
-            json?.state?.isBashRunning
-          );
-          markSessionRunning(sessionId, isRunning);
+          if (reqGeneration === entry.runGeneration) {
+            const runningState = readSessionRunningState(json);
+            if (typeof runningState === "boolean") {
+              entry.state = { data: json, timestamp: Date.now(), isRunning: runningState };
+              if (runningState) {
+                markSessionRunning(sessionId, true);
+              } else {
+                markSessionRunning(sessionId, false, { settled: true });
+              }
+            } else {
+              // 仅在读到明确布尔运行态时采信；字段缺失、error 或未知 running:true 不能凭空标完成
+              entry.state = { data: json, timestamp: Date.now() };
+            }
+          }
         } catch (e) {}
       }
       return realResp;
     }
 
-    // metricsOnly 是后台统计的权威请求，不能命中或写入会话展示缓存，
-    // 否则它可能把刚失效的旧快照重新写回持久层。
+    // metricsOnly 请求直接透传 activeFetch 响应，绝不破坏性投影剥离 model/content/stopReason/details，保证权威统计元数据完整
     if (/[?&]metricsOnly=1(?:&|$)/.test(urlStr)) {
       return activeFetch(input, { ...init, cache: "no-store" });
     }
@@ -3343,18 +4336,22 @@
     }
 
     // 仅在本地完全没有候选快照（全新冷会话）或用户显式要求强制绕过缓存时，才走以下网络拉取
-    const canCoalesceCold = !bypassCache && !isHistoricalPage && isWarmSessionSnapshotUrl(urlStr) && !urlStr.includes("/context");
-    if (canCoalesceCold && inFlightSessionDetailRequests.has(sessionId)) {
+    const isSimpleGet = isSimpleCoalesceableGet(input, init);
+    const explicitCachePolicy = (init && typeof init.cache === "string") ? init.cache : "default";
+    const coalesceKey = JSON.stringify([urlStr, explicitCachePolicy]);
+    const canCoalesceCold = !bypassCache && !isHistoricalPage && isWarmSessionSnapshotUrl(urlStr) && !urlStr.includes("/context") && isSimpleGet;
+    if (canCoalesceCold && inFlightSessionDetailRequests.has(coalesceKey)) {
       try {
-        const sharedJson = await inFlightSessionDetailRequests.get(sessionId);
+        const sharedJson = await inFlightSessionDetailRequests.get(coalesceKey);
         if (sharedJson) return createCachedResponse(sharedJson, {}, "COALESCED");
       } catch (_) {}
     }
     const liveInit = { ...init, cache: "no-store" };
     let resolveColdFlight = null;
+    let coldFlightPromise = null;
     if (canCoalesceCold) {
-      const flightPromise = new Promise((r) => { resolveColdFlight = r; });
-      inFlightSessionDetailRequests.set(sessionId, flightPromise);
+      coldFlightPromise = new Promise((r) => { resolveColdFlight = r; });
+      inFlightSessionDetailRequests.set(coalesceKey, coldFlightPromise);
     }
     let realResp = null;
     try {
@@ -3362,7 +4359,8 @@
       if (realResp && (realResp.ok || realResp.status === 200)) {
         try {
           const clone = typeof realResp.clone === "function" ? realResp.clone() : realResp;
-          const json = await clone.json();
+          const rawJson = await clone.json();
+          const json = rawJson;
           const oldData = entry.detailRequests.get(urlStr)?.data;
           const oldMsgs = oldData?.context?.messages;
           const newMsgs = json?.context?.messages;
@@ -3388,7 +4386,9 @@
     } finally {
       entry.forceBypassCache = false;
       if (resolveColdFlight) resolveColdFlight(null);
-      if (canCoalesceCold) inFlightSessionDetailRequests.delete(sessionId);
+      if (canCoalesceCold && inFlightSessionDetailRequests.get(coalesceKey) === coldFlightPromise) {
+        inFlightSessionDetailRequests.delete(coalesceKey);
+      }
     }
 
     return realResp;
@@ -3413,6 +4413,8 @@
     window.__PI_ENH_CLEAR_SESSION_CACHE__ = clearSessionCaches;
     window.__PI_ENH_INVALIDATE_SESSION_CACHE__ = invalidateSessionCache;
     window.__PI_ENH_MARK_SESSION_RUNNING__ = markSessionRunning;
+    window.__PI_ENH_IS_SESSION_TERMINALLY_SETTLED__ = isSessionTerminallySettled;
+    window.__PI_ENH_MARK_SESSION_SETTLED__ = markSessionSettled;
     window.__PI_ENH_GET_SESSION_CACHE_STATS__ = getSessionCacheStats;
     window.__PI_ENH_GET_SESSION_CACHE_LIMIT__ = getSessionMemoryCacheLimit;
     window.__PI_ENH_SET_SESSION_CACHE_LIMIT__ = setSessionMemoryCacheLimit;
@@ -4039,6 +5041,129 @@
     window.__PI_ENH_SESSION_TURN_BASELINES__ = sessionTurnBaselines;
     window.__PI_ENH_EXPECTED_TURN_SIGNATURES__ = sessionExpectedTurnSignatures;
 
+    function verifySessionStreamSettled(sessionId, eventType) {
+      if (!sessionId) return;
+      const entry = getOrCreateSessionEntry(sessionId);
+      const reqGeneration = entry.runGeneration;
+      const activeFetch = baseFetch || originalWindowFetch || (typeof window !== "undefined" && typeof window.fetch === "function" ? window.fetch : null);
+      if (!activeFetch) return;
+
+      activeFetch(`/api/agent/${encodeURIComponent(sessionId)}`, { cache: "no-store" })
+        .then(async (resp) => {
+          if (!resp || !resp.ok) return;
+          const clone = typeof resp.clone === "function" ? resp.clone() : resp;
+          const json = await clone.json();
+          if (reqGeneration !== entry.runGeneration) return;
+
+          const runningState = readSessionRunningState(json);
+          if (runningState === false) {
+            markSessionSettled(sessionId);
+            markSessionRunning(sessionId, false, { settled: true });
+            entry.isRunning = false;
+            entry.completedAt = Date.now();
+            entry.hasPendingAgentEnd = false;
+            entry.hasPendingAttention = false;
+            broadcastSessionUpdate(sessionId, new Date().toISOString(), "event");
+            if (sessionId === getCurrentSessionId() || sessionId === getActiveSessionId()) {
+              scheduleTerminalSessionReconcile(sessionId, { reason: eventType });
+            } else {
+              if (typeof schedulePrioritySessionPreloads === "function") {
+                schedulePrioritySessionPreloads();
+              }
+            }
+          } else if (runningState === true) {
+            markSessionRunning(sessionId, true);
+          }
+        })
+        .catch(() => {});
+    }
+
+    function handleSessionStreamEvent(sId, data) {
+      if (!sId || !data) return;
+      handleSessionHistoryOrderStreamEvent(sId, data);
+      handleModelSpeedStreamEvent(sId, data);
+      if (data?.type === "agent_start") {
+        // 新一轮开始时明确废弃上一轮的异步校准，状态轮询本身不得做此清理。
+        clearTerminalReconcileTimers(sId);
+        const runningEntry = getOrCreateSessionEntry(sId);
+        runningEntry.hasPendingAgentEnd = false;
+        runningEntry.isSettled = false;
+        runningEntry.settledAt = null;
+        runningEntry.state = null;
+        runningEntry.runGeneration = (runningEntry.runGeneration || 0) + 1;
+        markSessionRunning(sId, true, { explicit: true, start: true });
+        recordSessionTurnBaseline(sId);
+        handleSessionWakeupIfArchived(sId);
+        if (typeof schedulePrioritySessionPreloads === "function") {
+          schedulePrioritySessionPreloads();
+        }
+      } else if (data?.type === "message_end") {
+        recordSessionTurnMessageEnd(sId, data);
+      } else if (data?.type === "connected") {
+        // 普通切换也会收到空闲 connected，它不是任务完成事件。
+        // 仅已知运行→空闲或明确失效时执行完成同步，避免每次切换清缓存并广播伪更新。
+        if (data.isStreaming === false) {
+          const previousEntry = sessionMemoryCache.get(sId);
+          const requiresSync = previousEntry?.isRunning || previousEntry?.needsFreshSync || previousEntry?.hasPendingAgentEnd;
+          markSessionRunning(sId, false);
+          if (!requiresSync) {
+            return;
+          }
+          const entry = getOrCreateSessionEntry(sId);
+          entry.isRunning = false;
+          entry.hasPendingAgentEnd = true;
+          entry.completedAt = Date.now();
+          markSessionNeedsIncrementalSync(sId);
+          void invalidateSessionCache(sId);
+          broadcastSessionUpdate(sId, new Date().toISOString(), "event");
+          if (sId === getCurrentSessionId() || sId === getActiveSessionId()) {
+            scheduleTerminalSessionReconcile(sId, { reason: "connected" });
+          }
+        } else {
+          markSessionRunning(sId, true, { explicit: true });
+        }
+      } else if (data?.type === "agent_end") {
+        // agent_end 仅视作中间事件，不抢先完成同步，不将 needsFreshSync 置 false，不立即 preload
+        const entry = getOrCreateSessionEntry(sId);
+        entry.hasPendingAgentEnd = true;
+        entry.needsFreshSync = true;
+        entry.lastAgentEndTime = Date.now();
+        if (!sessionTurnBaselines.has(sId)) {
+          recordSessionTurnBaseline(sId);
+        }
+        // 原生 React 在收到 agent_end 时会立即调用 tI(session)
+        // 保持 needsFreshSync=true 确保原生 tI 绝不命中未更新的旧缓存
+        // 同时若为当前活跃会话，启动后台权威校准保护
+        if (sId === getCurrentSessionId() || sId === getActiveSessionId()) {
+          scheduleTerminalSessionReconcile(sId, { reason: "agent_end" });
+        }
+      } else if (data?.type === "agent_settled" || data?.type === "prompt_done") {
+        verifySessionStreamSettled(sId, data.type);
+      } else if (data?.type === "tool_execution_end" && data.toolName === "ask_user" && data.toolCallId) {
+        getOrCreateSessionEntry(sId).hasPendingAttention = false;
+        resolveAskUserToolResult(sId, String(data.toolCallId));
+      } else if (data?.type === "extension_ui_request") {
+        const entry = getOrCreateSessionEntry(sId);
+        if (["select", "confirm", "input", "editor", "custom"].includes(data.method)) {
+          entry.hasPendingAttention = data.closed !== true;
+          if (data.closed !== true && typeof schedulePrioritySessionPreloads === "function") {
+            schedulePrioritySessionPreloads();
+          }
+        }
+      } else if (data?.type === "extension_ui_response" || data?.type === "extension_ui_closed") {
+        const entry = getOrCreateSessionEntry(sId);
+        entry.hasPendingAttention = false;
+      }
+      if (["agent_start", "agent_settled", "prompt_done", "extension_ui_request", "extension_ui_response", "extension_ui_closed"].includes(data?.type)
+        || (data?.type === "tool_execution_end" && data.toolName === "ask_user")) {
+        requestProjectStatusRefresh(data?.type === "extension_ui_request" && data.closed === true);
+        if (typeof schedulePrioritySessionPreloads === "function") {
+          schedulePrioritySessionPreloads();
+        }
+      }
+    }
+    window.__PI_ENH_HANDLE_SESSION_STREAM_EVENT__ = handleSessionStreamEvent;
+
     // 全局 EventSource 联动，精准捕获会话生命周期（避免任何旧缓存抹除新消息）
     const OriginalEventSource = window.EventSource;
     if (typeof OriginalEventSource === "function" && !window.__PI_ENH_EVENT_SOURCE_WRAPPED__) {
@@ -4103,6 +5228,7 @@
                   realEs.onmessage = (ev) => {
                     try {
                       const d = JSON.parse(ev.data);
+                      handleSessionStreamEvent(sId, d);
                       if (d?.type === "connected") finish();
                     } catch (_) {}
                     if (typeof this.onmessage === "function") this.onmessage(ev);
@@ -4136,75 +5262,7 @@
             const messageHandler = (event) => {
               try {
                 const data = JSON.parse(event.data);
-                handleSessionHistoryOrderStreamEvent(sId, data);
-                handleModelSpeedStreamEvent(sId, data);
-                if (data?.type === "agent_start") {
-                  // 新一轮开始时明确废弃上一轮的异步校准，状态轮询本身不得做此清理。
-                  clearTerminalReconcileTimers(sId);
-                  const runningEntry = getOrCreateSessionEntry(sId);
-                  runningEntry.hasPendingAgentEnd = false;
-                  markSessionRunning(sId, true);
-                  recordSessionTurnBaseline(sId);
-                  handleSessionWakeupIfArchived(sId);
-                } else if (data?.type === "message_end") {
-                  recordSessionTurnMessageEnd(sId, data);
-                } else if (data?.type === "connected") {
-                  // 普通切换也会收到空闲 connected，它不是任务完成事件。
-                  // 仅已知运行→空闲或明确失效时执行完成同步，避免每次切换清缓存并广播伪更新。
-                  if (data.isStreaming === false) {
-                    const previousEntry = sessionMemoryCache.get(sId);
-                    const requiresSync = previousEntry?.isRunning || previousEntry?.needsFreshSync || previousEntry?.hasPendingAgentEnd;
-                    markSessionRunning(sId, false);
-                    if (!requiresSync) {
-                      return;
-                    }
-                    const entry = getOrCreateSessionEntry(sId);
-                    entry.isRunning = false;
-                    entry.hasPendingAgentEnd = true;
-                    entry.completedAt = Date.now();
-                    markSessionNeedsIncrementalSync(sId);
-                    void invalidateSessionCache(sId);
-                    broadcastSessionUpdate(sId, new Date().toISOString(), "event");
-                    if (sId === getCurrentSessionId() || sId === getActiveSessionId()) {
-                      scheduleTerminalSessionReconcile(sId, { reason: "connected" });
-                    }
-                  } else {
-                    markSessionRunning(sId, true);
-                  }
-                } else if (data?.type === "agent_end") {
-                  // agent_end 仅视作中间事件，不抢先完成同步，不将 needsFreshSync 置 false，不立即 preload
-                  const entry = getOrCreateSessionEntry(sId);
-                  entry.hasPendingAgentEnd = true;
-                  entry.needsFreshSync = true;
-                  entry.lastAgentEndTime = Date.now();
-                  if (!sessionTurnBaselines.has(sId)) {
-                    recordSessionTurnBaseline(sId);
-                  }
-                  // 原生 React 在收到 agent_end 时会立即调用 tI(session)
-                  // 保持 needsFreshSync=true 确保原生 tI 绝不命中未更新的旧缓存
-                  // 同时若为当前活跃会话，启动后台权威校准保护
-                  if (sId === getCurrentSessionId() || sId === getActiveSessionId()) {
-                    scheduleTerminalSessionReconcile(sId, { reason: "agent_end" });
-                  }
-                } else if (data?.type === "agent_settled" || data?.type === "prompt_done") {
-                  markSessionRunning(sId, false);
-                  const entry = getOrCreateSessionEntry(sId);
-                  entry.isRunning = false;
-                  entry.completedAt = Date.now();
-                  entry.hasPendingAgentEnd = false;
-                  // 保留已有快照作为增量基线秒开，由后台 sync=1 精确合并落盘差量，绝不再暴力清空 detailRequests
-                  broadcastSessionUpdate(sId, new Date().toISOString(), "event");
-                  if (sId === getCurrentSessionId() || sId === getActiveSessionId()) {
-                    scheduleTerminalSessionReconcile(sId, { reason: data.type });
-                  }
-                } else if (data?.type === "extension_ui_request") {
-                  const entry = getOrCreateSessionEntry(sId);
-                  entry.hasPendingAttention = true;
-                } else if (data?.type === "extension_ui_response") {
-                  const entry = getOrCreateSessionEntry(sId);
-                  entry.hasPendingAttention = false;
-                }
-                if (["agent_start", "agent_settled", "prompt_done", "extension_ui_request", "extension_ui_response"].includes(data?.type)) requestProjectStatusRefresh(data?.type === "extension_ui_request" && data.closed === true);
+                handleSessionStreamEvent(sId, data);
               } catch (e) {}
             };
             es.addEventListener("message", messageHandler);
@@ -4270,10 +5328,231 @@
     const sessionDomSnapshots = new Map();
     let activeSnapshotOverlay = null;
 
+    function isHandoverReadinessSatisfied(sessionId) {
+      if (!sessionId) return false;
+      const currentActive = getActiveSessionId() || getCurrentSessionId();
+      if (currentActive !== sessionId) return false;
+
+      // 原生历史归属必须已完成切换到目标 sessionId
+      const loaded = window.__PI_ENH_GET_HISTORY_STATE__?.();
+      if (loaded?.sessionId !== sessionId) return false;
+
+      const nativeChat = document.querySelector(".chat-content");
+      if (!nativeChat) return false;
+
+      const scroll = nativeChat.querySelector(".overflow-y-auto") || nativeChat;
+      const nativeEntries = scroll.querySelectorAll("[data-entry-id]");
+      if (nativeEntries.length === 0) return false;
+
+      // 1. 工具卡片与过程折叠检查：若有未折叠的展开项，同步折叠一次并核对
+      if (isPluginEnabled("task-tool-auto-collapse")) {
+        if (typeof window.__PI_ENH_HAS_PENDING_TOOL_COLLAPSE__ === "function" && window.__PI_ENH_HAS_PENDING_TOOL_COLLAPSE__()) {
+          if (typeof window.__PI_ENH_FORCE_TOOL_COLLAPSE__ === "function") {
+            try { window.__PI_ENH_FORCE_TOOL_COLLAPSE__(); } catch (e) {}
+          }
+          if (window.__PI_ENH_HAS_PENDING_TOOL_COLLAPSE__()) {
+            return false;
+          }
+        }
+      }
+
+      // 2. 阅读位置恢复就绪检查：若当前正在恢复中或尚未就绪，严禁提前交接！
+      if (isPluginEnabled("session-scroll-restore")) {
+        if (document.documentElement && document.documentElement.classList.contains("pi-enh-scroll-restoring")) {
+          return false;
+        }
+        if (typeof window.__PI_ENH_IS_SCROLL_RESTORE_READY__ === "function") {
+          if (!window.__PI_ENH_IS_SCROLL_RESTORE_READY__(sessionId)) {
+            return false;
+          }
+        }
+      }
+
+      return true;
+    }
+
+    let activeLoadingPlaceholder = null;
+
+    function dismissStaticLoadingPlaceholder(reason) {
+      if (!activeLoadingPlaceholder) {
+        document.body.removeAttribute("data-pi-enh-session-placeholder-active");
+        const stale = document.querySelectorAll(".pi-enh-session-loading-placeholder");
+        stale.forEach(el => el.remove());
+        return;
+      }
+      try {
+        activeLoadingPlaceholder.cleanup(reason);
+      } catch (e) {}
+      activeLoadingPlaceholder = null;
+      if (reason !== "ready") {
+        document.querySelectorAll(".pi-enh-session-loading-placeholder").forEach(el => el.remove());
+      }
+    }
+
+    function showSessionStaticLoadingPlaceholder(sessionId) {
+      dismissStaticLoadingPlaceholder("superseded");
+      dismissSnapshotOverlay("superseded");
+      if (!isPluginEnabled("session-memory-cache") || !sessionId) return;
+      if (typeof isChatSessionRunning === "function" && isChatSessionRunning(sessionId)) return;
+
+      const chatContent = document.querySelector(".chat-content");
+      const scrollContainer = chatContent?.querySelector(".overflow-y-auto") || chatContent;
+      const targetArea = scrollContainer || chatContent;
+      const rect = targetArea?.getBoundingClientRect();
+      if (!rect || rect.width <= 0 || rect.height <= 0) return;
+
+      const placeholder = document.createElement("div");
+      placeholder.className = "pi-enh-session-loading-placeholder";
+      placeholder.setAttribute("data-target-session-id", sessionId);
+
+      let bgColor = "var(--bg, #ffffff)";
+      try {
+        let el = targetArea;
+        while (el && el !== document.documentElement) {
+          const comp = window.getComputedStyle(el).backgroundColor;
+          if (comp && comp !== "transparent" && comp !== "rgba(0, 0, 0, 0)") {
+            bgColor = comp;
+            break;
+          }
+          el = el.parentElement;
+        }
+        if (bgColor === "var(--bg, #ffffff)") {
+          const bodyBg = window.getComputedStyle(document.body).backgroundColor;
+          if (bodyBg && bodyBg !== "transparent" && bodyBg !== "rgba(0, 0, 0, 0)") {
+            bgColor = bodyBg;
+          }
+        }
+      } catch (e) {}
+
+      Object.assign(placeholder.style, {
+        position: "fixed",
+        top: `${rect.top}px`,
+        left: `${rect.left}px`,
+        width: `${rect.width}px`,
+        height: `${rect.height}px`,
+        zIndex: "44",
+        pointerEvents: "none",
+        overflow: "hidden",
+        backgroundColor: bgColor,
+        contain: "strict",
+      });
+
+      const label = document.createElement("div");
+      label.className = "pi-enh-session-placeholder-label";
+      label.textContent = "正在加载会话...";
+      Object.assign(label.style, {
+        position: "absolute",
+        top: "40%",
+        left: "50%",
+        transform: "translate(-50%, -50%)",
+        fontSize: "13px",
+        lineHeight: "1.4",
+        color: "currentColor",
+        opacity: "0.55",
+        userSelect: "none",
+        pointerEvents: "none",
+      });
+      placeholder.appendChild(label);
+
+      document.body.appendChild(placeholder);
+      document.body.setAttribute("data-pi-enh-session-placeholder-active", "true");
+
+      const timeoutId = setTimeout(() => {
+        dismissStaticLoadingPlaceholder("timeout");
+      }, 6000);
+
+      let rafId = null;
+      let urlChangedToTarget = false;
+      let firstContentAt = 0;
+      let lastLayoutChangeAt = 0;
+      let layoutSignature = "";
+
+      function checkPlaceholderHandover() {
+        const currentActive = getActiveSessionId() || getCurrentSessionId();
+        if (urlChangedToTarget && currentActive && currentActive !== sessionId) {
+          dismissStaticLoadingPlaceholder("switched-away");
+          return;
+        }
+        if (currentActive === sessionId) {
+          urlChangedToTarget = true;
+        }
+        if (!urlChangedToTarget) return;
+
+        // 无快照的首次进入会先显示尾页、随后补齐历史并折叠过程卡片。
+        // 在这段布局交接窗口只展示静态占位，避免 3→100→3 条的可见跳动。
+        const loaded = window.__PI_ENH_GET_HISTORY_STATE__?.();
+        const scroll = document.querySelector(".chat-content .overflow-y-auto");
+        if (loaded?.sessionId !== sessionId || !scroll) return;
+        const entryCount = scroll.querySelectorAll("[data-entry-id]").length;
+        if (!entryCount) return;
+        const now = performance.now();
+        const signature = `${loaded.entryIds?.length || 0}:${entryCount}:${scroll.scrollHeight}`;
+        if (!firstContentAt) firstContentAt = now;
+        if (signature !== layoutSignature) {
+          layoutSignature = signature;
+          lastLayoutChangeAt = now;
+        }
+        if (now - firstContentAt < 1650 || now - lastLayoutChangeAt < 240) return;
+        if (!isHandoverReadinessSatisfied(sessionId)) return;
+
+        dismissStaticLoadingPlaceholder("ready");
+      }
+
+      const observer = new MutationObserver(() => {
+        checkPlaceholderHandover();
+      });
+      observer.observe(document.body, { childList: true, subtree: true });
+
+      function pollPlaceholder() {
+        if (!activeLoadingPlaceholder) return;
+        checkPlaceholderHandover();
+        if (activeLoadingPlaceholder) {
+          rafId = requestAnimationFrame(pollPlaceholder);
+        }
+      }
+      rafId = requestAnimationFrame(pollPlaceholder);
+
+      const gestureEvents = ["wheel", "touchstart", "touchmove", "pointerdown", "mousedown", "keydown"];
+      const onGesture = () => dismissStaticLoadingPlaceholder("user-gesture");
+      for (const ev of gestureEvents) {
+        window.addEventListener(ev, onGesture, { capture: true, passive: true });
+      }
+
+      activeLoadingPlaceholder = {
+        placeholderEl: placeholder,
+        targetSessionId: sessionId,
+        cleanup: (reason) => {
+          clearTimeout(timeoutId);
+          if (rafId) cancelAnimationFrame(rafId);
+          observer.disconnect();
+          for (const ev of gestureEvents) {
+            window.removeEventListener(ev, onGesture, { capture: true, passive: true });
+          }
+          document.body.removeAttribute("data-pi-enh-session-placeholder-active");
+
+          if (reason === "ready") {
+            placeholder.style.transition = "opacity 0.1s ease-out";
+            placeholder.style.opacity = "0";
+            setTimeout(() => {
+              try { placeholder.remove(); } catch (e) {}
+            }, 100);
+          } else {
+            // 所有 user-gesture / superseded / switched-away / plugin-disabled 即时 remove，避免残影叠层
+            try { placeholder.remove(); } catch (e) {}
+          }
+        }
+      };
+    }
+
     function clearDomSessionSnapshots() {
       sessionDomSnapshots.clear();
       dismissSnapshotOverlay("cleared");
+      dismissStaticLoadingPlaceholder("cleared");
     }
+    // 设置面板即时切换时，清理作用域内的 DOM 覆盖层（不能依赖外层对局部函数的 typeof 检查）。
+    addManagedListener(window, "pi:session-cache-change", () => {
+      if (!isPluginEnabled("session-memory-cache")) clearDomSessionSnapshots();
+    });
     window.__PI_ENH_INVALIDATE_DOM_SESSION_SNAPSHOT__ = (sid) => {
       if (sid) sessionDomSnapshots.delete(sid);
     };
@@ -4375,13 +5654,17 @@
         return;
       }
       try {
-        activeSnapshotOverlay.cleanup();
+        activeSnapshotOverlay.cleanup(reason);
       } catch (e) {}
       activeSnapshotOverlay = null;
+      if (reason !== "ready") {
+        document.querySelectorAll(".pi-enh-session-snapshot-overlay").forEach(el => el.remove());
+      }
     }
 
     function showSessionDomSnapshotOverlay(sessionId, snap) {
       dismissSnapshotOverlay("superseded");
+      dismissStaticLoadingPlaceholder("superseded");
       if (!isPluginEnabled("session-memory-cache") || !snap) return;
 
       const chatContent = document.querySelector(".chat-content");
@@ -4446,12 +5729,9 @@
 
       const timeoutId = setTimeout(() => {
         dismissSnapshotOverlay("timeout");
-      }, 1200);
+      }, 6000);
 
-      const observer = new MutationObserver(() => {
-        checkHandoverReadiness();
-      });
-
+      let rafId = null;
       let urlChangedToTarget = false;
 
       function checkHandoverReadiness() {
@@ -4465,29 +5745,53 @@
         }
         if (!urlChangedToTarget) return;
 
-        // 原生加载视图与 .chat-content 互斥；不要扫描整页文案（正文可能恰好提到“正在加载会话”）。
-        const nativeChat = document.querySelector(".chat-content");
-        if (!nativeChat) return;
-
-        const nativeEntries = nativeChat.querySelectorAll("[data-entry-id]");
-        if (nativeEntries.length === 0) return;
-
-        // 虚拟列表切换阅读位置时首个 entryId 不一定仍在视口内；以原生历史归属为交接依据。
-        if (window.__PI_ENH_GET_HISTORY_STATE__?.()?.sessionId !== sessionId) return;
+        if (!isHandoverReadinessSatisfied(sessionId)) return;
 
         dismissSnapshotOverlay("ready");
       }
 
+      const observer = new MutationObserver(() => {
+        checkHandoverReadiness();
+      });
       observer.observe(document.body, { childList: true, subtree: true });
+
+      function pollSnapshot() {
+        if (!activeSnapshotOverlay) return;
+        checkHandoverReadiness();
+        if (activeSnapshotOverlay) {
+          rafId = requestAnimationFrame(pollSnapshot);
+        }
+      }
+      rafId = requestAnimationFrame(pollSnapshot);
+
+      const gestureEvents = ["wheel", "touchstart", "touchmove", "pointerdown", "mousedown", "keydown"];
+      const onGesture = () => dismissSnapshotOverlay("user-gesture");
+      for (const ev of gestureEvents) {
+        window.addEventListener(ev, onGesture, { capture: true, passive: true });
+      }
 
       activeSnapshotOverlay = {
         overlayEl: overlay,
         targetSessionId: sessionId,
-        cleanup: () => {
+        cleanup: (reason) => {
           clearTimeout(timeoutId);
+          if (rafId) cancelAnimationFrame(rafId);
           observer.disconnect();
-          overlay.remove();
+          for (const ev of gestureEvents) {
+            window.removeEventListener(ev, onGesture, { capture: true, passive: true });
+          }
           document.body.removeAttribute("data-pi-enh-session-snapshot-active");
+
+          if (reason === "ready") {
+            overlay.style.transition = "opacity 0.1s ease-out";
+            overlay.style.opacity = "0";
+            setTimeout(() => {
+              try { overlay.remove(); } catch (e) {}
+            }, 100);
+          } else {
+            // 所有 user-gesture / superseded / switched-away / plugin-disabled 即时 remove，避免残影叠层
+            try { overlay.remove(); } catch (e) {}
+          }
         }
       };
     }
@@ -4509,6 +5813,8 @@
       const snap = getValidDomSnapshot(targetSessionId);
       if (snap) {
         showSessionDomSnapshotOverlay(targetSessionId, snap);
+      } else {
+        showSessionStaticLoadingPlaceholder(targetSessionId);
       }
     }, { capture: true, passive: true });
 
@@ -4519,12 +5825,20 @@
           dismissSnapshotOverlay("popstate-change");
         }
       }
+      if (activeLoadingPlaceholder) {
+        const nextId = getActiveSessionId();
+        if (nextId && nextId !== activeLoadingPlaceholder.targetSessionId) {
+          dismissStaticLoadingPlaceholder("popstate-change");
+        }
+      }
       if (!isPluginEnabled("session-memory-cache")) return;
       const targetSessionId = getActiveSessionId();
       if (!targetSessionId) return;
       const snap = getValidDomSnapshot(targetSessionId);
       if (snap) {
         showSessionDomSnapshotOverlay(targetSessionId, snap);
+      } else {
+        showSessionStaticLoadingPlaceholder(targetSessionId);
       }
     }, { passive: true });
 
@@ -4533,9 +5847,10 @@
     window.__PI_ENH_GET_DOM_SNAPSHOT_STATS__ = () => ({
       count: sessionDomSnapshots.size,
       sessionIds: Array.from(sessionDomSnapshots.keys()),
-      activeOverlay: activeSnapshotOverlay ? activeSnapshotOverlay.targetSessionId : null,
+      activeOverlay: activeSnapshotOverlay ? activeSnapshotOverlay.targetSessionId : (activeLoadingPlaceholder ? activeLoadingPlaceholder.targetSessionId : null),
     });
     window.__PI_ENH_DISMISS_SNAPSHOT_OVERLAY__ = dismissSnapshotOverlay;
+    window.__PI_ENH_DISMISS_LOADING_PLACEHOLDER__ = dismissStaticLoadingPlaceholder;
 
     activeCleanups.push(() => {
       clearDomSessionSnapshots();
@@ -4750,6 +6065,100 @@
     document.querySelector(".pi-enh-presence-badge")?.remove();
     document.querySelector(".pi-enh-presence-popover")?.remove();
   } catch (e) {}
+
+  // 界面防红字黑屏自愈看门狗：一旦页面意外渲染出 [session-history-order-guard] 错误节点，自动自愈恢复
+  if (typeof window !== "undefined") {
+    addManagedInterval(() => {
+      try {
+        const errEl = document.querySelector(".chat-content-error, .text-red-400, div[class*='text-red']");
+        if (errEl && errEl.textContent && errEl.textContent.includes("[session-history-order-guard]")) {
+          console.warn("[pi-enh] Detected stale order-guard red error screen on DOM, triggering auto-heal...");
+          errEl.style.display = "none";
+          if (typeof window.__PI_WEB_NATIVE_RELOAD_CURRENT_SESSION__ === "function") {
+            window.__PI_WEB_NATIVE_RELOAD_CURRENT_SESSION__(false);
+          } else if (typeof window.__PI_ENH_RELOAD_CURRENT_SESSION__ === "function") {
+            window.__PI_ENH_RELOAD_CURRENT_SESSION__(false);
+          }
+        }
+      } catch (_) {}
+    }, 1500);
+
+    // 会话加载长期卡死自愈看门狗 (Anti-Loading-Stuck Watchdog)
+    // 专治大体积会话、高频SSE推送/版本并发冲突导致的“一直显示正在加载会话...”
+    let lastStuckSessionId = null;
+    let stuckDetectCount = 0;
+    let lastHealTimestamp = 0;
+
+    addManagedInterval(() => {
+      try {
+        const targetSessionId = getActiveSessionId() || getCurrentSessionId();
+        if (!targetSessionId) {
+          lastStuckSessionId = null;
+          stuckDetectCount = 0;
+          return;
+        }
+
+        const chatContent = document.querySelector(".chat-content");
+        const loadingDiv = Array.from(document.querySelectorAll("div")).find(d =>
+          d.children.length === 0 &&
+          (d.textContent?.includes("正在加载会话") || d.textContent?.includes("Loading session") || d.textContent?.includes("正在載入工作階段"))
+        );
+
+        if (!chatContent && loadingDiv) {
+          if (lastStuckSessionId === targetSessionId) {
+            stuckDetectCount++;
+          } else {
+            lastStuckSessionId = targetSessionId;
+            stuckDetectCount = 1;
+          }
+
+          // 连续检测到卡在 loading 态超过 2 次（约 1.6s ~ 2.4s）
+          if (stuckDetectCount >= 2 && Date.now() - lastHealTimestamp > 1500) {
+            lastHealTimestamp = Date.now();
+            console.warn(`[pi-enh] Detected session loading stuck on "${targetSessionId}" for ${stuckDetectCount * 800}ms, triggering force healing...`);
+
+            // 1. 最优先执行：直接触发原生权威重载，解除 loading 态死锁
+            try {
+              if (typeof window.__PI_WEB_RELOAD_SESSION__ === "function") {
+                const p = window.__PI_WEB_RELOAD_SESSION__(targetSessionId, true, true, { force: true });
+                if (p && typeof p.then === "function") {
+                  p.then(() => {
+                    console.log(`[pi-enh] Watchdog reload successfully resolved for ${targetSessionId}`);
+                  }).catch((err) => {
+                    console.warn(`[pi-enh] Watchdog reload promise rejected:`, err?.message || err);
+                  });
+                }
+              } else if (typeof window.__PI_ENH_RELOAD_CURRENT_SESSION__ === "function") {
+                window.__PI_ENH_RELOAD_CURRENT_SESSION__(true);
+              }
+            } catch (reloadErr) {
+              console.error(`[pi-enh] Watchdog reload invocation error:`, reloadErr);
+            }
+
+            // 2. 尝试快照垫底（安全容错包裹）
+            try {
+              const snap = typeof getValidDomSnapshot === "function" ? getValidDomSnapshot(targetSessionId) : null;
+              if (snap && typeof showSessionDomSnapshotOverlay === "function") {
+                showSessionDomSnapshotOverlay(targetSessionId, snap);
+              }
+            } catch (_) {}
+          }
+        } else {
+          lastStuckSessionId = null;
+          stuckDetectCount = 0;
+        }
+      } catch (_) {}
+    }, 800);
+  }
+
+  // 页面首屏就绪后，平滑延迟 800ms 触发一次高优会话（running/completed/ask_user）优先级预加载
+  if (typeof window !== "undefined") {
+    setTimeout(() => {
+      if (typeof schedulePrioritySessionPreloads === "function") {
+        schedulePrioritySessionPreloads();
+      }
+    }, 800);
+  }
 
   activeCleanups.push(() => {
     if (typeof window !== "undefined" && window.fetch === interceptedFetch) {

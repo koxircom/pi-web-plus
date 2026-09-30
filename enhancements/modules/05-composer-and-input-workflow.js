@@ -721,6 +721,16 @@
 
   function isServerRunningForSession(sid) {
     if (!sid) return false;
+
+    // 终态保护检查：若该会话有可验证的终态证据（agent_settled/prompt_done），且未出现新轮次 agent_start 或明确 stop 按钮，
+    // 则陈旧滞后的 statusEntry.execution === "running" 或 runningSessionIds 绝不能复活秒表与运行态。
+    const isSettledFn = typeof isSessionTerminallySettled === "function"
+      ? isSessionTerminallySettled
+      : (typeof window !== "undefined" ? window.__PI_ENH_IS_SESSION_TERMINALLY_SETTLED__ : null);
+    if (typeof isSettledFn === "function" && isSettledFn(sid)) {
+      return false;
+    }
+
     const hasRunningIdsList =
       typeof projectStatusLastPayload !== "undefined" &&
       Array.isArray(projectStatusLastPayload?.runningSessionIds);
@@ -873,9 +883,28 @@
       activeTextareaInputListener = null;
       return;
     }
+    let lastWasEmpty = !textarea.value || textarea.value.trim().length === 0;
+    let quickActionDebounceTimer = null;
     activeTextareaInputListener = () => {
       if (isComposing) return;
-      syncQuickActionButtons();
+      const isEmpty = !textarea.value || textarea.value.trim().length === 0;
+      // 状态发生空/非空突变（如完全删空或输入首字），立即无延迟同步
+      if (isEmpty !== lastWasEmpty) {
+        lastWasEmpty = isEmpty;
+        if (quickActionDebounceTimer) {
+          clearTimeout(quickActionDebounceTimer);
+          quickActionDebounceTimer = null;
+        }
+        syncQuickActionButtons();
+      } else {
+        // 持续删除或输入中（长文本长按 Backspace），防抖 160ms，绝不阻塞主线程
+        if (!quickActionDebounceTimer) {
+          quickActionDebounceTimer = setTimeout(() => {
+            quickActionDebounceTimer = null;
+            if (!isComposing) syncQuickActionButtons();
+          }, 160);
+        }
+      }
     };
     textarea.addEventListener("input", activeTextareaInputListener);
     textarea.addEventListener("compositionstart", onCompositionStart);
@@ -921,6 +950,45 @@
     return textarea?.closest?.("fieldset")?.querySelector('div[style*="flex-wrap"], div[style*="flexWrap"]') || null;
   }
 
+  function isNativeImagePreviewTrigger(el) {
+    if (!el || !el.tagName || el.tagName.toLowerCase() !== "button") return false;
+    const hasPopup = typeof el.getAttribute === "function"
+      ? el.getAttribute("aria-haspopup")
+      : el.attributes?.["aria-haspopup"];
+    if (hasPopup !== "dialog") return false;
+    if (el.classList?.contains?.("image-preview-close")) return false;
+    if (el.hasAttribute?.("data-no-zoom") || el.hasAttribute?.("data-pi-enh-no-zoom")) return false;
+    if (String(el.textContent || "").trim() !== "") return false;
+    const children = Array.from(el.children || []);
+    if (children.length !== 1) return false;
+    const onlyChild = children[0];
+    return Boolean(onlyChild && onlyChild.tagName && onlyChild.tagName.toLowerCase() === "img");
+  }
+
+  function unwrapNativeImagePreviewTarget(el) {
+    if (!el || !el.tagName) return el;
+    if (isNativeImagePreviewTrigger(el)) {
+      return Array.from(el.children || [])[0] || el;
+    }
+    return el;
+  }
+
+  function getComposerAttachmentItemContainer(img) {
+    if (!img || !img.parentElement) return null;
+    const parent = img.parentElement;
+    if (isNativeImagePreviewTrigger(parent)) {
+      return parent.parentElement || null;
+    }
+    return parent;
+  }
+
+  function getComposerAttachmentRemoveButton(img) {
+    const itemContainer = getComposerAttachmentItemContainer(img);
+    if (!itemContainer) return null;
+    const children = Array.from(itemContainer.children || []);
+    return children.find((c) => c && c.tagName && c.tagName.toLowerCase() === "button" && !isNativeImagePreviewTrigger(c)) || null;
+  }
+
   function findComposerTextarea() {
     return document.querySelector("textarea.chat-input-textarea") ||
       document.querySelector('textarea[style*="fontFamily"]') ||
@@ -928,18 +996,68 @@
       document.querySelector("textarea");
   }
 
-  function syncComposerTextareaAutoHeight(textarea) {
+  let composerHeightRafId = null;
+  let lastMeasuredValueLength = -1;
+  let lastMeasuredScrollHeight = -1;
+
+  function syncComposerTextareaAutoHeight(textarea, { immediate = false } = {}) {
     if (!textarea || textarea.tagName !== "TEXTAREA") return;
     if (!textarea.hasAttribute("rows")) textarea.setAttribute("rows", "1");
     if (textarea.style.display === "none") return;
-    if (!textarea.value) {
-      textarea.style.height = "auto";
+
+    const card = textarea.closest?.('.pi-enh-cursor-composer, fieldset > div[style*="max-width"]');
+    // 若用户已手动拉大/拉小高度，保持用户自定义尺寸，彻底跳过高度重排
+    if (card && card.classList.contains("pi-enh-composer-custom-height")) {
       return;
     }
-    textarea.style.height = "auto";
-    const sh = textarea.scrollHeight || 0;
-    if (sh > 0) {
-      textarea.style.height = `${Math.min(sh, 200)}px`;
+
+    const val = textarea.value || "";
+    if (!val) {
+      if (composerHeightRafId) {
+        cancelAnimationFrame(composerHeightRafId);
+        composerHeightRafId = null;
+      }
+      textarea.style.height = "auto";
+      lastMeasuredValueLength = 0;
+      lastMeasuredScrollHeight = 0;
+      return;
+    }
+
+    // 移动端长文本快速删除优化 (Fast Path)：
+    // 当文本很长且已处于溢出滚动状态时，小幅度的字符删除绝不会让高度变矮，跳过 auto 布局颠簸
+    const len = val.length;
+    if (!immediate && lastMeasuredScrollHeight >= 200 && Math.abs(len - lastMeasuredValueLength) < 20) {
+      return;
+    }
+
+    const measureAndApply = () => {
+      composerHeightRafId = null;
+      if (!textarea.isConnected || textarea.style.display === "none") return;
+      if (card && card.classList.contains("pi-enh-composer-custom-height")) return;
+      const currentVal = textarea.value || "";
+      if (!currentVal) {
+        textarea.style.height = "auto";
+        lastMeasuredValueLength = 0;
+        lastMeasuredScrollHeight = 0;
+        return;
+      }
+      textarea.style.height = "auto";
+      const sh = textarea.scrollHeight || 0;
+      lastMeasuredValueLength = currentVal.length;
+      lastMeasuredScrollHeight = sh;
+      if (sh > 0) {
+        textarea.style.height = `${Math.min(sh, 200)}px`;
+      }
+    };
+
+    if (immediate) {
+      if (composerHeightRafId) {
+        cancelAnimationFrame(composerHeightRafId);
+        composerHeightRafId = null;
+      }
+      measureAndApply();
+    } else if (!composerHeightRafId) {
+      composerHeightRafId = requestAnimationFrame(measureAndApply);
     }
   }
 
@@ -1239,8 +1357,71 @@
   let lastObservedNativeDraftKey = null;
   const submittedDraftKeys = new Set();
   const pendingDraftSubmissions = new Map();
+  const nativeDraftRestoreObserverRecords = new Set();
+  let restoringPersistedComposerDraft = false;
   let draftSubmissionPollFrame = 0;
   let clearingStaleDraftSurface = false;
+  const recentlySubmittedSignatures = new Map();
+
+  function recordSubmittedDraftSignature(sig) {
+    if (!sig || typeof sig !== "string") return;
+    recentlySubmittedSignatures.set(sig, Date.now());
+    if (recentlySubmittedSignatures.size > 80) {
+      const now = Date.now();
+      for (const [s, ts] of recentlySubmittedSignatures) {
+        if (now - ts > 600000) recentlySubmittedSignatures.delete(s);
+      }
+    }
+  }
+
+  function isDraftAlreadySentInSession(ownerKey, draft) {
+    if (!draft || (!draft.value && (!draft.images || !draft.images.length))) return false;
+    const text = (draft.value || "").trim();
+    if (!text && !draft.images?.length) return false;
+
+    const sig = JSON.stringify({
+      value: draft.value || "",
+      images: (draft.images || []).map(({ data, mimeType }) => ({ data, mimeType }))
+    });
+    if (recentlySubmittedSignatures.has(sig)) return true;
+
+    try {
+      const sid = typeof getCurrentSessionId === "function" ? getCurrentSessionId() : null;
+      const targetSid = (sid && sid.length >= 20) ? sid : (typeof ownerKey === "string" && ownerKey.length >= 20 ? ownerKey : null);
+      if (targetSid && typeof sessionMemoryCache !== "undefined") {
+        const entry = sessionMemoryCache.get(targetSid);
+        if (entry && entry.detailRequests) {
+          for (const req of entry.detailRequests.values()) {
+            const msgs = req.data?.context?.messages;
+            if (Array.isArray(msgs)) {
+              for (const m of msgs) {
+                if (m.role === "user") {
+                  let userText = "";
+                  if (typeof m.content === "string") userText = m.content.trim();
+                  else if (Array.isArray(m.content)) {
+                    userText = m.content.filter(c => c.type === "text").map(c => c.text).join("\n").trim();
+                  }
+                  if (userText && (userText === text || (text.length >= 10 && userText.includes(text)))) return true;
+                }
+              }
+            }
+          }
+        }
+      }
+
+      if (text) {
+        const userNodes = document.querySelectorAll(".chat-content [data-entry-id], .chat-content .markdown-user-message");
+        for (const node of userNodes) {
+          const content = node.textContent?.trim() || "";
+          if (content && (content === text || (text.length >= 10 && content.includes(text.slice(0, Math.min(text.length, 50)))))) {
+            return true;
+          }
+        }
+      }
+    } catch (_) {}
+
+    return false;
+  }
 
   function validDraftImages(images) {
     return Array.isArray(images) && images.length <= 10 && images.every((img) =>
@@ -1270,6 +1451,10 @@
     if (!isPluginEnabled("composer-draft-cache") || typeof key !== "string" || !key
       || typeof draft?.value !== "string" || !validDraftImages(draft.images)) return false;
     if (!draft.value && !draft.images.length) return removePersistedDraft(key);
+    if (isDraftAlreadySentInSession(key, draft)) {
+      removePersistedDraft(key);
+      return false;
+    }
     try {
       // Each owner has its own atomic entry. Never rewrite another session's
       // draft on quota failure or a concurrent save from another browser tab.
@@ -1295,6 +1480,67 @@
       }
       return true;
     } catch { return false; } // Keep existing drafts intact if storage is full.
+  }
+
+  function installNativeDraftRestoreObserver(native) {
+    const handle = native?.handle;
+    if (!native || !handle) return;
+    for (const record of nativeDraftRestoreObserverRecords) {
+      if (record.handle === handle) continue;
+      if (record.handle.restoreSubmission === record.wrapper) {
+        try { record.handle.restoreSubmission = record.original; } catch {}
+      }
+      nativeDraftRestoreObserverRecords.delete(record);
+    }
+    const original = handle.restoreSubmission;
+    if (typeof original !== "function" || original.__piEnhDraftRestoreObserver) return;
+    const wrapper = function(text, images, targetDraftKey) {
+      const result = original.apply(this, arguments);
+      if (restoringPersistedComposerDraft || !isPluginEnabled("composer-draft-cache")) return result;
+      const owner = typeof targetDraftKey === "string" && targetDraftKey
+        ? targetDraftKey : (native.keyRef?.current || native.key);
+      if (!owner) return result;
+      pendingDraftSubmissions.delete(owner);
+      submittedDraftKeys.delete(owner);
+
+      const current = readNativeComposerDraft();
+      if (current?.key === owner && current.keyRef?.current === owner) {
+        const ctx = nativeDraftContexts.get(current.keyRef);
+        const snapshot = nativeDraftSnapshot(current);
+        if (ctx) {
+          ctx.initialized = true;
+          ctx.lastSaved = EMPTY_DRAFT_SIGNATURE;
+        }
+        if (snapshot && (snapshot.value || snapshot.images.length)
+          && savePersistedDraft(owner, snapshot) && ctx) {
+          ctx.lastSaved = JSON.stringify(snapshot);
+        }
+        return result;
+      }
+
+      // Rejection recovery can target a session that is no longer visible. Keep
+      // the native recovery and the enhancement's durable copy in sync.
+      const recoveredValue = typeof text === "string" ? text : "";
+      const recoveredImages = (Array.isArray(images) ? images : [])
+        .filter((image) => image && typeof image.data === "string" && image.data
+          && typeof image.mimeType === "string" && image.mimeType.startsWith("image/"))
+        .map(({ data, mimeType }) => ({ data, mimeType }));
+      const existing = getPersistedDraft(owner) || { value: "", images: [] };
+      const value = !recoveredValue.trim() ? existing.value
+        : (!existing.value.trim() ? recoveredValue : `${recoveredValue}\n\n${existing.value}`);
+      const mergedImages = [...recoveredImages, ...existing.images];
+      if (mergedImages.length <= 10 && validDraftImages(mergedImages)) {
+        savePersistedDraft(owner, { value, images: mergedImages });
+      }
+      return result;
+    };
+    Object.defineProperty(wrapper, "__piEnhDraftRestoreObserver", { value: true });
+    try {
+      handle.restoreSubmission = wrapper;
+      if (handle.restoreSubmission === wrapper) {
+        nativeDraftRestoreObserverRecords.add({ handle, original, wrapper });
+      }
+    } catch { /* Native imperative handles may be immutable; fail closed. */ }
   }
 
   function committedComposerFiber(fieldset) {
@@ -1342,9 +1588,11 @@
       const imagesRef = hooks[i + 2];
       const imageStateHooks = hookNodes.filter((hook) =>
         hook.memoizedState === imagesRef.current && typeof hook.queue?.dispatch === "function");
-      return { key: props.draftKey, keyRef: hooks[i], valueRef: hooks[i + 1],
+      const native = { key: props.draftKey, keyRef: hooks[i], valueRef: hooks[i + 1],
         imagesRef, pendingRef: hooks[i + 3], textarea, fieldset, handle,
         imageStateHook: imageStateHooks.length === 1 ? imageStateHooks[0] : null };
+      installNativeDraftRestoreObserver(native);
+      return native;
     }
     return null;
   }
@@ -1380,7 +1628,7 @@
         } else if (native.fieldset) {
           for (const img of native.fieldset.querySelectorAll("img")) {
             if (/^(blob:|data:image\/)/.test(img.getAttribute("src") || "")) {
-              img.parentElement?.querySelector("button")?.click();
+              (getComposerAttachmentRemoveButton(img) || (!isNativeImagePreviewTrigger(img.parentElement) ? img.parentElement?.querySelector?.("button") : null))?.click();
             }
           }
         }
@@ -1510,19 +1758,31 @@
       && snapshot.value === submission.text && !submission.accepted) snapshot.value = submission.body;
     const isEmpty = !snapshot.value && !snapshot.images.length;
     if (isEmpty) {
-      if (sub && !sub.accepted && sub.keyRef === ctx.keyRef) {
-        markDraftSubmissionAccepted(sub);
+      const hadSavedContent = typeof ctx.lastSaved === "string"
+        && ctx.lastSaved !== EMPTY_DRAFT_SIGNATURE;
+      // An empty native instance may not have hydrated its session draft yet.
+      // Only erase storage after an observed submission intent or a previously
+      // non-empty draft was explicitly cleared; empty refs alone prove nothing.
+      if (sub?.accepted || submittedDraftKeys.has(ctx.key) || hadSavedContent) {
+        removePersistedDraft(ctx.key);
       }
-      removePersistedDraft(ctx.key);
       ctx.lastSaved = EMPTY_DRAFT_SIGNATURE;
       return;
     }
-    // Never write back stale content on a newly remounted instance whose prior
-    // same-session instance already accepted and cleared the submission.
-    if (sub?.accepted && ctx.keyRef !== sub.keyRef) return;
-    if (sub?.accepted && ctx.keyRef === sub.keyRef) {
-      pendingDraftSubmissions.delete(ctx.key);
-      submittedDraftKeys.delete(ctx.key);
+    // 已提交且已接受的会话：若当前内容与已提交载荷一致，或当前处于提交确认状态且无真实新打字输入，严禁重新写回草稿
+    if (sub?.accepted) {
+      if (JSON.stringify(snapshot) === sub.signature) return;
+      if (ctx.keyRef === sub.keyRef) {
+        pendingDraftSubmissions.delete(ctx.key);
+        submittedDraftKeys.delete(ctx.key);
+      }
+    }
+    if (submittedDraftKeys.has(ctx.key)) {
+      if (sub && JSON.stringify(snapshot) === sub.signature) return;
+    }
+    if (isDraftAlreadySentInSession(ctx.key, snapshot)) {
+      removePersistedDraft(ctx.key);
+      return;
     }
     const signature = JSON.stringify(snapshot);
     if (signature === ctx.lastSaved && getPersistedDraft(ctx.key)) return;
@@ -1552,6 +1812,9 @@
       && (button.classList?.contains("pi-enh-cursor-send")
         || button.classList?.contains("pi-enh-cursor-followup")
         || button.classList?.contains("pi-enh-cursor-steer")
+        || button.querySelector?.('polyline[points*="7.5 3 12 7 7.5 11"]')
+        || button.querySelector?.('path[d*="M5 1"]')
+        || button.querySelector?.('polyline[points*="2.5 3.5 5 1 7.5 3.5"]')
         || labels.some((label) => /发送(?:消息)?|引导|后续消息|send(?:\s+message)?|steer|follow[\s-]?up/i.test(label)));
     const isEditorTarget = target === native.textarea
       || Boolean(activeFormattedComposer && activeFormattedComposer.__boundTextarea === native.textarea && activeFormattedComposer.contains(target));
@@ -1580,6 +1843,7 @@
     if (snapshot && (snapshot.value || snapshot.images.length) && !getPersistedDraft(native.key)) {
       if (savePersistedDraft(native.key, snapshot)) ctx.lastSaved = signature;
     }
+    recordSubmittedDraftSignature(signature);
     const sub = {
       owner: native.key,
       keyRef: native.keyRef,
@@ -1629,7 +1893,7 @@
     const badge = document.createElement("div");
     badge.className = "pi-enh-draft-badge";
     badge.setAttribute("data-draft-owner", ctx.key);
-    badge.style.cssText = "display:inline-flex;align-items:center;gap:6px;margin-left:8px;padding:3px 7px;border:1px solid color-mix(in srgb, var(--primary, #8ab4f8) 55%, transparent);border-radius:999px;background:color-mix(in srgb, var(--primary, #8ab4f8) 12%, transparent);color:var(--primary, #a9c7fa);font-size:12px;line-height:18px;white-space:nowrap;";
+    badge.style.cssText = "display:inline-flex;align-items:center;gap:6px;margin-left:8px;padding:3px 7px;border:1px solid color-mix(in srgb, var(--primary, #8ab4f8) 55%, transparent);border-radius:999px;background:color-mix(in srgb, var(--primary, #8ab4f8) 12%, transparent);color:var(--text, #1a1a1a);font-size:12px;line-height:18px;white-space:nowrap;";
     const label = document.createElement("span");
     label.textContent = `草稿已恢复${draft.images.length ? ` · ${draft.images.length} 张图片` : ""}`;
     const discard = document.createElement("button");
@@ -1650,7 +1914,9 @@
           activeFormattedComposer.__piEnhSyncedValue = "";
         }
         for (const img of ctx.fieldset.querySelectorAll("img")) {
-          if (/^(blob:|data:image\/)/.test(img.getAttribute("src") || "")) img.parentElement?.querySelector("button")?.click();
+          if (/^(blob:|data:image\/)/.test(img.getAttribute("src") || "")) {
+            (getComposerAttachmentRemoveButton(img) || (!isNativeImagePreviewTrigger(img.parentElement) ? img.parentElement?.querySelector?.("button") : null))?.click();
+          }
         }
       } finally {
         clearingStaleDraftSurface = prevClearing;
@@ -1673,10 +1939,8 @@
     if (activeNativeDraft) persistNativeDraft(activeNativeDraft);
     if (!native) return false;
     if (lastObservedNativeDraftKey !== native.key) {
-      if (lastObservedNativeDraftKey) {
-        submittedDraftKeys.delete(lastObservedNativeDraftKey);
-        pendingDraftSubmissions.delete(lastObservedNativeDraftKey);
-      }
+      // Do not infer submission from empty refs while changing owners. The old
+      // composer may still be waiting for native draft hydration or rejection recovery.
       lastObservedNativeDraftKey = native.key;
       requestComposerDraftRestore();
     }
@@ -1741,11 +2005,17 @@
         ctx.initialized = true;
         draftRestoreRequested = false;
         const stored = getPersistedDraft(ctx.key);
-        if (!submittedDraftKeys.has(ctx.key) && !snapshot.value && !snapshot.images.length && stored) {
+        const isStaleAlreadySent = stored && isDraftAlreadySentInSession(ctx.key, stored);
+        if (submittedDraftKeys.has(ctx.key) || isStaleAlreadySent) {
+          // 若本会话已知已完成提交或已包含该用户消息，必须安全清除残余持久化草稿，绝不复活
+          removePersistedDraft(ctx.key);
+        } else if (!snapshot.value && !snapshot.images.length && stored) {
           // Native handle takes the explicit owner and restores Base64 directly;
           // no FileReader, DataTransfer, pending merge, or delayed image injection.
           try {
-            ctx.handle.restoreSubmission(stored.value, stored.images, ctx.key);
+            restoringPersistedComposerDraft = true;
+            try { ctx.handle.restoreSubmission(stored.value, stored.images, ctx.key); }
+            finally { restoringPersistedComposerDraft = false; }
             showDraftRestoredBadge(ctx, stored);
             restored = true;
             if (typeof syncComposerMarkdownFormat === "function") {
@@ -1761,6 +2031,10 @@
       } else if ((snapshot.value || snapshot.images.length) && !getPersistedDraft(ctx.key)) {
         ctx.initialized = true;
         draftRestoreRequested = false;
+      }
+      if ((snapshot?.value || snapshot?.images?.length) && isDraftAlreadySentInSession(ctx.key, snapshot)) {
+        clearStaleRemountedNativeComposer(ctx, ctx.key);
+        removePersistedDraft(ctx.key);
       }
     }
     persistNativeDraft(ctx);
@@ -1800,18 +2074,24 @@
       if (changedText || changedImage) {
         removeDraftRestoredBadge();
         if (current?.key) {
+          const snap = nativeDraftSnapshot(current);
+          const hasContent = snap && (snap.value || snap.images.length);
           const sub = pendingDraftSubmissions.get(current.key);
-          if (sub && sub.keyRef === current.keyRef) {
+          if (sub) {
             if (sub.accepted) {
-              pendingDraftSubmissions.delete(current.key);
-              submittedDraftKeys.delete(current.key);
+              if (hasContent && JSON.stringify(snap) !== sub.signature) {
+                pendingDraftSubmissions.delete(current.key);
+                submittedDraftKeys.delete(current.key);
+              }
             } else {
-              const snap = nativeDraftSnapshot(current);
-              if (snap && (snap.value || snap.images.length) && JSON.stringify(snap) !== sub.signature) {
+              if (hasContent && JSON.stringify(snap) !== sub.signature) {
                 pendingDraftSubmissions.delete(current.key);
                 submittedDraftKeys.delete(current.key);
               }
             }
+          } else if (hasContent) {
+            // 用户在切回或已提交清空后重新进行了真实编辑（即使文字相同也是新草稿）
+            submittedDraftKeys.delete(current.key);
           }
         }
       }
@@ -1834,6 +2114,13 @@
       draftSubmissionPollFrame = 0;
     }
     for (const cleanup of draftListeners.splice(0)) cleanup();
+    for (const record of nativeDraftRestoreObserverRecords) {
+      if (record.handle.restoreSubmission === record.wrapper) {
+        try { record.handle.restoreSubmission = record.original; } catch {}
+      }
+    }
+    nativeDraftRestoreObserverRecords.clear();
+    restoringPersistedComposerDraft = false;
     nativeDraftContexts = new WeakMap();
     activeNativeDraft = null;
     draftRestoreRequested = true;
@@ -2948,6 +3235,7 @@
     const card = document.createElement("div");
     card.className = "pi-enh-attachment-card";
     card.setAttribute("data-attachment-id", att.id);
+    card.style.flexShrink = "0";
 
     const meta = getFileCategoryMeta(att.name, att.type);
     const sizeStr = formatFileSize(att.size);
@@ -3018,15 +3306,16 @@
     if (!textarea) return null;
     const host = textarea.parentElement || textarea;
     const grandParent = host.parentElement;
-    return grandParent?.querySelector(".pi-enh-attachments-bar") || host.querySelector(".pi-enh-attachments-bar");
+    const composerCard = textarea.closest?.('.pi-enh-cursor-composer, fieldset > div[style*="max-width"]') || grandParent;
+    return composerCard?.querySelector?.(".pi-enh-attachments-bar") || grandParent?.querySelector?.(".pi-enh-attachments-bar") || host?.querySelector?.(".pi-enh-attachments-bar") || null;
   }
 
   function syncComposerAttachmentBar(textarea) {
     if (!textarea) return;
     const host = textarea.parentElement || textarea;
     const grandParent = host.parentElement;
+    const composerCard = textarea.closest?.('.pi-enh-cursor-composer, fieldset > div[style*="max-width"]') || grandParent;
     let bar = findComposerAttachmentBar(textarea);
-    const composerCard = textarea.closest?.('.pi-enh-cursor-composer, fieldset > div[style*="max-width"]');
 
     if (pendingComposerAttachments.length === 0) {
       if (bar) bar.remove();
@@ -3035,13 +3324,31 @@
       return;
     }
 
-    if (!bar) {
-      bar = document.createElement("div");
-      bar.className = "pi-enh-attachments-bar";
-      if (grandParent) {
+    // 查找原生图片预览容器（绝不移动或重排原生图片节点，增强自有 bar 挂入其中复用同一 flex 行）
+    const nativeImgContainer = composerCard?.querySelector?.(
+      'div[style*="flex-wrap"]:has(img), .pi-enh-cursor-attachments'
+    );
+
+    if (nativeImgContainer) {
+      if (!bar) {
+        bar = document.createElement("div");
+        bar.className = "pi-enh-attachments-bar";
+        nativeImgContainer.appendChild(bar);
+      } else if (bar.parentElement !== nativeImgContainer) {
+        nativeImgContainer.appendChild(bar);
+      }
+    } else {
+      // 只有文件或原生图片容器卸载时：bar 挂到 composerCard 下的 host 之前，占据 grid-row: 1 顶行
+      if (!bar) {
+        bar = document.createElement("div");
+        bar.className = "pi-enh-attachments-bar";
+        if (grandParent) {
+          grandParent.insertBefore(bar, host);
+        } else {
+          host.appendChild(bar);
+        }
+      } else if (bar.parentElement !== grandParent && grandParent) {
         grandParent.insertBefore(bar, host);
-      } else {
-        host.appendChild(bar);
       }
     }
 
@@ -3625,18 +3932,33 @@
     let p = el.parentElement;
     while (p) {
       const tag = p.tagName ? p.tagName.toLowerCase() : "";
-      if (tag === "dialog" || tag === "button" || tag === "pre" || tag === "code") {
+      if (tag === "dialog" || tag === "pre" || tag === "code") {
+        return false;
+      }
+      if (tag === "button") {
+        if (p !== el.parentElement || !isNativeImagePreviewTrigger(p)) {
+          return false;
+        }
+      }
+      const pCls = typeof p.className === "string" ? p.className : "";
+      if (
+        pCls.includes("chat-message")
+        || pCls.includes("markdown-body")
+        || p.hasAttribute?.("data-message-role")
+        || p.hasAttribute?.("data-entry-id")
+      ) {
         return false;
       }
       p = p.parentElement;
     }
-    const parent = el.parentElement;
-    if (!parent) return false;
-    const hasRemoveBtn = Array.from(parent.children || [])
-      .some((c) => c.tagName && c.tagName.toLowerCase() === "button");
+    const itemContainer = getComposerAttachmentItemContainer(el);
+    if (!itemContainer) return false;
+    const itemTag = itemContainer.tagName ? itemContainer.tagName.toLowerCase() : "";
+    if (itemTag === "button") return false;
+    const hasRemoveBtn = Boolean(getComposerAttachmentRemoveButton(el));
     if (!hasRemoveBtn) return false;
 
-    let curr = parent;
+    let curr = itemContainer;
     while (curr) {
       const tag = curr.tagName ? curr.tagName.toLowerCase() : "";
       const cls = curr.className || "";
@@ -3695,6 +4017,77 @@
     return true;
   }
 
+  const HISTORY_IMAGE_MAX_BYTES = 10 * 1024 * 1024;
+  const HISTORY_IMAGE_FAST_PATH_MAX_BYTES = 1024 * 1024;
+
+  function historyImageBase64ByteLength(data) {
+    if (typeof data !== "string" || !data || data.length % 4 !== 0) return null;
+    const padding = data.endsWith("==") ? 2 : data.endsWith("=") ? 1 : 0;
+    const dataEnd = data.length - padding;
+    for (let index = 0; index < dataEnd; index += 1) {
+      const code = data.charCodeAt(index);
+      if (!((code >= 0x41 && code <= 0x5a) || (code >= 0x61 && code <= 0x7a)
+        || (code >= 0x30 && code <= 0x39) || code === 0x2b || code === 0x2f)) return null;
+    }
+    for (let index = dataEnd; index < data.length; index += 1) {
+      if (data[index] !== "=") return null;
+    }
+    return (data.length / 4) * 3 - padding;
+  }
+
+  function parseHistoryImageDataUrl(source) {
+    if (typeof source !== "string" || source.slice(0, 5).toLowerCase() !== "data:") return null;
+    const comma = source.indexOf(",");
+    if (comma < 0) return null;
+    const header = source.slice(5, comma);
+    const base64Marker = header.toLowerCase().lastIndexOf(";base64");
+    if (base64Marker < 0 || base64Marker !== header.length - 7) return null;
+    const mimeType = header.slice(0, base64Marker).split(";")[0].trim().toLowerCase();
+    if (!mimeType.startsWith("image/")) return null;
+    const data = source.slice(comma + 1);
+    const byteLength = historyImageBase64ByteLength(data);
+    return byteLength === null ? null : { data, mimeType, byteLength };
+  }
+
+  function appendComposerImageState(ctx, image) {
+    const images = ctx?.imagesRef?.current;
+    const stateHook = ctx?.imageStateHook;
+    const mimeType = typeof image?.mimeType === "string" ? image.mimeType.toLowerCase() : "";
+    const byteLength = historyImageBase64ByteLength(image?.data);
+    if (!Array.isArray(images) || images.length >= 10 || ctx.keyRef?.current !== ctx.key
+      || ctx.pendingRef?.current > 0 || byteLength === null || byteLength > HISTORY_IMAGE_MAX_BYTES
+      || !mimeType.startsWith("image/") || !stateHook || stateHook.memoizedState !== images
+      || typeof stateHook.queue?.dispatch !== "function") return false;
+
+    const nextImages = images.concat({
+      data: image.data,
+      mimeType,
+      previewUrl: typeof image.previewUrl === "string" && image.previewUrl
+        ? image.previewUrl : `data:${mimeType};base64,${image.data}`,
+    });
+    if (!validDraftImages(nextImages)) return false;
+    ctx.imagesRef.current = nextImages;
+    try {
+      stateHook.queue.dispatch(nextImages);
+    } catch (error) {
+      ctx.imagesRef.current = images;
+      return false;
+    }
+    try { queueNativeDraftSync(); } catch (error) {}
+    return true;
+  }
+
+  function readBlobAsDataUrl(blob) {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => typeof reader.result === "string"
+        ? resolve(reader.result) : reject(new Error("图片读取失败"));
+      reader.onerror = () => reject(reader.error || new Error("图片读取失败"));
+      reader.onabort = () => reject(new Error("图片读取已取消"));
+      reader.readAsDataURL(blob);
+    });
+  }
+
   function getComposerImageEditContext(target) {
     const native = readNativeComposerDraft();
     if (!native?.imageStateHook) return null;
@@ -3724,6 +4117,10 @@
       && galleryContext.initialIndex < items.length
       ? galleryContext.initialIndex
       : 0;
+    const addedHistoryImageSources = new Set();
+    let isAddingHistoryImage = false;
+    let addHistoryImageAbortController = null;
+    let addHistoryImageOperation = 0;
 
     const previousActiveElement = (typeof document !== "undefined" && document.activeElement) ? document.activeElement : null;
 
@@ -3797,7 +4194,7 @@
     zoomOutBtn.setAttribute("data-zoom-action", "out");
     zoomOutBtn.setAttribute("aria-label", "缩小 (-)");
     zoomOutBtn.title = "缩小 (-)";
-    zoomOutBtn.textContent = "➖";
+    zoomOutBtn.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="5" y1="12" x2="19" y2="12"></line></svg>';
 
     const indicator = document.createElement("span");
     indicator.className = "pi-enh-zoom-indicator";
@@ -3812,7 +4209,7 @@
     zoomInBtn.setAttribute("data-zoom-action", "in");
     zoomInBtn.setAttribute("aria-label", "放大 (+)");
     zoomInBtn.title = "放大 (+)";
-    zoomInBtn.textContent = "➕";
+    zoomInBtn.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>';
 
     const editBtn = document.createElement("button");
     editBtn.type = "button";
@@ -3820,7 +4217,7 @@
     editBtn.setAttribute("data-zoom-action", "edit");
     editBtn.setAttribute("aria-label", "编辑与标注图片");
     editBtn.title = "编辑与标注图片";
-    editBtn.textContent = "✏️ 编辑";
+    editBtn.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="margin-right: 4px;"><path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"></path></svg>编辑';
 
     const downloadBtn = document.createElement("button");
     downloadBtn.type = "button";
@@ -3828,7 +4225,36 @@
     downloadBtn.setAttribute("data-zoom-action", "download");
     downloadBtn.setAttribute("aria-label", "下载图片");
     downloadBtn.title = "下载图片";
-    downloadBtn.textContent = "💾 下载";
+    downloadBtn.innerHTML = '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" style="margin-right: 4px;"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>下载';
+
+    let addToConversationLabel = null;
+    const addToConversationBtn = options?.allowAddToConversation ? document.createElement("button") : null;
+    if (addToConversationBtn) {
+      addToConversationBtn.type = "button";
+      addToConversationBtn.className = "pi-enh-zoom-btn pi-enh-zoom-add-to-chat-btn";
+      addToConversationBtn.setAttribute("data-zoom-action", "add-to-chat");
+      addToConversationBtn.setAttribute("aria-label", "添加到当前对话");
+      addToConversationBtn.title = "添加到当前对话";
+      // Center the history toolbar against the mobile viewport, not the padded dialog content box.
+      toolbar.style.position = "fixed";
+      addToConversationBtn.style.gap = "4px";
+      addToConversationBtn.style.padding = "3px 6px";
+      const addIcon = document.createElement("span");
+      addIcon.setAttribute("aria-hidden", "true");
+      addIcon.textContent = "+";
+      addIcon.style.fontSize = "17px";
+      addIcon.style.lineHeight = "1";
+      addToConversationLabel = document.createElement("span");
+      addToConversationLabel.textContent = "添加到对话";
+      addToConversationBtn.appendChild(addIcon);
+      addToConversationBtn.appendChild(addToConversationLabel);
+      addToConversationBtn.addEventListener("click", (e) => {
+        e.preventDefault?.();
+        e.stopPropagation?.();
+        void addHistoryImageToCurrentConversation();
+      });
+    }
+
     downloadBtn.addEventListener("click", (e) => {
       e.stopPropagation?.();
       try {
@@ -3850,6 +4276,7 @@
     toolbar.appendChild(indicator);
     toolbar.appendChild(zoomInBtn);
     toolbar.appendChild(downloadBtn);
+    if (addToConversationBtn) toolbar.appendChild(addToConversationBtn);
 
     dialog.appendChild(counterEl);
     dialog.appendChild(prevBtn);
@@ -3915,6 +4342,14 @@
     window.addEventListener("popstate", onPopState);
 
     function updateGalleryUi() {
+      if (addToConversationBtn) {
+        const currentSource = items[currentIndex]?.src || src;
+        const isAdded = addedHistoryImageSources.has(currentSource);
+        addToConversationBtn.disabled = isAddingHistoryImage || isAdded;
+        addToConversationLabel.textContent = isAddingHistoryImage ? "添加中…" : isAdded ? "已添加" : "添加到对话";
+        addToConversationBtn.setAttribute("aria-label", isAdded ? "已添加到当前对话" : "添加到当前对话");
+        addToConversationBtn.title = isAdded ? "已添加到当前对话" : "添加到当前对话";
+      }
       const total = items.length;
       if (total <= 1) {
         counterEl.style.display = "none";
@@ -3928,6 +4363,149 @@
       prevBtn.disabled = currentIndex <= 0;
       nextBtn.style.display = "";
       nextBtn.disabled = currentIndex >= total - 1;
+    }
+
+    async function addHistoryImageToCurrentConversation() {
+      if (!addToConversationBtn || isAddingHistoryImage) return;
+      const currentItem = items[currentIndex] || { src, alt };
+      const currentSource = currentItem.src || src;
+      if (!currentSource) {
+        showToast("找不到这张图片", null, 2600);
+        return;
+      }
+
+      const nativeBefore = readNativeComposerDraft();
+      if (!nativeBefore || typeof nativeBefore.handle?.addImages !== "function") {
+        showToast("找不到当前对话的输入框", null, 3000);
+        return;
+      }
+      const beforeCount = nativeBefore.imagesRef.current.length;
+      const beforePending = nativeBefore.pendingRef.current;
+      if (beforeCount + beforePending >= 10) {
+        showToast("当前对话最多添加 10 张图片", null, 3000);
+        return;
+      }
+
+      const directSourceImage = parseHistoryImageDataUrl(currentSource);
+      if (directSourceImage && directSourceImage.byteLength > HISTORY_IMAGE_MAX_BYTES) {
+        showToast("图片超过 10 MB，无法添加", null, 3000);
+        return;
+      }
+      const sourceCanSkipNativeCompression = directSourceImage
+        && (directSourceImage.byteLength <= HISTORY_IMAGE_FAST_PATH_MAX_BYTES
+          || directSourceImage.mimeType === "image/gif" || typeof createImageBitmap !== "function");
+      // ChatInput only compresses images above 1 MiB (except GIF); reusing those
+      // already-Base64 sources avoids a redundant fetch/FileReader pass without
+      // changing the native compression policy for larger images.
+      if (sourceCanSkipNativeCompression
+        && appendComposerImageState(nativeBefore, {
+          ...directSourceImage,
+          previewUrl: currentSource,
+        })) {
+        addedHistoryImageSources.add(currentSource);
+        showToast("已添加到当前对话", null, 2400);
+        closeComposerImageZoomModal();
+        return;
+      }
+
+      isAddingHistoryImage = true;
+      const operation = ++addHistoryImageOperation;
+      addHistoryImageAbortController = typeof AbortController === "function" ? new AbortController() : null;
+      const abortController = addHistoryImageAbortController;
+      updateGalleryUi();
+
+      try {
+        const protocol = new URL(currentSource, window.location.href).protocol;
+        if (!(["http:", "https:", "blob:", "data:"].includes(protocol))
+          || (protocol === "data:" && !/^data:image\//i.test(currentSource))) {
+          throw new Error("图片来源不受支持");
+        }
+        const response = await fetch(currentSource, {
+          credentials: "same-origin",
+          signal: abortController?.signal,
+        });
+        if (!response.ok) throw new Error("图片读取失败");
+        const blob = await response.blob();
+        if (!blob.size) throw new Error("图片内容为空");
+        if (blob.size > HISTORY_IMAGE_MAX_BYTES) throw new Error("图片超过 10 MB，无法添加");
+
+        const hintedName = String(currentItem.alt || "历史图片").split(/[\\/]/).pop() || "历史图片";
+        const extensionHint = hintedName.match(/\.([a-z0-9]{1,8})$/i)?.[1]?.toLowerCase();
+        const mimeByExtension = {
+          avif: "image/avif", bmp: "image/bmp", gif: "image/gif", jpeg: "image/jpeg",
+          jpg: "image/jpeg", png: "image/png", svg: "image/svg+xml", webp: "image/webp",
+        };
+        const dataMime = currentSource.match(/^data:(image\/[^;,]+)/i)?.[1]?.toLowerCase();
+        const mimeType = String(blob.type || "").toLowerCase().startsWith("image/")
+          ? blob.type.split(";")[0].toLowerCase()
+          : dataMime || mimeByExtension[extensionHint];
+        if (!mimeType || !mimeType.startsWith("image/")) throw new Error("无法识别图片格式");
+
+        const liveNative = readNativeComposerDraft();
+        if (!liveNative || liveNative.key !== nativeBefore.key || typeof liveNative.handle?.addImages !== "function") {
+          throw new Error("当前对话已切换，请重新添加");
+        }
+        if (liveNative.imagesRef.current.length + liveNative.pendingRef.current >= 10) {
+          throw new Error("当前对话最多添加 10 张图片");
+        }
+
+        const canSkipNativeCompression = blob.size <= HISTORY_IMAGE_FAST_PATH_MAX_BYTES || mimeType === "image/gif"
+          || typeof createImageBitmap !== "function";
+        if (canSkipNativeCompression && liveNative.pendingRef.current === 0 && liveNative.imageStateHook) {
+          const typedBlob = blob.type === mimeType ? blob : new Blob([blob], { type: mimeType });
+          let dataUrl = null;
+          try { dataUrl = await readBlobAsDataUrl(typedBlob); } catch (error) {}
+          if (operation !== addHistoryImageOperation || !dialog.isConnected) return;
+          const directImage = dataUrl && parseHistoryImageDataUrl(dataUrl);
+          if (directImage && directImage.byteLength === blob.size) {
+            let previewUrl = dataUrl;
+            let objectUrl = false;
+            try {
+              previewUrl = URL.createObjectURL(typedBlob);
+              objectUrl = true;
+            } catch (error) {}
+            if (appendComposerImageState(liveNative, { ...directImage, previewUrl })) {
+              addedHistoryImageSources.add(currentSource);
+              showToast("已添加到当前对话", null, 2400);
+              closeComposerImageZoomModal();
+              return;
+            }
+            if (objectUrl) {
+              try { URL.revokeObjectURL(previewUrl); } catch (error) {}
+            }
+          }
+        }
+
+        const extensionByMime = {
+          "image/avif": "avif", "image/bmp": "bmp", "image/gif": "gif", "image/jpeg": "jpg",
+          "image/png": "png", "image/svg+xml": "svg", "image/webp": "webp",
+        };
+        const extension = extensionByMime[mimeType] || extensionHint || "png";
+        const fileBase = hintedName
+          .replace(/\.[^.]+$/, "")
+          .replace(/[<>:\"|?*]/g, "_")
+          .replace(/\s+/g, "_")
+          .slice(0, 80) || "历史图片";
+        const imageFile = new File([blob], `${fileBase}.${extension}`, { type: mimeType });
+        const pendingBefore = liveNative.pendingRef.current;
+        liveNative.handle.addImages([imageFile]);
+        if (liveNative.pendingRef.current <= pendingBefore) {
+          throw new Error("图片未能添加，请检查图片大小或数量");
+        }
+        addedHistoryImageSources.add(currentSource);
+        showToast("已添加到当前对话", null, 2400);
+        closeComposerImageZoomModal();
+      } catch (error) {
+        if (operation === addHistoryImageOperation && dialog.isConnected) {
+          showToast(`添加失败：${error?.message || "图片无法读取"}`, null, 3600);
+        }
+      } finally {
+        if (operation === addHistoryImageOperation) {
+          addHistoryImageAbortController = null;
+          isAddingHistoryImage = false;
+          updateGalleryUi();
+        }
+      }
     }
 
     function switchTo(index) {
@@ -4261,7 +4839,7 @@
         tools.appendChild(button);
       }
 
-      const tipsToggleBtn = makeActionButton("toggle-tips", "💡 指引", "显示/隐藏快捷功能提示");
+      const tipsToggleBtn = makeActionButton("toggle-tips", "指引", "显示/隐藏快捷功能提示");
       if (!isTipsDismissed()) {
         tipsToggleBtn.classList.add("is-active");
         tipsToggleBtn.setAttribute("aria-pressed", "true");
@@ -4751,6 +5329,11 @@
             if (items[currentIndex].editContext) {
               items[currentIndex].editContext.editSrc = dataUrl;
             }
+            const targetDomImg = items[currentIndex].domElement;
+            if (editContext && targetDomImg) {
+              targetDomImg.src = dataUrl;
+              targetDomImg.setAttribute?.("src", dataUrl);
+            }
           }
           if (editContext) editContext.editSrc = dataUrl;
           cleanup();
@@ -5123,6 +5706,10 @@
 
     const cleanup = () => {
       if (dialog.__piEnhCleanup === null) return;
+      addHistoryImageOperation++;
+      try { addHistoryImageAbortController?.abort(); } catch (e) {}
+      addHistoryImageAbortController = null;
+      isAddingHistoryImage = false;
       dialog.__piEnhCleanup = null;
       dialog.__piEnhHandleEscape = null;
       window.removeEventListener("keydown", onGlobalModalKeyDown, true);
@@ -5409,9 +5996,11 @@
 
   function handleComposerImageClick(event) {
     if (!isPluginEnabled("composer-image-zoom")) return;
-    const target = event.target;
-    if (!target) return;
-    if (target.closest && target.closest("button")) return;
+    const rawTarget = event.target;
+    if (!rawTarget) return;
+    const enclosingButton = rawTarget.closest ? rawTarget.closest("button") : null;
+    if (enclosingButton && !isNativeImagePreviewTrigger(enclosingButton)) return;
+    const target = unwrapNativeImagePreviewTarget(rawTarget);
     if (isComposerAttachmentImage(target)) {
       if (typeof event.preventDefault === "function") event.preventDefault();
       if (typeof event.stopPropagation === "function") event.stopPropagation();
@@ -5419,7 +6008,7 @@
       const textarea = findComposerTextarea();
       let container = findComposerImageContainer(textarea);
       if (!container) {
-        let p = target.parentElement;
+        let p = getComposerAttachmentItemContainer(target) || target.parentElement;
         while (p) {
           const style = (typeof p.getAttribute === "function" ? p.getAttribute("style") : p.attributes?.style) || "";
           const cls = p.className || "";
@@ -5465,7 +6054,11 @@
 
   function handleComposerImageMouseOver(event) {
     if (!isPluginEnabled("composer-image-zoom")) return;
-    const target = event.target;
+    const rawTarget = event.target;
+    if (!rawTarget) return;
+    const enclosingButton = rawTarget.closest ? rawTarget.closest("button") : null;
+    if (enclosingButton && !isNativeImagePreviewTrigger(enclosingButton)) return;
+    const target = unwrapNativeImagePreviewTarget(rawTarget);
     if (isComposerAttachmentImage(target)) {
       target.classList?.add("pi-enh-composer-zoomable-img");
       if (!target.hasAttribute || !target.hasAttribute("title") || target.getAttribute("title") === "") {
@@ -5478,6 +6071,9 @@
   addManagedListener(document, "mouseover", handleComposerImageMouseOver, true);
 
   window.__PI_ENH_IS_COMPOSER_IMAGE__ = isComposerAttachmentImage;
+  window.__PI_ENH_IS_NATIVE_IMAGE_PREVIEW_TRIGGER__ = isNativeImagePreviewTrigger;
+  window.__PI_ENH_GET_COMPOSER_IMAGE_CONTAINER_ITEM__ = getComposerAttachmentItemContainer;
+  window.__PI_ENH_GET_COMPOSER_IMAGE_REMOVE_BUTTON__ = getComposerAttachmentRemoveButton;
   window.__PI_ENH_REPLACE_COMPOSER_IMAGE_STATE__ = replaceComposerImageState;
   window.__PI_ENH_IS_IMAGE_ZOOM_ACTIVE__ = () => Boolean(activeZoomDialog && activeZoomDialog.open);
   window.__PI_ENH_OPEN_IMAGE_ZOOM__ = openComposerImageZoomModal;
@@ -5810,6 +6406,24 @@
   let composerQueueBusy = false;
   const composerQueueUnsupported = new Set();
   let composerQueueActionsState = null;
+  let activeQueueHoverCard = null;
+  let activeQueueHoverOwner = null;
+  let activeQueueHoverSessionId = "";
+
+  function closeQueueHoverCard(targetOwner = null) {
+    if (targetOwner && activeQueueHoverOwner && targetOwner !== activeQueueHoverOwner) {
+      return;
+    }
+    if (activeQueueHoverCard) {
+      activeQueueHoverCard.remove();
+      activeQueueHoverCard = null;
+    }
+    activeQueueHoverOwner = null;
+    activeQueueHoverSessionId = "";
+    for (const preview of document.querySelectorAll(".pi-enh-queue-hover-preview")) {
+      preview.remove();
+    }
+  }
 
   function handleQueueOperationError(sessionId, errorMsg, defaultPrefix = "操作") {
     const raw = String(errorMsg || "");
@@ -5824,6 +6438,7 @@
 
   function removeComposerQueuePanel() {
     clearQueueDetailCache();
+    closeQueueHoverCard();
     if (activeZoomDialog?.hasAttribute("data-pi-queue-gallery")) closeComposerImageZoomModal();
     for (const preview of document.querySelectorAll(".pi-enh-queue-hover-preview")) preview.remove();
     composerQueuePanel?.remove();
@@ -5970,6 +6585,7 @@
   }
 
   async function promoteComposerQueuedMessage(entryIndex, sessionId, signature) {
+    closeQueueHoverCard();
     if (composerQueueBusy || sessionId !== getCurrentSessionId() || signature !== composerQueueLastEntriesSignature) return;
     const hasSecure = composerQueueActionsState && (composerQueueActionsState.version === 1 || composerQueueActionsState.version === 2) && !composerQueueUnsupported.has(sessionId);
     if (!hasSecure) {
@@ -6031,6 +6647,7 @@
   }
 
   async function recallSingleQueuedMessage(entryIndex, sessionId, signature) {
+    closeQueueHoverCard();
     if (composerQueueBusy || sessionId !== getCurrentSessionId() || signature !== composerQueueLastEntriesSignature) return;
     const hasSecure = composerQueueActionsState && composerQueueActionsState.version === 2 && !composerQueueUnsupported.has(sessionId);
     if (!hasSecure) {
@@ -6124,6 +6741,7 @@
   }
 
   async function recallAllQueuedMessages(sessionId, signature, entries) {
+    closeQueueHoverCard();
     if (composerQueueBusy || sessionId !== getCurrentSessionId() || signature !== composerQueueLastEntriesSignature) return;
     const hasSecure = composerQueueActionsState && composerQueueActionsState.version === 2 && !composerQueueUnsupported.has(sessionId);
     if (!hasSecure) {
@@ -6218,6 +6836,7 @@
   }
 
   async function deleteSingleQueuedMessage(entryIndex, sessionId, signature) {
+    closeQueueHoverCard();
     if (composerQueueBusy || sessionId !== getCurrentSessionId() || signature !== composerQueueLastEntriesSignature) return;
     const hasSecure = composerQueueActionsState && composerQueueActionsState.version === 2 && !composerQueueUnsupported.has(sessionId);
     if (!hasSecure) {
@@ -6271,15 +6890,7 @@
       style = document.createElement("style");
       style.id = QUEUE_PANEL_STYLE_ID;
       style.textContent = `
-        /* 物理级零延迟隐藏原生队列容器，杜绝 React 挂载时的瞬态闪烁与网格错位 */
-        .pi-enh-cursor-composer > div[style*="padding: 5px 0"],
-        .pi-enh-cursor-composer > div[style*="padding:5px 0"],
-        .pi-enh-cursor-composer > div[style*="padding: 5px"],
-        .pi-enh-cursor-composer > div[style*="padding:5px"],
-        .pi-enh-cursor-composer > div:has(button[title*="移回"]),
-        .pi-enh-cursor-composer > div:has(button[title*="Recall"]),
-        .pi-enh-cursor-composer > div:has(button[title*="recall"]),
-        .pi-enh-cursor-composer > div:has(svg polyline[points*="9 14 4 9 9 4"]),
+        /* Only hide queues explicitly replaced by this enabled plugin. */
         .pi-enh-native-queue-hidden {
           display: none !important;
           position: absolute !important;
@@ -6488,6 +7099,7 @@
       Array.from(node.querySelectorAll("button")).some((button) => /移回输入框|Recall/i.test(button.textContent || ""))
     );
     if (!nativeQueue) {
+      closeQueueHoverCard();
       composerQueuePanel?.remove();
       composerQueuePanel = null;
       composerQueueSignature = "";
@@ -6501,24 +7113,33 @@
       text: row.getAttribute("title") || "",
     }));
     const sessionId = getCurrentSessionId();
+    if (activeQueueHoverCard && (!activeQueueHoverOwner || !activeQueueHoverOwner.isConnected || activeQueueHoverSessionId !== sessionId)) {
+      closeQueueHoverCard();
+    }
     const entriesSignature = JSON.stringify([sessionId, entries]);
     const renderSignature = JSON.stringify([sessionId, entries, queueAttachmentRevision]);
 
-    if (composerQueuePanel?.isConnected && composerQueuePanel.nextElementSibling === card && renderSignature === composerQueueSignature) return;
+    const expectedNext = (composerGoalBarEl && composerGoalBarEl.isConnected && composerGoalBarEl.parentElement === card.parentElement)
+      ? composerGoalBarEl
+      : card;
+
+    if (composerQueuePanel?.isConnected && composerQueuePanel.nextElementSibling === expectedNext && renderSignature === composerQueueSignature) return;
 
     composerQueueSignature = renderSignature;
     composerQueueLastEntriesSignature = entriesSignature;
 
     let panel = composerQueuePanel;
-    const isSamePanel = Boolean(panel?.isConnected && panel.nextElementSibling === card);
+    const isSamePanel = Boolean(panel?.isConnected && panel.nextElementSibling === expectedNext);
     if (!isSamePanel) {
+      closeQueueHoverCard();
       panel?.remove();
       panel = document.createElement("section");
       panel.className = "pi-enh-queue-panel";
       panel.setAttribute("aria-label", "排队消息");
-      card.parentElement.insertBefore(panel, card);
+      card.parentElement.insertBefore(panel, expectedNext);
       composerQueuePanel = panel;
     }
+    closeQueueHoverCard();
     panel.innerHTML = "";
 
     const header = document.createElement("div");
@@ -6619,26 +7240,30 @@
 
         imageBadge.appendChild(label);
 
-        // 鼠标悬停大图卡片预览
-        let hoverCard = null;
+        // 鼠标悬停大图卡片预览（统一单例 hover + owner 身份）
         imageBadge.addEventListener("mouseenter", () => {
           if (!activeSrc) return;
-          hoverCard = document.createElement("div");
+          if (activeQueueHoverCard && activeQueueHoverOwner === imageBadge) return;
+          closeQueueHoverCard();
+          if (!imageBadge.isConnected) return;
+
+          const hoverCard = document.createElement("div");
           hoverCard.className = "pi-enh-queue-hover-preview";
           const hint = count > 1
             ? `共 ${count} 张图片 · 点击放大左右切换`
             : `${firstImg.alt || "图片附件预览"} · 点击放大`;
           hoverCard.innerHTML = `<img src="${activeSrc}" alt="${firstImg.alt || "图片附件"}" onerror="this.style.display='none'" /><span>${hint}</span>`;
           document.body.appendChild(hoverCard);
+          activeQueueHoverCard = hoverCard;
+          activeQueueHoverOwner = imageBadge;
+          activeQueueHoverSessionId = sessionId;
+
           const rect = imageBadge.getBoundingClientRect();
           hoverCard.style.left = `${Math.max(10, Math.min(window.innerWidth - 250, rect.left))}px`;
           hoverCard.style.bottom = `${window.innerHeight - rect.top + 8}px`;
         });
         imageBadge.addEventListener("mouseleave", () => {
-          if (hoverCard) {
-            hoverCard.remove();
-            hoverCard = null;
-          }
+          closeQueueHoverCard(imageBadge);
         });
 
         // 点击与双击均调用全站图片灯箱预览器（传递全部图片 items 并显式禁用 autoEdit）
@@ -6646,10 +7271,7 @@
           if (e) {
             e.stopPropagation?.();
           }
-          if (hoverCard) {
-            hoverCard.remove();
-            hoverCard = null;
-          }
+          closeQueueHoverCard();
           if (typeof openComposerImageZoomModal === "function" && activeSrc && !activeSrc.startsWith("blob:null")) {
             const galleryItems = attachedImages.map((img, idx) => ({
               src: img.data && img.mimeType ? `data:${img.mimeType};base64,${img.data}` : (img.src || ""),
@@ -6748,17 +7370,213 @@
   }
 
   activeCleanups.push(removeComposerQueuePanel);
+  const handleQueueHoverWindowBlurOrScroll = () => {
+    if (activeQueueHoverCard) {
+      closeQueueHoverCard();
+    }
+  };
+  const handleQueueHoverDocumentKeyDown = (e) => {
+    if (e.key === "Escape" && activeQueueHoverCard) {
+      closeQueueHoverCard();
+    }
+  };
+  window.addEventListener("blur", handleQueueHoverWindowBlurOrScroll);
+  window.addEventListener("scroll", handleQueueHoverWindowBlurOrScroll, { capture: true, passive: true });
+  document.addEventListener("keydown", handleQueueHoverDocumentKeyDown, true);
+
+  activeCleanups.push(() => {
+    window.removeEventListener("blur", handleQueueHoverWindowBlurOrScroll);
+    window.removeEventListener("scroll", handleQueueHoverWindowBlurOrScroll, { capture: true });
+    document.removeEventListener("keydown", handleQueueHoverDocumentKeyDown, true);
+    closeQueueHoverCard();
+  });
   window.__PI_ENH_SYNC_COMPOSER_QUEUE__ = syncComposerQueuePanel;
 
   // ==========================================
-  // 3.55.2 Cursor Style Unified Composer Layout
+  // 3.55.2 Cursor Style Unified Composer Layout & Resizable Height
   // ==========================================
   const CODEX_COMPOSER_STYLE_ID = "pi-enh-codex-composer-style";
+  const COMPOSER_RESIZER_CLASS = "pi-enh-composer-resizer";
+  const COMPOSER_CUSTOM_HEIGHT_CLASS = "pi-enh-composer-custom-height";
+  const COMPOSER_HEIGHT_STORAGE_KEY = "pi-web:composer-custom-height";
+
+  function syncComposerPreloadHeightProperty(heightValue) {
+    if (typeof document === "undefined" || !document.documentElement) return;
+    const docEl = document.documentElement;
+    if (typeof heightValue === "number" && Number.isFinite(heightValue) && heightValue >= 44) {
+      const rounded = Math.round(heightValue);
+      docEl.style.setProperty("--pi-enh-preload-composer-height", `${rounded}px`);
+      docEl.setAttribute("data-pi-composer-custom-height", String(rounded));
+    } else {
+      docEl.style.removeProperty("--pi-enh-preload-composer-height");
+      docEl.removeAttribute("data-pi-composer-custom-height");
+    }
+  }
+
+  function applyComposerCustomHeight(card, textarea, height) {
+    if (!card) return;
+    const rounded = Math.round(height);
+    card.classList.add(COMPOSER_CUSTOM_HEIGHT_CLASS);
+    card.style.setProperty("--pi-composer-custom-height", `${rounded}px`);
+    if (textarea) {
+      textarea.style.height = `${rounded}px`;
+    }
+    const formatted = card.querySelector(".pi-enh-formatted-composer");
+    if (formatted) {
+      formatted.style.height = `${rounded}px`;
+    }
+  }
+  window.__PI_ENH_APPLY_COMPOSER_CUSTOM_HEIGHT__ = applyComposerCustomHeight;
+
+  function resetComposerCustomHeight(card, textarea) {
+    if (!card) return;
+    card.classList.remove(COMPOSER_CUSTOM_HEIGHT_CLASS);
+    card.style.removeProperty("--pi-composer-custom-height");
+    if (textarea) {
+      textarea.style.height = "auto";
+      syncComposerTextareaAutoHeight(textarea, { immediate: true });
+    }
+    const formatted = card.querySelector(".pi-enh-formatted-composer");
+    if (formatted) {
+      formatted.style.height = "auto";
+    }
+    try {
+      localStorage.removeItem(COMPOSER_HEIGHT_STORAGE_KEY);
+    } catch (err) {}
+    syncComposerPreloadHeightProperty(null);
+  }
+
+  function syncComposerResizableHeight(card, textarea) {
+    if (!card || !textarea) return;
+    let resizer = card.querySelector(`.${COMPOSER_RESIZER_CLASS}`);
+    if (!resizer) {
+      resizer = document.createElement("div");
+      resizer.className = COMPOSER_RESIZER_CLASS;
+      resizer.setAttribute("role", "separator");
+      resizer.setAttribute("aria-label", "调整输入框高度");
+      resizer.setAttribute("title", "按住拖动调整高度");
+
+      const line = document.createElement("div");
+      line.className = "pi-enh-composer-resizer-line";
+      resizer.appendChild(line);
+
+      card.insertBefore(resizer, card.firstChild);
+
+      let startY = 0;
+      let startHeight = 0;
+      let isDragging = false;
+
+      const onPointerMove = (ev) => {
+        if (!isDragging) return;
+        ev.preventDefault();
+        const deltaY = startY - ev.clientY; // 向上拖为正，输入框增高
+        let targetHeight = startHeight + deltaY;
+
+        const minHeight = 44;
+        const vpHeight = window.visualViewport ? window.visualViewport.height : window.innerHeight;
+        // 允许拉大至可视区域的 80%，给予最充分的阅读与编辑视野，且绝不在高处被吸走反弹
+        const maxHeight = Math.max(minHeight, Math.floor(vpHeight * 0.8));
+
+        targetHeight = Math.max(minHeight, Math.min(maxHeight, targetHeight));
+        applyComposerCustomHeight(card, textarea, targetHeight);
+      };
+
+      const onPointerUp = (ev) => {
+        if (!isDragging) return;
+        isDragging = false;
+        try {
+          if (ev && typeof ev.pointerId === "number") {
+            resizer.releasePointerCapture(ev.pointerId);
+          }
+        } catch (err) {}
+        window.removeEventListener("pointermove", onPointerMove);
+        window.removeEventListener("pointerup", onPointerUp);
+        window.removeEventListener("pointercancel", onPointerUp);
+        card.classList.remove("pi-enh-composer-resizing");
+        document.body.classList.remove("pi-enh-composer-resizing");
+
+        // 绝不自动反弹吸回：用户拖动松手停在哪个高度，就持久保留在哪个高度
+        const currentH = parseFloat(card.style.getPropertyValue("--pi-composer-custom-height") || "0");
+        if (currentH >= 44) {
+          const roundedH = Math.round(currentH);
+          try {
+            localStorage.setItem(COMPOSER_HEIGHT_STORAGE_KEY, String(roundedH));
+          } catch (err) {}
+          syncComposerPreloadHeightProperty(roundedH);
+        }
+      };
+
+      const onPointerDown = (e) => {
+        if (e.button !== 0 && e.pointerType === "mouse") return;
+        e.preventDefault();
+        e.stopPropagation();
+
+        startY = e.clientY;
+        const currentEditor = card.querySelector(".pi-enh-formatted-composer:not([style*='display: none'])") || textarea;
+        startHeight = currentEditor.getBoundingClientRect().height || 56;
+        isDragging = true;
+        try {
+          resizer.setPointerCapture(e.pointerId);
+        } catch (err) {}
+
+        card.classList.add("pi-enh-composer-resizing");
+        document.body.classList.add("pi-enh-composer-resizing");
+
+        // 全局 window 监听，彻底解决手机端手指滑入上方聊天可滚动区域时的手势中断与跳变反弹
+        window.addEventListener("pointermove", onPointerMove, { passive: false });
+        window.addEventListener("pointerup", onPointerUp);
+        window.addEventListener("pointercancel", onPointerUp);
+      };
+
+      resizer.addEventListener("pointerdown", onPointerDown);
+
+      // 若已有保存的高度偏好，自动应用并保持稳定
+      try {
+        const saved = localStorage.getItem(COMPOSER_HEIGHT_STORAGE_KEY);
+        if (saved) {
+          const num = parseFloat(saved);
+          if (Number.isFinite(num) && num >= 44) {
+            applyComposerCustomHeight(card, textarea, num);
+            syncComposerPreloadHeightProperty(num);
+          } else {
+            syncComposerPreloadHeightProperty(null);
+          }
+        } else {
+          syncComposerPreloadHeightProperty(null);
+        }
+      } catch (err) {}
+    }
+  }
 
   function syncCodexComposerLayout() {
     if (!isPluginEnabled("codex-composer-layout")) {
       removeCodexComposerLayout();
       return;
+    }
+
+    // 检查并同步预置高度 CSS 变量与标记（有效数值 >= 44）
+    try {
+      const saved = localStorage.getItem(COMPOSER_HEIGHT_STORAGE_KEY);
+      if (saved) {
+        const num = parseFloat(saved);
+        if (Number.isFinite(num) && num >= 44) {
+          syncComposerPreloadHeightProperty(num);
+        } else {
+          syncComposerPreloadHeightProperty(null);
+        }
+      } else {
+        syncComposerPreloadHeightProperty(null);
+      }
+    } catch (err) {}
+
+    // Preload the model/reasoning grid rules before React mounts a new composer.
+    // Waiting for a mutation observer to decorate the first DOM commit causes a visible height jump.
+    if (isPluginEnabled("composer-model-reasoning-pill")) {
+      ensureComposerModelPillStyle();
+    }
+    if (isPluginEnabled("composer-modes")) {
+      ensureComposerModesStyle();
+      ensureComposerModesStatusObserver();
     }
 
     let style = document.getElementById(CODEX_COMPOSER_STYLE_ID);
@@ -6770,6 +7588,7 @@
         body:has(.settings-dialog-backdrop, .settings-dialog-surface, [role="dialog"][aria-modal="true"]) .pi-enh-cursor-composer {
           display: none !important;
         }
+
 
         /* One grid owns editor and toolbar. Native React nodes are never reparented. */
         .pi-enh-cursor-composer,
@@ -6786,11 +7605,6 @@
           border-radius: 16px !important;
           box-shadow: 0 2px 8px #0000000a !important;
           min-width: 0;
-          animation: pi-enh-composer-in 0.1s ease-out !important;
-        }
-        @keyframes pi-enh-composer-in {
-          from { opacity: 0.92; }
-          to { opacity: 1; }
         }
         .pi-enh-cursor-composer:focus-within,
         fieldset > div[style*="max-width"]:focus-within {
@@ -6799,14 +7613,24 @@
         .pi-enh-cursor-composer .pi-enh-cursor-contents,
         .pi-enh-cursor-composer .pi-enh-cursor-left,
         .pi-enh-cursor-composer .pi-enh-cursor-right,
+        .pi-enh-cursor-composer .pi-enh-cursor-right > .pi-enh-cursor-right-inner:not([hidden]):not([style*="display: none"]):not([style*="display:none"]):not([style*="position: absolute"]):not([style*="position:absolute"]),
         fieldset > div[style*="max-width"] > div:has(textarea),
         fieldset > div[style*="max-width"] > div:has(textarea) > div:has(textarea, .pi-enh-formatted-composer),
         fieldset > div[style*="max-width"] > div[data-pi-composer-toolbar],
         fieldset > div[style*="max-width"] > div[style*="margin-top"],
         fieldset > div[style*="max-width"] [data-pi-composer-left],
         fieldset > div[style*="max-width"] .pi-enh-cursor-left,
-        fieldset > div[style*="max-width"] .pi-enh-cursor-right {
+        fieldset > div[style*="max-width"] .pi-enh-cursor-right,
+        fieldset > div[style*="max-width"] .pi-enh-cursor-right > .pi-enh-cursor-right-inner:not([hidden]):not([style*="display: none"]):not([style*="display:none"]):not([style*="position: absolute"]):not([style*="position:absolute"]) {
           display: contents !important;
+        }
+        .pi-enh-cursor-composer .pi-enh-cursor-right > .pi-enh-cursor-right-inner[hidden],
+        .pi-enh-cursor-composer .pi-enh-cursor-right > .pi-enh-cursor-right-inner[style*="display: none"],
+        .pi-enh-cursor-composer .pi-enh-cursor-right > .pi-enh-cursor-right-inner[style*="display:none"],
+        fieldset > div[style*="max-width"] .pi-enh-cursor-right > .pi-enh-cursor-right-inner[hidden],
+        fieldset > div[style*="max-width"] .pi-enh-cursor-right > .pi-enh-cursor-right-inner[style*="display: none"],
+        fieldset > div[style*="max-width"] .pi-enh-cursor-right > .pi-enh-cursor-right-inner[style*="display:none"] {
+          display: none !important;
         }
 
         /* Cursor 风格文件引用 (@mention) 紧凑浮层：原生 @ 菜单特有 max-height: min(48vh */
@@ -6889,15 +7713,17 @@
           opacity: 0 !important;
         }
 
-        /* 零延迟物理级屏蔽原生队列容器，杜绝任何阶段在 Grid 内部闪烁或引起布局跳动 */
+        /* Keep the native fallback out of the toolbar's narrow auto-placement cells. */
         .pi-enh-cursor-composer > div[style*="padding: 5px 0"],
-        .pi-enh-cursor-composer > div[style*="padding:5px 0"],
-        .pi-enh-cursor-composer > div[style*="padding: 5px"],
-        .pi-enh-cursor-composer > div[style*="padding:5px"],
-        .pi-enh-cursor-composer > div:has(button[title*="移回"]),
-        .pi-enh-cursor-composer > div:has(button[title*="Recall"]),
-        .pi-enh-cursor-composer > div:has(button[title*="recall"]),
-        .pi-enh-cursor-composer > div:has(svg polyline[points*="9 14 4 9 9 4"]) {
+        .pi-enh-cursor-composer > div[style*="padding:5px 0"] {
+          grid-column: 1 / -1 !important;
+          min-width: 0 !important;
+          max-width: 100% !important;
+          box-sizing: border-box !important;
+        }
+
+        /* Queue visibility belongs to composer-queue-panel, not this layout plugin. */
+        .pi-enh-native-queue-hidden {
           display: none !important;
           width: 0 !important;
           height: 0 !important;
@@ -6935,15 +7761,17 @@
           overscroll-behavior: contain !important;
           box-sizing: border-box !important;
         }
-        .pi-enh-cursor-composer:has(.pi-enh-cursor-attachments, div[style*="flex-wrap"] img) .pi-enh-cursor-editor,
-        .pi-enh-cursor-composer:has(.pi-enh-cursor-attachments, div[style*="flex-wrap"] img) textarea.chat-input-textarea,
-        .pi-enh-cursor-composer:has(.pi-enh-cursor-attachments, div[style*="flex-wrap"] img) .pi-enh-formatted-composer,
-        fieldset > div[style*="max-width"]:has(div[style*="flex-wrap"] img) textarea.chat-input-textarea,
-        fieldset > div[style*="max-width"]:has(div[style*="flex-wrap"] img) .pi-enh-formatted-composer {
+        .pi-enh-cursor-composer:has(.pi-enh-cursor-attachments, div[style*="flex-wrap"]:has(img), .pi-enh-attachments-bar, .pi-enh-attachment-card) .pi-enh-cursor-editor,
+        .pi-enh-cursor-composer:has(.pi-enh-cursor-attachments, div[style*="flex-wrap"]:has(img), .pi-enh-attachments-bar, .pi-enh-attachment-card) textarea.chat-input-textarea,
+        .pi-enh-cursor-composer:has(.pi-enh-cursor-attachments, div[style*="flex-wrap"]:has(img), .pi-enh-attachments-bar, .pi-enh-attachment-card) .pi-enh-formatted-composer,
+        fieldset > div[style*="max-width"]:has(div[style*="flex-wrap"]:has(img), .pi-enh-attachments-bar, .pi-enh-attachment-card) textarea.chat-input-textarea,
+        fieldset > div[style*="max-width"]:has(div[style*="flex-wrap"]:has(img), .pi-enh-attachments-bar, .pi-enh-attachment-card) .pi-enh-formatted-composer {
           max-height: clamp(52px, calc(18vh - 12px), 124px) !important;
         }
         .pi-enh-cursor-composer .pi-enh-cursor-attachments,
-        fieldset > div[style*="max-width"] > div[style*="flex-wrap"]:has(img) {
+        fieldset > div[style*="max-width"] > div[style*="flex-wrap"]:has(img),
+        .pi-enh-cursor-composer > .pi-enh-attachments-bar,
+        fieldset > div[style*="max-width"] > .pi-enh-attachments-bar {
           grid-area: 1 / 1 / 2 / -1 !important;
           display: flex !important;
           flex-wrap: nowrap !important;
@@ -6956,6 +7784,11 @@
           overflow-y: hidden !important;
           box-sizing: border-box !important;
           min-width: 0 !important;
+        }
+        /* 当 attachment-bar 挂在原生图片预览容器内部时，使用 display: contents 让 pill 卡片直接无缝复用原生同一 flex 行 */
+        fieldset > div[style*="max-width"] > div[style*="flex-wrap"]:has(img) > .pi-enh-attachments-bar,
+        .pi-enh-cursor-composer .pi-enh-cursor-attachments > .pi-enh-attachments-bar {
+          display: contents !important;
         }
         .pi-enh-cursor-composer .pi-enh-cursor-attachments img,
         fieldset > div[style*="max-width"] > div[style*="flex-wrap"]:has(img) img {
@@ -7005,6 +7838,15 @@
           justify-self: start !important;
           align-self: center !important;
           flex-shrink: 0 !important;
+        }
+
+        /* A text toggle must not auto-place in the 28px icon columns above the editor. */
+        .pi-enh-cursor-composer .pi-enh-format-toggle-btn,
+        fieldset > div[style*="max-width"] .pi-enh-format-toggle-btn {
+          grid-column: 4 !important;
+          grid-row: 3 !important;
+          justify-self: start !important;
+          align-self: center !important;
         }
 
         /* 4. 模型选择器槽位：永远固定在倒数第4列，靠右对齐，绝不重叠 */
@@ -7386,7 +8228,9 @@
         .pi-enh-cursor-composer button:has(svg path[d*="M14.7 6.3"]),
         .pi-enh-cursor-composer div:has(> button[title*="工具预设"]),
         .pi-enh-cursor-composer div:has(> button[aria-label*="工具预设"]),
-        .pi-enh-cursor-composer div:has(> button:has(svg path[d*="M14.7 6.3"])),
+        .pi-enh-cursor-composer div:has(> button[title*="tool preset" i]),
+        .pi-enh-cursor-composer div:has(> button[aria-label*="tool preset" i]),
+        .pi-enh-cursor-composer div:has(> button svg path[d*="M14.7 6.3"]),
 
         .pi-enh-cursor-composer button[title*="压缩上下文"],
         .pi-enh-cursor-composer button[aria-label*="压缩上下文"],
@@ -7397,7 +8241,9 @@
         .pi-enh-cursor-composer button:has(svg polyline[points*="4 14 10 14"]),
         .pi-enh-cursor-composer div:has(> button[title*="压缩上下文"]),
         .pi-enh-cursor-composer div:has(> button[aria-label*="压缩上下文"]),
-        .pi-enh-cursor-composer div:has(> button:has(svg polyline[points*="4 14 10 14"])) {
+        .pi-enh-cursor-composer div:has(> button[title*="compact context" i]),
+        .pi-enh-cursor-composer div:has(> button[aria-label*="compact context" i]),
+        .pi-enh-cursor-composer div:has(> button svg polyline[points*="4 14 10 14"]) {
           display: none !important;
           width: 0 !important;
           height: 0 !important;
@@ -7421,6 +8267,11 @@
           display: inline-flex !important;
           align-items: center !important;
         }
+        .pi-enh-cursor-composer [data-pi-thinking-control][hidden],
+        .pi-enh-cursor-composer [data-pi-thinking-control][style*="display: none"],
+        .pi-enh-cursor-composer [data-pi-thinking-control][style*="display:none"] {
+          display: none !important;
+        }
         .pi-enh-cursor-composer [data-pi-thinking-control] > button,
         .pi-enh-cursor-composer [data-pi-thinking-button],
         .pi-enh-cursor-composer .pi-enh-cursor-left div:has(> button[title*="推理"], > button[aria-label*="推理"], > button[title*="Reasoning" i], > button[title*="thinking" i]) > button {
@@ -7442,10 +8293,10 @@
         }
 
         /* 思考深度下拉菜单弹窗：严格隔离保护，垂直列表排布，杜绝任何外部样式导致横向截断 */
-        .pi-enh-cursor-composer [data-pi-thinking-control] div[style*="position: absolute"],
-        .pi-enh-cursor-composer [data-pi-thinking-control] div[style*="position:absolute"],
-        [data-pi-thinking-control] div[style*="position: absolute"],
-        [data-pi-thinking-control] div[style*="position:absolute"] {
+        .pi-enh-cursor-composer [data-pi-thinking-control] div[style*="position: absolute"]:not([hidden]):not([style*="display: none"]):not([style*="display:none"]),
+        .pi-enh-cursor-composer [data-pi-thinking-control] div[style*="position:absolute"]:not([hidden]):not([style*="display: none"]):not([style*="display:none"]),
+        [data-pi-thinking-control] div[style*="position: absolute"]:not([hidden]):not([style*="display: none"]):not([style*="display:none"]),
+        [data-pi-thinking-control] div[style*="position:absolute"]:not([hidden]):not([style*="display: none"]):not([style*="display:none"]) {
           display: flex !important;
           flex-direction: column !important;
           height: auto !important;
@@ -7456,6 +8307,20 @@
           min-width: 200px !important;
           box-sizing: border-box !important;
           box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35), 0 2px 8px rgba(0, 0, 0, 0.15) !important;
+        }
+        .pi-enh-cursor-composer [data-pi-thinking-control] div[style*="position: absolute"][hidden],
+        .pi-enh-cursor-composer [data-pi-thinking-control] div[style*="position:absolute"][hidden],
+        .pi-enh-cursor-composer [data-pi-thinking-control] div[style*="position: absolute"][style*="display: none"],
+        .pi-enh-cursor-composer [data-pi-thinking-control] div[style*="position: absolute"][style*="display:none"],
+        .pi-enh-cursor-composer [data-pi-thinking-control] div[style*="position:absolute"][style*="display: none"],
+        .pi-enh-cursor-composer [data-pi-thinking-control] div[style*="position:absolute"][style*="display:none"],
+        [data-pi-thinking-control] div[style*="position: absolute"][hidden],
+        [data-pi-thinking-control] div[style*="position:absolute"][hidden],
+        [data-pi-thinking-control] div[style*="position: absolute"][style*="display: none"],
+        [data-pi-thinking-control] div[style*="position: absolute"][style*="display:none"],
+        [data-pi-thinking-control] div[style*="position:absolute"][style*="display: none"],
+        [data-pi-thinking-control] div[style*="position:absolute"][style*="display:none"] {
+          display: none !important;
         }
         .pi-enh-cursor-composer [data-pi-thinking-control] div[style*="position: absolute"] button,
         .pi-enh-cursor-composer [data-pi-thinking-control] div[style*="position:absolute"] button,
@@ -7622,7 +8487,8 @@
             gap: 6px 3px !important;
           }
           .pi-enh-cursor-composer .pi-enh-cursor-left,
-          .pi-enh-cursor-composer .pi-enh-cursor-right {
+          .pi-enh-cursor-composer .pi-enh-cursor-right,
+          .pi-enh-cursor-composer .pi-enh-cursor-right > .pi-enh-cursor-right-inner:not([hidden]):not([style*="display: none"]):not([style*="display:none"]):not([style*="position: absolute"]):not([style*="position:absolute"]) {
             display: contents !important;
           }
           .pi-enh-cursor-composer button.pi-enh-cursor-stop,
@@ -7689,13 +8555,13 @@
           .pi-enh-cursor-composer .pi-enh-formatted-composer,
           fieldset > div[style*="max-width"] textarea.chat-input-textarea,
           fieldset > div[style*="max-width"] .pi-enh-formatted-composer {
-            max-height: clamp(60px, 19vh, 136px) !important;
+            max-height: clamp(70px, 28vh, 200px) !important;
           }
-          .pi-enh-cursor-composer:has(.pi-enh-cursor-attachments, div[style*="flex-wrap"] img) .pi-enh-cursor-editor,
-          .pi-enh-cursor-composer:has(.pi-enh-cursor-attachments, div[style*="flex-wrap"] img) textarea.chat-input-textarea,
-          .pi-enh-cursor-composer:has(.pi-enh-cursor-attachments, div[style*="flex-wrap"] img) .pi-enh-formatted-composer,
-          fieldset > div[style*="max-width"]:has(div[style*="flex-wrap"] img) textarea.chat-input-textarea,
-          fieldset > div[style*="max-width"]:has(div[style*="flex-wrap"] img) .pi-enh-formatted-composer {
+          .pi-enh-cursor-composer:has(.pi-enh-cursor-attachments, div[style*="flex-wrap"]:has(img), .pi-enh-attachments-bar, .pi-enh-attachment-card) .pi-enh-cursor-editor,
+          .pi-enh-cursor-composer:has(.pi-enh-cursor-attachments, div[style*="flex-wrap"]:has(img), .pi-enh-attachments-bar, .pi-enh-attachment-card) textarea.chat-input-textarea,
+          .pi-enh-cursor-composer:has(.pi-enh-cursor-attachments, div[style*="flex-wrap"]:has(img), .pi-enh-attachments-bar, .pi-enh-attachment-card) .pi-enh-formatted-composer,
+          fieldset > div[style*="max-width"]:has(div[style*="flex-wrap"]:has(img), .pi-enh-attachments-bar, .pi-enh-attachment-card) textarea.chat-input-textarea,
+          fieldset > div[style*="max-width"]:has(div[style*="flex-wrap"]:has(img), .pi-enh-attachments-bar, .pi-enh-attachment-card) .pi-enh-formatted-composer {
             max-height: clamp(48px, calc(16vh - 10px), 104px) !important;
           }
         }
@@ -7734,6 +8600,99 @@
             max-height: clamp(36px, calc(22vh - 16px), 64px) !important;
           }
         }
+
+        /* 调整输入框高度手柄 (Resize Handle Bar) - 极细隐蔽设计与零悬停粘连 */
+        .pi-enh-composer-resizer {
+          position: absolute !important;
+          top: -2px !important;
+          left: 0 !important;
+          right: 0 !important;
+          height: 14px !important;
+          display: flex !important;
+          align-items: center !important;
+          justify-content: center !important;
+          cursor: ns-resize !important;
+          touch-action: none !important;
+          user-select: none !important;
+          -webkit-user-select: none !important;
+          -webkit-tap-highlight-color: transparent !important;
+          outline: none !important;
+          z-index: 20 !important;
+        }
+        .pi-enh-composer-resizer-line {
+          width: 32px !important;
+          height: 2px !important;
+          border-radius: 1px !important;
+          background: color-mix(in srgb, var(--border, #71717a) 70%, transparent) !important;
+          transition: background 0.15s ease, width 0.15s ease, height 0.15s ease, opacity 0.15s ease !important;
+          opacity: 0.55 !important;
+          pointer-events: none !important;
+        }
+        /* 仅在支持鼠标 hover 的桌面设备上轻微提高不透明度，依然保持优雅纯灰色，绝无淡蓝色 */
+        @media (hover: hover) and (pointer: fine) {
+          .pi-enh-composer-resizer:hover .pi-enh-composer-resizer-line {
+            opacity: 0.85 !important;
+            width: 36px !important;
+            background: color-mix(in srgb, var(--text-dim, #71717a) 80%, transparent) !important;
+          }
+        }
+        /* 仅在用户实际按住正在拖拽时才显示高亮，松手瞬间恢复中性灰，物理级根除手机触屏粘连 */
+        .pi-enh-composer-resizing .pi-enh-composer-resizer-line {
+          background: var(--accent, #3b82f6) !important;
+          width: 40px !important;
+          height: 2.5px !important;
+          opacity: 0.95 !important;
+        }
+        @media (max-width: 768px) {
+          .pi-enh-composer-resizer {
+            top: -3px !important;
+            height: 18px !important;
+          }
+          .pi-enh-composer-resizer-line {
+            width: 32px !important;
+            height: 2px !important;
+            opacity: 0.5 !important;
+          }
+        }
+
+        /* 预留状态栏 36px 占位槽：仅既有会话、无 shelf 时生效，新会话(:has(.mb-3))不预留 */
+        .chat-content > .relative.shrink-0:has(> fieldset):not(:has(> .mb-3)):not(:has(> .extension-status-shelf))::after {
+          content: "";
+          display: block;
+          height: 36px;
+          flex-shrink: 0;
+        }
+
+        /* 用户拉大/拉小高度首帧预置规则：仅在有用户自定义高度偏好时预置生效，无高度偏好时不污染默认 min-height */
+        html[data-pi-composer-custom-height] .chat-content > .relative.shrink-0 fieldset > div[style*="max-width"]:not(.pi-enh-composer-custom-height) textarea.chat-input-textarea,
+        html[data-pi-composer-custom-height] .chat-content > .relative.shrink-0 fieldset > div[style*="max-width"]:not(.pi-enh-composer-custom-height) .pi-enh-formatted-composer {
+          height: var(--pi-enh-preload-composer-height) !important;
+          max-height: var(--pi-enh-preload-composer-height) !important;
+          min-height: 56px !important;
+          overflow-y: auto !important;
+          overscroll-behavior: contain !important;
+        }
+
+        /* 用户拉大/拉小高度生效规则：最高特异性覆盖默认与媒体查询限制 */
+        .pi-enh-cursor-composer.pi-enh-composer-custom-height .pi-enh-cursor-editor,
+        .pi-enh-cursor-composer.pi-enh-composer-custom-height textarea.chat-input-textarea,
+        .pi-enh-cursor-composer.pi-enh-composer-custom-height .pi-enh-formatted-composer,
+        fieldset > div[style*="max-width"].pi-enh-composer-custom-height textarea.chat-input-textarea,
+        fieldset > div[style*="max-width"].pi-enh-composer-custom-height .pi-enh-formatted-composer {
+          height: var(--pi-composer-custom-height) !important;
+          max-height: var(--pi-composer-custom-height) !important;
+          min-height: 56px !important;
+          overflow-y: auto !important;
+          overscroll-behavior: contain !important;
+        }
+
+        /* 拖拽调整高度时全局防选中文本与光标跳动 */
+        .pi-enh-composer-resizing,
+        .pi-enh-composer-resizing * {
+          user-select: none !important;
+          -webkit-user-select: none !important;
+          cursor: ns-resize !important;
+        }
       `;
       document.head.appendChild(style);
     }
@@ -7742,16 +8701,104 @@
     if (!card) return;
     card.classList.add("pi-enh-cursor-composer");
     textarea.classList.add("pi-enh-cursor-editor");
+    syncComposerResizableHeight(card, textarea);
     syncComposerTextareaAutoHeight(textarea);
     const editor = textarea.parentElement;
     editor.classList.add("pi-enh-cursor-contents");
     if (editor.parentElement !== card) editor.parentElement.classList.add("pi-enh-cursor-contents");
-    const toolbar = Array.from(card.children).find((node) => node.style.marginTop);
+    const toolbar = Array.from(card.children).find((node) => node.style.marginTop || node.hasAttribute?.("data-pi-composer-toolbar"));
     if (toolbar) {
       toolbar.classList.add("pi-enh-cursor-contents");
-      toolbar.firstElementChild?.classList.add("pi-enh-cursor-left");
-      toolbar.lastElementChild?.classList.add("pi-enh-cursor-right");
+      const leftContainer = toolbar.firstElementChild;
+      const rightContainer = toolbar.lastElementChild;
+      leftContainer?.classList.add("pi-enh-cursor-left");
+      rightContainer?.classList.add("pi-enh-cursor-right");
       if (toolbar.children.length > 2) toolbar.children[1].classList.add("pi-enh-cursor-spacer");
+
+      // 1. 30142 unpatched React 兼容：补齐原生图片按钮 data-pi-attach-image（已带标记的 30141 不做改动）
+      if (!toolbar.querySelector('button[data-pi-attach-image]')) {
+        const candidateButtons = Array.from((leftContainer || toolbar).querySelectorAll("button"));
+        const attachBtn = candidateButtons.find((btn) => {
+          if (
+            btn.classList.contains("pi-enh-composer-add-btn") ||
+            btn.hasAttribute("data-pi-composer-add") ||
+            btn.closest(".model-selector, [data-pi-thinking-control], .pi-enh-cursor-right")
+          ) {
+            return false;
+          }
+          const label = `${btn.getAttribute("title") || ""} ${btn.getAttribute("aria-label") || ""}`;
+          return Boolean(
+            btn.querySelector('svg circle[cx="8.5"][cy="8.5"], svg polyline[points*="21 15 16 10 5 21"]') ||
+            /添加图片|上传图片|添加图片或视频|attach\s*image|upload\s*image/i.test(label)
+          );
+        });
+        if (attachBtn && !attachBtn.hasAttribute("data-pi-attach-image")) {
+          attachBtn.setAttribute("data-pi-attach-image", "true");
+          attachBtn.setAttribute("data-pi-enh-tagged-attach", "true");
+        }
+      }
+
+      // 2. 30142 unpatched React 兼容：补齐原生思考控件 data-pi-thinking-control 与 data-pi-thinking-button
+      let thinkingControl = toolbar.querySelector("[data-pi-thinking-control]");
+      if (!thinkingControl) {
+        const rightButtons = Array.from((rightContainer || toolbar).querySelectorAll("button"));
+        const thinkingBtn = rightButtons.find((btn) => {
+          if (btn.closest('div[style*="position: absolute"], div[style*="position:absolute"], [role="listbox"], [role="menu"]')) {
+            return false;
+          }
+          const label = `${btn.getAttribute("title") || ""} ${btn.getAttribute("aria-label") || ""}`;
+          return Boolean(
+            btn.querySelector('svg path[d*="M9.5 2A5.5 5.5"]') ||
+            /推理|思考|reasoning|thinking/i.test(label)
+          );
+        });
+        if (thinkingBtn) {
+          if (!thinkingBtn.hasAttribute("data-pi-thinking-button")) {
+            thinkingBtn.setAttribute("data-pi-thinking-button", "true");
+            thinkingBtn.setAttribute("data-pi-enh-tagged-thinking-button", "true");
+          }
+          const parent = thinkingBtn.parentElement;
+          if (parent && parent.tagName === "DIV" && parent !== toolbar && parent !== card && parent !== rightContainer) {
+            thinkingControl = parent;
+            if (!thinkingControl.hasAttribute("data-pi-thinking-control")) {
+              thinkingControl.setAttribute("data-pi-thinking-control", "true");
+              thinkingControl.setAttribute("data-pi-enh-tagged-thinking-control", "true");
+            }
+          }
+        }
+      } else {
+        const directBtn = Array.from(thinkingControl.children).find((c) => c.tagName === "BUTTON");
+        if (directBtn && !directBtn.hasAttribute("data-pi-thinking-button")) {
+          directBtn.setAttribute("data-pi-thinking-button", "true");
+          directBtn.setAttribute("data-pi-enh-tagged-thinking-button", "true");
+        }
+      }
+
+      // 3. 精确扁平化 30142 controlsMenuRef 下多出的一层直接原生包装层，绝不触碰 30141 已打标直出层或隐藏移动菜单
+      if (rightContainer) {
+        for (const child of Array.from(rightContainer.children)) {
+          if (child.tagName !== "DIV" || child.hasAttribute("data-pi-thinking-control")) {
+            child.classList.remove("pi-enh-cursor-right-inner");
+            continue;
+          }
+          const rawStyle = child.getAttribute("style") || "";
+          const isHiddenOrFloating =
+            child.hidden ||
+            child.getAttribute("aria-hidden") === "true" ||
+            child.style?.display === "none" ||
+            /display\s*:\s*none/i.test(rawStyle) ||
+            child.style?.position === "absolute" ||
+            child.style?.position === "fixed" ||
+            /position\s*:\s*(absolute|fixed)/i.test(rawStyle) ||
+            child.getAttribute("role") === "listbox" ||
+            child.getAttribute("role") === "menu";
+          if (!isHiddenOrFloating && child.querySelector?.("[data-pi-thinking-control], button")) {
+            child.classList.add("pi-enh-cursor-right-inner");
+          } else {
+            child.classList.remove("pi-enh-cursor-right-inner");
+          }
+        }
+      }
     }
     for (const node of Array.from(editor.children)) {
       if (node.tagName === "BUTTON" && !node.classList.contains("pi-enh-quick-fallback-trigger")) {
@@ -7786,6 +8833,13 @@
       if (/提示音|通知声音|压缩|notification sound|compact/i.test(button.title)) button.classList.add("pi-enh-cursor-secondary");
     }
     updateCardContentState(card, textarea);
+    if (typeof pendingComposerAttachments !== "undefined" && pendingComposerAttachments.length > 0) {
+      const nativeImg = card.querySelector?.('div[style*="flex-wrap"]:has(img), .pi-enh-cursor-attachments');
+      const currentBar = findComposerAttachmentBar(textarea);
+      if (!currentBar || !currentBar.isConnected || (nativeImg && currentBar.parentElement !== nativeImg) || (!nativeImg && currentBar.parentElement !== card)) {
+        syncComposerAttachmentBar(textarea);
+      }
+    }
     syncComposerModelPill();
   }
 
@@ -7838,6 +8892,10 @@
   function removeCodexComposerLayout() {
     const style = document.getElementById(CODEX_COMPOSER_STYLE_ID);
     if (style) style.remove();
+    if (typeof pendingComposerAttachments !== "undefined" && pendingComposerAttachments.length > 0) {
+      const ta = findComposerTextarea();
+      if (ta) syncComposerAttachmentBar(ta);
+    }
 
     // 仅定位已标记 composer 卡片的编辑器祖先修复旧 !important
     for (const card of document.querySelectorAll(".pi-enh-cursor-composer")) {
@@ -7870,10 +8928,33 @@
       }
     }
 
+    // 清理本插件在 30142 未打标 DOM 上动态补齐的 data-pi-* 属性，严禁改动 30141 原生已有标记
+    for (const node of document.querySelectorAll('[data-pi-enh-tagged-attach="true"]')) {
+      node.removeAttribute("data-pi-attach-image");
+      node.removeAttribute("data-pi-enh-tagged-attach");
+    }
+    for (const node of document.querySelectorAll('[data-pi-enh-tagged-thinking-control="true"]')) {
+      node.removeAttribute("data-pi-thinking-control");
+      node.removeAttribute("data-pi-enh-tagged-thinking-control");
+    }
+    for (const node of document.querySelectorAll('[data-pi-enh-tagged-thinking-button="true"]')) {
+      node.removeAttribute("data-pi-thinking-button");
+      node.removeAttribute("data-pi-enh-tagged-thinking-button");
+    }
+
+    for (const resizer of document.querySelectorAll(".pi-enh-composer-resizer")) {
+      resizer.remove();
+    }
+    for (const card of document.querySelectorAll(".pi-enh-composer-custom-height")) {
+      card.classList.remove("pi-enh-composer-custom-height");
+      card.style.removeProperty("--pi-composer-custom-height");
+    }
+
     for (const card of document.querySelectorAll(".has-user-content, .pi-enh-has-running-controls")) {
       card.classList.remove("has-user-content", "pi-enh-has-running-controls");
     }
     removeComposerModelPill();
+    syncComposerPreloadHeightProperty(null);
   }
 
   window.__PI_ENH_SYNC_CODEX_COMPOSER_LAYOUT__ = syncCodexComposerLayout;
@@ -7898,8 +8979,45 @@
         }
 
         .pi-enh-cursor-composer.pi-enh-composer-model-pill .pi-enh-cursor-left,
-        .pi-enh-cursor-composer.pi-enh-composer-model-pill .pi-enh-cursor-right {
+        .pi-enh-cursor-composer.pi-enh-composer-model-pill .pi-enh-cursor-right,
+        .pi-enh-cursor-composer.pi-enh-composer-model-pill .pi-enh-cursor-right > .pi-enh-cursor-right-inner:not([hidden]):not([style*="display: none"]):not([style*="display:none"]):not([style*="position: absolute"]):not([style*="position:absolute"]) {
           display: contents !important;
+        }
+
+        /* The outer margin-top toolbar is already contents in the base layout.
+           Flatten its visible, untagged native side wrappers on the first React commit. */
+        .pi-enh-cursor-composer.pi-enh-composer-model-pill > div[style*="margin-top"] > div:first-child:not([hidden]):not([aria-hidden="true"]):not([style*="display: none"]):not([style*="display:none"]),
+        .pi-enh-cursor-composer.pi-enh-composer-model-pill > div[style*="margin-top"] > div:last-child:not([hidden]):not([aria-hidden="true"]):not([style*="display: none"]):not([style*="display:none"]) {
+          display: contents !important;
+        }
+        /* Paired hidden-state rules outrank the native inline display and synced contents classes. */
+        .pi-enh-cursor-composer.pi-enh-composer-model-pill > div[style*="margin-top"] > div:first-child[hidden],
+        .pi-enh-cursor-composer.pi-enh-composer-model-pill > div[style*="margin-top"] > div:first-child[style*="display: none"],
+        .pi-enh-cursor-composer.pi-enh-composer-model-pill > div[style*="margin-top"] > div:first-child[style*="display:none"],
+        .pi-enh-cursor-composer.pi-enh-composer-model-pill > div[style*="margin-top"] > div:last-child[hidden],
+        .pi-enh-cursor-composer.pi-enh-composer-model-pill > div[style*="margin-top"] > div:last-child[style*="display: none"],
+        .pi-enh-cursor-composer.pi-enh-composer-model-pill > div[style*="margin-top"] > div:last-child[style*="display:none"],
+        .pi-enh-cursor-composer.pi-enh-composer-model-pill > div[style*="margin-top"] > div:last-child > div[hidden],
+        .pi-enh-cursor-composer.pi-enh-composer-model-pill > div[style*="margin-top"] > div:last-child > div[style*="display: none"],
+        .pi-enh-cursor-composer.pi-enh-composer-model-pill > div[style*="margin-top"] > div:last-child > div[style*="display:none"],
+        .pi-enh-cursor-composer.pi-enh-composer-model-pill > div[style*="margin-top"] > div:last-child > div > div[hidden]:has(> button svg path[d*="M9.5 2A5.5 5.5"]),
+        .pi-enh-cursor-composer.pi-enh-composer-model-pill > div[style*="margin-top"] > div:last-child > div > div[style*="display: none"]:has(> button svg path[d*="M9.5 2A5.5 5.5"]),
+        .pi-enh-cursor-composer.pi-enh-composer-model-pill > div[style*="margin-top"] > div:last-child > div > div[style*="display:none"]:has(> button svg path[d*="M9.5 2A5.5 5.5"]),
+        .pi-enh-cursor-composer.pi-enh-composer-model-pill .pi-enh-cursor-left[hidden],
+        .pi-enh-cursor-composer.pi-enh-composer-model-pill .pi-enh-cursor-left[style*="display: none"],
+        .pi-enh-cursor-composer.pi-enh-composer-model-pill .pi-enh-cursor-left[style*="display:none"],
+        .pi-enh-cursor-composer.pi-enh-composer-model-pill .pi-enh-cursor-right[hidden],
+        .pi-enh-cursor-composer.pi-enh-composer-model-pill .pi-enh-cursor-right[style*="display: none"],
+        .pi-enh-cursor-composer.pi-enh-composer-model-pill .pi-enh-cursor-right[style*="display:none"] {
+          display: none !important;
+        }
+        /* Mirror the later .pi-enh-cursor-right-inner tag only for the visible inline controls row. */
+        .pi-enh-cursor-composer.pi-enh-composer-model-pill > div[style*="margin-top"] > div:last-child > div:not([hidden]):not([aria-hidden="true"]):not([style*="display: none"]):not([style*="display:none"]):not([style*="position: absolute"]):not([style*="position:absolute"]):not([style*="position: fixed"]):not([style*="position:fixed"]):not([role="listbox"]):not([role="menu"]):has(> div > button svg path[d*="M9.5 2A5.5 5.5"]) {
+          display: contents !important;
+        }
+        /* Hide an orphan pre-model label without changing grid/display participation. */
+        .pi-enh-cursor-composer.pi-enh-composer-model-pill:not(:has(.model-selector)) > div[style*="margin-top"] > div:last-child > div:not([hidden]):not([style*="display: none"]):not([style*="display:none"]):has(> div > button svg path[d*="M9.5 2A5.5 5.5"]) > div:not([hidden]):not([style*="display: none"]):not([style*="display:none"]):has(> button svg path[d*="M9.5 2A5.5 5.5"]) > button > span {
+          visibility: hidden;
         }
 
         /* 加号与图片按钮位置收紧 */
@@ -7924,7 +9042,8 @@
           grid-row: 3 !important;
           align-self: center !important;
         }
-        .pi-enh-cursor-composer.pi-enh-composer-model-pill button[data-pi-attach-image] {
+        .pi-enh-cursor-composer.pi-enh-composer-model-pill button[data-pi-attach-image],
+        .pi-enh-cursor-composer.pi-enh-composer-model-pill > div[style*="margin-top"] > div:first-child > button:has(svg circle[cx="8.5"][cy="8.5"], svg polyline[points*="21 15 16 10 5 21"]) {
           grid-column: 2 !important;
           grid-row: 3 !important;
           justify-self: start !important;
@@ -7939,7 +9058,8 @@
         }
 
         .pi-enh-cursor-composer.pi-enh-composer-model-pill button.pi-enh-cursor-stop,
-        .pi-enh-cursor-composer.pi-enh-composer-model-pill .pi-enh-cursor-right > button.pi-enh-cursor-stop {
+        .pi-enh-cursor-composer.pi-enh-composer-model-pill .pi-enh-cursor-right > button.pi-enh-cursor-stop,
+        .pi-enh-cursor-composer.pi-enh-composer-model-pill .pi-enh-cursor-right > .pi-enh-cursor-right-inner > button.pi-enh-cursor-stop {
           grid-column: -2 !important;
           grid-row: 3 !important;
           justify-self: end !important;
@@ -7961,7 +9081,10 @@
         }
 
         .pi-enh-cursor-composer.pi-enh-composer-model-pill [data-pi-thinking-control],
-        .pi-enh-cursor-composer.pi-enh-composer-model-pill .pi-enh-cursor-right > div[data-pi-thinking-control] {
+        .pi-enh-cursor-composer.pi-enh-composer-model-pill .pi-enh-cursor-right > div[data-pi-thinking-control],
+        .pi-enh-cursor-composer.pi-enh-composer-model-pill .pi-enh-cursor-right > .pi-enh-cursor-right-inner > div[data-pi-thinking-control],
+        .pi-enh-cursor-composer.pi-enh-composer-model-pill .pi-enh-cursor-right > .pi-enh-cursor-right-inner > div:not([data-pi-thinking-control]):has(> button svg path[d*="M9.5 2A5.5 5.5"]),
+        .pi-enh-cursor-composer.pi-enh-composer-model-pill > div[style*="margin-top"] > div:last-child > div:not([hidden]):not([aria-hidden="true"]):not([style*="display: none"]):not([style*="display:none"]):not([style*="position: absolute"]):not([style*="position:absolute"]):not([style*="position: fixed"]):not([style*="position:fixed"]):not([role="listbox"]):not([role="menu"]) > div:not([data-pi-thinking-control]):not([hidden]):not([aria-hidden="true"]):not([style*="display: none"]):not([style*="display:none"]):has(> button svg path[d*="M9.5 2A5.5 5.5"]) {
           grid-column: -3 !important;
           grid-row: 3 !important;
           padding: 0 !important;
@@ -7975,6 +9098,18 @@
           display: inline-flex !important;
         }
 
+        .pi-enh-cursor-composer.pi-enh-composer-model-pill [data-pi-thinking-control][hidden],
+        .pi-enh-cursor-composer.pi-enh-composer-model-pill [data-pi-thinking-control][style*="display: none"],
+        .pi-enh-cursor-composer.pi-enh-composer-model-pill [data-pi-thinking-control][style*="display:none"],
+        .pi-enh-cursor-composer.pi-enh-composer-model-pill .pi-enh-cursor-right > div[data-pi-thinking-control][hidden],
+        .pi-enh-cursor-composer.pi-enh-composer-model-pill .pi-enh-cursor-right > div[data-pi-thinking-control][style*="display: none"],
+        .pi-enh-cursor-composer.pi-enh-composer-model-pill .pi-enh-cursor-right > div[data-pi-thinking-control][style*="display:none"],
+        .pi-enh-cursor-composer.pi-enh-composer-model-pill .pi-enh-cursor-right > .pi-enh-cursor-right-inner > div[data-pi-thinking-control][hidden],
+        .pi-enh-cursor-composer.pi-enh-composer-model-pill .pi-enh-cursor-right > .pi-enh-cursor-right-inner > div[data-pi-thinking-control][style*="display: none"],
+        .pi-enh-cursor-composer.pi-enh-composer-model-pill .pi-enh-cursor-right > .pi-enh-cursor-right-inner > div[data-pi-thinking-control][style*="display:none"] {
+          display: none !important;
+        }
+
         .pi-enh-cursor-composer.pi-enh-composer-model-pill .pi-enh-cursor-send,
         .pi-enh-cursor-composer.pi-enh-composer-model-pill .pi-enh-cursor-actions,
         .pi-enh-cursor-composer.pi-enh-composer-model-pill div[style*="align-self: flex-end"]:not(:has(textarea, [contenteditable])) {
@@ -7984,8 +9119,68 @@
           align-self: center !important;
         }
 
-        .pi-enh-cursor-composer.pi-enh-composer-model-pill:not(:has([data-pi-thinking-control])) .model-selector {
-          grid-column: -3 !important;
+        /* Style the native send button before the observer adds its enhancement class. */
+        .pi-enh-cursor-composer.pi-enh-composer-model-pill button:has(> svg polyline[points*="7.5 3 12 7 7.5 11"]):not(.pi-enh-cursor-send) {
+          position: relative !important;
+          grid-column: -2 !important;
+          grid-row: 3 !important;
+          justify-self: end !important;
+          align-self: center !important;
+          width: 24px !important;
+          height: 24px !important;
+          min-width: 24px !important;
+          max-width: 24px !important;
+          gap: 0 !important;
+          padding: 0 !important;
+          margin: 0 !important;
+          border: none !important;
+          border-radius: 50% !important;
+          box-shadow: none !important;
+          font-size: 0 !important;
+          line-height: 0 !important;
+          display: inline-flex !important;
+          align-items: center !important;
+          justify-content: center !important;
+          box-sizing: border-box !important;
+          overflow: hidden !important;
+          transition: background 0.15s ease, color 0.15s ease, transform 0.1s ease, box-shadow 0.15s ease !important;
+        }
+        .pi-enh-cursor-composer.pi-enh-composer-model-pill button:has(> svg polyline[points*="7.5 3 12 7 7.5 11"]):not(.pi-enh-cursor-send)::before {
+          content: "" !important;
+          position: absolute !important;
+          top: 50% !important;
+          left: 50% !important;
+          transform: translate(-50%, -50%) !important;
+          display: block !important;
+          width: 14px !important;
+          height: 14px !important;
+          margin: 0 !important;
+          padding: 0 !important;
+          pointer-events: none !important;
+          background-color: currentColor !important;
+          -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M12 19V5m-7 7 7-7 7 7' fill='none' stroke='black' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") no-repeat center / contain !important;
+          mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M12 19V5m-7 7 7-7 7 7' fill='none' stroke='black' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") no-repeat center / contain !important;
+        }
+        .pi-enh-cursor-composer.pi-enh-composer-model-pill button:has(> svg polyline[points*="7.5 3 12 7 7.5 11"]):not(.pi-enh-cursor-send) > svg {
+          display: none !important;
+        }
+        .pi-enh-cursor-composer.pi-enh-composer-model-pill button:has(> svg polyline[points*="7.5 3 12 7 7.5 11"]):not(.pi-enh-cursor-send):disabled {
+          background: rgba(128, 128, 128, 0.14) !important;
+          color: var(--text-dim, #71717a) !important;
+          cursor: not-allowed !important;
+          opacity: 0.55 !important;
+        }
+        .pi-enh-cursor-composer.pi-enh-composer-model-pill button:has(> svg polyline[points*="7.5 3 12 7 7.5 11"]):not(.pi-enh-cursor-send):not(:disabled) {
+          background: #efefef !important;
+          color: #262626 !important;
+          cursor: pointer !important;
+          opacity: 1 !important;
+        }
+        .pi-enh-cursor-composer.pi-enh-composer-model-pill button:has(> svg polyline[points*="7.5 3 12 7 7.5 11"]):not(.pi-enh-cursor-send):not(:disabled):hover {
+          background: #ffffff !important;
+        }
+        .pi-enh-cursor-composer.pi-enh-composer-model-pill button:has(> svg polyline[points*="7.5 3 12 7 7.5 11"]):not(.pi-enh-cursor-send):not(:disabled):active {
+          transform: scale(0.94) !important;
         }
 
         /* 当模型选择器或思考控件展开下拉菜单时，外层与控件层叠上下文提升至最前，确保绝不被任何浮动按钮遮挡 */
@@ -8021,8 +9216,8 @@
           transition: background-color 0.15s ease, border-color 0.15s ease !important;
         }
 
-        .pi-enh-cursor-composer.pi-enh-composer-model-pill:not(:has([data-pi-thinking-control]))::after {
-          grid-column: -3 / -2 !important;
+        .pi-enh-cursor-composer.pi-enh-composer-model-pill:not(:has([data-pi-thinking-control], .pi-enh-cursor-right-inner > div > button > svg > path[d*="M9.5 2A5.5 5.5"]))::after {
+          grid-column: -4 / -3 !important;
         }
 
         html[data-theme="light"] .pi-enh-cursor-composer.pi-enh-composer-model-pill::after,
@@ -8092,7 +9287,7 @@
           white-space: nowrap !important;
         }
 
-        .pi-enh-cursor-composer.pi-enh-composer-model-pill:not(:has([data-pi-thinking-control])) .model-selector > button {
+        .pi-enh-cursor-composer.pi-enh-composer-model-pill:not(:has([data-pi-thinking-control], .pi-enh-cursor-right-inner > div > button > svg > path[d*="M9.5 2A5.5 5.5"])) .model-selector > button {
           border-radius: 9999px !important;
           padding: 0 10px 0 12px !important;
         }
@@ -8149,7 +9344,7 @@
           margin-left: 1px !important;
         }
 
-        .pi-enh-cursor-composer.pi-enh-composer-model-pill:not(:has([data-pi-thinking-control])) .model-selector > button::after {
+        .pi-enh-cursor-composer.pi-enh-composer-model-pill:not(:has([data-pi-thinking-control], .pi-enh-cursor-right-inner > div > button > svg > path[d*="M9.5 2A5.5 5.5"])) .model-selector > button::after {
           content: "" !important;
           display: inline-block !important;
           width: 10px !important;
@@ -8307,14 +9502,111 @@
     const style = document.createElement("style");
     style.id = MOBILE_MODEL_GUARD_STYLE_ID;
     style.textContent = `
-      /* 模型下拉列表层叠保护（仅作用于 .model-selector 内部 listbox） */
-      .model-selector > div[role="listbox"],
+      /* 物理吸附铁律：模型选择下拉菜单必须紧挨在按钮正上方，杜绝脱节与半空悬浮 */
+      .model-selector.is-toolbar > div[role="listbox"],
       .model-selector div[role="listbox"] {
+        position: absolute !important;
+        bottom: calc(100% + 6px) !important;
+        top: auto !important;
+        right: 0 !important;
+        left: auto !important;
+        max-width: min(320px, calc(100vw - 16px)) !important;
         z-index: 1200 !important;
-        box-sizing: border-box;
+        box-sizing: border-box !important;
+        box-shadow: 0 -4px 16px rgba(0, 0, 0, 0.14), 0 0 0 1px var(--border) !important;
       }
     `;
     document.head.appendChild(style);
+  }
+
+  let activeTouchTriggerBtn = null;
+  let touchStartX = 0;
+  let touchStartY = 0;
+  let touchStartTime = 0;
+  let touchIsMoved = false;
+
+  function handleModelSelectorTouchStart(e) {
+    if (!isPluginEnabled("mobile-model-keyboard-guard")) return;
+    const target = e?.target;
+    if (!target) return;
+    const el = target.nodeType === 1 ? target : target.parentElement;
+    if (!el || typeof el.closest !== "function") return;
+
+    if (el.closest('textarea, [contenteditable], .pi-enh-formatted-composer, .pi-enh-cursor-editor, input')) {
+      return;
+    }
+    if (el.closest('dialog, .settings-modal, [data-modal]')) return;
+
+    const isTrigger = el.closest(
+      '.model-selector button, .model-selector [role="button"], [data-pi-thinking-control] > button, [data-pi-thinking-button]'
+    );
+    if (!isTrigger) return;
+    if (el.closest('div[role="listbox"], [role="option"]')) return;
+
+    // 检查当前是否正处于打字/键盘展开态
+    const active = document.activeElement;
+    const isEditing = active && (
+      active.tagName === "TEXTAREA" ||
+      active.tagName === "INPUT" ||
+      active.isContentEditable ||
+      active.classList?.contains("pi-enh-formatted-composer")
+    );
+
+    // 核心物理保护：若处于键盘展开状态，在 touchstart 阻止默认失焦行为，保证键盘绝对不被收起！
+    if (isEditing) {
+      if (typeof e.preventDefault === "function") {
+        e.preventDefault();
+      }
+      activeTouchTriggerBtn = isTrigger;
+      const t = e.touches ? e.touches[0] : e;
+      touchStartX = t?.clientX || 0;
+      touchStartY = t?.clientY || 0;
+      touchStartTime = Date.now();
+      touchIsMoved = false;
+    }
+  }
+
+  function handleModelSelectorTouchMove(e) {
+    if (!activeTouchTriggerBtn) return;
+    const t = e.touches ? e.touches[0] : e;
+    if (t) {
+      const dist = Math.hypot((t.clientX || 0) - touchStartX, (t.clientY || 0) - touchStartY);
+      if (dist > 12) {
+        touchIsMoved = true;
+      }
+    }
+  }
+
+  function handleModelSelectorTouchEnd() {
+    if (!activeTouchTriggerBtn) return;
+    const btn = activeTouchTriggerBtn;
+    activeTouchTriggerBtn = null;
+
+    if (touchIsMoved) return;
+    if (Date.now() - touchStartTime > 600) return;
+
+    // 手指抬起，手动触发受信任的 click 事件打开菜单，完美弥补 touchstart 阻止失焦带来的原生 click 抑制！
+    try {
+      btn.click();
+    } catch (_) {}
+  }
+
+  function handleModelSelectorTouchCancel() {
+    activeTouchTriggerBtn = null;
+    touchIsMoved = false;
+  }
+
+  function handleModelSelectorPointerDown(e) {
+    // 桌面端鼠标点击拦截失焦：若当前正在打字，阻止 mousedown 默认失焦，保持输入框焦点且不影响 click 派发
+    if (e.pointerType === "mouse") {
+      const active = document.activeElement;
+      if (active && (active.tagName === "TEXTAREA" || active.tagName === "INPUT" || active.isContentEditable || active.classList?.contains("pi-enh-formatted-composer"))) {
+        const isTrigger = e.target?.closest?.('.model-selector button, .model-selector [role="button"], [data-pi-thinking-control] > button, [data-pi-thinking-button]');
+        if (isTrigger && !e.target.closest('div[role="listbox"], [role="option"]')) {
+          if (typeof e.preventDefault === "function") e.preventDefault();
+        }
+      }
+    }
   }
 
   function handleModelSelectorClick(e) {
@@ -8328,10 +9620,9 @@
     if (el.closest('textarea, [contenteditable], .pi-enh-formatted-composer, .pi-enh-cursor-editor, input')) {
       return;
     }
-
     if (el.closest('dialog, .settings-modal, [data-modal]')) return;
 
-    // 检查是否真正点击了模型选择器触发按钮或思考控件触发按钮（严禁包含外层 card 的 .pi-enh-composer-model-pill）
+    // 检查是否真正点击了模型选择器触发按钮或思考控件触发按钮
     const isTrigger = el.closest(
       '.model-selector button, .model-selector [role="button"], [data-pi-thinking-control] > button, [data-pi-thinking-button]'
     );
@@ -8340,26 +9631,26 @@
     // 若点击已在展开的菜单内部列表项，不干扰
     if (el.closest('div[role="listbox"], [role="option"]')) return;
 
+    // 记录触发前是否是编辑框聚焦态
+    const prevActive = document.activeElement;
+    const wasEditing = prevActive && (
+      prevActive.tagName === "TEXTAREA" ||
+      prevActive.tagName === "INPUT" ||
+      prevActive.isContentEditable ||
+      prevActive.classList?.contains("pi-enh-formatted-composer")
+    );
+
+    // 遵从用户指令：点击模型选择按钮绝不收起软键盘，严禁调用 active.blur()！
     addManagedTimeout(syncOpenModelListboxes, 0);
 
-    if (typeof isMobileEnvironment === "function" && !isMobileEnvironment()) return;
-
-    // 捕获当前编辑框，但必须等本轮 click/React 处理完并打开菜单后再 blur。
-    // pointerdown/touchstart 时立刻收起软键盘会触发视口重排，使手机后续 click 落到已移动的对话输入框。
-    const active = document.activeElement;
-    if (
-      active &&
-      (active.tagName === "TEXTAREA" ||
-        active.tagName === "INPUT" ||
-        active.isContentEditable ||
-        active.classList?.contains("pi-enh-formatted-composer"))
-    ) {
+    // 如果之前正在打字（软键盘展开），确保编辑框保持焦点，绝不被收起软键盘
+    if (wasEditing && prevActive && prevActive.isConnected) {
       addManagedTimeout(() => {
-        if (!isPluginEnabled("mobile-model-keyboard-guard") || !active.isConnected || document.activeElement !== active) return;
-        try {
-          active.blur();
-        } catch (err) {}
-        syncOpenModelListboxes();
+        if (prevActive.isConnected && document.activeElement !== prevActive) {
+          try {
+            prevActive.focus({ preventScroll: true });
+          } catch (_) {}
+        }
       }, 0);
     }
   }
@@ -8375,6 +9666,7 @@
 
     if (!listbox.__piModelGuardOrig) {
       listbox.__piModelGuardOrig = {
+        position: listbox.style.position,
         zIndex: listbox.style.zIndex,
         maxHeight: listbox.style.maxHeight,
         top: listbox.style.top,
@@ -8385,50 +9677,48 @@
       };
     }
 
-    // 1. 视口高度与边界安全保护（visualViewport、安全边距 8px / 触发器间距 6px）
+    // 1. 物理吸附锚定：下拉菜单必须始终挨在模型选择按钮上方 6px，绝对避免高空悬浮脱节
+    listbox.style.setProperty("position", "absolute", "important");
+    listbox.style.setProperty("bottom", "calc(100% + 6px)", "important");
+    listbox.style.setProperty("top", "auto", "important");
+    listbox.style.setProperty("right", "0", "important");
+    listbox.style.setProperty("left", "auto", "important");
     listbox.style.zIndex = "1200";
-    const composerParent = listbox.closest('.pi-enh-cursor-composer');
+
+    const composerParent = listbox.closest('.pi-enh-cursor-composer') || selectorParent.closest('fieldset > div');
     for (const parent of [selectorParent, composerParent]) {
       if (!parent) continue;
       if (parent.__piModelGuardZIndex === undefined) parent.__piModelGuardZIndex = parent.style.zIndex;
       parent.style.zIndex = "1200";
     }
 
+    // 2. 动态视口高度与边界安全限制（visualViewport 边界安全保护）
     const viewport = window.visualViewport;
     const viewportTop = viewport?.offsetTop || 0;
-    const viewportBottom = viewportTop + (viewport?.height || window.innerHeight);
+    const viewportHeight = viewport?.height || window.innerHeight;
+    const viewportBottom = viewportTop + viewportHeight;
     const triggerBtn = selectorParent.querySelector('button[aria-haspopup="listbox"], button');
+
     if (triggerBtn && viewportBottom > viewportTop) {
       const r = triggerBtn.getBoundingClientRect();
-      const availAbove = Math.floor(r.top - 6 - viewportTop - 8);
-      const availBelow = Math.floor(viewportBottom - r.bottom - 6 - 8);
-      if (availAbove >= 120 || availAbove >= availBelow) {
-        listbox.style.top = "";
-        listbox.style.bottom = `${Math.max(8, Math.round(window.innerHeight - r.top + 6))}px`;
-        listbox.style.maxHeight = `${Math.max(60, availAbove)}px`;
-      } else {
-        listbox.style.bottom = "";
-        listbox.style.top = `${Math.max(viewportTop + 8, Math.round(r.bottom + 6))}px`;
-        listbox.style.maxHeight = `${Math.max(60, availBelow)}px`;
+      const availAbove = Math.floor(r.top - viewportTop - 12);
+      const safeMaxHeight = Math.max(80, Math.min(availAbove > 0 ? availAbove : 200, Math.floor(viewportHeight * 0.75)));
+      listbox.style.maxHeight = `${safeMaxHeight}px`;
+
+      // 水平防溢出：确保向左展开的菜单不会超出视口左边缘
+      const safeLeft = (viewport?.offsetLeft || 0) + 8;
+      const safeRight = (viewport?.offsetLeft || 0) + (viewport?.width || window.innerWidth) - 8;
+      const availWidth = Math.floor(Math.max(160, safeRight - safeLeft));
+      listbox.style.maxWidth = `${Math.min(320, availWidth)}px`;
+
+      // 如果按钮右边界距离视口左侧太近，向左展开会超出屏幕左侧，则改向右展开
+      if (r.right - 320 < safeLeft && r.left >= safeLeft) {
+        listbox.style.setProperty("right", "auto", "important");
+        listbox.style.setProperty("left", "0", "important");
       }
     }
 
-    const rect = listbox.getBoundingClientRect();
-    if (rect.top < viewportTop + 8 && viewportBottom > viewportTop) {
-      listbox.style.top = `${Math.round(viewportTop + 8)}px`;
-      listbox.style.bottom = "auto";
-      listbox.style.maxHeight = `${Math.max(60, Math.floor(viewportBottom - viewportTop - 16))}px`;
-    }
-    const safeLeft = (viewport?.offsetLeft || 0) + 8;
-    const safeRight = (viewport?.offsetLeft || 0) + (viewport?.width || window.innerWidth) - 8;
-    if (rect.left < safeLeft || rect.right > safeRight) {
-      const width = Math.min(rect.width, Math.max(1, safeRight - safeLeft));
-      listbox.style.right = "auto";
-      listbox.style.left = `${Math.round(Math.max(safeLeft, Math.min(triggerBtn?.getBoundingClientRect().left ?? rect.left, safeRight - width)))}px`;
-      listbox.style.maxWidth = `${Math.floor(Math.max(1, safeRight - safeLeft))}px`;
-    }
-
-    // 2. 移动端/触屏环境下，拦截搜索框自动聚焦调起虚拟键盘
+    // 3. 移动端/触屏环境下，拦截搜索框自动聚焦调起虚拟键盘
     if (isMobile) {
       const filterInput = listbox.querySelector('input');
       if (filterInput) {
@@ -8505,7 +9795,12 @@
     }
   }
 
-  // 仅在 click 阶段安排延迟 blur；绝不在 pointerdown/touchstart 改变视口与点击目标。
+  // 监听 touch 与 pointer 事件：键盘展开时 touchstart 拦截失焦保持键盘不被关闭，并在 touchend 手动触发点击打开菜单
+  addManagedListener(document, "touchstart", handleModelSelectorTouchStart, { passive: false, capture: true });
+  addManagedListener(document, "touchmove", handleModelSelectorTouchMove, { passive: true, capture: true });
+  addManagedListener(document, "touchend", handleModelSelectorTouchEnd, { passive: true, capture: true });
+  addManagedListener(document, "touchcancel", handleModelSelectorTouchCancel, { passive: true, capture: true });
+  addManagedListener(document, "pointerdown", handleModelSelectorPointerDown, true);
   addManagedListener(document, "click", handleModelSelectorClick, true);
   addManagedListener(document, "input", (e) => {
     if (!isPluginEnabled("mobile-model-keyboard-guard")) return;
@@ -8556,7 +9851,9 @@
   window.__PI_ENH_REMOVE_MOBILE_MODEL_GUARD__ = removeMobileModelKeyboardGuard;
   window.__PI_ENH_INSPECT_MODEL_LISTBOX__ = inspectAndProtectModelListbox;
   window.__PI_ENH_HANDLE_MODEL_SELECTOR_CLICK__ = handleModelSelectorClick;
-  window.__PI_ENH_HANDLE_MODEL_POINTERDOWN__ = handleModelSelectorClick;
+  window.__PI_ENH_HANDLE_MODEL_POINTERDOWN__ = handleModelSelectorPointerDown;
+  window.__PI_ENH_HANDLE_MODEL_TOUCHSTART__ = handleModelSelectorTouchStart;
+  window.__PI_ENH_HANDLE_MODEL_TOUCHEND__ = handleModelSelectorTouchEnd;
 
   // ==========================================
   // 3.55.0 Composer Thinking Options Refinement (思考深度选项垂直排布与排除“默认”)
@@ -8678,10 +9975,12 @@
   let isFormattedViewMode = getPersistedFormattedViewMode();
   isComposingInput = false;
   let composerCompositionEndedAt = 0;
+  let lastCompositionKeyReleased = false;
   let composerFormatTextareaCleanup = null;
 
   function onComposerFormatCompositionStart() {
     isComposingInput = true;
+    lastCompositionKeyReleased = false;
   }
 
   function onComposerFormatCompositionEnd() {
@@ -8690,7 +9989,8 @@
   }
 
   function blockComposerCompositionShortcut(event) {
-    const composing = isComposingInput || event.isComposing || event.keyCode === 229 || Date.now() - composerCompositionEndedAt < 100;
+    const composing = isComposingInput || event.isComposing || event.keyCode === 229
+      || (Date.now() - composerCompositionEndedAt < 100 && !lastCompositionKeyReleased);
     if (!composing) return false;
     if (event.key === "Enter") {
       // Keep IME confirmation native, but never let its Enter become a send.
@@ -9053,6 +10353,50 @@
     return htmlToMarkdown(el.innerHTML);
   }
 
+  function restoreFormattedSelectionFromTextarea(formattedComposer, markdown, textarea) {
+    if (!formattedComposer || !textarea) return false;
+
+    const sourceStart = Number.isFinite(textarea.selectionStart) ? textarea.selectionStart : markdown.length;
+    const sourceEnd = Number.isFinite(textarea.selectionEnd) ? textarea.selectionEnd : sourceStart;
+    const getRenderedOffset = (sourceOffset) => {
+      const prefix = document.createElement("div");
+      const boundedOffset = Math.max(0, Math.min(markdown.length, sourceOffset));
+      prefix.innerHTML = markdownToFormattedHtml(markdown.slice(0, boundedOffset));
+      return (prefix.textContent || "").length;
+    };
+    const locateTextPoint = (renderedOffset) => {
+      const walker = document.createTreeWalker(formattedComposer, NodeFilter.SHOW_TEXT);
+      let remaining = Math.max(0, renderedOffset);
+      let node = null;
+      let lastTextNode = null;
+      while ((node = walker.nextNode())) {
+        const length = (node.nodeValue || "").length;
+        lastTextNode = node;
+        if (remaining <= length) return { node, offset: remaining };
+        remaining -= length;
+      }
+      if (lastTextNode) {
+        return { node: lastTextNode, offset: (lastTextNode.nodeValue || "").length };
+      }
+      return { node: formattedComposer, offset: formattedComposer.childNodes.length };
+    };
+
+    try {
+      const range = document.createRange();
+      const start = locateTextPoint(getRenderedOffset(sourceStart));
+      const end = locateTextPoint(getRenderedOffset(sourceEnd));
+      range.setStart(start.node, start.offset);
+      range.setEnd(end.node, end.offset);
+      const selection = window.getSelection();
+      if (!selection) return false;
+      selection.removeAllRanges();
+      selection.addRange(range);
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
   function updateFormattedViewMode(targetFormatted) {
     isFormattedViewMode = targetFormatted;
     setPersistedFormattedViewMode(isFormattedViewMode);
@@ -9079,9 +10423,11 @@
         activeComposerFormatTextarea.style.display = "none";
         activeFormattedComposer.style.display = "block";
         activeFormattedComposer.focus();
-        const selection = window.getSelection();
-        selection?.selectAllChildren(activeFormattedComposer);
-        selection?.collapseToEnd();
+        if (!restoreFormattedSelectionFromTextarea(activeFormattedComposer, currentMd, activeComposerFormatTextarea)) {
+          const selection = window.getSelection();
+          selection?.selectAllChildren(activeFormattedComposer);
+          selection?.collapseToEnd();
+        }
       } else {
         activeComposerFormatTextarea.style.display = "block";
         activeFormattedComposer.style.display = "none";
@@ -9099,8 +10445,8 @@
     }
   }
 
-  function insertMarkdownIntoComposer(md) {
-    const textarea = activeComposerFormatTextarea || findComposerTextarea();
+  function insertMarkdownIntoComposer(md, targetTextarea = null) {
+    const textarea = targetTextarea || (document.activeElement instanceof HTMLTextAreaElement ? document.activeElement : (activeComposerFormatTextarea || findComposerTextarea()));
     if (!textarea) return;
 
     if (undoDebounceTimer) {
@@ -9111,28 +10457,119 @@
     // 记录 Undo 快照，支持 Ctrl+Z 撤销
     pushComposerUndo(textarea.value || "");
 
-    let newVal = "";
-    if (!textarea.value || textarea.value.trim().length === 0) {
-      newVal = md;
-    } else {
-      const start = textarea.selectionStart ?? textarea.value.length;
-      const end = textarea.selectionEnd ?? textarea.value.length;
-      const beforeText = textarea.value.slice(0, start);
-      const afterText = textarea.value.slice(end);
+    const isFormattedActive = Boolean(
+      isFormattedViewMode &&
+      activeFormattedComposer &&
+      activeFormattedComposer.style.display !== "none" &&
+      (!activeFormattedComposer.__boundTextarea || activeFormattedComposer.__boundTextarea === textarea)
+    );
 
-      // 智能保护：若前序文字不以换行结尾，且粘贴内容以块级语法 (#, -, 1., >, ```, ~~~) 开头，自动插入换行防止粘连失效
-      let normalizedMd = md;
-      if (beforeText && !beforeText.endsWith("\n") && /^(\s*(?:#{1,6}\s|[-*+•◦▪▫–—]\s|\d+\.\s|>\s*|```|~~~))/.test(normalizedMd)) {
-        normalizedMd = "\n" + normalizedMd;
+    const sel = window.getSelection();
+    let range = null;
+    if (isFormattedActive && sel && sel.rangeCount > 0) {
+      try {
+        const r = sel.getRangeAt(0);
+        const containerEl = r.commonAncestorContainer?.nodeType === Node.ELEMENT_NODE
+          ? r.commonAncestorContainer
+          : r.commonAncestorContainer?.parentElement;
+        if (containerEl && activeFormattedComposer.contains(containerEl)) {
+          range = r;
+        }
+      } catch (_) {
+        range = null;
       }
-      newVal = beforeText + normalizedMd + afterText;
     }
+
+    if (isFormattedActive && range) {
+      // 1. 活动 contenteditable 真实 Range 是粘贴选区唯一来源
+      const renderedHtml = markdownToFormattedHtml(md);
+      const tempDoc = new DOMParser().parseFromString(renderedHtml, "text/html");
+      const childElements = Array.from(tempDoc.body.children);
+      const frag = document.createDocumentFragment();
+
+      // 单一段落保护：拆掉外层 div 避免括号中插入被换行
+      const isSingleParagraph = (
+        childElements.length === 1 &&
+        childElements[0].classList.contains("pi-enh-md-p") &&
+        !/\n/.test(md.trim())
+      );
+
+      if (isSingleParagraph) {
+        frag.appendChild(document.createTextNode(md.match(/^[ \t]+/)?.[0] || ""));
+        while (childElements[0].firstChild) {
+          frag.appendChild(childElements[0].firstChild);
+        }
+        frag.appendChild(document.createTextNode(md.match(/[ \t]+$/)?.[0] || ""));
+      } else {
+        while (tempDoc.body.firstChild) {
+          frag.appendChild(tempDoc.body.firstChild);
+        }
+      }
+
+      // 选区替换：若选区未折叠，先删除选中内容
+      if (!range.collapsed) {
+        range.deleteContents();
+      }
+
+      const lastChild = frag.lastChild;
+      let afterSplitNode = null;
+      if (range.startContainer && range.startContainer.nodeType === Node.TEXT_NODE) {
+        const textNode = range.startContainer;
+        afterSplitNode = textNode.splitText(range.startOffset);
+        textNode.parentNode.insertBefore(frag, afterSplitNode);
+      } else {
+        range.insertNode(frag);
+      }
+
+      if (afterSplitNode) {
+        const nextRange = document.createRange();
+        nextRange.setStart(afterSplitNode, 0);
+        nextRange.collapse(true);
+        sel.removeAllRanges();
+        sel.addRange(nextRange);
+      } else if (lastChild) {
+        const nextRange = document.createRange();
+        if (lastChild.nodeType === Node.TEXT_NODE) {
+          nextRange.setStart(lastChild, lastChild.textContent.length);
+          nextRange.setEnd(lastChild, lastChild.textContent.length);
+        } else {
+          nextRange.setStartAfter(lastChild);
+          nextRange.setEndAfter(lastChild);
+        }
+        nextRange.collapse(true);
+        sel.removeAllRanges();
+        sel.addRange(nextRange);
+      }
+
+      const currentMd = extractMarkdownFromFormattedComposer(activeFormattedComposer);
+      setComposerTextareaValue(textarea, currentMd, { focus: false });
+      pushComposerUndo(currentMd);
+      activeFormattedComposer.__piEnhSyncedValue = currentMd;
+
+      const card = textarea.closest?.('.pi-enh-cursor-composer, fieldset > div[style*="max-width"]');
+      if (card) updateCardContentState(card, textarea);
+      return;
+    }
+
+    // 纯 textarea 路径（源码模式或未激活格式化视图）
+    const start = textarea.selectionStart ?? (textarea.value || "").length;
+    const end = textarea.selectionEnd ?? (textarea.value || "").length;
+    const beforeText = (textarea.value || "").slice(0, start);
+    const afterText = (textarea.value || "").slice(end);
+
+    let normalizedMd = md;
+    if (beforeText && !beforeText.endsWith("\n") && /^(\s*(?:#{1,6}\s|[-*+•◦▪▫–—]\s|\d+\.\s|>\s*|```|~~~))/.test(normalizedMd)) {
+      normalizedMd = "\n" + normalizedMd;
+    }
+    const newVal = beforeText + normalizedMd + afterText;
+    const nextCursor = start + normalizedMd.length;
 
     setComposerTextareaValue(textarea, newVal);
     pushComposerUndo(newVal);
 
     if (activeFormattedComposer) {
       activeFormattedComposer.innerHTML = markdownToFormattedHtml(newVal);
+      activeFormattedComposer.__piEnhSyncedValue = newVal;
       if (isFormattedViewMode) {
         textarea.style.display = "none";
         activeFormattedComposer.style.display = "block";
@@ -9142,11 +10579,18 @@
         selection?.collapseToEnd();
       }
     }
+
+    if (!isFormattedViewMode || !activeFormattedComposer) {
+      try {
+        textarea.setSelectionRange(nextCursor, nextCursor);
+      } catch (_) {}
+      textarea.focus();
+    }
   }
 
   function handleComposerMarkdownPaste(event) {
     if (!isPluginEnabled("composer-markdown-format")) return;
-    const textarea = activeComposerFormatTextarea || findComposerTextarea();
+    const textarea = (event.target instanceof HTMLTextAreaElement ? event.target : (activeComposerFormatTextarea || findComposerTextarea()));
     if (!textarea) return;
 
     const html = event.clipboardData?.getData("text/html") || "";
@@ -9169,10 +10613,9 @@
       return;
     }
 
-    const imageFile = files.find((f) => f.type && f.type.startsWith("image/")) ||
-      items.find((it) => it.type && it.type.startsWith("image/"))?.getAsFile?.();
+    const imageFiles = allClipboardFiles.filter((file) => file.type?.startsWith("image/") && !isVideoFile(file.name, file.type));
 
-    if (imageFile) {
+    if (imageFiles.length > 0) {
       // 阻止图片或 base64 文本进入输入框内部
       event.preventDefault();
       event.stopPropagation();
@@ -9183,7 +10626,7 @@
       if (imageInput) {
         try {
           const dt = new DataTransfer();
-          dt.items.add(imageFile);
+          for (const imageFile of imageFiles) dt.items.add(imageFile);
           const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement?.prototype || {}, "files")?.set;
           if (setter) setter.call(imageInput, dt.files);
           else imageInput.files = dt.files;
@@ -9199,25 +10642,41 @@
       if (convertedMd) {
         event.preventDefault();
         event.stopPropagation();
-        insertMarkdownIntoComposer(convertedMd);
+        insertMarkdownIntoComposer(convertedMd, textarea);
         return;
       }
     }
 
-    // Ordinary text (including dictation via clipboard) must keep the same editor.
-    // Only explicit rich/Markdown pastes opt into a different surface.
+    // Ordinary text (including dictation via clipboard) keeps the browser's native insertion path.
+    // Only explicit Markdown text is parsed; rich HTML is handled above.
     if (plain && plain.trim().length > 0) {
       const hasMarkdown = /(^|\n)\s*(?:#{1,6}\s|[-*+]\s|\d+\.\s|>\s|```)|\*\*[^*]+\*\*|__[^_]+__|`[^`\n]+`|\[[^\]]+\]\([^)]+\)/.test(plain);
       if (!hasMarkdown) {
         if (event.target === textarea) return; // Native paste preserves caret/IME/undo.
         event.preventDefault();
         event.stopPropagation();
-        document.execCommand("insertText", false, plain);
+        if (undoDebounceTimer) {
+          clearTimeout(undoDebounceTimer);
+          undoDebounceTimer = null;
+        }
+        pushComposerUndo(textarea.value || "");
+        const inserted = document.execCommand("insertText", false, plain);
+        if (inserted) {
+          if (undoDebounceTimer) {
+            clearTimeout(undoDebounceTimer);
+            undoDebounceTimer = null;
+          }
+          const currentMd = activeFormattedComposer && activeFormattedComposer.style.display !== "none"
+            ? extractMarkdownFromFormattedComposer(activeFormattedComposer)
+            : textarea.value || "";
+          pushComposerUndo(currentMd);
+          lastUndoCharsCount = currentMd.length;
+        }
         return;
       }
       event.preventDefault();
       event.stopPropagation();
-      insertMarkdownIntoComposer(plain);
+      insertMarkdownIntoComposer(plain, textarea);
     }
   }
 
@@ -9380,6 +10839,10 @@
 
     // DOM 提交也已确认为空；不写受控 textarea.value，不派发空 input 冒充接收。
     textarea.style.height = "auto";
+    if (card && card.classList.contains("pi-enh-composer-custom-height")) {
+      card.classList.remove("pi-enh-composer-custom-height");
+      card.style.removeProperty("--pi-composer-custom-height");
+    }
 
     // 原生已消费输入的轻提示；不代表服务端接收或网络投递成功。
     showSentPulseTransition(textarea);
@@ -9446,9 +10909,25 @@
     afterCapture?.();
     await result;
     // This is native input consumption, NOT confirmation of network delivery.
-    return native.keyRef.current === native.key && native.valueRef.current === ""
-      && native.imagesRef.current.length === 0;
+    return native.valueRef.current === ""
+      && (!Array.isArray(native.imagesRef?.current) || native.imagesRef.current.length === 0);
   }
+
+  // Capture the last real input before React can briefly reconcile a controlled
+  // textarea back to its previous value. A later edit invalidates the intent.
+  const composerRecentInput = new WeakMap();
+  let composerInputRevision = 0;
+  addManagedListener(document, "input", (event) => {
+    const textarea = event.target;
+    if (!textarea?.matches?.("textarea.chat-input-textarea")) return;
+    const native = readNativeComposerDraft();
+    if (native?.textarea === textarea) {
+      composerRecentInput.set(textarea, {
+        text: textarea.value, owner: native.key, at: Date.now(),
+        revision: ++composerInputRevision,
+      });
+    }
+  }, true);
 
   function rollbackAnnotationSubmission(intent) {
     if (!intent.snapshot || intent.accepted) return;
@@ -9480,24 +10959,46 @@
       keyRef: native.keyRef, route: getCurrentSessionId(),
       images: JSON.stringify(native.imagesRef.current),
       snapshot: annotationSnapshot || null, annotationSession,
+      inputRevision: composerRecentInput.get(textarea)?.revision ?? null,
+      sourceMarkdownEnabled: isPluginEnabled("composer-markdown-format"),
+      startedAt: performance.now(),
     };
     composerSubmissionInFlight = intent;
 
     // Keep the user's body untouched while waiting. Stage the outbound quote
     // payload only in the dispatch turn, not in a draft that navigation can save.
-    intent.frame = requestAnimationFrame(async () => {
+    const attemptNativeSubmission = async () => {
+      let deferred = false;
+      const deferUntilNativeCommit = () => {
+        if (performance.now() - intent.startedAt >= 240) {
+          showToast("回车未发送，草稿已保留，请重试");
+          return;
+        }
+        deferred = true;
+        intent.frame = requestAnimationFrame(attemptNativeSubmission);
+      };
       try {
         let current = readNativeComposerDraft();
         const originalText = intent.snapshot ? intent.body : expectedText;
-        const pluginActive = isPluginEnabled(intent.snapshot ? "quick-quote" : "composer-markdown-format");
+        const pluginActive = intent.snapshot ? isPluginEnabled("quick-quote")
+          : (!intent.sourceMarkdownEnabled || isPluginEnabled("composer-markdown-format"));
+        const currentRev = composerRecentInput.get(textarea)?.revision ?? null;
         if (composerSubmissionInFlight !== intent || !pluginActive
           || !current || current.key !== expectedOwner || current.textarea !== textarea
           || current.keyRef !== intent.keyRef || current.keyRef.current !== expectedOwner
           || current.fieldset.disabled || current.pendingRef.current > 0
           || getCurrentSessionId() !== intent.route || isComposingInput
-          || current.valueRef.current !== originalText || textarea.value !== originalText
+          || currentRev !== intent.inputRevision
           || JSON.stringify(current.imagesRef.current) !== intent.images) return;
         if (!expectedText.trim() && !current.imagesRef.current.length) return;
+        // React can render a stale controlled value between a fast input and
+        // Enter. Wait only for the exact, unchanged draft to commit; never send
+        // a newer edit or a different session's draft.
+        if (current.valueRef.current !== originalText || textarea.value !== originalText) {
+          if (intent.snapshot || (textarea.value && textarea.value !== originalText)) return;
+          deferUntilNativeCommit();
+          return;
+        }
         if (intent.snapshot) {
           const items = listAnnotations();
           if (!intent.snapshot.every(saved => items.some(item => item.id === saved.id
@@ -9512,10 +11013,17 @@
             || current.textarea !== textarea || getCurrentSessionId() !== intent.route
             || !isPluginEnabled("quick-quote") || current.fieldset.disabled || current.pendingRef.current > 0
             || current.valueRef.current !== expectedText || textarea.value !== expectedText
-            || JSON.stringify(current.imagesRef.current) !== intent.images) return;
+            || JSON.stringify(current.imagesRef.current) !== intent.images) {
+            deferUntilNativeCommit();
+            return;
+          }
         }
         const button = getAnnotationSendButtons(textarea).find((b) => determineSendKindFromButton(b) === kind);
-        if (!button || button.disabled) return;
+        if (!button) return;
+        if (button.disabled) {
+          deferUntilNativeCommit();
+          return;
+        }
         const preDispatchSnapshot = nativeDraftSnapshot(current);
         if (preDispatchSnapshot) {
           const outboundSnap = intent.snapshot ? { ...preDispatchSnapshot, value: intent.body || "" } : preDispatchSnapshot;
@@ -9526,8 +11034,7 @@
           });
         }
         intent.phase = "dispatched";
-        intent.accepted = await invokeNativeComposerButton(button, current,
-          intent.snapshot ? () => rollbackAnnotationSubmission(intent) : null);
+        intent.accepted = await invokeNativeComposerButton(button, current);
         if (!intent.accepted) return;
         const cardAfterDispatch = (readNativeComposerDraft()?.textarea || textarea)?.closest?.('.pi-enh-cursor-composer, fieldset > div[style*="max-width"]');
         if (cardAfterDispatch) {
@@ -9537,14 +11044,25 @@
           }
         }
         if (intent.snapshot) consumeAnnotationSnapshot(intent.snapshot, intent.annotationSession);
+        submittedDraftKeys.add(intent.owner);
         removePersistedDraft(intent.owner);
+        const sub = pendingDraftSubmissions.get(intent.owner);
+        if (sub) {
+          sub.accepted = true;
+        }
+        const oldCtx = nativeDraftContexts.get(intent.keyRef);
+        if (oldCtx && oldCtx.key === intent.owner) {
+          oldCtx.initialized = true;
+          oldCtx.lastSaved = EMPTY_DRAFT_SIGNATURE;
+        }
         syncNativeComposerDraft(false);
         const committed = readNativeComposerDraft();
         if (committed && committed.key === intent.owner && getCurrentSessionId() === intent.route
           && committed.valueRef.current === "" && committed.imagesRef.current.length === 0) {
           if (!instantlyClearComposerSurface(committed.textarea, intent.owner)) {
             requestAnimationFrame(() => {
-              if (!isPluginEnabled(intent.snapshot ? "quick-quote" : "composer-markdown-format")) return;
+              if (intent.snapshot ? !isPluginEnabled("quick-quote")
+                : (intent.sourceMarkdownEnabled && !isPluginEnabled("composer-markdown-format"))) return;
               const rafNative = readNativeComposerDraft();
               if (rafNative && rafNative.key === intent.owner && getCurrentSessionId() === intent.route
                 && rafNative.valueRef.current === "" && rafNative.imagesRef.current.length === 0) {
@@ -9558,11 +11076,14 @@
         console.warn("[Pi Web] Native composer submission was not completed", error);
         showToast("提交未完成，输入与引用已保留");
       } finally {
-        rollbackAnnotationSubmission(intent);
-        if (composerSubmissionInFlight === intent) composerSubmissionInFlight = null;
-        if (intent.snapshot) syncAnnotationComposer();
+        if (!deferred) {
+          rollbackAnnotationSubmission(intent);
+          if (composerSubmissionInFlight === intent) composerSubmissionInFlight = null;
+          if (intent.snapshot) syncAnnotationComposer();
+        }
       }
-    });
+    };
+    intent.frame = requestAnimationFrame(attemptNativeSubmission);
     return true;
   }
 
@@ -9662,13 +11183,18 @@
       node.getBoundingClientRect().height > 0);
   }
 
+  function isComposerRunningForEnter(textarea) {
+    // The styling marker may remain for a render after a turn finishes. Native
+    // send/followup controls are the authority for this editor's key semantics.
+    const kinds = getAnnotationSendButtons(textarea).map(determineSendKindFromButton);
+    if (kinds.includes("followup") || kinds.includes("steer")) return true;
+    if (kinds.includes("send")) return false;
+    return isChatSessionRunning();
+  }
+
   function handleComposerSmartKeyDown(event, textarea) {
     if (isComposerCompletionKey(event, textarea)) return false;
-    const isRunning = Boolean(
-      document.querySelector('fieldset button[title*="停止"], fieldset button:has(svg rect[x="1.5"])') ||
-      document.querySelector('fieldset div[style*="align-self: flex-end"]:has(button), fieldset .pi-enh-running-group, fieldset .pi-enh-has-running-controls') ||
-      (typeof isChatSessionRunning === "function" && isChatSessionRunning())
-    );
+    const isRunning = isComposerRunningForEnter(textarea);
 
     if (isRunning && event.key === "Enter" && !event.shiftKey) {
       if (event.isComposing || isComposingInput || event.keyCode === 229) return false;
@@ -9702,11 +11228,19 @@
         rawText = textarea.value || "";
       }
 
+      const hasQuotes = isPluginEnabled("quick-quote") && typeof listAnnotations === "function" && listAnnotations().length > 0;
+      const annotationSnapshot = hasQuotes ? listAnnotations() : null;
+      const bodyText = rawText;
+      const finalText = hasQuotes ? serializeAnnotations(bodyText) : rawText;
+
       dispatchComposerNativeSubmission({
         kind,
         textarea,
         expectedOwner: currentOwner,
-        expectedText: rawText
+        expectedText: finalText,
+        annotationSnapshot,
+        annotationBody: bodyText,
+        annotationSession: typeof getAnnotationSessionId === "function" ? getAnnotationSessionId() : (getCurrentSessionId() || "draft"),
       });
 
       return true;
@@ -10200,6 +11734,8 @@
 
         /* 格式化切换小药丸 (✨ 格式化 / 📝 纯文本) - 优雅融入底栏工具条 */
         .pi-enh-format-toggle-btn {
+          width: max-content !important;
+          white-space: nowrap !important;
           height: 28px !important;
           padding: 0 9px !important;
           border-radius: 7px !important;
@@ -10416,10 +11952,27 @@
           updateFormattedViewMode(!isFormattedViewMode);
         }
       };
+      let contentStateRaf = null;
+      let lastHasContent = false;
       const onInput = () => {
         syncComposerTextareaAutoHeight(textarea);
         const card = textarea.closest('fieldset > div[style*="max-width"]');
-        updateCardContentState(card, textarea);
+        if (!card) return;
+        const val = textarea.value || "";
+        const nowHasContent = val.trim().length > 0;
+        if (nowHasContent !== lastHasContent) {
+          lastHasContent = nowHasContent;
+          if (contentStateRaf) {
+            cancelAnimationFrame(contentStateRaf);
+            contentStateRaf = null;
+          }
+          updateCardContentState(card, textarea);
+        } else if (!contentStateRaf) {
+          contentStateRaf = requestAnimationFrame(() => {
+            contentStateRaf = null;
+            updateCardContentState(card, textarea);
+          });
+        }
       };
       textarea.addEventListener("paste", handleComposerMarkdownPaste, true);
       textarea.addEventListener("keydown", onKeyDown);
@@ -10515,7 +12068,11 @@
   }
 
   function removeComposerMarkdownFormat() {
-    if (!composerSubmissionInFlight?.snapshot) cancelComposerNativeSubmission();
+    // Routine cleanup while Markdown is disabled must not cancel an ordinary
+    // textarea Enter submission; only an intent begun in this editor is ours.
+    if (composerSubmissionInFlight?.sourceMarkdownEnabled && !composerSubmissionInFlight.snapshot) {
+      cancelComposerNativeSubmission();
+    }
     composerFormatTextareaCleanup?.();
     composerFormatTextareaCleanup = null;
     isComposingInput = false;
@@ -10727,13 +12284,17 @@
   // 3.55.3 Composer Modes (Codex Style Goal & Plan Modes)
   // ==========================================
   const COMPOSER_MODES_STYLE_ID = "pi-enh-composer-modes-style";
-  composerModesStateMap = new Map(); // sessionId -> { mode: "normal"|"plan"|"goal", goal?: string }
+  composerModesStateMap = new Map(); // sessionId -> { mode: "normal"|"plan"|"goal", goal?: string, pausePending?: boolean, paused?: boolean }
   let composerModeSwitching = false;
+  let composerGoalBarEl = null;
+  let isGoalActionRunning = false;
   pendingNewComposerMode = null; // {mode, project, sessionId?}; never a server success claim
   let composerAddMenuEl = null;
+  let composerAddMenuContext = null;
   let composerModesEventsBound = false;
   let lastObservedModesSessionId = null;
   let composerModeFetchToken = 0;
+  let lastComposerGoalMismatchKey = null;
 
   const SVG_ADD_ICON = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>`;
   // SVG 目标：同心圆右上缺口 + 向右上箭头的截图形态
@@ -10766,7 +12327,120 @@
     }
   }
 
+  let pendingComposerNavOverride = null; // { mode: "new" | "session", sessionId: string | null, fromUrlSessionId: string | null, until: number }
+  let lastTrackedModeUrlSessionId = undefined;
+  let lastTrackedModeNativeDraftKey = undefined;
+  let syntheticUrlSessionForNewDraft = null; // { sessionId: string, whileDraftKey: string | null }
+
+  function readComposerNativeDraftKey() {
+    try {
+      const textarea = findComposerTextarea();
+      const fieldset = textarea?.closest?.("fieldset");
+      if (!fieldset || !fieldset.isConnected) return null;
+      let owner = typeof committedComposerFiber === "function" ? committedComposerFiber(fieldset) : null;
+      for (let depth = 0; owner && depth < 12; depth++, owner = owner.return) {
+        const dk = owner.memoizedProps?.draftKey;
+        if (typeof dk === "string" && dk.length > 0) {
+          return dk;
+        }
+      }
+    } catch (e) {}
+    return null;
+  }
+
+  function isNewSessionWelcomeDomVisible() {
+    try {
+      const brandLogo = document.querySelector?.('img[src*="apple-touch-icon"]');
+      if (!brandLogo) return false;
+      const rect = brandLogo.getBoundingClientRect?.();
+      if (!rect || rect.width <= 0 || rect.height <= 0) return false;
+      const msgs = document.querySelectorAll?.('div[data-message-role], [data-entry-id]');
+      return !msgs || msgs.length === 0;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  function getEffectiveComposerSessionId() {
+    const urlSessionId = typeof getCurrentSessionId === "function" ? getCurrentSessionId() : null;
+    const nativeDraftKey = readComposerNativeDraftKey();
+
+    const urlChanged = lastTrackedModeUrlSessionId !== undefined && urlSessionId !== lastTrackedModeUrlSessionId;
+    const draftKeyChanged = lastTrackedModeNativeDraftKey !== undefined && nativeDraftKey !== lastTrackedModeNativeDraftKey;
+
+    if (draftKeyChanged && nativeDraftKey) {
+      if (syntheticUrlSessionForNewDraft && syntheticUrlSessionForNewDraft.whileDraftKey !== nativeDraftKey) {
+        syntheticUrlSessionForNewDraft = null;
+      }
+    }
+    if (urlChanged) {
+      if (urlSessionId && nativeDraftKey && nativeDraftKey.startsWith("new:") && !draftKeyChanged) {
+        syntheticUrlSessionForNewDraft = { sessionId: urlSessionId, whileDraftKey: nativeDraftKey };
+      } else if (!urlSessionId) {
+        syntheticUrlSessionForNewDraft = null;
+      }
+    }
+
+    lastTrackedModeUrlSessionId = urlSessionId;
+    lastTrackedModeNativeDraftKey = nativeDraftKey;
+
+    // 1. 捕获阶段点击「新建会话」或「侧边栏其他会话」后的瞬时零延迟覆盖（在 Next.js URL 异步更新完成前生效）
+    if (pendingComposerNavOverride) {
+      if (Date.now() < pendingComposerNavOverride.until) {
+        if (pendingComposerNavOverride.mode === "new") {
+          if (!urlSessionId) {
+            pendingComposerNavOverride = null;
+            return null;
+          }
+          if (urlSessionId === pendingComposerNavOverride.fromUrlSessionId) {
+            return null;
+          }
+          pendingComposerNavOverride = null;
+        } else if (pendingComposerNavOverride.mode === "session" && pendingComposerNavOverride.sessionId) {
+          if (urlSessionId === pendingComposerNavOverride.sessionId) {
+            pendingComposerNavOverride = null;
+            return urlSessionId;
+          }
+          if (urlSessionId === pendingComposerNavOverride.fromUrlSessionId) {
+            return pendingComposerNavOverride.sessionId;
+          }
+          pendingComposerNavOverride = null;
+        }
+      } else {
+        pendingComposerNavOverride = null;
+      }
+    }
+
+    // 2. 在同一个欢迎页草稿下主动通过 replaceState / __PI_ENH_SET_COMPOSER_MODE_STATE__ 绑定的会话 ID
+    if (
+      syntheticUrlSessionForNewDraft &&
+      syntheticUrlSessionForNewDraft.sessionId &&
+      urlSessionId === syntheticUrlSessionForNewDraft.sessionId &&
+      (!nativeDraftKey || nativeDraftKey === syntheticUrlSessionForNewDraft.whileDraftKey)
+    ) {
+      return syntheticUrlSessionForNewDraft.sessionId;
+    }
+
+    // 3. 原生 ChatInput React Fiber 的实时 draftKey（第 0ms 同步反映新建会话 "new:..." 或目标会话 ID，杜绝 URL 滞后串台）
+    if (typeof nativeDraftKey === "string" && nativeDraftKey) {
+      if (nativeDraftKey.startsWith("new:")) {
+        return null;
+      }
+      return nativeDraftKey;
+    }
+
+    // 4. 若无 Fiber draftKey 但页面明确处于新建会话欢迎页，且无合成绑定，则绝不继承滞后的旧 URL sessionId
+    if (isNewSessionWelcomeDomVisible() && !syntheticUrlSessionForNewDraft) {
+      return null;
+    }
+
+    return urlSessionId;
+  }
+
   function ensureComposerModesStyle() {
+    if (typeof document !== "undefined" && document.documentElement) {
+      document.documentElement.setAttribute("data-pi-composer-modes-active", "true");
+    }
     let style = document.getElementById(COMPOSER_MODES_STYLE_ID);
     if (!style) {
       style = document.createElement("style");
@@ -11045,6 +12719,361 @@
         .pi-enh-composer-modes-disabled-notice button:hover {
           background: color-mix(in srgb, var(--warning, #f59e0b) 50%, transparent) !important;
         }
+
+        /* 阻断原生底栏 raw composer-modes JSON 首次闪现：仅在插件激活时隐藏未清洗 raw，清洗后或插件停用时立即还原可见 */
+        html[data-pi-composer-modes-active="true"] .extension-status-line[aria-label*='"version":1'] .extension-status-text,
+        html[data-pi-composer-modes-active="true"] .extension-status-line[title*='"version":1'] .extension-status-text {
+          visibility: hidden !important;
+        }
+
+        /* 底栏 Flex 左右分流与紧凑高度保护（方案 A：左侧紧凑胶囊，右侧系统状态常驻） */
+        html[data-pi-composer-modes-active="true"] .extension-status-line {
+          display: flex !important;
+          align-items: center !important;
+          justify-content: space-between !important;
+          gap: 12px !important;
+          min-height: 28px !important;
+          max-height: 36px !important;
+          padding: 4px 12px !important;
+          box-sizing: border-box !important;
+          overflow: visible !important;
+        }
+        html[data-pi-composer-modes-active="true"] .extension-status-text {
+          margin-left: auto !important;
+          white-space: nowrap !important;
+          overflow: hidden !important;
+          text-overflow: ellipsis !important;
+          flex-shrink: 1 !important;
+          text-align: right !important;
+          line-height: 1.4 !important;
+          font-size: 11px !important;
+        }
+
+        /* fieldset 的浏览器默认 min-inline-size:min-content 不得被长目标文本撑宽 */
+        fieldset:has(> .pi-enh-composer-goal-bar) {
+          min-width: 0 !important;
+          width: 100% !important;
+          max-width: 100% !important;
+          box-sizing: border-box !important;
+        }
+        /* 输入框正上方独立目标管理横条（与下方居中输入卡片严格同宽同左对齐） */
+        .pi-enh-composer-goal-bar {
+          display: flex !important;
+          align-items: center !important;
+          justify-content: flex-start !important;
+          gap: 8px !important;
+          width: 100% !important;
+          max-width: var(--chat-content-max-width, 820px) !important;
+          box-sizing: border-box !important;
+          margin: 0 auto 6px auto !important;
+          padding: 0 2px !important;
+          min-height: 28px !important;
+          user-select: none !important;
+          transition: opacity 0.15s ease !important;
+        }
+
+        /* 目标紧凑胶囊（位于输入卡片正上方同列，嵌入播放/暂停图标按钮） */
+        .pi-enh-composer-goal-pill {
+          display: inline-flex !important;
+          align-items: center !important;
+          gap: 6px !important;
+          flex: 0 1 auto !important;
+          min-width: 0 !important;
+          max-width: 100% !important;
+          height: 24px !important;
+          padding: 0 4px 0 10px !important;
+          border-radius: 12px !important;
+          background: color-mix(in srgb, var(--accent, #a4c2f4) 14%, transparent) !important;
+          border: 1px solid color-mix(in srgb, var(--accent, #a4c2f4) 30%, transparent) !important;
+          color: var(--text, #e8e8e8) !important;
+          font-size: 11.5px !important;
+          font-family: var(--font-mono, monospace) !important;
+          line-height: 1 !important;
+          cursor: pointer !important;
+          box-sizing: border-box !important;
+          transition: background 0.15s ease, border-color 0.15s ease !important;
+        }
+        .pi-enh-composer-goal-pill:hover {
+          background: color-mix(in srgb, var(--accent, #a4c2f4) 22%, transparent) !important;
+          border-color: color-mix(in srgb, var(--accent, #a4c2f4) 50%, transparent) !important;
+        }
+        .pi-enh-composer-goal-pill[data-status="paused"] {
+          background: color-mix(in srgb, var(--border, #666666) 20%, transparent) !important;
+          border-color: color-mix(in srgb, var(--border, #666666) 45%, transparent) !important;
+          opacity: 0.88 !important;
+        }
+        .pi-enh-composer-goal-pill[data-status="pending"] {
+          background: color-mix(in srgb, #f59e0b 16%, transparent) !important;
+          border-color: color-mix(in srgb, #f59e0b 42%, transparent) !important;
+        }
+
+        .pi-enh-goal-pill-icon {
+          flex-shrink: 0 !important;
+          display: inline-flex !important;
+          align-items: center !important;
+        }
+        .pi-enh-goal-pill-status {
+          flex-shrink: 0 !important;
+          font-weight: 600 !important;
+          color: var(--accent, #a4c2f4) !important;
+        }
+        .pi-enh-composer-goal-pill[data-status="paused"] .pi-enh-goal-pill-status {
+          color: var(--text-dim, #999999) !important;
+        }
+        .pi-enh-composer-goal-pill[data-status="pending"] .pi-enh-goal-pill-status {
+          color: #f59e0b !important;
+        }
+
+        .pi-enh-goal-pill-text {
+          white-space: nowrap !important;
+          overflow: hidden !important;
+          text-overflow: ellipsis !important;
+          min-width: 0 !important;
+          flex: 0 1 auto !important;
+          color: var(--text, #e8e8e8) !important;
+          opacity: 0.95 !important;
+        }
+
+        /* 目标累计运行计时器（显示在播放/暂停按钮左侧） */
+        .pi-enh-goal-pill-timer {
+          display: inline-flex !important;
+          align-items: center !important;
+          flex-shrink: 0 !important;
+          white-space: nowrap !important;
+          font-size: 10.5px !important;
+          line-height: 1 !important;
+          font-variant-numeric: tabular-nums !important;
+          font-family: var(--font-mono, monospace) !important;
+          opacity: 0.82 !important;
+          color: var(--text-muted, #a0a0a0) !important;
+          margin: 0 1px 0 2px !important;
+          letter-spacing: -0.2px !important;
+        }
+        .pi-enh-composer-goal-pill[data-status="paused"] .pi-enh-goal-pill-timer {
+          opacity: 0.65 !important;
+          color: var(--text-dim, #888888) !important;
+        }
+        .pi-enh-composer-goal-pill[data-status="pending"] .pi-enh-goal-pill-timer {
+          color: #f59e0b !important;
+          opacity: 0.9 !important;
+        }
+
+        /* 胶囊内物理嵌入的类似音乐播放器暂停/播放图标按钮 */
+        .pi-enh-composer-goal-btn {
+          display: inline-flex !important;
+          align-items: center !important;
+          justify-content: center !important;
+          width: 18px !important;
+          height: 18px !important;
+          min-width: 18px !important;
+          padding: 0 !important;
+          margin: 0 0 0 2px !important;
+          border-radius: 9px !important;
+          border: 1px solid transparent !important;
+          background: color-mix(in srgb, var(--accent, #a4c2f4) 18%, transparent) !important;
+          color: var(--accent, #a4c2f4) !important;
+          cursor: pointer !important;
+          box-sizing: border-box !important;
+          flex-shrink: 0 !important;
+          line-height: 1 !important;
+          transition: all 0.15s ease !important;
+        }
+        .pi-enh-composer-goal-btn:hover {
+          background: color-mix(in srgb, var(--accent, #a4c2f4) 36%, transparent) !important;
+          border-color: color-mix(in srgb, var(--accent, #a4c2f4) 55%, transparent) !important;
+          color: var(--text, #ffffff) !important;
+        }
+        .pi-enh-composer-goal-btn:focus-visible {
+          outline: 2px solid var(--accent, #a4c2f4) !important;
+          outline-offset: 1px !important;
+        }
+        .pi-enh-composer-goal-btn:disabled {
+          opacity: 0.45 !important;
+          cursor: not-allowed !important;
+        }
+        .pi-enh-composer-goal-btn[aria-busy="true"] {
+          opacity: 0.65 !important;
+          cursor: wait !important;
+        }
+        .pi-enh-composer-goal-btn.pi-enh-goal-btn-resume {
+          background: color-mix(in srgb, var(--accent, #a4c2f4) 22%, transparent) !important;
+          border-color: color-mix(in srgb, var(--accent, #a4c2f4) 50%, transparent) !important;
+          color: var(--accent, #a4c2f4) !important;
+        }
+        .pi-enh-composer-goal-btn.pi-enh-goal-btn-resume:hover {
+          background: color-mix(in srgb, var(--accent, #a4c2f4) 38%, transparent) !important;
+        }
+        .pi-enh-composer-goal-btn.pi-enh-goal-btn-cancel {
+          background: color-mix(in srgb, #f59e0b 22%, transparent) !important;
+          border-color: color-mix(in srgb, #f59e0b 50%, transparent) !important;
+          color: #f59e0b !important;
+        }
+        .pi-enh-composer-goal-btn.pi-enh-goal-btn-cancel:hover {
+          background: color-mix(in srgb, #f59e0b 38%, transparent) !important;
+          border-color: color-mix(in srgb, #f59e0b 70%, transparent) !important;
+        }
+
+        /* 浅色主题自适应 */
+        html[data-theme="light"] .pi-enh-composer-goal-pill {
+          background: color-mix(in srgb, var(--accent, #1d4ed8) 10%, transparent) !important;
+          border-color: color-mix(in srgb, var(--accent, #1d4ed8) 25%, transparent) !important;
+          color: var(--text, #1e293b) !important;
+        }
+        html[data-theme="light"] .pi-enh-composer-goal-pill:hover {
+          background: color-mix(in srgb, var(--accent, #1d4ed8) 18%, transparent) !important;
+        }
+        html[data-theme="light"] .pi-enh-composer-goal-pill[data-status="paused"] {
+          background: color-mix(in srgb, #64748b 12%, transparent) !important;
+          border-color: color-mix(in srgb, #64748b 30%, transparent) !important;
+        }
+        html[data-theme="light"] .pi-enh-composer-goal-pill[data-status="pending"] {
+          background: color-mix(in srgb, #d97706 12%, transparent) !important;
+          border-color: color-mix(in srgb, #d97706 35%, transparent) !important;
+        }
+        html[data-theme="light"] .pi-enh-goal-pill-timer {
+          color: var(--text-muted, #64748b) !important;
+        }
+        html[data-theme="light"] .pi-enh-composer-goal-pill[data-status="paused"] .pi-enh-goal-pill-timer {
+          color: var(--text-dim, #94a3b8) !important;
+        }
+        html[data-theme="light"] .pi-enh-composer-goal-pill[data-status="pending"] .pi-enh-goal-pill-timer {
+          color: #d97706 !important;
+        }
+        html[data-theme="light"] .pi-enh-composer-goal-btn {
+          background: color-mix(in srgb, var(--accent, #1d4ed8) 14%, transparent) !important;
+          color: var(--accent, #1d4ed8) !important;
+        }
+        html[data-theme="light"] .pi-enh-composer-goal-btn:hover {
+          background: color-mix(in srgb, var(--accent, #1d4ed8) 26%, transparent) !important;
+          border-color: color-mix(in srgb, var(--accent, #1d4ed8) 50%, transparent) !important;
+        }
+        html[data-theme="light"] .pi-enh-composer-goal-btn.pi-enh-goal-btn-cancel {
+          background: color-mix(in srgb, #d97706 16%, transparent) !important;
+          border-color: color-mix(in srgb, #d97706 45%, transparent) !important;
+          color: #d97706 !important;
+        }
+
+        /* 左侧目标/计划胶囊徽章（Badge） */
+        .pi-enh-status-goal-badge {
+          display: inline-flex !important;
+          align-items: center !important;
+          gap: 5px !important;
+          max-width: min(65%, 520px) !important;
+          height: 22px !important;
+          padding: 0 8px !important;
+          border-radius: 11px !important;
+          background: color-mix(in srgb, var(--accent, #a4c2f4) 14%, transparent) !important;
+          border: 1px solid color-mix(in srgb, var(--accent, #a4c2f4) 32%, transparent) !important;
+          color: var(--text, #e8e8e8) !important;
+          font-size: 11px !important;
+          font-family: var(--font-mono, monospace) !important;
+          line-height: 1 !important;
+          cursor: pointer !important;
+          user-select: none !important;
+          flex-shrink: 0 !important;
+          box-sizing: border-box !important;
+          transition: background 0.15s ease, border-color 0.15s ease, transform 0.12s ease !important;
+        }
+        .pi-enh-status-goal-badge:hover {
+          background: color-mix(in srgb, var(--accent, #a4c2f4) 22%, transparent) !important;
+          border-color: color-mix(in srgb, var(--accent, #a4c2f4) 52%, transparent) !important;
+          transform: translateY(-1px) !important;
+        }
+        .pi-enh-goal-badge-icon {
+          flex-shrink: 0 !important;
+          font-size: 11px !important;
+          line-height: 1 !important;
+        }
+        .pi-enh-goal-badge-label {
+          flex-shrink: 0 !important;
+          font-weight: 600 !important;
+          color: var(--accent, #a4c2f4) !important;
+        }
+        .pi-enh-goal-badge-text {
+          white-space: nowrap !important;
+          overflow: hidden !important;
+          text-overflow: ellipsis !important;
+          min-width: 0 !important;
+          color: var(--text, #e8e8e8) !important;
+          opacity: 0.92 !important;
+        }
+
+        /* 悬停富文本 Tooltip 卡片（方案 A 浮层） */
+        .pi-enh-goal-tooltip-card {
+          position: fixed !important;
+          z-index: 10000 !important;
+          max-width: min(520px, 86vw) !important;
+          max-height: min(340px, 45dvh) !important;
+          background: color-mix(in srgb, var(--bg-panel, #242424) 94%, var(--bg, #1a1a1a)) !important;
+          backdrop-filter: blur(16px) !important;
+          -webkit-backdrop-filter: blur(16px) !important;
+          border: 1px solid color-mix(in srgb, var(--border, #454545) 80%, var(--accent, #a4c2f4)) !important;
+          border-radius: 8px !important;
+          box-shadow: 0 16px 36px rgba(0, 0, 0, 0.4), 0 2px 8px rgba(0, 0, 0, 0.2) !important;
+          color: var(--text, #e8e8e8) !important;
+          font-size: 12px !important;
+          line-height: 1.55 !important;
+          padding: 10px 14px !important;
+          box-sizing: border-box !important;
+          overflow-y: auto !important;
+          pointer-events: auto !important;
+          opacity: 0;
+          transform: translateY(4px);
+          transition: opacity 0.15s ease-out, transform 0.15s ease-out !important;
+        }
+        .pi-enh-goal-tooltip-card.is-visible {
+          opacity: 1 !important;
+          transform: translateY(0) !important;
+        }
+        .pi-enh-goal-tooltip-header {
+          display: flex !important;
+          align-items: center !important;
+          justify-content: space-between !important;
+          gap: 8px !important;
+          padding-bottom: 6px !important;
+          margin-bottom: 8px !important;
+          border-bottom: 1px solid color-mix(in srgb, var(--border, #454545) 60%, transparent) !important;
+        }
+        .pi-enh-goal-tooltip-title {
+          font-weight: 600 !important;
+          color: var(--accent, #a4c2f4) !important;
+          font-size: 12px !important;
+          display: flex !important;
+          align-items: center !important;
+          gap: 6px !important;
+        }
+        .pi-enh-goal-tooltip-hint {
+          font-size: 10px !important;
+          color: var(--text-dim, #a4a4a4) !important;
+        }
+        .pi-enh-goal-tooltip-body {
+          color: var(--text, #e8e8e8) !important;
+          font-size: 12px !important;
+          line-height: 1.6 !important;
+        }
+        .pi-enh-goal-tooltip-body blockquote {
+          margin: 6px 0 !important;
+          padding: 4px 10px !important;
+          border-left: 3px solid var(--accent, #a4c2f4) !important;
+          background: color-mix(in srgb, var(--accent, #a4c2f4) 8%, transparent) !important;
+          border-radius: 0 4px 4px 0 !important;
+          color: var(--text, #e8e8e8) !important;
+          font-size: 11.5px !important;
+        }
+        .pi-enh-goal-tooltip-body strong {
+          font-weight: 700 !important;
+          color: var(--text, #ffffff) !important;
+        }
+        .pi-enh-goal-tooltip-body code {
+          font-family: var(--font-mono, monospace) !important;
+          font-size: 11px !important;
+          padding: 1px 4px !important;
+          border-radius: 3px !important;
+          background: color-mix(in srgb, var(--text, #fff) 10%, transparent) !important;
+        }
+        .pi-enh-goal-tooltip-body p {
+          margin: 4px 0 !important;
+        }
       `;
       document.head.appendChild(style);
     }
@@ -11060,31 +13089,44 @@
       try { composerAddMenuEl.remove(); } catch (e) {}
       composerAddMenuEl = null;
     }
-    const addBtn = document.querySelector(".pi-enh-composer-add-btn");
-    if (addBtn) { addBtn.classList.remove("active"); addBtn.setAttribute("aria-expanded", "false"); }
+    if (composerAddMenuContext?.addBtn) {
+      try {
+        composerAddMenuContext.addBtn.classList.remove("active");
+        composerAddMenuContext.addBtn.setAttribute("aria-expanded", "false");
+      } catch (e) {}
+    }
+    composerAddMenuContext = null;
+    const addBtns = document.querySelectorAll(".pi-enh-composer-add-btn");
+    addBtns.forEach((btn) => {
+      btn.classList.remove("active");
+      btn.setAttribute("aria-expanded", "false");
+    });
+  }
+
+  function positionComposerAddMenu() {
+    if (!composerAddMenuEl || !composerAddMenuContext) return;
+    const { card, addBtn } = composerAddMenuContext;
+    if (!card || !card.isConnected || (addBtn && !addBtn.isConnected)) {
+      closeComposerAddMenu();
+      return;
+    }
+    const cardRect = card.getBoundingClientRect();
+    const menuRect = composerAddMenuEl.getBoundingClientRect();
+    composerAddMenuEl.style.left = Math.max(8, Math.min(cardRect.left, window.innerWidth - menuRect.width - 8)) + "px";
+    composerAddMenuEl.style.top = Math.max(8, cardRect.top >= menuRect.height + 16 ? cardRect.top - menuRect.height - 8 : Math.min(cardRect.bottom + 8, window.innerHeight - menuRect.height - 8)) + "px";
   }
 
   function openComposerAddMenu(card, addBtn) {
     closeComposerAddMenu();
     if (!card || !addBtn) return;
 
-    const sessionId = getCurrentSessionId();
+    const sessionId = getEffectiveComposerSessionId();
     const currentMode = getSessionComposerMode(sessionId);
 
     const menu = document.createElement("div");
     menu.className = "pi-enh-composer-add-menu";
     menu.setAttribute("role", "menu");
     menu.setAttribute("aria-label", "输入框模式与附件菜单");
-
-    // 视口边界自适应：若上方空间不足 160px 且下方空间充足，向下展开；否则向上展开
-    const cardRect = card.getBoundingClientRect();
-    if (cardRect.top < 160 && (window.innerHeight - cardRect.bottom) >= 160) {
-      menu.style.bottom = "auto";
-      menu.style.top = "calc(100% + 8px)";
-    } else {
-      menu.style.bottom = "calc(100% + 8px)";
-      menu.style.top = "auto";
-    }
 
     // 1. 添加附件入口
     const attachItem = document.createElement("button");
@@ -11155,10 +13197,9 @@
     // Portal outside the composer stacking context: native new-chat logo must never overlap the menu.
     document.body.appendChild(menu);
     menu.style.bottom = "auto";
-    const menuRect = menu.getBoundingClientRect();
-    menu.style.left = Math.max(8, Math.min(cardRect.left, window.innerWidth - menuRect.width - 8)) + "px";
-    menu.style.top = Math.max(8, cardRect.top >= menuRect.height + 16 ? cardRect.top - menuRect.height - 8 : Math.min(cardRect.bottom + 8, window.innerHeight - menuRect.height - 8)) + "px";
     composerAddMenuEl = menu;
+    composerAddMenuContext = { card, addBtn, openWidth: window.innerWidth };
+    positionComposerAddMenu();
     addBtn.classList.add("active");
     addBtn.setAttribute("aria-expanded", "true");
   }
@@ -11199,7 +13240,7 @@
 
   async function requestSwitchComposerMode(targetMode, targetSessionId) {
     if (!["normal", "plan", "goal"].includes(targetMode)) return false;
-    const sessionId = targetSessionId || getCurrentSessionId();
+    const sessionId = targetSessionId || getEffectiveComposerSessionId();
     if (!sessionId) {
       pendingNewComposerMode = targetMode === "normal" ? null : {mode: targetMode, project: getCurrentProjectStatusKey()};
       syncComposerModes();
@@ -11298,8 +13339,21 @@
 
       // 真实生效后，才更新本地会话模式状态
       composerModeFetchToken++;
-      composerModesStateMap.set(sessionId, { mode: realMode, goal: parsed?.goal });
+      const updatedSwitchState = {
+        mode: realMode,
+        goal: parsed?.goal,
+        pausePending: Boolean(parsed?.pausePending),
+        paused: Boolean(parsed?.paused),
+      };
+      if (typeof parsed?.goalElapsedMs === "number") {
+        updatedSwitchState.goalElapsedMs = parsed.goalElapsedMs;
+      }
+      if (typeof parsed?.goalActiveSinceMs === "number") {
+        updatedSwitchState.goalActiveSinceMs = parsed.goalActiveSinceMs;
+      }
+      composerModesStateMap.set(sessionId, updatedSwitchState);
       syncComposerModes();
+      syncComposerGoalBar();
       return true;
     } catch (err) {
       showToast("切换模式发生异常，请检查网络", null, 3000);
@@ -11348,7 +13402,7 @@
           return;
         }
 
-        const sid = getCurrentSessionId();
+        const sid = getEffectiveComposerSessionId();
         const currentMode = getSessionComposerMode(sid);
         const target = currentMode === "plan" ? "normal" : "plan";
         void requestSwitchComposerMode(target);
@@ -11365,14 +13419,32 @@
         method: "GET",
         cache: "no-store",
       });
-      if (token !== composerModeFetchToken || getCurrentSessionId() !== sessionId) return;
+      if (token !== composerModeFetchToken || getEffectiveComposerSessionId() !== sessionId) return;
       if (!res.ok) return;
       const data = await res.json().catch(() => null);
       if (data && data.running === false && !data.state) return;
-      const parsed = parseExtensionStatus(data?.state || data, "composer-modes");
+      const stateObj = data?.state || (data && typeof data === "object" && "extensionStatuses" in data ? data : null);
+      const parsed = parseExtensionStatus(stateObj || data, "composer-modes");
       if (parsed?.mode) {
-        composerModesStateMap.set(sessionId, { mode: parsed.mode, goal: parsed.goal });
+        const updatedQueryState = {
+          mode: parsed.mode,
+          goal: parsed.goal,
+          pausePending: Boolean(parsed.pausePending),
+          paused: Boolean(parsed.paused),
+        };
+        if (typeof parsed.goalElapsedMs === "number") {
+          updatedQueryState.goalElapsedMs = parsed.goalElapsedMs;
+        }
+        if (typeof parsed.goalActiveSinceMs === "number") {
+          updatedQueryState.goalActiveSinceMs = parsed.goalActiveSinceMs;
+        }
+        composerModesStateMap.set(sessionId, updatedQueryState);
         syncComposerModes();
+        syncComposerGoalBar();
+      } else if (stateObj && Array.isArray(stateObj.extensionStatuses)) {
+        composerModesStateMap.set(sessionId, { mode: "normal" });
+        syncComposerModes();
+        syncComposerGoalBar();
       }
     } catch (e) {}
   }
@@ -11385,6 +13457,10 @@
     "mode",
     "goal",
     "toolsBeforePlan",
+    "pausePending",
+    "paused",
+    "goalElapsedMs",
+    "goalActiveSinceMs",
   ]);
   const composerModesTextNodeMap = new Map(); // TextNode -> { raw: string, formatted: string }
   const composerModesAttrMap = new Map(); // Element -> Map<attrName, { raw: string, formatted: string }>
@@ -11438,6 +13514,161 @@
     return blocks;
   }
 
+  const SVG_STATUS_GOAL_ICON = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;"><circle cx="12" cy="12" r="10"></circle><circle cx="12" cy="12" r="6"></circle><circle cx="12" cy="12" r="2"></circle></svg>`;
+  const SVG_STATUS_PLAN_ICON = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;"><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"></path><rect x="8" y="2" width="8" height="4" rx="1" ry="1"></rect></svg>`;
+  const SVG_GOAL_PAUSE_ICON = `<svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor" class="pi-enh-goal-icon-pause" aria-hidden="true"><rect x="3" y="2.5" width="3.5" height="11" rx="1.2"></rect><rect x="9.5" y="2.5" width="3.5" height="11" rx="1.2"></rect></svg>`;
+  const SVG_GOAL_PLAY_ICON = `<svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor" class="pi-enh-goal-icon-play" aria-hidden="true"><path d="M4.5 2.8c0-.6.7-1 1.2-.7l8 4.7c.5.3.5 1.1 0 1.4l-8 4.7c-.5.3-1.2-.1-1.2-.7V2.8z"></path></svg>`;
+
+  function sanitizeGoalInlineText(text) {
+    if (!text || typeof text !== "string") return "";
+    let s = text.trim();
+    // 0. 处理可能的字面转义 \n
+    s = s.replace(/\\n/g, "\n");
+    // 1. 去除引用符号 > 与 HTML 转义的 &gt;
+    s = s.replace(/^[ \t]*>[ \t]*/gm, "");
+    s = s.replace(/^[ \t]*&gt;[ \t]*/gm, "");
+    // 2. 去除粗体、斜体、删除线
+    s = s.replace(/\*\*([^*]+)\*\*/g, "$1");
+    s = s.replace(/\*([^*]+)\*/g, "$1");
+    s = s.replace(/__([^_]+)__/g, "$1");
+    s = s.replace(/_([^_]+)_/g, "$1");
+    s = s.replace(/~~([^~]+)~~/g, "$1");
+    // 3. 去除行内代码反引号
+    s = s.replace(/`([^`]+)`/g, "$1");
+    // 4. 去除标题前缀 #
+    s = s.replace(/^[ \t]*#{1,6}[ \t]+/gm, "");
+    // 5. 将换行符转为空格
+    s = s.replace(/\r?\n+/g, " ");
+    // 6. 再次清理换行后连接处可能残留的 > 与 &gt;
+    s = s.replace(/[ \t]+(?:>|&gt;)[ \t]*/g, " ");
+    // 7. 合并多余空白
+    s = s.replace(/\s{2,}/g, " ");
+    return s.trim();
+  }
+
+  function escapeGoalHtml(str) {
+    if (!str || typeof str !== "string") return "";
+    return str
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;")
+      .replace(/'/g, "&#39;");
+  }
+
+  function renderGoalMarkdownHtml(rawText) {
+    if (!rawText || typeof rawText !== "string") return "";
+    const normalized = rawText.replace(/\\n/g, "\n");
+    const lines = normalized.split(/\r?\n/);
+    const htmlBlocks = [];
+    let currentQuoteLines = [];
+
+    function flushQuote() {
+      if (!currentQuoteLines.length) return;
+      const quoteContent = currentQuoteLines.map(line => formatInlineMd(line)).join("<br>");
+      htmlBlocks.push(`<blockquote>${quoteContent}</blockquote>`);
+      currentQuoteLines = [];
+    }
+
+    function formatInlineMd(line) {
+      let escaped = escapeGoalHtml(line);
+      escaped = escaped.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+      escaped = escaped.replace(/`([^`]+)`/g, "<code>$1</code>");
+      return escaped;
+    }
+
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+      const trimmed = line.trim();
+      if (!trimmed) {
+        flushQuote();
+        continue;
+      }
+      if (/^[ \t]*&gt;|^[ \t]*>/.test(line)) {
+        const quoteText = line.replace(/^[ \t]*&gt;[ \t]?|^[ \t]*>[ \t]?/, "");
+        currentQuoteLines.push(quoteText);
+      } else {
+        flushQuote();
+        htmlBlocks.push(`<p>${formatInlineMd(line)}</p>`);
+      }
+    }
+    flushQuote();
+    return htmlBlocks.join("");
+  }
+
+  let activeGoalTooltipEl = null;
+  let goalTooltipHideTimer = null;
+
+  function showGoalTooltip(anchorEl, goalRawText, title = "当前目标 (Goal)") {
+    if (goalTooltipHideTimer) {
+      clearTimeout(goalTooltipHideTimer);
+      goalTooltipHideTimer = null;
+    }
+    if (!anchorEl || !anchorEl.isConnected || !goalRawText) return;
+
+    if (!activeGoalTooltipEl) {
+      activeGoalTooltipEl = document.createElement("div");
+      activeGoalTooltipEl.className = "pi-enh-goal-tooltip-card";
+      activeGoalTooltipEl.addEventListener("mouseenter", () => {
+        if (goalTooltipHideTimer) {
+          clearTimeout(goalTooltipHideTimer);
+          goalTooltipHideTimer = null;
+        }
+      });
+      activeGoalTooltipEl.addEventListener("mouseleave", () => {
+        scheduleHideGoalTooltip();
+      });
+      document.body.appendChild(activeGoalTooltipEl);
+    }
+
+    const renderedHtml = renderGoalMarkdownHtml(goalRawText);
+    activeGoalTooltipEl.innerHTML = `
+      <div class="pi-enh-goal-tooltip-header">
+        <span class="pi-enh-goal-tooltip-title">${SVG_STATUS_GOAL_ICON} ${escapeGoalHtml(title)}</span>
+        <span class="pi-enh-goal-tooltip-hint">悬停查看详情</span>
+      </div>
+      <div class="pi-enh-goal-tooltip-body">
+        ${renderedHtml}
+      </div>
+    `;
+
+    const rect = anchorEl.getBoundingClientRect();
+    const tooltipWidth = Math.min(520, window.innerWidth - 24);
+    let left = rect.left;
+    if (left + tooltipWidth > window.innerWidth - 12) {
+      left = Math.max(12, window.innerWidth - 12 - tooltipWidth);
+    }
+    left = Math.max(12, left);
+
+    activeGoalTooltipEl.style.width = `${tooltipWidth}px`;
+    activeGoalTooltipEl.style.left = `${left}px`;
+    const tooltipHeight = activeGoalTooltipEl.offsetHeight || 160;
+    let top = rect.top - tooltipHeight - 6;
+    if (top < 10) {
+      top = rect.bottom + 6;
+    }
+    activeGoalTooltipEl.style.top = `${top}px`;
+    activeGoalTooltipEl.classList.add("is-visible");
+  }
+
+  function scheduleHideGoalTooltip(delayMs = 180) {
+    if (goalTooltipHideTimer) clearTimeout(goalTooltipHideTimer);
+    goalTooltipHideTimer = setTimeout(() => {
+      hideGoalTooltip();
+    }, delayMs);
+  }
+
+  function hideGoalTooltip() {
+    if (goalTooltipHideTimer) {
+      clearTimeout(goalTooltipHideTimer);
+      goalTooltipHideTimer = null;
+    }
+    if (activeGoalTooltipEl) {
+      try { activeGoalTooltipEl.remove(); } catch (e) {}
+      activeGoalTooltipEl = null;
+    }
+  }
+
   function cleanupStatusText(text) {
     if (!text || typeof text !== "string") return "";
     let s = text.trim();
@@ -11485,7 +13716,7 @@
 
       hasMatchedMode = true;
       let replacement = "";
-      if (options.hideAll) {
+      if (options.hideAll || options.stripForBadge) {
         replacement = "";
       } else if (parsed.mode === "normal") {
         replacement = options.normalLabel ?? "";
@@ -11493,7 +13724,8 @@
         replacement = options.planLabel ?? "计划模式";
       } else if (parsed.mode === "goal") {
         if (parsed.goal && typeof parsed.goal === "string" && parsed.goal.trim()) {
-          replacement = options.goalPrefix ? `${options.goalPrefix}${parsed.goal.trim()}` : `目标: ${parsed.goal.trim()}`;
+          const cleanGoal = sanitizeGoalInlineText(parsed.goal);
+          replacement = options.goalPrefix ? `${options.goalPrefix}${cleanGoal}` : `目标: ${cleanGoal}`;
         } else {
           replacement = options.goalLabel ?? "目标模式";
         }
@@ -11509,111 +13741,575 @@
     return cleanupStatusText(result);
   }
 
-  function syncComposerModesBottomStatus() {
+  // ==========================================
+  // 3.55.3.1.5 输入框正上方独立目标管理横条与暂停/继续控制
+  // ==========================================
+  let goalTimerInterval = null;
+  let goalTimerAnchor = null; // { baseMs: number, startPerf: number, sessionId: string }
+
+  function formatGoalDuration(totalMs) {
+    const totalSeconds = Math.max(0, Math.floor(totalMs / 1000));
+    const hours = Math.floor(totalSeconds / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    const seconds = totalSeconds % 60;
+    const pad = (n) => (n < 10 ? "0" + n : String(n));
+    if (hours > 0) {
+      return `${hours}:${pad(minutes)}:${pad(seconds)}`;
+    }
+    return `${pad(minutes)}:${pad(seconds)}`;
+  }
+
+  function clearGoalTimer() {
+    if (goalTimerInterval) {
+      clearInterval(goalTimerInterval);
+      goalTimerInterval = null;
+    }
+    goalTimerAnchor = null;
+  }
+
+  function removeComposerGoalBar() {
+    clearGoalTimer();
+    hideGoalTooltip();
+    if (composerGoalBarEl) {
+      try { composerGoalBarEl.remove(); } catch (e) {}
+      composerGoalBarEl = null;
+    }
+    if (typeof document !== "undefined" && typeof document.querySelectorAll === "function") {
+      document.querySelectorAll(".pi-enh-composer-goal-bar").forEach((el) => {
+        try { el.remove(); } catch (e) {}
+      });
+    }
+  }
+
+  async function handleComposerGoalAction(action, targetSessionId, btnEl) {
+    if (isGoalActionRunning) return;
+    const sid = targetSessionId || (typeof getEffectiveComposerSessionId === "function" ? getEffectiveComposerSessionId() : getCurrentSessionId());
+    if (!sid) return;
+
+    isGoalActionRunning = true;
+    if (btnEl) {
+      btnEl.disabled = true;
+      btnEl.setAttribute("aria-busy", "true");
+    }
+
+    try {
+      // 0. 检查后端扩展命令是否已注册，防止旧会话尚未加载扩展时将 /composer-goal 当作普通用户消息发给模型
+      const cmdRes = await window.fetch(`/api/agent/${encodeURIComponent(sid)}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ type: "get_commands" }),
+      });
+      if (!cmdRes.ok) {
+        showToast("无法获取会话命令列表，已拒绝发送目标控制指令", null, 2500);
+        return false;
+      }
+      const cmdData = await cmdRes.json().catch(() => null);
+      if (cmdData && cmdData.success === false) {
+        showToast("获取会话命令列表失败，已拒绝发送目标控制指令", null, 2500);
+        return false;
+      }
+      const commands = cmdData?.data?.commands || cmdData?.commands || [];
+      const hasComposerGoal = Array.isArray(commands) && commands.some(
+        (c) => c?.name === "composer-goal" || c?.name === "/composer-goal"
+      );
+      if (!hasComposerGoal) {
+        showToast("该会话未加载 composer-goal 命令，需等待空闲后输入 /reload 重新加载", null, 4000);
+        return false;
+      }
+
+      // 1. 发送真实 POST 扩展命令（/composer-goal pause|resume 在忙碌中亦被允许）
+      const promptRes = await window.fetch(`/api/agent/${encodeURIComponent(sid)}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ type: "prompt", message: `/composer-goal ${action}` }),
+      });
+
+      if (!promptRes.ok) {
+        showToast("目标控制请求失败，请稍后重试", null, 2500);
+        return false;
+      }
+      const promptData = await promptRes.json().catch(() => null);
+      if (promptData && promptData.success === false) {
+        showToast(`目标控制被拒绝: ${promptData.error || "未知原因"}`, null, 3000);
+        return false;
+      }
+
+      // 2. 回读对应会话状态确认（必须读取真实扩展状态，绝不伪造成功）
+      const postStateRes = await window.fetch(`/api/agent/${encodeURIComponent(sid)}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ type: "get_state" }),
+      });
+
+      if (!postStateRes.ok) {
+        showToast("回读会话状态失败，未更新目标状态", null, 2500);
+        return false;
+      }
+
+      const postStateData = await postStateRes.json().catch(() => null);
+      const parsed = parseExtensionStatus(postStateData, "composer-modes");
+
+      if (!parsed || parsed.version !== 1 || parsed.mode !== "goal" || postStateData?.success === false) {
+        showToast("回读状态异常或目标模式已改变，操作未确认", null, 3000);
+        return false;
+      }
+
+      const newPending = Boolean(parsed.pausePending);
+      const newPaused = Boolean(parsed.paused);
+
+      if (action === "pause" && !newPending && !newPaused) {
+        showToast("暂停未生效，请检查会话状态", null, 3000);
+        return false;
+      }
+      if (action === "resume" && (newPending || newPaused)) {
+        showToast("恢复未生效，请重试", null, 3000);
+        return false;
+      }
+
+      // 3. 真实确认后更新本地会话模式映射
+      const prev = composerModesStateMap.get(sid) || {};
+      const updatedActionState = {
+        ...prev,
+        mode: parsed.mode || "goal",
+        goal: parsed.goal || prev.goal,
+        pausePending: newPending,
+        paused: newPaused,
+      };
+      if (typeof parsed?.goalElapsedMs === "number") {
+        updatedActionState.goalElapsedMs = parsed.goalElapsedMs;
+      }
+      if (typeof parsed?.goalActiveSinceMs === "number") {
+        updatedActionState.goalActiveSinceMs = parsed.goalActiveSinceMs;
+      } else {
+        delete updatedActionState.goalActiveSinceMs;
+      }
+      composerModesStateMap.set(sid, updatedActionState);
+
+      // 4. 刷新目标独立行
+      syncComposerGoalBar();
+      syncComposerModesBottomStatus();
+      return true;
+    } catch (e) {
+      showToast("操作发生异常，请检查网络", null, 3000);
+      return false;
+    } finally {
+      isGoalActionRunning = false;
+      if (btnEl && btnEl.isConnected) {
+        btnEl.disabled = false;
+        btnEl.removeAttribute("aria-busy");
+      }
+    }
+  }
+
+  function syncComposerGoalBar() {
     if (!isPluginEnabled("composer-modes")) {
-      restoreComposerModesBottomStatus();
+      clearGoalTimer();
+      removeComposerGoalBar();
       return;
     }
 
-    // 1. 清理已断开连接的节点与元素，杜绝内存泄漏
-    for (const [node] of composerModesTextNodeMap) {
-      if (!node.isConnected) {
-        composerModesTextNodeMap.delete(node);
-      }
-    }
-    for (const [el] of composerModesAttrMap) {
-      if (!el.isConnected) {
-        composerModesAttrMap.delete(el);
-      }
+    const sessionId = typeof getEffectiveComposerSessionId === "function" ? getEffectiveComposerSessionId() : getCurrentSessionId();
+    const sessionState = sessionId ? composerModesStateMap.get(sessionId) : null;
+    const isGoalMode = sessionState?.mode === "goal";
+    const rawGoal = (isGoalMode && sessionState?.goal) ? String(sessionState.goal).trim() : "";
+
+    if (!isGoalMode || !rawGoal) {
+      clearGoalTimer();
+      removeComposerGoalBar();
+      return;
     }
 
-    // 2. 状态行根节点定位（优先整体状态行，避免重复处理；normal空状态绝不隐藏整行，保留其它扩展）
-    const lines = document.querySelectorAll(
-      '.extension-status-line[role="status"], .extension-status-line'
+    const textarea = findComposerTextarea();
+    const card = textarea?.closest('fieldset > div[style*="max-width"]');
+    if (!card || !card.parentElement) {
+      clearGoalTimer();
+      removeComposerGoalBar();
+      return;
+    }
+
+    const isPaused = Boolean(sessionState?.paused);
+    const isPending = Boolean(sessionState?.pausePending);
+    const statusKey = isPaused ? "paused" : (isPending ? "pending" : "active");
+    const cleanGoal = sanitizeGoalInlineText(rawGoal);
+
+    let bar = composerGoalBarEl;
+    const isConnectedAtCorrectPos = Boolean(
+      bar?.isConnected && bar.parentElement === card.parentElement && bar.nextElementSibling === card
     );
-    const roots = lines.length > 0
-      ? Array.from(lines)
-      : Array.from(document.querySelectorAll('.extension-status-text'));
+    if (!isConnectedAtCorrectPos) {
+      clearGoalTimer();
+      removeComposerGoalBar();
+      bar = document.createElement("div");
+      bar.className = "pi-enh-composer-goal-bar";
+      bar.setAttribute("role", "region");
+      bar.setAttribute("aria-label", "当前目标管理");
+      card.parentElement.insertBefore(bar, card);
+      composerGoalBarEl = bar;
+    }
 
-    if (!roots.length) return;
+    const hasTiming = typeof sessionState?.goalElapsedMs === "number";
+    const elapsedBase = hasTiming ? sessionState.goalElapsedMs : 0;
+    const activeSince = typeof sessionState?.goalActiveSinceMs === "number" ? sessionState.goalActiveSinceMs : null;
 
-    for (const root of roots) {
-      if (!root.isConnected) continue;
+    // 签名包含关键静态状态字段，不包含每秒累加的瞬时秒数，防止每秒重建 DOM 导致焦点跳动
+    const barSignature = `${sessionId}|${rawGoal}|${statusKey}|${hasTiming ? 1 : 0}|${elapsedBase}|${activeSince ?? ""}`;
+    const signatureChanged = bar.dataset.renderSignature !== barSignature;
 
-      // 3. TreeWalker 遍历具体 Text 节点并修改 nodeValue，保留所有 React 原生元素和 ANSI span
-      if (typeof document.createTreeWalker === "function") {
-        const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null);
-        let node = walker.nextNode();
-        while (node) {
-          if (node.isConnected) {
-            const current = node.nodeValue || "";
-            const record = composerModesTextNodeMap.get(node);
+    if (signatureChanged) {
+      bar.dataset.renderSignature = barSignature;
+      bar.dataset.sessionId = sessionId;
 
-            // 若当前内容正是我们格式化的文本且 React 未写入新状态，跳过
-            if (record && current === record.formatted) {
-              // no-op
-            } else {
-              // 全新节点或 React 更新写入了新内容，以当前文本作为 raw 基准
-              const raw = current;
-              const formatted = formatComposerModesStatusText(raw);
-              if (formatted !== raw) {
-                composerModesTextNodeMap.set(node, { raw, formatted });
-                node.nodeValue = formatted;
-              } else if (record) {
-                composerModesTextNodeMap.delete(node);
-              }
-            }
-          }
-          node = walker.nextNode();
-        }
+      let statusLabel = "目标:";
+      let tooltipTitle = "当前目标 (推进中)";
+      let actionType = "pause";
+      let actionBtnClass = "pi-enh-goal-btn-pause";
+      let actionIconSvg = SVG_GOAL_PAUSE_ICON;
+      let actionBtnTitle = "当前任务完成后暂停目标";
+      let actionBtnLabel = "当前任务完成后暂停目标";
+
+      if (isPaused) {
+        statusLabel = "目标 (已暂停):";
+        tooltipTitle = "当前目标 (已暂停)";
+        actionType = "resume";
+        actionBtnClass = "pi-enh-goal-btn-resume";
+        actionIconSvg = SVG_GOAL_PLAY_ICON;
+        actionBtnTitle = "继续目标";
+        actionBtnLabel = "继续目标";
+      } else if (isPending) {
+        statusLabel = "目标 (等待暂停):";
+        tooltipTitle = "当前目标 (等待当前任务完成后暂停)";
+        actionType = "resume";
+        actionBtnClass = "pi-enh-goal-btn-cancel";
+        actionIconSvg = SVG_GOAL_PLAY_ICON;
+        actionBtnTitle = "取消待暂停";
+        actionBtnLabel = "取消待暂停";
       }
 
-      // 4. 属性清洗（title 与 aria-label 避免向用户悬停露出原始 JSON，同样条件式存储）
-      const elementsWithAttrs = [];
-      if (root.hasAttribute?.("title") || root.hasAttribute?.("aria-label")) {
-        elementsWithAttrs.push(root);
-      }
-      if (typeof root.querySelectorAll === "function") {
-        const children = root.querySelectorAll("[title], [aria-label]");
-        for (let i = 0; i < children.length; i++) {
-          elementsWithAttrs.push(children[i]);
-        }
+      let initialDurationMs = elapsedBase;
+      if (hasTiming && !isPaused && activeSince !== null) {
+        initialDurationMs += Math.max(0, Date.now() - activeSince);
       }
 
-      for (const el of elementsWithAttrs) {
-        if (!el.isConnected) continue;
-        let attrMap = composerModesAttrMap.get(el);
+      const timerHtml = hasTiming
+        ? `<span class="pi-enh-goal-pill-timer" aria-label="目标累计运行时间" title="目标累计运行时间">${formatGoalDuration(initialDurationMs)}</span>`
+        : "";
 
-        for (const attrName of ["title", "aria-label"]) {
-          if (!el.hasAttribute(attrName)) continue;
-          const current = el.getAttribute(attrName) || "";
-          const record = attrMap?.get(attrName);
+      bar.innerHTML = `
+        <div class="pi-enh-composer-goal-pill" data-status="${statusKey}" tabindex="0" role="status" aria-label="${escapeGoalHtml(tooltipTitle)}: ${escapeGoalHtml(cleanGoal)}">
+          <span class="pi-enh-goal-pill-icon">${SVG_STATUS_GOAL_ICON}</span>
+          <span class="pi-enh-goal-pill-status">${escapeGoalHtml(statusLabel)}</span>
+          <span class="pi-enh-goal-pill-text">${escapeGoalHtml(cleanGoal)}</span>
+          ${timerHtml}
+          <button type="button" class="pi-enh-composer-goal-btn ${actionBtnClass}" aria-label="${escapeGoalHtml(actionBtnLabel)}" title="${escapeGoalHtml(actionBtnTitle)}">
+            ${actionIconSvg}
+          </button>
+        </div>
+      `;
 
-          if (record && current === record.formatted) {
-            continue;
+      const pillEl = bar.querySelector(".pi-enh-composer-goal-pill");
+      if (pillEl) {
+        pillEl.onmouseenter = () => {
+          showGoalTooltip(pillEl, rawGoal, tooltipTitle);
+        };
+        pillEl.onmouseleave = () => {
+          scheduleHideGoalTooltip();
+        };
+        pillEl.onclick = (e) => {
+          if (e.target && e.target.closest(".pi-enh-composer-goal-btn")) return;
+          showGoalTooltip(pillEl, rawGoal, tooltipTitle);
+        };
+      }
+
+      const btnEl = bar.querySelector(".pi-enh-composer-goal-btn");
+      if (btnEl) {
+        btnEl.addEventListener("click", (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          void handleComposerGoalAction(actionType, sessionId, btnEl);
+        });
+      }
+
+      // 状态变动时重新锚定单调计时器基线
+      if (hasTiming && !isPaused && activeSince !== null) {
+        const startPerf = typeof performance !== "undefined" && typeof performance.now === "function" ? performance.now() : Date.now();
+        goalTimerAnchor = {
+          baseMs: initialDurationMs,
+          startPerf,
+          sessionId,
+        };
+      }
+    }
+
+    // 维持/刷新单调计时器
+    const isTimerRunning = hasTiming && !isPaused && activeSince !== null;
+    if (isTimerRunning) {
+      if (!goalTimerAnchor || goalTimerAnchor.sessionId !== sessionId) {
+        const initialDurationMs = elapsedBase + Math.max(0, Date.now() - activeSince);
+        const startPerf = typeof performance !== "undefined" && typeof performance.now === "function" ? performance.now() : Date.now();
+        goalTimerAnchor = {
+          baseMs: initialDurationMs,
+          startPerf,
+          sessionId,
+        };
+      }
+
+      if (!goalTimerInterval) {
+        goalTimerInterval = setInterval(() => {
+          if (!goalTimerAnchor) {
+            clearGoalTimer();
+            return;
           }
-
-          const raw = current;
-          const formatted = formatComposerModesStatusText(raw);
-          if (formatted !== raw) {
-            if (!attrMap) {
-              attrMap = new Map();
-              composerModesAttrMap.set(el, attrMap);
-            }
-            attrMap.set(attrName, { raw, formatted });
-            el.setAttribute(attrName, formatted);
-          } else if (record) {
-            attrMap.delete(attrName);
-            if (attrMap.size === 0) {
-              composerModesAttrMap.delete(el);
-            }
+          const currentEffectiveSid = typeof getEffectiveComposerSessionId === "function" ? getEffectiveComposerSessionId() : getCurrentSessionId();
+          if (!currentEffectiveSid || currentEffectiveSid !== goalTimerAnchor.sessionId) {
+            clearGoalTimer();
+            removeComposerGoalBar();
+            return;
           }
+          const timerSpan = composerGoalBarEl?.querySelector(".pi-enh-goal-pill-timer");
+          if (!timerSpan || !timerSpan.isConnected) {
+            clearGoalTimer();
+            return;
+          }
+          const curPerf = typeof performance !== "undefined" && typeof performance.now === "function" ? performance.now() : Date.now();
+          const deltaMs = Math.max(0, curPerf - goalTimerAnchor.startPerf);
+          timerSpan.textContent = formatGoalDuration(goalTimerAnchor.baseMs + deltaMs);
+        }, 1000);
+      }
+    } else {
+      clearGoalTimer();
+      if (hasTiming) {
+        const timerSpan = bar.querySelector(".pi-enh-goal-pill-timer");
+        if (timerSpan) {
+          timerSpan.textContent = formatGoalDuration(elapsedBase);
         }
       }
     }
   }
 
+  let isCleaningComposerModesStatus = false;
+
+  function syncComposerModesBottomStatus() {
+    if (!isPluginEnabled("composer-modes")) {
+      restoreComposerModesBottomStatus();
+      return;
+    }
+    if (isCleaningComposerModesStatus) return;
+    isCleaningComposerModesStatus = true;
+    try {
+      ensureComposerModesStatusObserver();
+
+      // 1. 清理已断开连接的节点与元素，杜绝内存泄漏
+      for (const [node] of composerModesTextNodeMap) {
+        if (!node.isConnected) {
+          composerModesTextNodeMap.delete(node);
+        }
+      }
+      for (const [el] of composerModesAttrMap) {
+        if (!el.isConnected) {
+          composerModesAttrMap.delete(el);
+        }
+      }
+
+      // 2. 状态行根节点定位（优先整体状态行，避免重复处理；normal空状态绝不隐藏整行，保留其它扩展）
+      const lines = document.querySelectorAll(
+        '.extension-status-line[role="status"], .extension-status-line'
+      );
+      const roots = lines.length > 0
+        ? Array.from(lines)
+        : Array.from(document.querySelectorAll('.extension-status-text'));
+
+      if (!roots.length) return;
+
+      for (const root of roots) {
+        if (!root.isConnected) continue;
+
+        // 提取并维护左侧目标胶囊（Badge）
+        let activeGoalInfo = null;
+        let activePlanInfo = null;
+
+        const allText = root.textContent || "";
+        let jsonBlocks = extractTopLevelJsonBlocks(allText);
+
+        // 若当前 DOM 文本已被 TreeWalker 清洗，从记录的 raw 文本中恢复检测模式，避免 MutationObserver 重复触发时误删 Badge
+        if (!jsonBlocks.length) {
+          for (const [node, record] of composerModesTextNodeMap) {
+            if (node.isConnected && root.contains(node) && record.raw) {
+              const rawBlocks = extractTopLevelJsonBlocks(record.raw);
+              if (rawBlocks.length) {
+                jsonBlocks = rawBlocks;
+                break;
+              }
+            }
+          }
+        }
+
+        for (let bi = 0; bi < jsonBlocks.length; bi++) {
+          try {
+            const p = JSON.parse(jsonBlocks[bi].raw);
+            if (p && p.version === 1) {
+              if (p.mode === "goal" && p.goal && typeof p.goal === "string" && p.goal.trim()) {
+                activeGoalInfo = p;
+                const currentSid = typeof getEffectiveComposerSessionId === "function"
+                  ? getEffectiveComposerSessionId()
+                  : (typeof getCurrentSessionId === "function" ? getCurrentSessionId() : null);
+                if (currentSid) {
+                  const prev = composerModesStateMap.get(currentSid);
+                  // 仅当会话状态映射已为 goal 且 goal 文本与 p.goal 一致时，才从底栏 status 更新暂停状态；
+                  // 防止会话切换瞬间残留的旧状态栏 raw JSON 将旧 goal 污染写入新会话缓存，缓存不一致时以真实回读为准
+                  if (prev && prev.mode === "goal" && prev.goal === p.goal) {
+                    const nextPending = Boolean(p.pausePending);
+                    const nextPaused = Boolean(p.paused);
+                    const nextElapsed = typeof p.goalElapsedMs === "number" ? p.goalElapsedMs : undefined;
+                    const nextActiveSince = typeof p.goalActiveSinceMs === "number" ? p.goalActiveSinceMs : undefined;
+                    if (
+                      Boolean(prev.pausePending) !== nextPending ||
+                      Boolean(prev.paused) !== nextPaused ||
+                      prev.goalElapsedMs !== nextElapsed ||
+                      prev.goalActiveSinceMs !== nextActiveSince
+                    ) {
+                      const updatedBottomState = {
+                        ...prev,
+                        mode: "goal",
+                        goal: p.goal,
+                        pausePending: nextPending,
+                        paused: nextPaused,
+                      };
+                      if (nextElapsed !== undefined) {
+                        updatedBottomState.goalElapsedMs = nextElapsed;
+                      } else {
+                        delete updatedBottomState.goalElapsedMs;
+                      }
+                      if (nextActiveSince !== undefined) {
+                        updatedBottomState.goalActiveSinceMs = nextActiveSince;
+                      } else {
+                        delete updatedBottomState.goalActiveSinceMs;
+                      }
+                      composerModesStateMap.set(currentSid, updatedBottomState);
+                      syncComposerGoalBar();
+                    }
+                  } else {
+                    const mismatchKey = `${currentSid}|${p.goal}`;
+                    if (lastComposerGoalMismatchKey !== mismatchKey) {
+                      lastComposerGoalMismatchKey = mismatchKey;
+                      void querySessionModeState(currentSid);
+                    }
+                  }
+                }
+              } else if (p.mode === "plan") {
+                activePlanInfo = p;
+              }
+            }
+          } catch (e) {}
+        }
+
+        if (!activeGoalInfo && !activePlanInfo) {
+          const currentSid = typeof getEffectiveComposerSessionId === "function"
+            ? getEffectiveComposerSessionId()
+            : (typeof getCurrentSessionId === "function" ? getCurrentSessionId() : null);
+          const sessionState = currentSid ? composerModesStateMap.get(currentSid) : null;
+          if (sessionState?.mode === "goal" && sessionState?.goal?.trim()) {
+            activeGoalInfo = sessionState;
+          } else if (sessionState?.mode === "plan") {
+            activePlanInfo = sessionState;
+          }
+        }
+
+        // 底栏不再放置目标胶囊，如有遗留一律清除，将底栏空间完全留给 LSP / Mail 扩展
+        const isStatusLine = root.classList?.contains("extension-status-line");
+        const statusLineEl = isStatusLine ? root : root.closest?.(".extension-status-line");
+
+        if (statusLineEl && statusLineEl.isConnected && typeof statusLineEl.querySelector === "function") {
+          const badgeEl = statusLineEl.querySelector(".pi-enh-status-goal-badge");
+          if (badgeEl) {
+            badgeEl.remove();
+          }
+        }
+
+        // 3. TreeWalker 遍历具体 Text 节点并修改 nodeValue，保留所有 React 原生元素和 ANSI span
+        if (typeof document.createTreeWalker === "function") {
+          const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, null);
+          let node = walker.nextNode();
+          while (node) {
+            if (node.isConnected) {
+              if (!node.parentElement?.closest?.(".pi-enh-status-goal-badge")) {
+                const current = node.nodeValue || "";
+                const record = composerModesTextNodeMap.get(node);
+
+                // 若当前内容正是我们格式化的文本且 React 未写入新状态，跳过
+                if (record && current === record.formatted) {
+                  // no-op
+                } else {
+                  // 全新节点或 React 更新写入了新内容，以当前文本作为 raw 基准；底栏彻底清洗 composer-modes 文本留给其它扩展
+                  const raw = current;
+                  const formatted = formatComposerModesStatusText(raw, { stripForBadge: true });
+                  if (formatted !== raw) {
+                    composerModesTextNodeMap.set(node, { raw, formatted });
+                    node.nodeValue = formatted;
+                  } else if (record) {
+                    composerModesTextNodeMap.delete(node);
+                  }
+                }
+              }
+            }
+            node = walker.nextNode();
+          }
+        }
+
+        // 4. 属性清洗（title 与 aria-label 避免向用户悬停露出原始 JSON，同样条件式存储）
+        const elementsWithAttrs = [];
+        if (root.hasAttribute?.("title") || root.hasAttribute?.("aria-label")) {
+          elementsWithAttrs.push(root);
+        }
+        if (typeof root.querySelectorAll === "function") {
+          const children = root.querySelectorAll("[title], [aria-label]");
+          for (let i = 0; i < children.length; i++) {
+            elementsWithAttrs.push(children[i]);
+          }
+        }
+
+        for (const el of elementsWithAttrs) {
+          if (!el.isConnected) continue;
+          let attrMap = composerModesAttrMap.get(el);
+
+          for (const attrName of ["title", "aria-label"]) {
+            if (!el.hasAttribute(attrName)) continue;
+            const current = el.getAttribute(attrName) || "";
+            const record = attrMap?.get(attrName);
+
+            if (record && current === record.formatted) {
+              continue;
+            }
+
+            const raw = current;
+            const formatted = formatComposerModesStatusText(raw);
+            if (formatted !== raw) {
+              if (!attrMap) {
+                attrMap = new Map();
+                composerModesAttrMap.set(el, attrMap);
+              }
+              attrMap.set(attrName, { raw, formatted });
+              el.setAttribute(attrName, formatted);
+            } else if (record) {
+              attrMap.delete(attrName);
+              if (attrMap.size === 0) {
+                composerModesAttrMap.delete(el);
+              }
+            }
+          }
+        }
+      }
+    } finally {
+      isCleaningComposerModesStatus = false;
+    }
+  }
+
   function restoreComposerModesBottomStatus() {
+    hideGoalTooltip();
+    if (typeof document !== "undefined" && typeof document.querySelectorAll === "function") {
+      document.querySelectorAll(".pi-enh-status-goal-badge").forEach(el => {
+        try { el.remove(); } catch (e) {}
+      });
+    }
     if (composerModesStatusObserver) {
       try { composerModesStatusObserver.disconnect(); } catch (e) {}
       composerModesStatusObserver = null;
@@ -11641,11 +14337,176 @@
   }
 
   function ensureComposerModesStatusObserver() {
-    // 复用全局已有 scheduleDomSync / runAllSyncOperations 统一调度，
-    // 避免独立 MutationObserver 追踪内部 ANSI span 造成的祖先失效或无限 DOM 循环
+    if (!isPluginEnabled("composer-modes")) {
+      if (composerModesStatusObserver) {
+        try { composerModesStatusObserver.disconnect(); } catch (e) {}
+        composerModesStatusObserver = null;
+      }
+      return;
+    }
+    if (composerModesStatusObserver) return;
+    if (typeof MutationObserver !== "function") return;
+
+    composerModesStatusObserver = new MutationObserver((mutations) => {
+      if (isCleaningComposerModesStatus) return;
+      let shouldSync = false;
+      for (let i = 0; i < mutations.length; i++) {
+        const m = mutations[i];
+        if (m.type === "childList") {
+          const target = m.target;
+
+          // 彻底忽略本插件自身徽章、目标横条与浮层卡片的变动，防止自触发
+          if (
+            target?.classList?.contains("pi-enh-status-goal-badge") ||
+            target?.classList?.contains("pi-enh-goal-tooltip-card") ||
+            target?.classList?.contains("pi-enh-composer-goal-bar") ||
+            target?.closest?.(".pi-enh-status-goal-badge, .pi-enh-goal-tooltip-card, .pi-enh-composer-goal-bar")
+          ) {
+            continue;
+          }
+          let isOurOwnChange = false;
+          for (let j = 0; j < m.addedNodes.length; j++) {
+            const an = m.addedNodes[j];
+            if (an.nodeType === 1 && (an.classList?.contains("pi-enh-status-goal-badge") || an.classList?.contains("pi-enh-goal-tooltip-card") || an.classList?.contains("pi-enh-composer-goal-bar"))) {
+              isOurOwnChange = true;
+              break;
+            }
+          }
+          for (let j = 0; j < m.removedNodes.length; j++) {
+            const rn = m.removedNodes[j];
+            if (rn.nodeType === 1 && (rn.classList?.contains("pi-enh-status-goal-badge") || rn.classList?.contains("pi-enh-goal-tooltip-card") || rn.classList?.contains("pi-enh-composer-goal-bar"))) {
+              isOurOwnChange = true;
+              break;
+            }
+          }
+          if (isOurOwnChange) continue;
+
+          // 1. 检查目标容器是否为 status 相关（React 更新 status-text 内部 childList TextNode）
+          if (
+            target && target.nodeType === 1 &&
+            (target.classList?.contains("extension-status-text") ||
+             target.classList?.contains("extension-status-line") ||
+             target.classList?.contains("extension-status-shelf") ||
+             target.closest?.(".extension-status-shelf, .extension-status-line"))
+          ) {
+            shouldSync = true;
+            break;
+          }
+
+          // 2. 检查新增节点：仅检查 relevant class，严禁在普通消息节点做昂贵 querySelector
+          for (let j = 0; j < m.addedNodes.length; j++) {
+            const node = m.addedNodes[j];
+            if (node.nodeType === 1) {
+              const cl = node.classList;
+              if (
+                cl?.contains("extension-status-shelf") ||
+                cl?.contains("extension-status-line") ||
+                cl?.contains("extension-status-text")
+              ) {
+                shouldSync = true;
+                break;
+              }
+              // 仅当整块新建挂载 chat-content 容器时才扫描内部状态栏
+              if (cl?.contains("chat-content") && node.querySelector?.(".extension-status-shelf, .extension-status-line, .extension-status-text")) {
+                shouldSync = true;
+                break;
+              }
+            }
+          }
+        } else if (m.type === "characterData") {
+          const parent = m.target.parentElement;
+          if (parent?.closest?.(".extension-status-shelf, .extension-status-line")) {
+            shouldSync = true;
+          }
+        }
+        if (shouldSync) break;
+      }
+      if (shouldSync) {
+        syncComposerModesBottomStatus();
+        syncComposerGoalBar();
+      }
+    });
+
+    try {
+      const root = document.documentElement || document.body;
+      if (root) {
+        composerModesStatusObserver.observe(root, {
+          childList: true,
+          subtree: true,
+          characterData: true,
+        });
+      }
+    } catch (e) {}
+  }
+
+  function handleComposerModesResize() {
+    if (!composerAddMenuEl) return;
+    const currentWidth = window.innerWidth;
+    // 宽度发生变化（如横竖屏切换或拉伸窗口）：合理关闭菜单
+    if (composerAddMenuContext && typeof composerAddMenuContext.openWidth === "number" && composerAddMenuContext.openWidth !== currentWidth) {
+      closeComposerAddMenu();
+      return;
+    }
+    // 视口高度发生变化（如移动端虚拟键盘收起/弹出）：保持菜单打开，重新计算定位以紧贴 composer
+    positionComposerAddMenu();
+    if (typeof window.requestAnimationFrame === "function") {
+      window.requestAnimationFrame(() => {
+        if (composerAddMenuEl) positionComposerAddMenu();
+      });
+    }
   }
 
   function handleComposerModesDocClick(e) {
+    const target = e.target;
+    if (target && typeof target.closest === "function" && isPluginEnabled("composer-modes")) {
+      const btnOrLink = target.closest("button, a");
+      if (btnOrLink) {
+        const title = String(btnOrLink.getAttribute("title") || "");
+        const ariaLabel = String(btnOrLink.getAttribute("aria-label") || "");
+        const text = String(btnOrLink.textContent || "").replace(/\s+/g, " ").trim();
+        const isNewSessionBtn =
+          title.includes("新建会话") ||
+          title.includes("New session") ||
+          ariaLabel.includes("新建会话") ||
+          ariaLabel.includes("New session") ||
+          text === "新建" ||
+          text === "+ 新建" ||
+          text === "New" ||
+          text === "+ New" ||
+          btnOrLink.hasAttribute("data-pi-enh-new-session");
+        if (isNewSessionBtn) {
+          const urlSid = typeof getCurrentSessionId === "function" ? getCurrentSessionId() : null;
+          pendingComposerNavOverride = { mode: "new", sessionId: null, fromUrlSessionId: urlSid, until: Date.now() + 5000 };
+          syntheticUrlSessionForNewDraft = null;
+          pendingNewComposerMode = null;
+          clearGoalTimer();
+          removeComposerGoalBar();
+          syncComposerModes();
+        }
+      }
+      const sessionRow = target.closest("[data-pi-enh-session-id], [data-session-id], a[href*='session=']");
+      if (sessionRow && !target.closest(".pi-enh-session-menu-btn, .pi-enh-archived-checkbox, input[type='checkbox']")) {
+        let clickedSid = sessionRow.getAttribute("data-pi-enh-session-id") || sessionRow.getAttribute("data-session-id") || null;
+        if (!clickedSid && sessionRow.tagName === "A") {
+          const href = sessionRow.getAttribute("href") || "";
+          const m = href.match(/[?&]session=([^&#]+)/);
+          if (m) {
+            try { clickedSid = decodeURIComponent(m[1]); } catch (err) {}
+          }
+        }
+        if (clickedSid) {
+          const curSid = getEffectiveComposerSessionId();
+          if (clickedSid !== curSid) {
+            const urlSid = typeof getCurrentSessionId === "function" ? getCurrentSessionId() : null;
+            pendingComposerNavOverride = { mode: "session", sessionId: clickedSid, fromUrlSessionId: urlSid, until: Date.now() + 5000 };
+            syntheticUrlSessionForNewDraft = null;
+            syncComposerGoalBar();
+            syncComposerModes();
+          }
+        }
+      }
+    }
+
     const addBtn = e.target.closest?.(".pi-enh-composer-add-btn");
     if (addBtn && isPluginEnabled("composer-modes")) {
       const card = addBtn.closest(".pi-enh-cursor-composer") || addBtn.closest("fieldset > div");
@@ -11665,6 +14526,15 @@
     if (e.key === "Escape" && composerAddMenuEl) {
       closeComposerAddMenu();
     }
+    if (e.ctrlKey && e.altKey && (e.key === "n" || e.key === "N") && isPluginEnabled("composer-modes")) {
+      const urlSid = typeof getCurrentSessionId === "function" ? getCurrentSessionId() : null;
+      pendingComposerNavOverride = { mode: "new", sessionId: null, fromUrlSessionId: urlSid, until: Date.now() + 5000 };
+      syntheticUrlSessionForNewDraft = null;
+      pendingNewComposerMode = null;
+      clearGoalTimer();
+      removeComposerGoalBar();
+      syncComposerModes();
+    }
   }
 
   function bindComposerModesEvents() {
@@ -11673,7 +14543,10 @@
       window.addEventListener("keydown", handleComposerModesKeydown, true);
       document.addEventListener("click", handleComposerModesDocClick, true);
       document.addEventListener("keydown", handleComposerModesDocKeydown, true);
-      window.addEventListener("resize", closeComposerAddMenu);
+      window.addEventListener("resize", handleComposerModesResize);
+      if (window.visualViewport) {
+        window.visualViewport.addEventListener("resize", handleComposerModesResize);
+      }
     }
   }
 
@@ -11682,17 +14555,21 @@
       window.removeEventListener("keydown", handleComposerModesKeydown, true);
       document.removeEventListener("click", handleComposerModesDocClick, true);
       document.removeEventListener("keydown", handleComposerModesDocKeydown, true);
-      window.removeEventListener("resize", closeComposerAddMenu);
+      window.removeEventListener("resize", handleComposerModesResize);
+      if (window.visualViewport) {
+        window.visualViewport.removeEventListener("resize", handleComposerModesResize);
+      }
       composerModesEventsBound = false;
     }
   }
 
   function syncComposerModes() {
-    const observedId = getCurrentSessionId();
+    const observedId = getEffectiveComposerSessionId();
     if (observedId !== lastObservedModesSessionId) {
       lastObservedModesSessionId = observedId;
       closeComposerAddMenu();
       if (pendingNewComposerMode?.sessionId && pendingNewComposerMode.sessionId !== observedId) pendingNewComposerMode = null;
+      syncComposerGoalBar();
       if (observedId) void querySessionModeState(observedId);
     }
     if (!isPluginEnabled("composer-modes")) {
@@ -11701,12 +14578,20 @@
     }
 
     ensureComposerModesStyle();
+    ensureComposerModesStatusObserver();
+    bindComposerModesEvents();
     document.querySelectorAll(".pi-enh-composer-modes-disabled-notice").forEach(el => el.remove());
 
     const textarea = findComposerTextarea();
-    if (!textarea) return;
+    if (!textarea) {
+      syncComposerGoalBar();
+      return;
+    }
     const card = textarea.closest(".pi-enh-cursor-composer") || textarea.closest("fieldset > div") || textarea.parentElement?.parentElement;
-    if (!card) return;
+    if (!card) {
+      syncComposerGoalBar();
+      return;
+    }
 
     if (card.style && getComputedStyle(card).position === "static") {
       card.style.position = "relative";
@@ -11719,7 +14604,7 @@
     }
     if (!leftContainer) return;
 
-    const sessionId = getCurrentSessionId();
+    const sessionId = getEffectiveComposerSessionId();
     if (pendingNewComposerMode && pendingNewComposerMode.project !== getCurrentProjectStatusKey()) pendingNewComposerMode = null;
 
     const currentMode = getSessionComposerMode(sessionId);
@@ -11796,6 +14681,9 @@
 
     // 5. 原生底栏状态清洗（隐藏或人性化本模式 JSON，保留其他扩展状态）
     syncComposerModesBottomStatus();
+
+    // 6. 输入框上方独立目标管理胶囊横条同步
+    syncComposerGoalBar();
   }
 
   async function requestExitModeWithVerification(sessionId) {
@@ -11831,6 +14719,9 @@
   }
 
   function removeComposerModes(options = {}) {
+    if (typeof document !== "undefined" && document.documentElement) {
+      document.documentElement.removeAttribute("data-pi-composer-modes-active");
+    }
     closeComposerAddMenu();
     document.querySelectorAll('.pi-enh-composer-add-btn[data-pi-enh-mode-owned="true"]').forEach((el) => {
       try { el.remove(); } catch (e) {}
@@ -11844,10 +14735,11 @@
     }
     unbindComposerModesEvents();
     restoreComposerModesBottomStatus();
+    removeComposerGoalBar();
 
     // 安全不变量：禁用仅关闭常规 UI 增强，严禁自动恢复写权限。
     // 若后台仍处于 plan 或 goal 激活模式，必须保留简明状态提醒条与回读退出按钮，不可在关闭时默默失去状态
-    const currentSessionId = getCurrentSessionId();
+    const currentSessionId = getEffectiveComposerSessionId();
     const currentMode = getSessionComposerMode(currentSessionId);
     if ((currentMode === "plan" || currentMode === "goal") && currentSessionId && !options.forceCleanNotice) {
       const card = textarea?.closest?.(".pi-enh-cursor-composer") || textarea?.closest?.("fieldset");
@@ -11894,15 +14786,27 @@
   window.__PI_ENH_GET_COMPOSER_MODE__ = getSessionComposerMode;
   window.__PI_ENH_SWITCH_COMPOSER_MODE__ = requestSwitchComposerMode;
   window.__PI_ENH_GET_CURRENT_SESSION_ID__ = getCurrentSessionId;
+  window.__PI_ENH_GET_EFFECTIVE_COMPOSER_SESSION_ID__ = getEffectiveComposerSessionId;
   window.__PI_ENH_FORMAT_COMPOSER_MODES_STATUS_TEXT__ = formatComposerModesStatusText;
   window.__PI_ENH_SYNC_COMPOSER_MODES_BOTTOM_STATUS__ = syncComposerModesBottomStatus;
   window.__PI_ENH_RESTORE_COMPOSER_MODES_BOTTOM_STATUS__ = restoreComposerModesBottomStatus;
   window.__PI_ENH_COMPOSER_MODES_TEXT_NODE_MAP__ = composerModesTextNodeMap;
   window.__PI_ENH_COMPOSER_MODES_ATTR_MAP__ = composerModesAttrMap;
   window.__PI_ENH_SET_COMPOSER_MODE_STATE__ = (sessionId, state) => {
+    pendingComposerNavOverride = null;
+    if (sessionId) {
+      syntheticUrlSessionForNewDraft = {
+        sessionId,
+        whileDraftKey: readComposerNativeDraftKey(),
+      };
+    }
     composerModesStateMap.set(sessionId, state);
     syncComposerModes();
+    syncComposerGoalBar();
   };
+  window.__PI_ENH_SYNC_COMPOSER_GOAL_BAR__ = syncComposerGoalBar;
+  window.__PI_ENH_REMOVE_COMPOSER_GOAL_BAR__ = removeComposerGoalBar;
+  window.__PI_ENH_HANDLE_COMPOSER_GOAL_ACTION__ = handleComposerGoalAction;
 
   // ==========================================
   // 3.55.4 At-Mention Plugins & Workflow Directives (@ 提及聚焦插件与目标计划)
@@ -12266,8 +15170,10 @@
   function extractAtMentionMatch(textarea) {
     if (!textarea) return null;
     const text = textarea.value || "";
+    if (text.indexOf("@") === -1) return null;
     const cursor = typeof textarea.selectionStart === "number" ? textarea.selectionStart : text.length;
     const textBefore = text.slice(0, cursor);
+    if (textBefore.indexOf("@") === -1) return null;
     const match = /(?:^|\s)@([^\s]*)$/.exec(textBefore);
     if (!match) return null;
     const query = match[1] || "";
@@ -12538,7 +15444,9 @@
     activeAtTextarea = textarea;
     const match = extractAtMentionMatch(textarea);
     if (!match) {
-      closeAtMentionMenu();
+      if (currentAtMatch || atMentionMenuEl) {
+        closeAtMentionMenu();
+      }
       return;
     }
     currentAtMatch = match;
@@ -12658,15 +15566,21 @@
   window.__PI_ENH_EXTRACT_AT_MATCH__ = extractAtMentionMatch;
 
   // ==========================================
-  // 3.56 Image Double Click Preview (全站图片双击弹窗预览)
+  // 3.56 Image Preview (历史消息单击预览，其余图片双击预览)
   // ==========================================
   function isEligibleDblClickImage(el) {
     if (!el || !el.tagName || el.tagName.toLowerCase() !== "img") return false;
+    if (isComposerAttachmentImage(el)) return false;
     let p = el.parentElement;
     while (p) {
       const tag = p.tagName ? p.tagName.toLowerCase() : "";
-      if (tag === "dialog" || tag === "button" || tag === "pre" || tag === "code") {
+      if (tag === "dialog" || tag === "pre" || tag === "code") {
         return false;
+      }
+      if (tag === "button") {
+        if (p !== el.parentElement || !isNativeImagePreviewTrigger(p)) {
+          return false;
+        }
       }
       const cls = p.className || "";
       if (typeof cls === "string" && (
@@ -12752,10 +15666,18 @@
     };
   }
 
+  function isHistoryMessageImageTarget(target) {
+    return Boolean(target?.closest?.("[data-message-role], .chat-message, [data-message-id]"));
+  }
+
   function handleImageDblClick(event) {
     if (!isPluginEnabled("image-dblclick-preview")) return;
-    const target = event.target;
-    if (!isEligibleDblClickImage(target)) return;
+    const rawTarget = event.target;
+    if (!rawTarget) return;
+    const enclosingButton = rawTarget.closest ? rawTarget.closest("button") : null;
+    if (enclosingButton && !isNativeImagePreviewTrigger(enclosingButton)) return;
+    const target = unwrapNativeImagePreviewTarget(rawTarget);
+    if (!isEligibleDblClickImage(target) || isHistoryMessageImageTarget(target)) return;
 
     if (typeof event.preventDefault === "function") event.preventDefault();
     if (typeof event.stopPropagation === "function") event.stopPropagation();
@@ -12766,13 +15688,7 @@
       alt: target.alt || target.getAttribute?.("alt") || "图片预览",
     };
 
-    openComposerImageZoomModal(
-      currentItem.src,
-      currentItem.alt,
-      null,
-      gallery,
-      { autoEdit: false }
-    );
+    openComposerImageZoomModal(currentItem.src, currentItem.alt, null, gallery, { autoEdit: false });
     if (activeZoomDialog) {
       activeZoomDialog.__isDblClickPreview = true;
     }
@@ -12780,11 +15696,15 @@
 
   function handleImageMouseOver(event) {
     if (!isPluginEnabled("image-dblclick-preview")) return;
-    const target = event.target;
+    const rawTarget = event.target;
+    if (!rawTarget) return;
+    const enclosingButton = rawTarget.closest ? rawTarget.closest("button") : null;
+    if (enclosingButton && !isNativeImagePreviewTrigger(enclosingButton)) return;
+    const target = unwrapNativeImagePreviewTarget(rawTarget);
     if (isEligibleDblClickImage(target)) {
       target.classList?.add("pi-enh-dblclick-zoomable");
       const inPanel = Boolean(target.closest?.("#file-panel, .right-panel-container, [data-panel='file']"));
-      const hint = inPanel ? "点击全屏预览" : "双击全屏预览";
+      const hint = isHistoryMessageImageTarget(target) ? "单击全屏预览" : inPanel ? "点击全屏预览" : "双击全屏预览";
       if (!target.hasAttribute || !target.hasAttribute("title") || target.getAttribute("title") === "" || target.getAttribute("title").includes("全屏预览")) {
         target.setAttribute?.("title", hint);
       }
@@ -12793,7 +15713,11 @@
 
   function handleImageClick(event) {
     if (!isPluginEnabled("image-dblclick-preview")) return;
-    const target = event.target;
+    const rawTarget = event.target;
+    if (!rawTarget) return;
+    const enclosingButton = rawTarget.closest ? rawTarget.closest("button") : null;
+    if (enclosingButton && !isNativeImagePreviewTrigger(enclosingButton)) return;
+    const target = unwrapNativeImagePreviewTarget(rawTarget);
     if (!isEligibleDblClickImage(target)) return;
 
     // 重点：如果在右侧文件浏览窗口内部，单击立即打开大图全屏预览！
@@ -12818,6 +15742,35 @@
       if (activeZoomDialog) {
         activeZoomDialog.__isDblClickPreview = true;
       }
+      return;
+    }
+
+    if (isHistoryMessageImageTarget(target)) {
+      if (typeof event.preventDefault === "function") event.preventDefault();
+      if (typeof event.stopPropagation === "function") event.stopPropagation();
+
+      const gallery = collectGalleryImages(target);
+      const currentItem = gallery.items[gallery.initialIndex] || {
+        src: target.currentSrc || target.src || target.getAttribute?.("src") || "",
+        alt: target.alt || target.getAttribute?.("alt") || "图片预览",
+      };
+      openComposerImageZoomModal(
+        currentItem.src,
+        currentItem.alt,
+        null,
+        gallery,
+        { autoEdit: false, allowAddToConversation: true }
+      );
+      if (activeZoomDialog) {
+        activeZoomDialog.__isDblClickPreview = true;
+      }
+      return;
+    }
+
+    // 保留非历史原生 ImagePreview 的点击行为，确保双击插件关闭/卸载时仍可使用原生预览。
+    if (isNativeImagePreviewTrigger(target.parentElement)) {
+      if (typeof event.preventDefault === "function") event.preventDefault();
+      if (typeof event.stopPropagation === "function") event.stopPropagation();
     }
   }
 
@@ -12828,7 +15781,7 @@
       if (isEligibleDblClickImage(img)) {
         img.classList?.add("pi-enh-dblclick-zoomable");
         const inPanel = Boolean(img.closest?.("#file-panel, .right-panel-container, [data-panel='file']"));
-        const hint = inPanel ? "点击全屏预览" : "双击全屏预览";
+        const hint = isHistoryMessageImageTarget(img) ? "单击全屏预览" : inPanel ? "点击全屏预览" : "双击全屏预览";
         if (!img.hasAttribute || !img.hasAttribute("title") || img.getAttribute("title") === "" || img.getAttribute("title").includes("全屏预览")) {
           img.setAttribute?.("title", hint);
         }
@@ -13092,11 +16045,16 @@
 
       /* 1. 宽屏分屏模式 (>= 960px)：右侧面板脱离默认 position:static，赋予独立的相对定位与高层级 */
       @media (min-width: 960px) {
-        #file-panel.right-panel-container,
-        .right-panel-container {
+        #file-panel.right-panel-container:not(.right-panel-full-width),
+        .right-panel-container:not(.right-panel-full-width) {
           position: relative !important;
           z-index: 100 !important;
           background: var(--bg) !important;
+        }
+        /* 补偿 #file-panel 左边框 1px；保持外层固定宽度与开关动画不变 */
+        #file-panel.right-panel-container:not(.right-panel-full-width) > * {
+          width: calc(var(--right-panel-width, clamp(360px, 42vw, 640px)) - 1px);
+          min-width: 299px;
         }
       }
 
@@ -13460,11 +16418,25 @@
 
     const native = readNativeComposerDraft();
     if (native && !assembledAttachments) {
+      let expectedText = textarea.value || "";
+      if (!expectedText && target === textarea && native.valueRef.current === "") {
+        const recent = composerRecentInput.get(textarea);
+        if (recent?.owner === native.key && recent.text.trim()
+          && Date.now() - recent.at < 240) expectedText = recent.text;
+      }
+      const hasQuotes = isPluginEnabled("quick-quote") && typeof listAnnotations === "function" && listAnnotations().length > 0;
+      const annotationSnapshot = hasQuotes ? listAnnotations() : null;
+      const bodyText = expectedText;
+      const finalText = hasQuotes ? serializeAnnotations(bodyText) : expectedText;
+
       return dispatchComposerNativeSubmission({
         kind: "send",
         textarea,
         expectedOwner: native.key,
-        expectedText: textarea.value || "",
+        expectedText: finalText,
+        annotationSnapshot,
+        annotationBody: bodyText,
+        annotationSession: typeof getAnnotationSessionId === "function" ? getAnnotationSessionId() : (getCurrentSessionId() || "draft"),
       });
     }
 
@@ -13516,7 +16488,7 @@
       if (e.isComposing || e.keyCode === 229) return;
 
       // 拼音选词刚结束 120ms 缓冲期内，阻止意外回车并吞噬
-      if (Date.now() - lastCompositionEndTime < 120) {
+      if (Date.now() - lastCompositionEndTime < 120 && !lastCompositionKeyReleased) {
         if (typeof e.preventDefault === "function") e.preventDefault();
         if (typeof e.stopPropagation === "function") e.stopPropagation();
         if (typeof e.stopImmediatePropagation === "function") e.stopImmediatePropagation();
@@ -13547,40 +16519,38 @@
 
     // 正在输入法拼音组字中，放行给输入法
     if (e.isComposing || isComposingInput || e.keyCode === 229) return;
-    if (Date.now() - lastCompositionEndTime < 120) return;
+    if (Date.now() - lastCompositionEndTime < 120 && !lastCompositionKeyReleased) return;
 
     const target = e.target;
     if (!isChatComposerTextarea(target)) return;
 
-    // 检查是否处于原生 React ChatInput 的 640px 窄屏盲区：
-    // 当 window.innerWidth <= 640 时，上游 React useIsMobile() 误将桌面窄屏判为手机，
-    // 导致原生 sendShortcut 失效并变成普通换行！
-    // 此时电脑端增强逻辑主动兜底触发发送，杜绝窄屏/分屏下的回车失效！
-    const isNarrowViewport = typeof window !== "undefined" && window.innerWidth <= 640;
-    if (isNarrowViewport) {
-      const isRunning = Boolean(
-        document.querySelector('fieldset button[title*="停止"], fieldset button:has(svg rect[x="1.5"])') ||
-        document.querySelector('fieldset div[style*="align-self: flex-end"]:has(button), fieldset .pi-enh-running-group, fieldset .pi-enh-has-running-controls') ||
-        (typeof isChatSessionRunning === "function" && isChatSessionRunning())
-      );
+    // 编辑器补全菜单需要先消费 Enter；其它桌面端普通 Enter 由此显式发送，
+    // 避免原生 ChatInput 在不同浏览器/视口下把 Enter 当作换行或不触发提交。
+    if (typeof isComposerCompletionKey === "function" && isComposerCompletionKey(e, target)) return;
 
-      // 若处于运行态，交给运行态 smartKeyDown 处理（按 Enter 加入队列 followup）
-      if (isRunning) {
-        return;
-      }
+    const isRunning = isComposerRunningForEnter(findComposerTextarea());
 
-      // 空闲状态：主动触发发送！
-      if (typeof e.preventDefault === "function") e.preventDefault();
-      if (typeof e.stopPropagation === "function") e.stopPropagation();
-      if (typeof e.stopImmediatePropagation === "function") e.stopImmediatePropagation();
+    // 运行态保留原生 Enter 后续消息行为；空闲桌面端统一主动发送。
+    if (isRunning) return;
 
-      triggerDesktopComposerSend(target);
-    }
-    // 正常宽屏电脑端：原生 React 会正确识别 !isMobile 并执行 handleSend()，自然放行即可。
+    if (typeof e.preventDefault === "function") e.preventDefault();
+    if (typeof e.stopPropagation === "function") e.stopPropagation();
+    if (typeof e.stopImmediatePropagation === "function") e.stopImmediatePropagation();
+
+    triggerDesktopComposerSend(target);
   }
 
   addManagedListener(document, "compositionend", () => {
     lastCompositionEndTime = Date.now();
+    lastCompositionKeyReleased = false;
+  }, true);
+  addManagedListener(document, "keyup", (event) => {
+    // Confirmation keyup closes the IME keystroke. A distinct next Enter is a
+    // deliberate send/newline even inside the short accidental-send buffer.
+    if (Date.now() - lastCompositionEndTime < 120
+      && (event.key === "Enter" || event.key === " " || /^[1-9]$/.test(event.key))) {
+      lastCompositionKeyReleased = true;
+    }
   }, true);
 
   addManagedListener(document, "keydown", handleMobileEnterKeydown, true);
@@ -14401,7 +17371,7 @@
       if (activeEl && (activeEl.id === "session-search-input" || activeEl.closest?.("#session-search-input"))) {
         try { activeEl.blur(); } catch (e) {}
       }
-      const composer = document.querySelector(".chat-input-textarea, textarea.chat-input, textarea");
+      const composer = Array.from(document.querySelectorAll(".pi-enh-formatted-composer, .chat-input-textarea, textarea.chat-input, textarea")).find((el) => el.offsetWidth > 0 && el.offsetHeight > 0 && getComputedStyle(el).visibility !== "hidden");
       if (composer) {
         try { composer.focus(); } catch (e) {}
       }
@@ -15323,4 +18293,110 @@
     }
     closeQuickActionMenu();
   });
+
+  // ==========================================
+  // 新建会话光标自动聚焦输入框 (New Session Autofocus - 根本级架构支持双态编辑器与防失焦)
+  // ==========================================
+  function findActiveComposerEditable() {
+    // 1. 优先查找当前可见的格式化富文本编辑器 (.pi-enh-formatted-composer)
+    const formatted = document.querySelector(".pi-enh-formatted-composer");
+    if (formatted && formatted.isConnected && window.getComputedStyle(formatted).display !== "none") {
+      return formatted;
+    }
+    // 2. 其次查找原生可见的 textarea 输入框
+    const ta = findComposerTextarea();
+    if (ta && ta.isConnected && window.getComputedStyle(ta).display !== "none") {
+      return ta;
+    }
+    return formatted || ta || null;
+  }
+
+  function focusComposerEditable({ force = false } = {}) {
+    const el = findActiveComposerEditable();
+    if (!el || !el.isConnected) return false;
+    if (window.getComputedStyle(el).display === "none") return false;
+
+    const active = document.activeElement;
+    if (!force && active && active !== document.body && active !== el) {
+      const isOther = (active.tagName === "INPUT" || active.tagName === "TEXTAREA" || active.isContentEditable) &&
+                      !active.closest("fieldset, form, .chat-input-textarea, .pi-enh-formatted-composer, .pi-enh-cursor-composer");
+      if (isOther) return false;
+    }
+
+    try {
+      el.focus({ preventScroll: true });
+      if (el.tagName === "TEXTAREA") {
+        const len = el.value ? el.value.length : 0;
+        el.setSelectionRange(len, len);
+      } else if (el.isContentEditable && window.getSelection) {
+        const sel = window.getSelection();
+        if (sel) {
+          sel.selectAllChildren(el);
+          sel.collapseToEnd();
+        }
+      }
+      return document.activeElement === el;
+    } catch (e) {
+      return false;
+    }
+  }
+
+  let newSessionFocusGuardUntil = 0;
+
+  function triggerNewSessionComposerFocus() {
+    newSessionFocusGuardUntil = performance.now() + 650;
+    let frameCount = 0;
+    const maxFrames = 15;
+    const poll = () => {
+      frameCount++;
+      const focused = focusComposerEditable({ force: true });
+      if (focused || frameCount >= maxFrames || isDisposed) return;
+      requestAnimationFrame(poll);
+    };
+    requestAnimationFrame(poll);
+  }
+
+  function isNewSessionButton(target) {
+    if (!target || typeof target.closest !== "function") return false;
+    const btn = target.closest("button, a, [role='button']");
+    if (!btn) return false;
+    const title = (btn.getAttribute("title") || "").trim();
+    const aria = (btn.getAttribute("aria-label") || "").trim();
+    const text = (btn.textContent || "").trim();
+    if (/新建会话|New session/i.test(title) || /新建会话|New session/i.test(aria)) return true;
+    if (/^(?:\+\s*)?(?:新建|New)$/i.test(text) && btn.closest(".sidebar-container, aside, div[style*='borderBottom']")) return true;
+    return false;
+  }
+
+  // 点击新建按钮触发聚焦与守卫
+  addManagedListener(document, "click", (e) => {
+    if (isNewSessionButton(e.target)) {
+      triggerNewSessionComposerFocus();
+    }
+  }, true);
+
+  // 全局新建会话快捷键
+  addManagedListener(document, "keydown", (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.altKey && (e.key === "n" || e.key === "N")) {
+      triggerNewSessionComposerFocus();
+    }
+  }, true);
+
+  // 防 React 重渲染/路由切换瞬态导致的失焦丢失
+  addManagedListener(document, "focusout", () => {
+    if (performance.now() < newSessionFocusGuardUntil) {
+      queueMicrotask(() => {
+        if (document.activeElement === document.body) {
+          focusComposerEditable({ force: true });
+        }
+      });
+    }
+  }, true);
+
+  // 用户打字时立即解除守卫，不干扰日常输入
+  addManagedListener(document, "input", () => {
+    newSessionFocusGuardUntil = 0;
+  }, true);
+
+  window.__PI_ENH_FOCUS_COMPOSER__ = focusComposerEditable;
 

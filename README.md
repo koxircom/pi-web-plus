@@ -23,7 +23,7 @@ Standalone local browser UI for the [pi coding agent](https://github.com/earendi
 Pi Web Standalone requires Node.js 22.19.0 or newer (`node >=22.19`). Check your version with `node --version`, then install the prebuilt release tarball from [`koxircom/pi-web-standalone` GitHub Releases](https://github.com/koxircom/pi-web-standalone/releases) and start `pi-web`:
 
 ```bash
-npm install -g https://github.com/koxircom/pi-web-standalone/releases/download/v1.0.2/pi-web-standalone-1.0.2.tgz
+npm install -g https://github.com/koxircom/pi-web-standalone/releases/download/v1.1.0/pi-web-standalone-1.1.0.tgz
 pi-web
 ```
 
@@ -33,11 +33,15 @@ The CLI opens a browser after the server is ready. If it does not, open [http://
 
 If no model provider is configured yet, open the **Models** panel to sign in or add an API key.
 
-The command above uses the planned `v1.0.2` release asset (`pi-web-standalone-1.0.2.tgz`) as the target format. To install or upgrade to a specific release, stop the running process with `Ctrl+C`, replace both `v1.0.2` and `1.0.2` in the URL with the target `<version>` from [GitHub Releases](https://github.com/koxircom/pi-web-standalone/releases), and run the install command again:
+The command above uses the `v1.1.0` release asset (`pi-web-standalone-1.1.0.tgz`) as the standard example. To install or upgrade to a specific release, stop the running process with `Ctrl+C`, replace both `v1.1.0` and `1.1.0` in the URL with the target `<version>` from [GitHub Releases](https://github.com/koxircom/pi-web-standalone/releases), and run the install command again:
 
 ```bash
 npm install -g https://github.com/koxircom/pi-web-standalone/releases/download/v<version>/pi-web-standalone-<version>.tgz
 ```
+
+- **SDK & Global CLI boundary**: Pi Web `v1.1.0` declares `@earendil-works/pi-*` SDK dependencies at `0.99.1` for the Web UI runtime. Installing or upgrading Pi Web does **not** automatically upgrade a separately installed global `pi` Agent CLI.
+- **No bundled `node_modules` in `.tgz`**: The release tarball contains prebuilt `.next/` and static assets without `node_modules/`, so standard `npm install` dependency resolution is required (or reuse a verified matching `node_modules/` when staging offline).
+- **Preserve instance data on upgrade**: When upgrading or unpacking over an existing deployment, protect custom static manifests (`public/pi-*-manifest.json`), local sessions (`~/.pi/agent/sessions/`), and usage ledgers (`pi-usage-ledger.json` / `~/.pi/agent/state/`) so default empty templates do not overwrite live user data.
 
 To uninstall, run `npm uninstall -g @agegr/pi-web`.
 
@@ -77,10 +81,10 @@ Password authentication does not encrypt the connection. Do not expose Pi Web ov
 
 Server-side model and API requests honor the standard `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY` environment variables.
 
-On macOS or Linux (after installing the [GitHub Release tarball](https://github.com/koxircom/pi-web-standalone/releases/download/v1.0.2/pi-web-standalone-1.0.2.tgz)):
+On macOS or Linux (after installing the [GitHub Release tarball](https://github.com/koxircom/pi-web-standalone/releases/download/v1.1.0/pi-web-standalone-1.1.0.tgz)):
 
 ```bash
-npm install -g https://github.com/koxircom/pi-web-standalone/releases/download/v1.0.2/pi-web-standalone-1.0.2.tgz
+npm install -g https://github.com/koxircom/pi-web-standalone/releases/download/v1.1.0/pi-web-standalone-1.1.0.tgz
 HTTP_PROXY=http://127.0.0.1:7890 \
 HTTPS_PROXY=http://127.0.0.1:7890 \
 NO_PROXY=localhost,127.0.0.1 \
@@ -90,7 +94,7 @@ pi-web
 On Windows PowerShell:
 
 ```powershell
-npm install -g https://github.com/koxircom/pi-web-standalone/releases/download/v1.0.2/pi-web-standalone-1.0.2.tgz
+npm install -g https://github.com/koxircom/pi-web-standalone/releases/download/v1.1.0/pi-web-standalone-1.1.0.tgz
 $env:HTTP_PROXY = "http://127.0.0.1:7890"
 $env:HTTPS_PROXY = "http://127.0.0.1:7890"
 $env:NO_PROXY = "localhost,127.0.0.1"

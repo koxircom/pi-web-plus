@@ -61,6 +61,10 @@ import type { SessionStatsInfo } from "@/lib/pi-types";
 import type { FileViewerState } from "@/lib/file-viewer-state";
 import type { ToolEntry } from "@/lib/tool-presets";
 import { getSessionFamily } from "@/lib/session-family";
+import {
+  composeEnhancementWindowTitle,
+  registerEnhancementOpenSettings,
+} from "@/lib/enhancement-sidebar-bridge";
 import { getLastSettingsSection, type SettingsSection } from "@/lib/settings-navigation";
 
 type SessionCopyField = "file" | "id" | "projectDir" | "gitBranch" | "gitWorktree";
@@ -1163,15 +1167,28 @@ export function AppShell() {
   const windowTitle = activeCwdName ? `${activeCwdName} - Pi Web` : "Pi Web";
 
   useEffect(() => {
+    const win = window as unknown as Record<string, any>;
+    win.__PI_WEB_NATIVE_TITLE_BASE__ = windowTitle;
     const syncWindowTitle = () => {
-      if (document.title !== windowTitle) document.title = windowTitle;
+      const targetTitle = composeEnhancementWindowTitle(windowTitle, win);
+      if (document.title !== targetTitle) document.title = targetTitle;
     };
 
     syncWindowTitle();
-    const observer = new MutationObserver(syncWindowTitle);
-    observer.observe(document.head, { childList: true, subtree: true, characterData: true });
-    return () => observer.disconnect();
+    window.addEventListener("pi-enh-title-change", syncWindowTitle);
+    return () => {
+      window.removeEventListener("pi-enh-title-change", syncWindowTitle);
+      if (win.__PI_WEB_NATIVE_TITLE_BASE__ === windowTitle) {
+        delete win.__PI_WEB_NATIVE_TITLE_BASE__;
+      }
+    };
   }, [windowTitle]);
+
+  useEffect(() => {
+    return registerEnhancementOpenSettings((section) => {
+      setSettingsSection((section || "general") as SettingsSection);
+    });
+  }, []);
 
   const sidebarContent = (
     <>
@@ -1196,7 +1213,7 @@ export function AppShell() {
         onRunningSessionIdsChange={handleRunningSessionIdsChange}
         onSessionsChange={handleSessionsChange}
       />
-      <div style={{ padding: "8px", flexShrink: 0, display: "flex", justifyContent: "space-between", gap: 4 }}>
+      <div data-pi-enh-shortcuts-host="true" style={{ padding: "8px", flexShrink: 0, display: "flex", justifyContent: "space-between", gap: 4 }}>
         {([
           ["models", translate("common.models")],
           ["skills", translate("common.skills")],
