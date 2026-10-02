@@ -7,6 +7,7 @@ import type { TextContent, UserMessage } from "@/lib/types";
 import {
   clearDraft,
   getDraft,
+  getDraftInMemory,
   mergeRestoredSubmissionDraft,
   mergeRestoredSubmissionText,
   rekeyDraft as rekeyStoredDraft,
@@ -24,11 +25,13 @@ import {
 } from "@/lib/file-fuzzy";
 import { FolderIcon, getFileIcon } from "./FileIcons";
 import { ImagePreview } from "./ImagePreview";
-import { useIsMobile } from "@/hooks/useIsMobile";
+import { useIsMobile, allowsAutomaticEditableFocus, focusEditable } from "@/hooks/useIsMobile";
 import { useI18n } from "@/hooks/useI18n";
 import { useChatAppearance } from "@/hooks/useChatAppearance";
+import { useComposerLayoutPreferences } from "@/hooks/useComposerLayoutPreferences";
 import type { ToolPreset } from "@/lib/tool-presets";
 import { ModelSelector, type ModelSelectorOption } from "./ModelSelector";
+import { ThinkingSelector } from "./ThinkingSelector";
 
 export { filterModelOptions } from "./ModelSelector";
 
@@ -41,9 +44,9 @@ export interface AttachedImage {
 interface Props {
   onSend: (message: string, images?: AttachedImage[]) => void;
   onAbort: () => void;
-  onSteer?: (message: string, images?: AttachedImage[]) => void;
-  onFollowUp?: (message: string, images?: AttachedImage[]) => void;
-  onPromptWithStreamingBehavior?: (message: string, behavior: "steer" | "followUp", images?: AttachedImage[]) => void;
+  onSteer?: (message: string, images?: AttachedImage[]) => void | Promise<void>;
+  onFollowUp?: (message: string, images?: AttachedImage[]) => void | Promise<void>;
+  onPromptWithStreamingBehavior?: (message: string, behavior: "steer" | "followUp", images?: AttachedImage[]) => void | Promise<void>;
   isStreaming: boolean;
   /** Text-only composer without the session controls or outer spacing. */
   compact?: boolean;
@@ -86,6 +89,7 @@ interface Props {
 }
 
 export interface ChatInputHandle {
+  focusEditable: () => boolean;
   insertText: (text: string) => void;
   insertIfEmpty: (text: string) => void;
   replaceMessage: (message: UserMessage) => void;
@@ -108,6 +112,214 @@ const TOOL_PRESET_MAP: Record<ToolPresetLabel, ToolPreset> = {
 const COMPOSITION_END_ENTER_GRACE_MS = 100;
 const TEXT_COLLATOR = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
 const ANCHORED_MENU_GAP = 8;
+
+type ComposerMode = "normal" | "plan" | "goal";
+
+interface ComposerGoalSnapshot {
+  sessionId: string;
+  mode: ComposerMode;
+  goal: string;
+  paused: boolean;
+  pausePending: boolean;
+  goalElapsedMs: number | null;
+  goalActiveSinceMs: number | null;
+  statusKey: "paused" | "pending" | "active";
+  action: "pause" | "resume";
+}
+
+interface ComposerModeSnapshot {
+  sessionId: string | null;
+  mode: ComposerMode;
+  goal: ComposerGoalSnapshot | null;
+}
+
+function readComposerModeSnapshot(): ComposerModeSnapshot {
+  if (typeof window === "undefined") return { sessionId: null, mode: "normal", goal: null };
+
+  try {
+    const bridges = window as any;
+    const sessionId = bridges.__PI_ENH_GET_EFFECTIVE_COMPOSER_SESSION_ID__?.() || null;
+    const candidateMode = bridges.__PI_ENH_GET_COMPOSER_MODE__?.(sessionId);
+    const mode: ComposerMode = candidateMode === "plan" || candidateMode === "goal" ? candidateMode : "normal";
+    const goalCandidate = bridges.__PI_ENH_GET_COMPOSER_GOAL_STATE__?.(sessionId);
+    const goal = goalCandidate && typeof goalCandidate.goal === "string"
+      ? goalCandidate as ComposerGoalSnapshot
+      : null;
+
+    return { sessionId, mode, goal };
+  } catch (_) {
+    return { sessionId: null, mode: "normal", goal: null };
+  }
+}
+
+function formatComposerGoalDuration(totalMs: number): string {
+  const totalSeconds = Math.max(0, Math.floor(totalMs / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  const pad = (value: number) => value < 10 ? `0${value}` : String(value);
+  return hours > 0 ? `${hours}:${pad(minutes)}:${pad(seconds)}` : `${pad(minutes)}:${pad(seconds)}`;
+}
+
+/**
+ * Native React controls project the mode bridge's authoritative snapshot. Keeping
+ * the subscription in this leaf prevents mode/goal updates from rerendering the
+ * controlled textarea while the user is typing or composing IME text.
+ */
+function NativeComposerModeControls({ onModeChange }: { onModeChange: (mode: ComposerMode) => void }) {
+  const [snapshot, setSnapshot] = useState<ComposerModeSnapshot>(() => ({ sessionId: null, mode: "normal", goal: null }));
+  const [goalClockNow, setGoalClockNow] = useState(0);
+  const [addMenuOpen, setAddMenuOpen] = useState(false);
+
+  const refresh = useCallback(() => {
+    const nextSnapshot = readComposerModeSnapshot();
+    setSnapshot((current) => {
+      const currentGoal = current.goal;
+      const nextGoal = nextSnapshot.goal;
+      const sameGoal = currentGoal === nextGoal || (
+        currentGoal !== null &&
+        nextGoal !== null &&
+        currentGoal.sessionId === nextGoal.sessionId &&
+        currentGoal.mode === nextGoal.mode &&
+        currentGoal.goal === nextGoal.goal &&
+        currentGoal.paused === nextGoal.paused &&
+        currentGoal.pausePending === nextGoal.pausePending &&
+        currentGoal.goalElapsedMs === nextGoal.goalElapsedMs &&
+        currentGoal.goalActiveSinceMs === nextGoal.goalActiveSinceMs &&
+        currentGoal.statusKey === nextGoal.statusKey &&
+        currentGoal.action === nextGoal.action
+      );
+      return current.sessionId === nextSnapshot.sessionId && current.mode === nextSnapshot.mode && sameGoal
+        ? current
+        : nextSnapshot;
+    });
+    onModeChange(nextSnapshot.mode);
+  }, [onModeChange]);
+
+  useEffect(() => {
+    refresh();
+    const handleAddMenuChange = (event: Event) => {
+      setAddMenuOpen((event as CustomEvent<{ open?: boolean }>).detail?.open === true);
+    };
+    window.addEventListener("pi-enh-composer-mode-change", refresh);
+    window.addEventListener("pi-native-composer-preferences-change", refresh);
+    window.addEventListener("pi-enh-composer-add-menu-change", handleAddMenuChange);
+    return () => {
+      window.removeEventListener("pi-enh-composer-mode-change", refresh);
+      window.removeEventListener("pi-native-composer-preferences-change", refresh);
+      window.removeEventListener("pi-enh-composer-add-menu-change", handleAddMenuChange);
+    };
+  }, [refresh]);
+
+  useEffect(() => {
+    const goal = snapshot.goal;
+    if (
+      !goal ||
+      goal.statusKey !== "active" ||
+      typeof goal.goalElapsedMs !== "number" ||
+      typeof goal.goalActiveSinceMs !== "number"
+    ) return;
+
+    const interval = window.setInterval(() => setGoalClockNow(Date.now()), 1000);
+    return () => window.clearInterval(interval);
+  }, [
+    snapshot.goal?.sessionId,
+    snapshot.goal?.goal,
+    snapshot.goal?.statusKey,
+    snapshot.goal?.goalElapsedMs,
+    snapshot.goal?.goalActiveSinceMs,
+  ]);
+
+  const openAddMenu = useCallback((event: React.MouseEvent<HTMLButtonElement>) => {
+    const openMenu = (window as any).__PI_ENH_OPEN_COMPOSER_ADD_MENU__;
+    if (typeof openMenu === "function") {
+      try { openMenu(event.currentTarget); } catch (_) {}
+    }
+  }, []);
+
+  const handleGoalAction = useCallback((event: React.MouseEvent<HTMLButtonElement>) => {
+    const { goal } = snapshot;
+    const handleAction = (window as any).__PI_ENH_HANDLE_COMPOSER_GOAL_ACTION__;
+    if (goal && typeof handleAction === "function") {
+      try { void handleAction(goal.action, goal.sessionId, event.currentTarget); } catch (_) {}
+    }
+  }, [snapshot]);
+
+  const modeLabel = snapshot.mode === "plan" ? "计划" : snapshot.mode === "goal" ? "目标" : "";
+  const goal = snapshot.mode === "goal" ? snapshot.goal : null;
+  const goalText = goal?.goal?.trim() || "";
+  const goalDurationMs = goal && typeof goal.goalElapsedMs === "number"
+    ? goal.goalElapsedMs + (
+      goal.statusKey === "active" && typeof goal.goalActiveSinceMs === "number"
+        ? Math.max(0, (goalClockNow || Date.now()) - goal.goalActiveSinceMs)
+        : 0
+    )
+    : null;
+  const goalActionLabel = goal?.action === "resume"
+    ? (goal.statusKey === "pending" ? "取消待暂停" : "继续目标")
+    : "暂停目标";
+  const goalActionText = goal?.statusKey === "pending"
+    ? "取消"
+    : goal?.action === "resume"
+      ? "继续"
+      : "暂停";
+  const goalStatusLabel = goal?.statusKey === "pending"
+    ? "等待暂停"
+    : goal?.statusKey === "paused"
+      ? "已暂停"
+      : "进行中";
+
+  return (
+    <>
+      <button
+        type="button"
+        className={`chat-composer-add-btn pi-enh-composer-add-btn${addMenuOpen ? " active" : ""}`}
+        aria-label="打开附件与模式菜单"
+        aria-haspopup="menu"
+        aria-expanded={addMenuOpen}
+        title="添加附件或切换模式"
+        onClick={openAddMenu}
+      >
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" aria-hidden="true">
+          <path d="M8 3v10M3 8h10" />
+        </svg>
+      </button>
+      {modeLabel && (
+        <div className="chat-composer-mode-status" data-mode={snapshot.mode}>
+          <span className="chat-composer-mode-chip" aria-label={`${modeLabel}模式`}>
+            {modeLabel}
+          </span>
+          {goalText && goal && (
+            <div
+              className="chat-composer-goal-summary"
+              data-status={goal.statusKey}
+              role="group"
+              aria-label={`当前目标，${goalStatusLabel}：${goalText}`}
+              title={`${goalStatusLabel}：${goalText}`}
+            >
+              <span className="chat-composer-goal-status">{goalStatusLabel}</span>
+              <span className="chat-composer-goal-text">{goalText}</span>
+              {goalDurationMs !== null && (
+                <span className="chat-composer-goal-timer" aria-label="目标累计运行时间" title="目标累计运行时间">
+                  {formatComposerGoalDuration(goalDurationMs)}
+                </span>
+              )}
+              <button
+                type="button"
+                className="chat-composer-goal-action"
+                aria-label={goalActionLabel}
+                title={goalActionLabel}
+                onClick={handleGoalAction}
+              >
+                {goalActionText}
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+    </>
+  );
+}
 
 export function getUpwardMenuMaxHeight(menuBottom: number, visibleTop: number, gap = ANCHORED_MENU_GAP): number {
   return Math.max(0, Math.floor(menuBottom - visibleTop - gap));
@@ -573,7 +785,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   retryInfo, queuedMessages, inputHistory = [], onRecallQueue,
   slashCommands, slashCommandsLoading, onLoadSlashCommands,
   onBuiltinCommand,
-  soundEnabled, onSoundToggle, onAudioUnlock,
+ onAudioUnlock,
   onPromptWithStreamingBehavior,
   draftKey,
   cwd,
@@ -582,12 +794,11 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const { t, locale } = useI18n();
   const { fontSize } = useChatAppearance();
   const isMobile = useIsMobile();
-  const [value, setValue] = useState(() => (draftKey ? getDraft(draftKey)?.value ?? "" : ""));
+  const [value, setValue] = useState(() => (draftKey ? getDraftInMemory(draftKey)?.value ?? "" : ""));
   const [toolDropdownOpen, setToolDropdownOpen] = useState(false);
-  const [thinkingDropdownOpen, setThinkingDropdownOpen] = useState(false);
   const [controlsMenuOpen, setControlsMenuOpen] = useState(false);
   const [attachedImages, setAttachedImages] = useState<AttachedImage[]>(() => (
-    draftKey ? draftImagesToAttachedImages(getDraft(draftKey)?.images) : []
+    draftKey ? draftImagesToAttachedImages(getDraftInMemory(draftKey)?.images) : []
   ));
   const trimmedValue = value.trimStart();
   const bashMode = attachedImages.length === 0 && trimmedValue.startsWith("!");
@@ -617,7 +828,6 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
 
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const toolDropdownRef = useRef<HTMLDivElement>(null);
-  const thinkingDropdownRef = useRef<HTMLDivElement>(null);
   const controlsMenuRef = useRef<HTMLDivElement>(null);
   const historyMenuRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -635,10 +845,28 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const valueRef = useRef(value);
   const attachedImagesRef = useRef(attachedImages);
   const pendingImageCountRef = useRef(0);
+  const draftHydratedKeyRef = useRef<string | null>(null);
+  const queuedSubmissionPendingRef = useRef(false);
+  const [queuedSubmissionPending, setQueuedSubmissionPending] = useState(false);
+  const isUserFocusedRef = useRef(false);
+  const userSelectionRef = useRef<{ start: number; end: number } | null>(null);
   valueRef.current = value;
   attachedImagesRef.current = attachedImages;
 
+  useLayoutEffect(() => {
+    if (isUserFocusedRef.current && (document.activeElement === document.body || document.activeElement === null)) {
+      const ta = textareaRef.current;
+      if (ta && ta.isConnected && ta.style.display !== "none") {
+        focusEditable(ta, { preventScroll: true });
+        if (userSelectionRef.current) {
+          try { ta.setSelectionRange(userSelectionRef.current.start, userSelectionRef.current.end); } catch (_) {}
+        }
+      }
+    }
+  });
+
   useImperativeHandle(ref, () => ({
+    focusEditable() { return focusEditable(textareaRef.current, { preventScroll: true }); },
     insertIfEmpty(text: string) {
       const ta = textareaRef.current;
       const current = ta ? ta.value : value;
@@ -648,7 +876,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
       setAtQuery(null);
       requestAnimationFrame(() => {
         if (!ta) return;
-        ta.focus();
+        focusEditable(ta);
         ta.style.height = "auto";
         ta.style.height = `${Math.min(ta.scrollHeight, 200)}px`;
       });
@@ -671,7 +899,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
       });
       requestAnimationFrame(() => {
         if (!ta) return;
-        ta.focus();
+        focusEditable(ta);
         ta.style.height = "auto";
         ta.style.height = `${Math.min(ta.scrollHeight, 200)}px`;
       });
@@ -688,7 +916,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
       setAtQuery(null);
       requestAnimationFrame(() => {
         if (!ta) return;
-        ta.focus();
+        focusEditable(ta);
         ta.setSelectionRange(combined.length, combined.length);
         ta.style.height = "auto";
         ta.style.height = `${Math.min(ta.scrollHeight, 200)}px`;
@@ -753,10 +981,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
       if (!targetsCurrentComposer) return;
       const restoredIncomingImages = draftImagesToAttachedImages(images);
       const restoredImages = restoredIncomingImages.length
-        ? [
-            ...restoredIncomingImages,
-            ...attachedImagesRef.current,
-          ]
+        ? [...restoredIncomingImages, ...attachedImagesRef.current]
         : attachedImagesRef.current;
       // Session promotion can rekey this composer before React flushes the
       // functional updates below, so update the imperative snapshot first.
@@ -779,7 +1004,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
       requestAnimationFrame(() => {
         const ta = textareaRef.current;
         if (!ta) return;
-        ta.focus();
+        focusEditable(ta);
         ta.setSelectionRange(ta.value.length, ta.value.length);
         ta.style.height = "auto";
         ta.style.height = `${Math.min(ta.scrollHeight, 200)}px`;
@@ -804,7 +1029,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
         if (!ta) return;
         const pos = start + sep.length + text.length;
         ta.setSelectionRange(pos, pos);
-        ta.focus();
+        focusEditable(ta);
         ta.style.height = "auto";
         ta.style.height = `${Math.min(ta.scrollHeight, 200)}px`;
       });
@@ -876,7 +1101,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   }, [clearImages, draftKey]);
 
   useEffect(() => {
-    if (!draftKey || draftKeyRef.current !== draftKey) return;
+    if (!draftKey || draftKeyRef.current !== draftKey || draftHydratedKeyRef.current !== draftKey) return;
     setDraft(draftKey, {
       value,
       images: attachedImages.map(imageToDraftImage),
@@ -885,9 +1110,9 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
 
   useEffect(() => {
     const previousDraftKey = draftKeyRef.current;
-    if (previousDraftKey === draftKey) return;
+    if (previousDraftKey === draftKey && draftHydratedKeyRef.current === (draftKey ?? null)) return;
 
-    if (previousDraftKey) {
+    if (previousDraftKey && previousDraftKey !== draftKey) {
       setDraft(previousDraftKey, {
         value: valueRef.current,
         images: attachedImagesRef.current.map(imageToDraftImage),
@@ -896,6 +1121,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
 
     const draft = draftKey ? getDraft(draftKey) : null;
     draftKeyRef.current = draftKey;
+    draftHydratedKeyRef.current = draftKey ?? null;
     const nextValue = draft?.value ?? "";
     const nextImages = draftImagesToAttachedImages(draft?.images);
     valueRef.current = nextValue;
@@ -956,10 +1182,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
 
   const handleSend = useCallback(async () => {
     const msg = value.trim();
-    const currentImageCount = Math.max(
-      attachedImages.length,
-      typeof attachedImagesRef !== "undefined" ? attachedImagesRef.current.length : 0,
-    );
+    const currentImageCount = Math.max(attachedImages.length, attachedImagesRef.current.length);
     if (!msg && !currentImageCount) return;
     if (currentImageCount > MAX_ATTACHED_IMAGES) return;
     onAudioUnlock?.();
@@ -1005,7 +1228,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const hasInputText = Boolean(value.trim());
   const tooManyImagesNotice = getTooManyImagesNotice(attachedImages.length, MAX_ATTACHED_IMAGES, locale);
   const canSendMessage = (hasInputText || attachedImages.length > 0) && !tooManyImagesNotice;
-  const canQueueStreamingMessage = (hasInputText || attachedImages.length > 0) && !tooManyImagesNotice;
+  const canQueueStreamingMessage = (hasInputText || attachedImages.length > 0) && !tooManyImagesNotice && !queuedSubmissionPending;
   // Warn when images are attached but the selected model is known not to accept
   // image input (#584), including a resolved default. Unknown models stay silent.
   const showImageUnsupportedWarning = (
@@ -1136,7 +1359,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     requestAnimationFrame(() => {
       const el = textareaRef.current;
       if (!el) return;
-      el.focus();
+      focusEditable(el);
       el.setSelectionRange(newPos, newPos);
       el.style.height = "auto";
       el.style.height = `${Math.min(el.scrollHeight, 200)}px`;
@@ -1181,7 +1404,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     requestAnimationFrame(() => {
       const ta = textareaRef.current;
       if (!ta) return;
-      ta.focus();
+      focusEditable(ta);
       ta.setSelectionRange(text.length, text.length);
       ta.style.height = "auto";
       ta.style.height = `${Math.min(ta.scrollHeight, 200)}px`;
@@ -1196,19 +1419,18 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     requestAnimationFrame(() => {
       const ta = textareaRef.current;
       if (!ta) return;
-      ta.focus();
+      focusEditable(ta);
       ta.setSelectionRange(nextValue.length, nextValue.length);
       ta.style.height = "auto";
       ta.style.height = `${Math.min(ta.scrollHeight, 200)}px`;
     });
   }, []);
 
-  const sendQueued = useCallback((mode: "steer" | "followup") => {
+  const sendQueued = useCallback(async (mode: "steer" | "followup") => {
+    if (queuedSubmissionPendingRef.current) return;
     const msg = value.trim();
-    const currentImageCount = Math.max(
-      attachedImages.length,
-      typeof attachedImagesRef !== "undefined" ? attachedImagesRef.current.length : 0,
-    );
+    const images = attachedImagesRef.current;
+    const currentImageCount = Math.max(attachedImages.length, images.length);
     if (!msg && !currentImageCount) return;
     if (currentImageCount > MAX_ATTACHED_IMAGES) return;
     onAudioUnlock?.();
@@ -1216,17 +1438,21 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
       void runBuiltinCommand(msg);
       return;
     }
-    const streamingBehavior = mode === "steer" ? "steer" : "followUp";
-    if (msg.startsWith("/") && onPromptWithStreamingBehavior) {
-      clearInput();
-      onPromptWithStreamingBehavior(msg, streamingBehavior, attachedImages.length ? attachedImages : undefined);
-      return;
-    }
+    queuedSubmissionPendingRef.current = true;
+    setQueuedSubmissionPending(true);
     clearInput();
-    if (mode === "steer" && onSteer) {
-      onSteer(msg, attachedImages.length ? attachedImages : undefined);
-    } else if (mode === "followup" && onFollowUp) {
-      onFollowUp(msg, attachedImages.length ? attachedImages : undefined);
+    try {
+      const submittedImages = images.length ? images : undefined;
+      if (msg.startsWith("/") && onPromptWithStreamingBehavior) {
+        await onPromptWithStreamingBehavior(msg, mode === "steer" ? "steer" : "followUp", submittedImages);
+      } else if (mode === "steer" && onSteer) {
+        await onSteer(msg, submittedImages);
+      } else if (mode === "followup" && onFollowUp) {
+        await onFollowUp(msg, submittedImages);
+      }
+    } finally {
+      queuedSubmissionPendingRef.current = false;
+      setQueuedSubmissionPending(false);
     }
   }, [value, attachedImages, onBuiltinCommand, onPromptWithStreamingBehavior, onSteer, onFollowUp, clearInput, onAudioUnlock, runBuiltinCommand]);
 
@@ -1454,7 +1680,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     setHistoryMenuOpen(false);
     updateAtQuery(nextValue, start + markdown.length);
     requestAnimationFrame(() => {
-      ta.focus();
+      focusEditable(ta);
       ta.setSelectionRange(start + markdown.length, start + markdown.length);
     });
   }, [compact, processImageFiles, updateAtQuery]);
@@ -1575,9 +1801,6 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
       if (toolDropdownRef.current && !toolDropdownRef.current.contains(e.target as Node)) {
         setToolDropdownOpen(false);
       }
-      if (thinkingDropdownRef.current && !thinkingDropdownRef.current.contains(e.target as Node)) {
-        setThinkingDropdownOpen(false);
-      }
       if (controlsMenuRef.current && !controlsMenuRef.current.contains(e.target as Node)) {
         setControlsMenuOpen(false);
       }
@@ -1591,13 +1814,101 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
 
   useEffect(() => {
     if (!isStreaming) return;
-    setThinkingDropdownOpen(false);
     setToolDropdownOpen(false);
   }, [isStreaming]);
 
   useEffect(() => {
     if (!isMobile) setControlsMenuOpen(false);
   }, [isMobile]);
+
+  const {
+    codexLayoutEnabled,
+    modesEnabled,
+    customHeight,
+    setCustomHeight,
+  } = useComposerLayoutPreferences();
+  const [nativeComposerMode, setNativeComposerMode] = useState<ComposerMode>("normal");
+  const handleNativeComposerModeChange = useCallback((mode: ComposerMode) => {
+    setNativeComposerMode((current) => current === mode ? current : mode);
+  }, []);
+
+  const handleModesHostReady = useCallback((node: HTMLDivElement | null) => {
+    if (node) window.dispatchEvent(new Event("pi-native-composer-preferences-change"));
+  }, []);
+  const [dragHeight, setDragHeight] = useState<number | null>(null);
+  const isDraggingRef = useRef(false);
+  const startDragYRef = useRef(0);
+  const startHeightRef = useRef(0);
+  const effectiveCustomHeight = dragHeight ?? customHeight;
+
+  const handleResizerPointerDown = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    if (e.button !== 0) return;
+    e.preventDefault();
+    const handle = e.currentTarget;
+    try {
+      handle.setPointerCapture(e.pointerId);
+    } catch (_) {}
+    isDraggingRef.current = true;
+    startDragYRef.current = e.clientY;
+    const ta = textareaRef.current;
+    // The formatting plugin owns its editable inside the editor host. Measure
+    // that visible editable during a gesture, never the hidden textarea proxy.
+    const formatted = ta?.parentElement?.querySelector<HTMLElement>(".pi-enh-formatted-composer:not([style*='display: none'])");
+    startHeightRef.current = (formatted ?? ta)?.getBoundingClientRect().height || customHeight || 44;
+    setDragHeight(startHeightRef.current);
+  }, [customHeight]);
+
+  const handleResizerPointerMove = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    if (!isDraggingRef.current) return;
+    const delta = startDragYRef.current - e.clientY;
+    const rawHeight = startHeightRef.current + delta;
+    const viewportHeight = window.visualViewport?.height || window.innerHeight;
+    const dynamicMaxHeight = Math.max(44, Math.floor(viewportHeight * 0.8));
+    const boundedHeight = Math.max(44, Math.min(dynamicMaxHeight, Math.round(rawHeight)));
+    setDragHeight(boundedHeight);
+  }, []);
+
+  const handleResizerPointerUp = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    if (!isDraggingRef.current) return;
+    isDraggingRef.current = false;
+    try {
+      e.currentTarget.releasePointerCapture(e.pointerId);
+    } catch (_) {}
+    if (dragHeight !== null) {
+      setCustomHeight(dragHeight);
+      setDragHeight(null);
+    }
+  }, [dragHeight, setCustomHeight]);
+
+  const handleResizerPointerCancel = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    if (!isDraggingRef.current) return;
+    isDraggingRef.current = false;
+    try {
+      e.currentTarget.releasePointerCapture(e.pointerId);
+    } catch (_) {}
+    setDragHeight(null);
+  }, []);
+
+  const isCodexActive = codexLayoutEnabled && !compact;
+  const hasUserContent = Boolean(value && value.trim().length > 0);
+
+  const rootClassName = isCodexActive
+    ? [
+        "chat-composer-card pi-enh-cursor-composer",
+        "chat-composer-model-pill pi-enh-composer-model-pill",
+        effectiveCustomHeight ? "chat-composer-custom-height" : "",
+        isStreaming ? "has-running-controls" : "",
+        hasUserContent ? "has-user-content" : "",
+      ].filter(Boolean).join(" ")
+    : "chat-composer-classic";
+
+  const rootStyle: React.CSSProperties = {
+    maxWidth: "var(--chat-content-max-width, 820px)",
+    margin: "0 auto",
+    ...(isCodexActive && effectiveCustomHeight
+      ? { "--pi-composer-custom-height": `${effectiveCustomHeight}px` }
+      : {}),
+  } as React.CSSProperties;
 
 
 
@@ -1630,15 +1941,26 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
           e.target.value = "";
         }}
       />}
-      <div className="pi-enh-cursor-composer pi-enh-composer-model-pill" style={{ maxWidth: "var(--chat-content-max-width, 820px)", margin: "0 auto" }}>
+      <div className={rootClassName} style={rootStyle} data-pi-native-composer-layout="true">
+        {isCodexActive && (
+          <div
+            className={`chat-composer-resizer ${dragHeight !== null ? "chat-composer-resizing" : ""}`}
+            role="separator"
+            aria-label="拖拽调整输入框高度"
+            aria-orientation="horizontal"
+            onPointerDown={handleResizerPointerDown}
+            onPointerMove={handleResizerPointerMove}
+            onPointerUp={handleResizerPointerUp}
+            onPointerCancel={handleResizerPointerCancel}
+          >
+            <div className="chat-composer-resizer-line" />
+          </div>
+        )}
+        <div className={isCodexActive ? "chat-composer-banner-stack" : ""}>
         <ModelErrorBanner error={modelError} />
         <ModelScopeWarningBanner warnings={modelScopeWarnings} />
         {tooManyImagesNotice && (
-          <ModelNoticeBanner
-            tone="error"
-            title={tooManyImagesNotice.title}
-            body={tooManyImagesNotice.body}
-          />
+          <ModelNoticeBanner tone="error" title={tooManyImagesNotice.title} body={tooManyImagesNotice.body} />
         )}
         {showImageUnsupportedWarning && (() => {
           const entry = modelList?.find((m) => m.provider === model?.provider && m.id === model?.modelId);
@@ -1651,6 +1973,11 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
             />
           );
         })()}
+        {queuedSubmissionPending && (
+          <div className="chat-composer-submit-pending" role="status" style={{ color: "var(--text-dim)", fontSize: 12, marginBottom: 6 }}>
+            {t("chat.submittingQueued")}
+          </div>
+        )}
         {/* Queued steering / follow-up messages (delivered by pi on upcoming turns) */}
         {((queuedMessages?.steering.length ?? 0) + (queuedMessages?.followUp.length ?? 0)) > 0 && (
           <div style={{
@@ -1767,9 +2094,22 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
             {compactError}
           </div>
         )}
+        {bashMode && (
+          <div className="text-xs px-2 py-1" style={{ color: bashExcluded ? "var(--text-muted)" : "var(--accent)", marginTop: 4 }}>
+             {t("chat.shell")} · {bashExcluded ? t("chat.outputLocal") : t("chat.outputModel")}
+          </div>
+        )}
         {/* Image previews */}
         {attachedImages.length > 0 && (
-          <div style={{ display: "flex", gap: 6, marginBottom: 6, flexWrap: "wrap" }}>
+          <div
+            className={isCodexActive ? "chat-composer-attachments" : ""}
+            style={{
+              display: "flex",
+              gap: 6,
+              marginBottom: isCodexActive ? 0 : 6,
+              flexWrap: isCodexActive ? "nowrap" : "wrap",
+            }}
+          >
             {attachedImages.map((img, i) => (
               <div key={i} style={{ position: "relative", flexShrink: 0 }}>
                 <ImagePreview key={img.previewUrl} src={img.previewUrl}>
@@ -1777,7 +2117,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                   <img
                     src={img.previewUrl}
                     alt=""
-                    style={{ width: 56, height: 56, objectFit: "cover", borderRadius: 6, border: "1px solid var(--border)", display: "block" }}
+                    style={{ width: isCodexActive ? 44 : 56, height: isCodexActive ? 44 : 56, objectFit: "cover", borderRadius: 6, border: "1px solid var(--border)", display: "block" }}
                   />
                 </ImagePreview>
                 <button
@@ -1800,8 +2140,12 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
           </div>
         )}
 
+        </div>
         {/* Main input */}
-        <div style={{ position: "relative", minWidth: 0 }}>
+        <div
+          className={isCodexActive ? "chat-composer-editor-container chat-composer-contents" : ""}
+          style={{ position: "relative", minWidth: 0, display: isCodexActive ? "contents" : undefined }}
+        >
           {historyMenuOpen && inputHistory.length > 0 && (
             <div
               ref={historyMenuRef}
@@ -2145,7 +2489,10 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
             );
           })()}
           <div
-            style={{
+            className={isCodexActive ? "chat-composer-editor-host chat-composer-contents" : ""}
+            style={isCodexActive ? ({
+              display: "contents",
+            } as React.CSSProperties) : ({
               minWidth: 0,
               display: "flex",
               flexDirection: compact ? "column" : "row",
@@ -2159,7 +2506,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
               padding: compact ? 0 : "10px 10px 10px 14px",
               boxShadow: compact ? "none" : "0 1px 2px rgba(15,23,42,0.04), 0 8px 24px -12px rgba(15,23,42,0.10)",
               transition: "border-color 0.15s, background 0.15s, box-shadow 0.15s",
-            } as React.CSSProperties}
+            } as React.CSSProperties)}
           >
           <textarea
             ref={textareaRef}
@@ -2171,10 +2518,40 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
               setValue(e.target.value);
               setHistoryMenuOpen(false);
               updateAtQuery(e.target.value, e.target.selectionStart);
+              userSelectionRef.current = { start: e.target.selectionStart, end: e.target.selectionEnd };
             }}
             onSelect={(e) => {
               const el = e.currentTarget;
               updateAtQuery(el.value, el.selectionStart);
+              userSelectionRef.current = { start: el.selectionStart, end: el.selectionEnd };
+            }}
+            onFocus={(e) => {
+              isUserFocusedRef.current = true;
+              userSelectionRef.current = { start: e.currentTarget.selectionStart, end: e.currentTarget.selectionEnd };
+            }}
+            onBlur={(e) => {
+              if (!allowsAutomaticEditableFocus()) {
+                isUserFocusedRef.current = false;
+                userSelectionRef.current = null;
+                return;
+              }
+              const related = e.relatedTarget as HTMLElement | null;
+              if (related && related !== document.body && !e.currentTarget.contains(related)) {
+                isUserFocusedRef.current = false;
+                userSelectionRef.current = null;
+                return;
+              }
+              queueMicrotask(() => {
+                if (isUserFocusedRef.current && (document.activeElement === document.body || document.activeElement === null)) {
+                  const ta = textareaRef.current;
+                  if (ta && ta.isConnected && ta.style.display !== "none") {
+                    focusEditable(ta, { preventScroll: true });
+                    if (userSelectionRef.current) {
+                      try { ta.setSelectionRange(userSelectionRef.current.start, userSelectionRef.current.end); } catch (_) {}
+                    }
+                  }
+                }
+              });
             }}
             onKeyDown={handleKeyDown}
             onCompositionStart={() => {
@@ -2192,6 +2569,10 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
               isStreaming && (onSteer || onFollowUp)
                 ? t("chat.steerPlaceholder")
                 : isStreaming ? t("chat.agentPlaceholder")
+                : isCodexActive && modesEnabled && nativeComposerMode === "plan"
+                  ? "描述你的任务以生成方案…"
+                  : isCodexActive && modesEnabled && nativeComposerMode === "goal"
+                    ? "描述你的目标，定义可衡量的成果，以获得最佳效果…"
                 : ""
             }
             rows={1}
@@ -2207,20 +2588,25 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
               fontSize: "var(--chat-content-font-size, 14px)",
               lineHeight: 1.6,
               fontFamily: "inherit",
-              minHeight: compact ? 96 : 24,
-              maxHeight: 200,
+              height: isCodexActive && effectiveCustomHeight ? effectiveCustomHeight : undefined,
+              minHeight: isCodexActive ? (effectiveCustomHeight ?? undefined) : (compact ? 96 : 24),
+              maxHeight: isCodexActive ? (effectiveCustomHeight ?? undefined) : 200,
               overflow: "auto",
             }}
           />
 
           {isStreaming ? (
-            <div style={{ display: "flex", alignItems: "center", gap: 6, flexShrink: 0, alignSelf: "flex-end" }}>
+            <div
+              className={isCodexActive ? "chat-composer-send-group chat-composer-actions" : ""}
+              style={isCodexActive ? undefined : { display: "flex", alignItems: "center", gap: 6, flexShrink: 0, alignSelf: "flex-end" }}
+            >
               {onSteer && (
                 <button
                   onClick={() => sendQueued("steer")}
                   disabled={!canQueueStreamingMessage}
                   title={t("chat.steerHint")}
-                  style={{
+                  className={isCodexActive ? "chat-composer-steer" : ""}
+                  style={isCodexActive ? undefined : {
                     display: "flex", alignItems: "center", gap: 5,
                     padding: "7px 12px",
                     background: canQueueStreamingMessage ? "rgba(234,179,8,0.12)" : "none",
@@ -2235,7 +2621,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                   <svg width="12" height="12" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
                     <path d="M5 1 L9 5 L5 9" /><line x1="1" y1="5" x2="9" y2="5" />
                   </svg>
-                  {t("chat.steer")}
+                  <span className={isCodexActive ? "chat-composer-steer-label" : ""}>{t("chat.steer")}</span>
                 </button>
               )}
               {onFollowUp && (
@@ -2244,7 +2630,8 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                   disabled={!canQueueStreamingMessage}
                   title={`${t("chat.followUpHint")} (${isMobile ? "Ctrl/Cmd+" : ""}Alt/Option+Enter)`}
                   aria-keyshortcuts={isMobile ? "Control+Alt+Enter Meta+Alt+Enter" : "Alt+Enter"}
-                  style={{
+                  className={isCodexActive ? "chat-composer-followup pi-enh-cursor-send pi-enh-cursor-followup" : ""}
+                  style={isCodexActive ? undefined : {
                     display: "flex", alignItems: "center", gap: 5,
                     padding: "7px 12px",
                     background: canQueueStreamingMessage ? "rgba(129,140,248,0.12)" : "none",
@@ -2256,10 +2643,16 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                     transition: "background 0.12s",
                   }}
                 >
-                  <svg width="12" height="12" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-                    <line x1="5" y1="1" x2="5" y2="6" /><polyline points="2.5 3.5 5 1 7.5 3.5" />
-                    <line x1="2" y1="9" x2="8" y2="9" />
-                  </svg>
+                  {isCodexActive ? (
+                    <svg width="12" height="12" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <path d="M8 13V3M3 8l5-5 5 5" />
+                    </svg>
+                  ) : (
+                    <svg width="12" height="12" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+                      <line x1="5" y1="1" x2="5" y2="6" /><polyline points="2.5 3.5 5 1 7.5 3.5" />
+                      <line x1="2" y1="9" x2="8" y2="9" />
+                    </svg>
+                  )}
                   {t("chat.followUp")}
                 </button>
               )}
@@ -2269,59 +2662,84 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
               onClick={handleSend}
               disabled={!canSendMessage}
               title={tooManyImagesNotice ? `${tooManyImagesNotice.title} — ${tooManyImagesNotice.body}` : undefined}
-              style={{
+              aria-label={t("chat.send")}
+              className={isCodexActive ? "chat-composer-send pi-enh-cursor-send" : ""}
+              style={isCodexActive ? undefined : {
                 flexShrink: 0,
                 alignSelf: "flex-end",
                 display: "flex", alignItems: "center", gap: 6,
                 padding: "7px 14px",
-                background: canSendMessage ? "var(--accent)" : "var(--bg-panel)",
+                background: (value.trim() || attachedImages.length) ? "var(--accent)" : "var(--bg-panel)",
                 border: "none",
                 borderRadius: 8,
-                color: canSendMessage ? "var(--accent-contrast)" : "var(--text-dim)",
-                cursor: canSendMessage ? "pointer" : "not-allowed",
+                color: (value.trim() || attachedImages.length) ? "var(--accent-contrast)" : "var(--text-dim)",
+                cursor: (value.trim() || attachedImages.length) ? "pointer" : "not-allowed",
                 fontSize: 13,
                 fontWeight: 600,
                 letterSpacing: "-0.01em",
-                boxShadow: canSendMessage ? "0 1px 3px color-mix(in srgb, var(--accent) 25%, transparent)" : "none",
+                boxShadow: (value.trim() || attachedImages.length) ? "0 1px 3px color-mix(in srgb, var(--accent) 25%, transparent)" : "none",
                 transition: "background 0.15s, box-shadow 0.15s",
               }}
             >
-              <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <line x1="2" y1="7" x2="11" y2="7" />
-                <polyline points="7.5 3 12 7 7.5 11" />
-              </svg>
-              {t("chat.send")}
+              {isCodexActive ? (
+                <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                  <path d="M8 13V3M3 8l5-5 5 5" />
+                </svg>
+              ) : (
+                <>
+                  <svg width="14" height="14" viewBox="0 0 14 14" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <line x1="2" y1="7" x2="11" y2="7" />
+                    <polyline points="7.5 3 12 7 7.5 11" />
+                  </svg>
+                  {t("chat.send")}
+                </>
+              )}
             </button>
           )}
           </div>
         </div>
 
         {/* Bash mode status label */}
-        {bashMode && (
-          <div className="text-xs px-2 py-1" style={{ color: bashExcluded ? "var(--text-muted)" : "var(--accent)", marginTop: 4 }}>
-             {t("chat.shell")} · {bashExcluded ? t("chat.outputLocal") : t("chat.outputModel")}
-          </div>
-        )}
-
         {/* Bottom bar: left | center (context) | right */}
-        {!compact && <div style={{
-          marginTop: 8,
-          display: isMobile ? "grid" : "flex",
-          gridTemplateColumns: isMobile ? "minmax(0, 1fr) auto" : undefined,
-          alignItems: "center",
-          gap: 6,
-        }}>
+        {!compact && <div
+          data-pi-composer-toolbar="true"
+          className={isCodexActive ? "chat-composer-toolbar chat-composer-contents" : ""}
+          style={isCodexActive ? { display: "contents" } : {
+            marginTop: 8,
+            display: isMobile ? "grid" : "flex",
+            gridTemplateColumns: isMobile ? "minmax(0, 1fr) auto" : undefined,
+            alignItems: "center",
+            gap: 6,
+          }}
+        >
 
-          {/* LEFT: attach + model selector (idle) or steer/followup toggle (streaming) */}
-          <div style={{ flex: isMobile ? "1 1 auto" : "0 0 auto", minWidth: 0, display: "flex", alignItems: "center", gap: 2 }}>
+          {/* LEFT: add button + attach image button */}
+          <div
+            className={isCodexActive ? "chat-composer-left chat-composer-contents" : ""}
+            style={isCodexActive ? { display: "contents" } : { flex: isMobile ? "1 1 auto" : "0 0 auto", minWidth: 0, display: "flex", alignItems: "center", gap: 2 }}
+          >
+            {isCodexActive && modesEnabled && (
+              <div
+                ref={handleModesHostReady}
+                className="chat-composer-mode-host"
+                data-pi-composer-mode-host="true"
+              >
+                <NativeComposerModeControls onModeChange={handleNativeComposerModeChange} />
+              </div>
+            )}
             <button
               onClick={() => fileInputRef.current?.click()}
-             title={t("chat.attachImage")}
+              title={t("chat.attachImage")}
+              data-pi-attach-image="true"
+              className={isCodexActive ? "chat-composer-attach-btn" : ""}
               style={{
                 flexShrink: 0, display: "flex", alignItems: "center", justifyContent: "center",
-                width: 32, height: 32, padding: 0,
+                width: isCodexActive ? 28 : 32,
+                height: isCodexActive ? 28 : 32,
+                minWidth: isCodexActive ? 28 : 32,
+                padding: 0,
                 background: "none", border: "none",
-                borderRadius: 9,
+                borderRadius: isCodexActive ? 8 : 9,
                 color: attachedImages.length ? "var(--accent)" : "var(--text-muted)",
                 cursor: "pointer",
                 opacity: 1,
@@ -2342,13 +2760,13 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                 <polyline points="21 15 16 10 5 21" />
               </svg>
             </button>
-            {/* Model selector - visible always, disabled while the session or switch is busy */}
-            {(modelOptions.length > 0 || model || modelError) && onModelChange && (
+            {/* 经典模式下模型选择器留在左侧 */}
+            {!isCodexActive && (modelOptions.length > 0 || model || modelError) && onModelChange && (
               <ModelSelector
                 options={modelOptions}
                 value={model}
                 onChange={onModelChange}
-                disabled={isStreaming}
+                // SDK refreshes the selected model at the next request boundary.
                 busy={modelSwitching}
                 isAutoSelection={isAutoModelSelection}
               />
@@ -2356,29 +2774,94 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
           </div>
 
           {/* spacer */}
-          {!isMobile && <div style={{ flex: 1 }} />}
+          {!isMobile && !isCodexActive && <div style={{ flex: 1 }} />}
 
-          {/* RIGHT: thinking + tools preset + compact + sound (idle) | Stop + sound (streaming) */}
-          <div ref={controlsMenuRef} style={{
-            flex: "0 0 auto",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "flex-end",
-            position: "relative",
-            marginLeft: isMobile ? 0 : "auto",
-          }}>
-            {isMobile && (
+          {/* RIGHT: controls */}
+          <div
+            ref={controlsMenuRef}
+            className={isCodexActive ? "chat-composer-right chat-composer-contents" : ""}
+            style={isCodexActive ? { display: "contents" } : {
+              flex: "0 0 auto",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "flex-end",
+              position: "relative",
+              marginLeft: isMobile ? 0 : "auto",
+            }}
+          >
+            <div className={isCodexActive ? "chat-composer-model-controls" : undefined} style={!isCodexActive ? { display: "flex", alignItems: "center", gap: 2 } : undefined}>
+            {/* Codex 模式下模型选择器位于 Row 3 倒数第 4 列 */}
+            {isCodexActive && (modelOptions.length > 0 || model || modelError) && onModelChange && (
+              <ModelSelector
+                options={modelOptions}
+                value={model}
+                onChange={onModelChange}
+                // SDK refreshes the selected model at the next request boundary.
+                busy={modelSwitching}
+                isAutoSelection={isAutoModelSelection}
+              />
+            )}
+
+            {onThinkingLevelChange && (
+              <ThinkingSelector
+                levels={THINKING_LEVELS.filter((level) => !availableThinkingLevels || level === "auto" || availableThinkingLevels.includes(level))}
+                value={isAutoThinkingSelection ? "auto" : resolvedThinkingLevel ?? "auto"}
+                displayLabel={thinkingDisplayLabel}
+                levelMap={thinkingLevelMap}
+                descriptions={Object.fromEntries(THINKING_LEVELS.map((level) => [level, t(THINKING_LEVEL_DESC_KEYS[level])]))}
+                label={t("chat.changeReasoningLabel")}
+                title={isStreaming ? t("chat.currentReasoning", { level: thinkingDisplayLabel }) : t("chat.changeReasoning", { level: thinkingDisplayLabel })}
+                disabled={isStreaming}
+                native={isCodexActive}
+                onChange={onThinkingLevelChange}
+              />
+            )}
+            </div>
+
+            {/* 运行态 Stop 按钮 (在 Codex 模式下为 24px 圆形图标按钮，位于 Col -2) */}
+            {isStreaming && (
+              <button
+                onClick={onAbort}
+                title={t("chat.stopAgent")}
+                aria-label={t("chat.stopAgent")}
+                className={isCodexActive ? "chat-composer-stop" : ""}
+                style={isCodexActive ? undefined : {
+                  display: "flex", alignItems: "center", gap: 6,
+                  padding: "8px 14px",
+                  height: 32,
+                  background: "rgba(239,68,68,0.08)",
+                  border: "1px solid rgba(239,68,68,0.3)",
+                  borderRadius: 9,
+                  color: "#ef4444",
+                  cursor: "pointer",
+                  fontSize: 12, fontWeight: 600,
+                  whiteSpace: "nowrap", letterSpacing: "-0.01em",
+                  transition: "background 0.12s",
+                }}
+                onMouseEnter={(e) => { e.currentTarget.style.background = "rgba(239,68,68,0.16)"; }}
+                onMouseLeave={(e) => { e.currentTarget.style.background = "rgba(239,68,68,0.08)"; }}
+              >
+                <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
+                  <rect x="2" y="2" width="6" height="6" rx="1" fill="currentColor" />
+                </svg>
+                {!isCodexActive && t("chat.stop")}
+              </button>
+            )}
+
+            {/* 移动端 More controls 按钮 */}
+            {isMobile && !isStreaming && (
               <button
                 type="button"
-                 title={controlsMenuOpen ? undefined : t("chat.moreControls")}
-                 aria-label={t("chat.moreControls")}
+                className={isCodexActive ? "chat-composer-more-btn" : ""}
+                title={controlsMenuOpen ? undefined : t("chat.moreControls")}
+                aria-label={t("chat.moreControls")}
                 aria-expanded={controlsMenuOpen}
                 aria-hidden={controlsMenuOpen || undefined}
                 tabIndex={controlsMenuOpen ? -1 : undefined}
                 onClick={() => {
-                  setControlsMenuOpen(true);
+                  setControlsMenuOpen((v) => !v);
                 }}
-                style={{
+                style={isCodexActive ? undefined : {
                   display: "flex",
                   alignItems: "center",
                   justifyContent: "center",
@@ -2410,126 +2893,36 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                 {t("chat.moreControls")}
               </button>
             )}
-            <div style={{
-              display: isMobile ? (controlsMenuOpen ? "flex" : "none") : "flex",
-              alignItems: "center",
-              gap: isMobile ? 1 : 2,
-              ...(isMobile ? {
-                position: "absolute",
-                right: 0,
-                bottom: 0,
-                zIndex: 60,
-                padding: 1,
-                width: "max-content",
-                maxWidth: "calc(100vw - 32px)",
-                flexWrap: "nowrap",
-                justifyContent: "flex-end",
-                border: "1px solid color-mix(in srgb, var(--border) 72%, transparent)",
-                borderRadius: 10,
-                background: "color-mix(in srgb, var(--bg-panel) 92%, var(--bg))",
-                boxShadow: "0 8px 24px rgba(0,0,0,0.14)",
-                backdropFilter: "blur(10px)",
-              } : null),
-            }}>
-            {onThinkingLevelChange && (
-              <div ref={thinkingDropdownRef} style={{ position: "relative" }}>
-                <button
-                  onClick={() => !isStreaming && setThinkingDropdownOpen((v) => !v)}
-                  disabled={isStreaming}
-                  title={isStreaming
-                    ? t("chat.currentReasoning", { level: thinkingDisplayLabel })
-                    : t("chat.changeReasoning", { level: thinkingDisplayLabel })}
-                  aria-label={t("chat.changeReasoningLabel")}
-                  style={{
-                    display: "flex", alignItems: "center", justifyContent: "center", gap: 5,
-                    padding: isMobile ? "0 6px" : "8px 12px",
-                    width: isMobile ? "auto" : undefined,
-                    height: 32,
-                    background: thinkingDropdownOpen ? "var(--bg-hover)" : "none",
-                    border: "none",
-                    borderRadius: 9,
-                    color: "var(--text-muted)",
-                    cursor: isStreaming ? "not-allowed" : "pointer",
-                    fontSize: 12,
-                    opacity: isStreaming ? 0.5 : 1,
-                    transition: "background 0.12s, color 0.12s",
-                  }}
-                  onMouseEnter={(e) => {
-                    if (isStreaming) return;
-                    e.currentTarget.style.background = "var(--bg-hover)";
-                    e.currentTarget.style.color = "var(--text)";
-                  }}
-                  onMouseLeave={(e) => {
-                    e.currentTarget.style.background = thinkingDropdownOpen ? "var(--bg-hover)" : "none";
-                    e.currentTarget.style.color = "var(--text-muted)";
-                  }}
-                >
-                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M9.5 2A5.5 5.5 0 0 0 4 7.5c0 1.7.78 3.21 2 4.21V14a1 1 0 0 0 1 1h5a1 1 0 0 0 1-1v-2.29c1.22-1 2-2.51 2-4.21A5.5 5.5 0 0 0 9.5 2z" />
-                    <line x1="7" y1="18" x2="12" y2="18" />
-                    <line x1="8" y1="21" x2="11" y2="21" />
-                  </svg>
-                  {(!isMobile || controlsMenuOpen) && <span style={{ whiteSpace: "nowrap" }}>{thinkingDisplayLabel}</span>}
-                </button>
-                {thinkingDropdownOpen && (
-                  <div style={{
-                    position: "absolute", bottom: "calc(100% + 6px)",
-                    ...(isMobile ? { left: 0 } : { right: 0 }),
-                    zIndex: 100, background: "var(--bg)", border: "1px solid var(--border)",
-                    borderRadius: 8, boxShadow: "0 -4px 16px rgba(0,0,0,0.10)",
-                    overflow: "hidden", minWidth: 180,
-                  }}>
-                    {THINKING_LEVELS.filter((lvl) => {
-                      if (!availableThinkingLevels) return true;
-                      if (lvl === "auto") return true;
-                      return availableThinkingLevels.includes(lvl);
-                    }).map((lvl) => {
-                      const isActive = lvl === "auto"
-                        ? isAutoThinkingSelection
-                        : !isAutoThinkingSelection && resolvedThinkingLevel === lvl;
-                      const desc = t(THINKING_LEVEL_DESC_KEYS[lvl]);
-                      const mappedVal = (lvl !== "auto" && thinkingLevelMap) ? thinkingLevelMap[lvl] : undefined;
-                      const displayLabel = (mappedVal != null && mappedVal !== lvl) ? mappedVal : lvl;
-                      const showOriginal = mappedVal != null && mappedVal !== lvl;
-                      return (
-                        <button
-                          key={lvl}
-                          onClick={() => {
-                            setThinkingDropdownOpen(false);
-                            if (lvl === "auto") {
-                              if (!isAutoThinkingSelection) onThinkingLevelChange("auto");
-                              return;
-                            }
-                            if (!isActive || isAutoThinkingSelection) onThinkingLevelChange(lvl);
-                          }}
-                          style={{
-                            display: "flex", alignItems: "center", gap: 8,
-                            width: "100%", padding: "7px 12px",
-                            background: isActive ? "var(--bg-selected)" : "none",
-                            border: "none",
-                            color: isActive ? "var(--text)" : "var(--text-muted)",
-                            cursor: "pointer", fontSize: 12, textAlign: "left",
-                            fontWeight: isActive ? 600 : 400,
-                            whiteSpace: "nowrap",
-                          }}
-                          onMouseEnter={(e) => { if (!isActive) e.currentTarget.style.background = "var(--bg-hover)"; }}
-                          onMouseLeave={(e) => { if (!isActive) e.currentTarget.style.background = "none"; }}
-                        >
-                          {isActive
-                            ? <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="var(--accent)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}><polyline points="1.5 5 4 7.5 8.5 2.5" /></svg>
-                            : <span style={{ width: 10, flexShrink: 0 }} />}
-                          <span style={{ flex: 1 }}>
-                            {displayLabel}
-                            {showOriginal && <span style={{ fontSize: 10, color: "var(--text-dim)", fontFamily: "var(--font-mono)", marginLeft: 5 }}>({lvl})</span>}
-                          </span>
-                          <span style={{ fontSize: 11, color: "var(--text-dim)", marginLeft: 8 }}>{desc}</span>
-                        </button>
-                      );
-                    })}
-                  </div>
-                )}
-              </div>
-            )}
+
+            {/* 移动端展开浮层或桌面端内联容器 */}
+            <div
+              className={
+                isCodexActive
+                  ? (isMobile ? (controlsMenuOpen ? "chat-composer-mobile-popover" : "") : "chat-composer-right-inner")
+                  : ""
+              }
+              style={{
+                display: isMobile ? (controlsMenuOpen ? "flex" : "none") : "flex",
+                alignItems: "center",
+                gap: isMobile ? 1 : 2,
+                ...((!isCodexActive && isMobile) ? {
+                  position: "absolute",
+                  right: 0,
+                  bottom: 0,
+                  zIndex: 60,
+                  padding: 1,
+                  width: "max-content",
+                  maxWidth: "calc(100vw - 32px)",
+                  flexWrap: "nowrap",
+                  justifyContent: "flex-end",
+                  border: "1px solid color-mix(in srgb, var(--border) 72%, transparent)",
+                  borderRadius: 10,
+                  background: "color-mix(in srgb, var(--bg-panel) 92%, var(--bg))",
+                  boxShadow: "0 8px 24px rgba(0,0,0,0.14)",
+                  backdropFilter: "blur(10px)",
+                } : null),
+              }}
+            >
             {!isStreaming && onToolPresetChange && (
               <div ref={toolDropdownRef} style={{ position: "relative" }}>
                 <button
@@ -2564,7 +2957,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                   <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                     <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z" />
                   </svg>
-                  {(!isMobile || controlsMenuOpen) && <span style={{ whiteSpace: "nowrap" }}>{toolPresetLabel}</span>}
+                  {(!isMobile || controlsMenuOpen) && <span className={isCodexActive ? "chat-composer-secondary-label" : undefined} style={{ whiteSpace: "nowrap" }}>{toolPresetLabel}</span>}
                 </button>
                 {toolDropdownOpen && (
                   <div style={{
@@ -2646,88 +3039,17 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                    aria-label={isCompacting ? t("chat.stopCompaction") : t("chat.compactContext")}
                 >
                   {isCompacting ? (
-                    <><svg width="10" height="10" viewBox="0 0 10 10" fill="none"><rect x="2" y="2" width="6" height="6" rx="1" fill="currentColor" /></svg>{(!isMobile || controlsMenuOpen) && <span style={{ whiteSpace: "nowrap" }}>{t("chat.compacting")}</span>}</>
+                    <><svg width="10" height="10" viewBox="0 0 10 10" fill="none"><rect x="2" y="2" width="6" height="6" rx="1" fill="currentColor" /></svg>{(!isMobile || controlsMenuOpen) && <span className={isCodexActive ? "chat-composer-secondary-label" : undefined} style={{ whiteSpace: "nowrap" }}>{t("chat.compacting")}</span>}</>
                   ) : (
                     <><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                       <polyline points="4 14 10 14 10 20" /><polyline points="20 10 14 10 14 4" />
                       <line x1="10" y1="14" x2="3" y2="21" /><line x1="21" y1="3" x2="14" y2="10" />
-                    </svg>{(!isMobile || controlsMenuOpen) && <span style={{ whiteSpace: "nowrap" }}>{t("chat.compact")}</span>}</>
+                    </svg>{(!isMobile || controlsMenuOpen) && <span className={isCodexActive ? "chat-composer-secondary-label" : undefined} style={{ whiteSpace: "nowrap" }}>{t("chat.compact")}</span>}</>
                   )}
                 </button>
               </div>
             )}
 
-            {isStreaming && (
-              <button
-                onClick={onAbort}
-                 title={t("chat.stopAgent")}
-                style={{
-                  display: "flex", alignItems: "center", gap: 6,
-                  padding: "8px 14px",
-                  height: 32,
-                  background: "rgba(239,68,68,0.08)",
-                  border: "1px solid rgba(239,68,68,0.3)",
-                  borderRadius: 9,
-                  color: "#ef4444",
-                  cursor: "pointer",
-                  fontSize: 12, fontWeight: 600,
-                  whiteSpace: "nowrap", letterSpacing: "-0.01em",
-                  transition: "background 0.12s",
-                }}
-                onMouseEnter={(e) => { e.currentTarget.style.background = "rgba(239,68,68,0.16)"; }}
-                onMouseLeave={(e) => { e.currentTarget.style.background = "rgba(239,68,68,0.08)"; }}
-              >
-                <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
-                  <rect x="1.5" y="1.5" width="7" height="7" rx="1.5" fill="currentColor" />
-                </svg>
-                 {t("chat.stop")}
-              </button>
-            )}
-
-            {onSoundToggle !== undefined && (
-              <button
-                onClick={onSoundToggle}
-                 title={soundEnabled ? t("chat.disableSound") : t("chat.enableSound")}
-                 aria-label={soundEnabled ? t("chat.disableSound") : t("chat.enableSound")}
-                style={{
-                  display: "flex", alignItems: "center", justifyContent: "center", gap: 5,
-                  width: isMobile ? 32 : 32,
-                  height: 32,
-                  padding: 0,
-                  background: "none",
-                  border: "none",
-                  borderRadius: 9,
-                  color: soundEnabled ? "var(--text-muted)" : "var(--text-dim)",
-                  cursor: "pointer",
-                  opacity: soundEnabled ? 1 : 0.55,
-                  transition: "background 0.12s, color 0.12s, opacity 0.12s",
-                }}
-                onMouseEnter={(e) => {
-                  e.currentTarget.style.background = "var(--bg-hover)";
-                  e.currentTarget.style.color = "var(--text)";
-                  e.currentTarget.style.opacity = "1";
-                }}
-                onMouseLeave={(e) => {
-                  e.currentTarget.style.background = "none";
-                  e.currentTarget.style.color = soundEnabled ? "var(--text-muted)" : "var(--text-dim)";
-                  e.currentTarget.style.opacity = soundEnabled ? "1" : "0.55";
-                }}
-              >
-                {soundEnabled ? (
-                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />
-                    <path d="M15.54 8.46a5 5 0 0 1 0 7.07" />
-                    <path d="M19.07 4.93a10 10 0 0 1 0 14.14" />
-                  </svg>
-                ) : (
-                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5" />
-                    <line x1="23" y1="9" x2="17" y2="15" />
-                    <line x1="17" y1="9" x2="23" y2="15" />
-                  </svg>
-                )}
-              </button>
-            )}
             {isMobile && controlsMenuOpen && (
               <button
                 type="button"
@@ -2736,8 +3058,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                 aria-expanded={true}
                 onClick={() => {
                   setToolDropdownOpen(false);
-                  setThinkingDropdownOpen(false);
-                  setControlsMenuOpen(false);
+                                setControlsMenuOpen(false);
                 }}
                 style={{
                   display: "flex",

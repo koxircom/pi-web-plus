@@ -70,6 +70,8 @@ export interface AgentUsage {
 }
 
 export interface AssistantMessage {
+  /** Client-only indexes retained when one saved message is split into display runs. */
+  displayBlockIndices?: number[];
   role: "assistant";
   content: AssistantContentBlock[];
   model: string;
@@ -81,6 +83,8 @@ export interface AssistantMessage {
 }
 
 export interface ToolResultMessage {
+  /** Client-only partial execution output; it does not establish tool success. */
+  inProgress?: boolean;
   role: "toolResult";
   toolCallId: string;
   toolName?: string;

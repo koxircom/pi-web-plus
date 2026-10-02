@@ -22,9 +22,7 @@ export function isNewerStableVersion(candidate: string, current: string): boolea
   return false;
 }
 
-export const PI_WEB_GITHUB_REPO = "koxircom/pi-web-plus";
-
 export function getPiWebReleaseUrl(version: string): string | null {
   if (!parseStableVersion(version)) return null;
-  return `https://github.com/${PI_WEB_GITHUB_REPO}/releases/tag/v${version}`;
+  return `https://github.com/koxircom/pi-web-plus/releases/tag/v${version}`;
 }

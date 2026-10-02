@@ -135,10 +135,10 @@ test("keeps one-line widgets compact but expandable", () => {
   assert.match(html, /<svg[^>]*extension-widget-placement-icon/);
   assert.match(html, /data-direction="down"/);
   assert.doesNotMatch(html, /[\u2191\u2193]/);
-  assert.match(html, /Below editor widget/);
+  assert.match(html, /输入框下方组件/);
   assert.match(html, /<button[^>]*class="extension-widget-trigger/);
   assert.match(html, /aria-expanded="false"/);
-  assert.match(html, /title="single-line-widget - Below editor widget - Expand"/);
+  assert.match(html, /title="single-line-widget - 输入框下方组件 - 展开"/);
   assert.match(html, /extension-widget-key/);
   assert.match(html, /extension-widget-update-pulse/);
   assert.doesNotMatch(html, /extension-widget-preview/);
@@ -155,5 +155,5 @@ test("keeps empty widgets non-interactive", () => {
   assert.match(html, /<div class="extension-widget-trigger/);
   assert.doesNotMatch(html, /<button/);
   assert.doesNotMatch(html, /aria-expanded/);
-  assert.match(html, /title="empty-widget - Above editor widget"/);
+  assert.match(html, /title="empty-widget - 输入框上方组件"/);
 });

@@ -1,6 +1,7 @@
 "use client";
 
-import Image from "next/image";
+import { PiWebBrandIcon } from "@/components/PiWebBrand";
+import { BRAND_NAME } from "@/lib/branding";
 import { useState, type FormEvent } from "react";
 import { I18nProvider, useI18n } from "@/hooks/useI18n";
 import { safeLoginDestination } from "@/lib/login-destination";
@@ -49,9 +50,9 @@ function LoginForm() {
     <main className="web-login-page">
       <div className="web-login-shell">
         <header className="web-login-brand">
-          <Image src="/icons/apple-touch-icon.png" width={52} height={52} alt="" priority />
+          <PiWebBrandIcon size={52} />
           <div>
-            <h1>Pi Web</h1>
+            <h1>{BRAND_NAME}</h1>
             <p>{t("auth.prompt")}</p>
           </div>
         </header>

@@ -20,7 +20,7 @@ const MODULE_SPECS = [
     file: "01-bootstrap-and-core-state.js",
     startAnchor: null,
     responsibility:
-      "IIFE 启动引导、路由自愈保护、页面标题脱敏防抖、顶层 TDZ 声明提升、Managed Lifecycle 零泄漏注册表、全局 CSS 样式表注入、通知偏好与历史、Toast 与剪贴板工具。",
+      "IIFE 启动引导、路由自愈保护、页面标题脱敏防抖、顶层 TDZ 声明提升、Managed Lifecycle 零泄漏注册表、原生样式生命周期契约、通知偏好与历史、Toast 与剪贴板工具。",
   },
   {
     index: 2,
@@ -30,7 +30,7 @@ const MODULE_SPECS = [
     startAnchor: "// 0. Enhancement Plugins Registry (网页插件注册与管理)",
     includePrecedingBanner: true,
     responsibility:
-      "ENHANCEMENT_PLUGINS (77 个插件) 注册表与默认配置 Schema、模块与插件启闭持久化、用户消息状态对齐与大图去重、会话置顶/归档/背景色/多维彩色标签/Odoo 插件更新状态胶囊与分组保留策略。",
+      "ENHANCEMENT_PLUGINS (76 个插件) 注册表与默认配置 Schema、模块与插件启闭持久化、用户消息状态对齐与大图去重、会话置顶/归档/背景色/多维彩色标签/Odoo 插件更新状态胶囊与分组保留策略。",
   },
   {
     index: 3,
@@ -40,7 +40,7 @@ const MODULE_SPECS = [
     startAnchor: "// 0.2 Session Memory Cache (会话内存秒开与长会话优化)",
     includePrecedingBanner: true,
     responsibility:
-      "会话内存秒开缓存 (Session Memory Cache)、CacheStorage/IndexedDB 统一持久化存储抽象、会话历史顺序防回退守卫 (session-history-order-guard)、高性能会话搜索 LRU 缓存与归档折叠管理、权威终态核验引擎 (Terminal Reconcile Engine)、DOM 快照秒开与跨端多标签页同步。",
+      "会话内存秒开缓存 (Session Memory Cache)、CacheStorage/IndexedDB 统一持久化存储抽象、会话历史顺序防回退守卫 (session-history-order-guard)、高性能会话搜索 LRU 缓存与归档折叠管理、权威终态核验引擎 (Terminal Reconcile Engine)、原生缓存预加载与跨端多标签页同步。",
   },
   {
     index: 4,
@@ -119,11 +119,56 @@ function validateSyntaxGate(code, filename = "pi-web-enhancements.js") {
   }
 }
 
-function syncMirrorBundle(bundleBuffer) {
-  const mirrorDir = path.dirname(MIRROR_BUNDLE_PATH);
-  if (fs.existsSync(mirrorDir)) {
-    fs.writeFileSync(MIRROR_BUNDLE_PATH, bundleBuffer);
+function validateOwnershipGate() {
+  const { SOURCE_FILES, checkReleaseOwnership } = require("./check-release-ownership.cjs");
+  const sources = Object.fromEntries(Object.entries(SOURCE_FILES).map(([key, file]) =>
+    [key, fs.readFileSync(path.join(__dirname, "..", file), "utf8")]));
+  for (const file of ["components/FileViewer.tsx", "components/MermaidBlock.tsx"]) {
+    const code = fs.readFileSync(path.join(__dirname, "..", file), "utf8");
+    if (code.includes("Prism as SyntaxHighlighter") || code.includes("dist/cjs/styles/prism")) {
+      throw new Error("不可重新同步引入完整高亮/主题：" + file);
+    }
   }
+  const report = checkReleaseOwnership(sources);
+  if (!report.ok) throw new Error("发布所有权门禁失败：" + report.checks.filter(c => !c.ok).map(c => c.name).join("、"));
+  const module03 = fs.readFileSync(path.join(MODULES_DIR, "03-session-cache-and-sync-engine.js"), "utf8");
+  for (const token of ["captureDomSessionSnapshot(", "showSessionDomSnapshotOverlay(", "showSessionStaticLoadingPlaceholder("]) {
+    if (module03.includes(token)) throw new Error("会话显示必须由原生缓存拥有：" + token);
+  }
+  const module01 = fs.readFileSync(path.join(MODULES_DIR, "01-bootstrap-and-core-state.js"), "utf8");
+  const layout = fs.readFileSync(path.join(__dirname, "..", "app/layout.tsx"), "utf8");
+  const nativeStyles = fs.readFileSync(path.join(__dirname, "..", "app/enhancements.css"), "utf8");
+  if (!layout.includes('import "./enhancements.css";') || !nativeStyles.includes(".pi-enh-quote-bar")) {
+    throw new Error("共享增强样式必须由原生首帧样式流水线拥有");
+  }
+  if (nativeStyles.includes('.sidebar-container > div:last-child:not([data-pi-enh-shortcuts-disabled="true"])') || !nativeStyles.includes('[data-pi-enh-shortcuts-host="true"]:has(> .pi-enh-shortcuts-bar)')) {
+    throw new Error("原生入口不可在增强快捷栏接管前被隐藏");
+  }
+  if (module01.includes("styleEl.textContent") || module01.includes("initLogoInstantCache") || /Node\.prototype\.insertBefore\s*=/.test(module01)) {
+    throw new Error("已迁移的共享样式/Logo/DOM所有权不能再次通过运行时覆盖");
+  }
+  if (module01.includes("contain-intrinsic-size: auto 130px")) throw new Error("原生会话不能使用增强层估算消息高度");
+  for (const token of ["triggerSessionScrollRestore(", "hookScrollContainerScrollTo(", "sessionScrollMemory = new Map"]) {
+    if (sources.module06.includes(token)) throw new Error("阅读位置必须由原生组件拥有：" + token);
+  }
+  if (sources.module06.includes("make_xlsx_lib") || sources.module06.includes("/*! xlsx.js")) {
+    throw new Error("Excel 引擎不可重新内联进增强主包");
+  }
+}
+
+function buildPublicBundle(bundleBuffer, writeAssets = false) {
+  const usageLedger = fs.readFileSync(path.join(__dirname, "usage-ledger-core.js"), "utf8");
+  const { script: optionalLoader } = require("./build-optional-assets.cjs").buildOptionalAssets(__dirname, { write: writeAssets });
+  const { extractEnhancementMetadata, buildFastPluginReaderSnippet } = require("./pi-web-settings-prepaint.cjs");
+  const reader = buildFastPluginReaderSnippet(extractEnhancementMetadata(path.join(MODULES_DIR, "02-plugin-registry-and-settings-schema.js")));
+  if (bundleBuffer.includes(Buffer.from("PiUsagePanel =")) || bundleBuffer.includes(Buffer.from("make_xlsx_lib"))) throw new Error("低频组件重复内联，已阻止发布");
+  const prefix = Buffer.from(`${usageLedger}\n;\n${optionalLoader}\n;\n${reader}\n;\n`, "utf8");
+  return Buffer.concat([prefix, bundleBuffer]);
+}
+
+function syncMirrorBundle(bundleBuffer) {
+  fs.mkdirSync(path.dirname(MIRROR_BUNDLE_PATH), { recursive: true });
+  fs.writeFileSync(MIRROR_BUNDLE_PATH, buildPublicBundle(bundleBuffer, true));
 }
 
 function resolveModuleBoundaries(lineChunks) {
@@ -229,6 +274,7 @@ function runSplit() {
 }
 
 function runBuild() {
+  validateOwnershipGate();
   const moduleBuffers = [];
   const manifestModules = [];
   let currentLine = 1;
@@ -289,6 +335,7 @@ function runBuild() {
 }
 
 function runVerify() {
+  validateOwnershipGate();
   if (!fs.existsSync(MANIFEST_PATH)) {
     throw new Error(`Manifest not found: ${MANIFEST_PATH}`);
   }
@@ -342,11 +389,14 @@ function runVerify() {
 
   if (fs.existsSync(MIRROR_BUNDLE_PATH)) {
     const mirrorBuffer = fs.readFileSync(MIRROR_BUNDLE_PATH);
-    if (Buffer.compare(combinedBuffer, mirrorBuffer) !== 0) {
-      throw new Error(
-        `Combined modules do not match ${MIRROR_BUNDLE_PATH} byte-for-byte (combined=${combinedBuffer.length}B, mirror=${mirrorBuffer.length}B).`
-      );
+    const expectedPublic = buildPublicBundle(combinedBuffer);
+    const rawOffset = mirrorBuffer.indexOf(combinedBuffer);
+    if (Buffer.compare(expectedPublic, mirrorBuffer) !== 0 || rawOffset < 0 ||
+        mirrorBuffer.indexOf(combinedBuffer, rawOffset + 1) !== -1 ||
+        rawOffset + combinedBuffer.length !== mirrorBuffer.length) {
+      throw new Error(`Public prefix/raw closure mismatch: ${MIRROR_BUNDLE_PATH}`);
     }
+    validateSyntaxGate(mirrorBuffer.toString("utf8"), MIRROR_BUNDLE_PATH);
   }
 
   const combinedSha = sha256Hex(combinedBuffer);
@@ -404,6 +454,7 @@ function ensureSynced() {
 
 function main() {
   const args = new Set(process.argv.slice(2));
+  if (args.has("--deploy")) throw new Error("This isolated candidate builder never deploys.");
   if (args.has("--auto") || args.has("--sync")) {
     ensureSynced();
     if (args.has("--verify")) runVerify();

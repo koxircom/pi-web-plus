@@ -41,3 +41,19 @@ export function useIsMobile(): boolean {
 export function useIsNarrowMobile(): boolean {
   return useSyncExternalStore(subscribeNarrowMobile, getNarrowMobileSnapshot, getServerSnapshot);
 }
+
+/** Read the real device before hydration can report its desktop snapshot. */
+export function allowsAutomaticEditableFocus(): boolean {
+  if (typeof window === "undefined" || !window.matchMedia) return false;
+  return !window.matchMedia(MOBILE_QUERY).matches
+    && !window.matchMedia("(hover: none) and (pointer: coarse)").matches;
+}
+
+/** Mobile edits preserve an existing keyboard, but never open it indirectly. */
+export function focusEditable(element: HTMLElement | null, options?: FocusOptions): boolean {
+  if (!element || !element.isConnected || typeof document === "undefined") return false;
+  if (document.activeElement === element) return true;
+  if (!allowsAutomaticEditableFocus()) return false;
+  element.focus(options);
+  return document.activeElement === element;
+}

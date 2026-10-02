@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { ModelsConfigReadError, readModelsConfig, writeModelsConfig } from "@/lib/models-config-store";
+import { ModelsConfigReadError, ModelsConfigWriteError, readModelsConfig, writeModelsConfig } from "@/lib/models-config-store";
 
 export const dynamic = "force-dynamic";
 
@@ -22,6 +22,9 @@ export async function PUT(req: Request) {
   } catch (error) {
     if (error instanceof ModelsConfigReadError) {
       return NextResponse.json({ error: error.message }, { status: 409 });
+    }
+    if (error instanceof ModelsConfigWriteError) {
+      return NextResponse.json({ error: error.message }, { status: 400 });
     }
     return NextResponse.json({ error: String(error) }, { status: 500 });
   }

@@ -83,11 +83,15 @@ nextArgs.push("-H", hostname);
 
 // Always run next's JS entry with node directly — avoids .bin symlink issues
 // and path-with-spaces problems on Windows when shell: true is used.
-const child = spawn(process.execPath, getNextNodeArgs(nextBin, nextArgs), {
-  cwd: pkgDir,
-  stdio: ["inherit", "pipe", "inherit"],
-  env: { ...process.env, PI_WEB_HOSTNAME: hostname },
-});
+const child = spawn(
+  process.execPath,
+  ["--import", path.join(__dirname, "pi-agent-runtime-bootstrap.mjs"), ...getNextNodeArgs(nextBin, nextArgs)],
+  {
+    cwd: pkgDir,
+    stdio: ["inherit", "pipe", "inherit"],
+    env: { ...process.env, PI_WEB_HOSTNAME: hostname, PI_WEB_PORT: port },
+  },
+);
 wireChildProcessLifecycle(child);
 
 let browserOpened = false;

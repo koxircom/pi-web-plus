@@ -3,11 +3,13 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import reactSyntaxHighlighter from "react-syntax-highlighter";
+import { createJiti } from "jiti";
+const jiti = createJiti(import.meta.url);
+const { default: SyntaxHighlighter } = await jiti.import("react-syntax-highlighter/dist/esm/prism-async-light");
 
 const source = await readFile(new URL("./FileViewer.tsx", import.meta.url), "utf8");
 const cssSource = await readFile(new URL("../app/globals.css", import.meta.url), "utf8");
-const { Prism: SyntaxHighlighter } = reactSyntaxHighlighter;
+
 
 function functionBlock(name, nextName) {
   const start = source.indexOf(`function ${name}(`);
@@ -60,7 +62,9 @@ test("TextFileViewer keeps first-mount preview eligibility across Strict Effects
   assert.match(block, /defaultPreviewEligibleRef\.current[\s\S]*updateDisplayMode\("preview"\)/);
 });
 
-test("markdown table tokens stay inline despite Tailwind's table utility", () => {
+test("markdown table tokens stay inline despite Tailwind's table utility", async () => {
+  await SyntaxHighlighter.preload();
+  await SyntaxHighlighter.loadLanguage("markdown");
   const html = renderToStaticMarkup(
     React.createElement(
       SyntaxHighlighter,
@@ -69,6 +73,16 @@ test("markdown table tokens stay inline despite Tailwind's table utility", () =>
     ),
   );
 
-  assert.match(html, /class="token table[ "]/);
+  assert.ok(Array.from(html.matchAll(/class="([^"]+)"/g)).some((m) => {
+    const classes = m[1].split(/\s+/);
+    return classes.includes("token") && classes.includes("table");
+  }), "Markdown table tokens retain both CSS classes after async grammar loading");
   assert.match(cssSource, /span\.token\.table\s*\{[^}]*display:\s*inline;/);
+});
+
+
+test("native file viewer synchronizes only its committed ready content", () => {
+  assert.match(source, /if \(loading \|\| error \|\| !data\) return;/);
+  assert.match(source, /__PI_ENH_SYNC_FILE_VIEWER__/);
+  assert.match(source, /\[filePath, loading, error, data\]/);
 });

@@ -45,6 +45,28 @@ test("a models.json with a syntax error is reported instead of read as empty, an
   assert.equal(await readFile(modelsPath, "utf8"), original);
 });
 
+test("models-config API rejects missing providers without replacing valid or invalid files", async () => {
+  const validConfig = { providers: { acme: { models: [{ id: "acme-1" }] } } };
+  await writeFile(modelsPath, JSON.stringify(validConfig));
+
+  let response = await PUT(put({ success: true, quickShortcuts: [{ id: "chat" }] }));
+  assert.equal(response.status, 400);
+  assert.deepEqual(await response.json(), {
+    error: 'Invalid models.json config: "providers" is required and must be an object',
+  });
+  assert.deepEqual(JSON.parse(await readFile(modelsPath, "utf8")), validConfig);
+
+  const invalidConfig = JSON.stringify({ success: true, quickShortcuts: [{ id: "chat" }] });
+  await writeFile(modelsPath, invalidConfig);
+  response = await GET();
+  assert.equal(response.status, 422);
+  assert.match((await response.json()).error, /providers/);
+
+  response = await PUT(put({ providers: {} }));
+  assert.equal(response.status, 409);
+  assert.equal(await readFile(modelsPath, "utf8"), invalidConfig);
+});
+
 test("a commented models.json loads with its providers", async () => {
   await writeFile(modelsPath, '{\n  // local models\n  "providers": { "acme": { "models": [{ "id": "a" },] } },\n}\n');
 

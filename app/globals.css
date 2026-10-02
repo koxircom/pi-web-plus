@@ -1938,3 +1938,17 @@ span.token.table {
     font-size: max(16px, var(--chat-content-font-size, 14px)) !important;
   }
 }
+
+/* 原生消息卡片窄屏布局随首屏 CSS 加载，避免增强脚本晚到后重排。 */
+@media (max-width: 768px) {
+  div[data-message-role="assistant"] > div[style*="flex-direction: column"] {
+    width: 100% !important;
+    align-items: stretch !important;
+  }
+  div[data-message-role="assistant"] div[style*="border-radius: 7px"] {
+    box-sizing: border-box !important;
+    width: 100% !important;
+    align-self: stretch !important;
+    text-align: left !important;
+  }
+}

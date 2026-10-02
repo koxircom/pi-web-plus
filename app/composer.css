@@ -1,0 +1,679 @@
+/* ==========================================================================
+   Pi Web Native Composer Layout (Pure Static CSS - Single Source of Truth)
+   ========================================================================== */
+
+/* 根卡片 (Native Composer Card) */
+.chat-composer-card {
+  display: grid;
+  position: relative;
+  grid-template-columns: 28px 28px auto minmax(0, 1fr) auto auto auto;
+  column-gap: 2px;
+  row-gap: 6px;
+  align-items: center;
+  padding: 10px 12px;
+  background: var(--bg-panel, #222);
+  border: 1px solid var(--border, #3f3f46);
+  border-radius: 16px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.04);
+  min-width: 0;
+  box-sizing: border-box;
+  container: native-composer / inline-size;
+}
+
+.chat-composer-card:focus-within {
+  border-color: color-mix(in srgb, var(--text-muted, #71717a) 60%, var(--border, #3f3f46));
+}
+
+/* Modal 对话框打开时防止遮挡（纯语义） */
+body:has(.settings-dialog-backdrop, .settings-dialog-surface, [role="dialog"][aria-modal="true"]) .chat-composer-card {
+  display: none !important;
+}
+
+/* 扁平化容器：让内部的 React 编辑器与工具栏子节点直接参与外部 Grid */
+.chat-composer-card .chat-composer-contents {
+  display: contents;
+}
+
+/* Native notices, queue rows and attachments share a full-width content row. */
+.chat-composer-card .chat-composer-banner-stack {
+  grid-area: 1 / 1 / 2 / -1;
+  min-width: 0;
+}
+.chat-composer-draft-notice-host:empty,
+.chat-composer-card .chat-composer-banner-stack:empty {
+  display: none;
+}
+
+/* 附件条 (Image Attachments Bar) - 位于 Row 1 跨全列 */
+.chat-composer-card .chat-composer-attachments {
+  grid-area: 1 / 1 / 2 / -1;
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 6px;
+  margin: -2px 0 0 0;
+  padding: 4px 6px 2px 2px;
+  max-height: 54px;
+  overflow-x: auto;
+  overflow-y: hidden;
+  box-sizing: border-box;
+  min-width: 0;
+}
+
+.chat-composer-card .chat-composer-attachments img {
+  width: 44px;
+  height: 44px;
+  border-radius: 6px;
+  object-fit: cover;
+  display: block;
+}
+
+/* 编辑区 (Textarea) - 位于 Row 2 跨全列 */
+.chat-composer-card textarea.chat-input-textarea,
+.chat-composer-card .pi-enh-formatted-composer {
+  grid-area: 2 / 1 / 3 / -1;
+  width: 100%;
+  padding: 0 2px 4px;
+  min-height: 28px;
+  max-height: clamp(68px, 22vh, 160px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  box-sizing: border-box;
+  border: none;
+  background: transparent;
+  outline: none;
+  resize: none;
+}
+
+/* 有附件时收紧 textarea 最大高度 */
+.chat-composer-card:has(.chat-composer-attachments) textarea.chat-input-textarea,
+.chat-composer-card:has(.chat-composer-attachments) .pi-enh-formatted-composer {
+  max-height: clamp(52px, calc(18vh - 12px), 124px);
+}
+
+/* 用户自定义高度生效规则（精确受控变量，无多余 min-height 抬高） */
+.chat-composer-card.chat-composer-custom-height textarea.chat-input-textarea,
+.chat-composer-card.chat-composer-custom-height .pi-enh-formatted-composer {
+  height: var(--pi-composer-custom-height);
+  min-height: var(--pi-composer-custom-height);
+  max-height: var(--pi-composer-custom-height);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+/* React owns the native mode controls; the enhancement module only supplies its menu/state bridge. */
+.chat-composer-mode-host {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 28px;
+  min-height: 28px;
+  flex-shrink: 0;
+}
+.chat-composer-card .chat-composer-mode-host {
+  display: contents;
+}
+
+/* 工具栏控件网格槽位 (Row 3) */
+/* 1. Native React add button (Col 1) */
+.chat-composer-card .chat-composer-add-btn {
+  grid-column: 1;
+  grid-row: 3;
+  justify-self: start;
+  align-self: center;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  min-width: 28px;
+  height: 28px;
+  padding: 0;
+  margin: 0;
+  flex-shrink: 0;
+  color: var(--text-muted);
+  background: transparent;
+  border: 0;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: color 0.12s ease, background-color 0.12s ease;
+}
+.chat-composer-card .chat-composer-add-btn:hover,
+.chat-composer-card .chat-composer-add-btn.active {
+  color: var(--text);
+  background: var(--bg-hover);
+}
+.chat-composer-card .chat-composer-add-btn:focus-visible,
+.chat-composer-card .chat-composer-goal-action:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* 2. 图片附件按钮 (Col 2) */
+.chat-composer-card .chat-composer-attach-btn,
+.chat-composer-card [data-pi-attach-image] {
+  grid-column: 2;
+  grid-row: 3;
+  justify-self: start;
+  align-self: center;
+  width: 28px;
+  min-width: 28px;
+  height: 28px;
+  padding: 0;
+  margin: 0;
+  flex-shrink: 0;
+}
+
+/* 3. Native mode and goal status (Col 3) */
+.chat-composer-card .chat-composer-mode-status {
+  grid-column: 3;
+  grid-row: 3;
+  justify-self: stretch;
+  align-self: center;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  max-width: min(100%, 34vw);
+  flex-shrink: 0;
+}
+.chat-composer-card .chat-composer-mode-chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 24px;
+  padding: 0 8px;
+  color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 24%, transparent);
+  border-radius: 999px;
+  font-size: 11px;
+  line-height: 1;
+  white-space: nowrap;
+}
+.chat-composer-card .chat-composer-goal-summary {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  max-width: min(100%, 260px);
+  color: var(--text-muted);
+  font-size: 11px;
+  line-height: 1.2;
+}
+.chat-composer-card .chat-composer-goal-status {
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+.chat-composer-card .chat-composer-goal-text {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text);
+}
+.chat-composer-card .chat-composer-goal-timer {
+  flex: 0 0 auto;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.chat-composer-card .chat-composer-goal-action {
+  flex: 0 0 auto;
+  padding: 3px 6px;
+  color: var(--text-muted);
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  font: inherit;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.chat-composer-card .chat-composer-goal-action:hover {
+  color: var(--text);
+  background: var(--bg-hover);
+}
+
+/* One real flex capsule owns model/reasoning geometry, background and hover. */
+.chat-composer-card .chat-composer-model-controls {
+  grid-column: -3;
+  grid-row: 3;
+  justify-self: end;
+  align-self: center;
+  display: inline-flex;
+  align-items: center;
+  gap: 0;
+  min-width: 0;
+  height: 24px;
+  box-sizing: border-box;
+  padding: 0 2px;
+  background: color-mix(in srgb, var(--text-muted) 10%, var(--bg-panel));
+  border: 1px solid color-mix(in srgb, var(--border) 65%, transparent);
+  border-radius: 999px;
+  transition: background-color 0.12s, border-color 0.12s;
+}
+.chat-composer-card .chat-composer-model-controls:hover,
+.chat-composer-card .chat-composer-model-controls:has(button[aria-expanded="true"]) {
+  background: var(--bg-hover);
+  border-color: var(--border);
+}
+.chat-composer-card .chat-composer-model-controls:has(button:focus-visible) {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.chat-composer-card .chat-composer-model-controls .model-selector {
+  display: inline-flex;
+  width: auto !important;
+  flex: 0 1 auto !important;
+  min-width: 0;
+  margin: 0;
+}
+.chat-composer-card .chat-composer-model-controls .model-selector > button,
+.chat-composer-card .chat-composer-model-controls .thinking-selector > button {
+  height: 22px !important;
+  min-height: 0;
+  padding: 0 5px !important;
+  color: var(--text-muted);
+  background: transparent !important;
+  border: 0;
+  border-radius: 999px;
+  box-shadow: none;
+  font-size: 12px;
+}
+.chat-composer-card .chat-composer-model-controls button:hover,
+.chat-composer-card .chat-composer-model-controls button[aria-expanded="true"] {
+  color: var(--text) !important;
+}
+.chat-composer-card .chat-composer-model-controls .model-selector > button { max-width: 180px; width: auto !important; color: var(--text) !important; font-weight: 600; }
+[data-theme="dark"] .chat-composer-card .chat-composer-model-controls .model-selector > button { color: #fff !important; }
+.chat-composer-card .chat-composer-model-controls .thinking-selector { display: inline-flex; flex: 0 0 auto; }
+.thinking-selector-menu {
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg-panel);
+  box-shadow: 0 8px 24px rgba(0,0,0,0.2);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.thinking-selector-option {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 34px;
+  padding: 6px 8px;
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-muted);
+  text-align: left;
+  font-size: 12px;
+  cursor: pointer;
+}
+.thinking-selector-option:hover,
+.thinking-selector-option:focus-visible { background: var(--bg-hover); color: var(--text); outline: none; }
+.thinking-selector-option[aria-selected="true"] { color: var(--text); background: var(--bg-selected); }
+.thinking-selector-description { margin-left: auto; color: var(--text-dim); font-size: 11px; }
+
+/* Native auxiliary controls stay in one toolbar slot, never an implicit content row. */
+.chat-composer-card .chat-composer-right-inner {
+  grid-column: -1;
+  grid-row: 3;
+  display: inline-flex;
+  justify-self: end;
+  align-self: center;
+  min-width: max-content;
+}
+.chat-composer-card .chat-composer-right-inner:empty {
+  display: none;
+}
+
+/* Narrow chat panes can occur on a wide touch viewport with the sidebar open. */
+@container native-composer (max-width: 500px) {
+  .chat-composer-right-inner .chat-composer-secondary-label { display: none; }
+  .chat-composer-card .chat-composer-mode-status { max-width: 25vw; gap: 4px; }
+  .chat-composer-card .chat-composer-goal-summary { max-width: 100%; }
+  .chat-composer-card .chat-composer-goal-status { display: none; }
+  .chat-composer-card .chat-composer-goal-text { display: none; }
+  .chat-composer-card .chat-composer-goal-timer { display: none; }
+  .chat-composer-card .chat-composer-goal-action { padding: 3px 5px; }
+  .chat-composer-right-inner > div > button,
+  .chat-composer-right-inner > button {
+    width: 28px;
+    min-width: 28px;
+    padding: 0;
+  }
+}
+
+/* 6. 发送与操作区 (倒数第 2 列) */
+.chat-composer-card .chat-composer-send-group,
+.chat-composer-card .chat-composer-actions,
+.chat-composer-card button.chat-composer-send {
+  grid-column: -2;
+  grid-row: 3;
+  justify-self: end;
+  align-self: center;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+}
+
+/* 发送按钮：Cursor 风格圆形向上发送按键 (外径 24px，图标居中) */
+.chat-composer-card button.chat-composer-send {
+  position: relative;
+  width: 24px;
+  height: 24px;
+  min-width: 24px;
+  max-width: 24px;
+  padding: 0;
+  margin: 0;
+  border-radius: 50%;
+  border: none;
+  outline: none;
+  font-size: 0;
+  line-height: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  align-self: center;
+  transition: background 0.15s ease, color 0.15s ease, opacity 0.15s ease;
+  flex-shrink: 0;
+  box-sizing: border-box;
+}
+
+.chat-composer-card button.chat-composer-send:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+
+/* 禁用态 */
+.chat-composer-card button.chat-composer-send:disabled {
+  background: rgba(128, 128, 128, 0.14);
+  color: var(--text-dim, #71717a);
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+/* 启用态与主题对比 */
+.chat-composer-card button.chat-composer-send:not(:disabled) {
+  background: #efefef;
+  color: #262626;
+  cursor: pointer;
+  opacity: 1;
+}
+
+.chat-composer-card button.chat-composer-send:not(:disabled):hover {
+  filter: brightness(1.1);
+}
+
+[data-theme="light"] .chat-composer-card button.chat-composer-send:not(:disabled) {
+  background: #0e0e11;
+  color: #ffffff;
+}
+
+[data-theme="light"] .chat-composer-card button.chat-composer-send:disabled {
+  background: rgba(0, 0, 0, 0.06);
+  color: var(--text-dim, #a1a1aa);
+}
+
+/* 运行态：引导 (Steer) 按钮 */
+.chat-composer-card button.chat-composer-steer {
+  position: static;
+  height: 28px;
+  min-width: 28px;
+  margin: 0;
+  padding: 0 8px;
+  border-radius: 8px;
+  font-size: 12px;
+  font-weight: 500;
+  white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  align-self: center;
+  border: 1px solid rgba(234, 179, 8, 0.35);
+  color: rgb(180, 130, 0);
+  background: rgba(234, 179, 8, 0.08);
+  cursor: pointer;
+  transition: all 0.12s ease;
+  flex-shrink: 0;
+}
+
+.chat-composer-card button.chat-composer-steer:hover {
+  color: #eab308;
+  border-color: rgba(234, 179, 8, 0.55);
+  background: rgba(234, 179, 8, 0.16);
+}
+
+/* Queue actions and Stop occupy one native action slot, never overlapping. */
+.chat-composer-card .chat-composer-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.chat-composer-card .chat-composer-actions:not(:has(button:not(:disabled))) {
+  display: none;
+}
+.chat-composer-card:has(.chat-composer-actions button:not(:disabled)) .chat-composer-stop {
+  display: none;
+}
+
+/* Follow-up uses the same compact upward-arrow geometry as Send. */
+.chat-composer-card button.chat-composer-followup {
+  width: 24px;
+  height: 24px;
+  min-width: 24px;
+  max-width: 24px;
+  padding: 0;
+  margin: 0;
+  border: none;
+  border-radius: 50%;
+  font-size: 0;
+  line-height: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  background: #efefef;
+  color: #262626;
+  cursor: pointer;
+}
+[data-theme="light"] .chat-composer-card button.chat-composer-followup {
+  background: #0e0e11;
+  color: #fff;
+}
+.chat-composer-card button.chat-composer-followup:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+
+/* 运行态：停止 (Stop) 按钮 (圆形 24px 图标按钮，无多余文字) */
+.chat-composer-card button.chat-composer-stop {
+  grid-column: -2;
+  grid-row: 3;
+  justify-self: end;
+  align-self: center;
+  position: static;
+  width: 24px;
+  height: 24px;
+  min-width: 24px;
+  max-width: 24px;
+  padding: 0;
+  margin: 0;
+  border-radius: 50%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid rgba(239, 68, 68, 0.3);
+  color: #ef4444;
+  background: rgba(239, 68, 68, 0.08);
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background 0.12s ease;
+}
+
+.chat-composer-card button.chat-composer-stop:hover {
+  background: rgba(239, 68, 68, 0.16);
+}
+
+/* --------------------------------------------------------------------------
+   移动端 (Mobile) 与 More controls 折叠面板
+   -------------------------------------------------------------------------- */
+.chat-composer-card .chat-composer-more-btn {
+  grid-column: -4;
+  grid-row: 3;
+  justify-self: end;
+  align-self: center;
+  height: 28px;
+  padding: 0 8px;
+  white-space: nowrap;
+  font-size: 11px;
+  font-weight: 500;
+  border-radius: 8px;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex-shrink: 0;
+  transition: background 0.12s ease, color 0.12s ease;
+}
+
+.chat-composer-card .chat-composer-more-btn:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+/* 移动端展开的真实 Absolute Popover，拥有独立盒模型，不被 contents 扁平化 */
+.chat-composer-card .chat-composer-mobile-popover {
+  position: absolute;
+  right: 10px;
+  bottom: 46px;
+  z-index: 80;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 6px;
+  width: max-content;
+  max-width: calc(100vw - 32px);
+  border: 1px solid color-mix(in srgb, var(--border) 72%, transparent);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--bg-panel) 94%, var(--bg));
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.2);
+  backdrop-filter: blur(10px);
+}
+
+/* 调整高度手柄 (Resize Handle Bar) */
+.chat-composer-resizer {
+  position: absolute;
+  top: -3px;
+  left: 0;
+  right: 0;
+  height: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: ns-resize;
+  touch-action: none;
+  user-select: none;
+  z-index: 20;
+}
+
+.chat-composer-resizer-line {
+  width: 32px;
+  height: 2px;
+  border-radius: 1px;
+  background: color-mix(in srgb, var(--border, #71717a) 70%, transparent);
+  transition: background 0.15s ease, width 0.15s ease, opacity 0.15s ease;
+  opacity: 0.55;
+  pointer-events: none;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .chat-composer-resizer:hover .chat-composer-resizer-line {
+    opacity: 0.85;
+    width: 36px;
+    background: color-mix(in srgb, var(--text-dim, #71717a) 80%, transparent);
+  }
+}
+
+/* 拖拽中高亮 */
+.chat-composer-resizing,
+.chat-composer-resizing * {
+  user-select: none !important;
+  cursor: ns-resize !important;
+}
+
+.chat-composer-resizing .chat-composer-resizer-line {
+  background: var(--accent, #3b82f6);
+  width: 40px;
+  height: 2.5px;
+  opacity: 0.95;
+}
+
+/* 响应式断点微调 */
+@media (max-width: 860px) {
+  .chat-composer-card button.chat-composer-steer .chat-composer-steer-label {
+    display: none;
+  }
+  .chat-composer-card button.chat-composer-steer {
+    padding: 0 6px;
+    min-width: 28px;
+    width: 28px;
+    font-size: 0;
+  }
+}
+
+@media (max-width: 640px) {
+  .chat-composer-card {
+    padding: 8px 10px;
+    column-gap: 2px;
+    row-gap: 6px;
+  }
+  .chat-composer-card .chat-composer-more-btn {
+    grid-column: -4;
+    grid-row: 3;
+  }
+  .chat-composer-card .chat-composer-model-controls .model-selector > button { max-width: 142px; padding: 0 6px; }
+  .chat-composer-card .chat-composer-model-controls .thinking-selector > button { padding: 0 6px; }
+  .chat-composer-card textarea.chat-input-textarea,
+  .chat-composer-card .pi-enh-formatted-composer {
+    max-height: clamp(70px, 28vh, 200px);
+  }
+  .chat-composer-card:has(.chat-composer-attachments) textarea.chat-input-textarea,
+  .chat-composer-card:has(.chat-composer-attachments) .pi-enh-formatted-composer {
+    max-height: clamp(48px, calc(16vh - 10px), 104px);
+  }
+}
+
+@media (max-height: 500px) {
+  .chat-composer-card {
+    padding: 6px 10px;
+    row-gap: 4px;
+  }
+  .chat-composer-card textarea.chat-input-textarea,
+  .chat-composer-card .pi-enh-formatted-composer {
+    min-height: 24px;
+    max-height: clamp(42px, calc(28vh - 16px), 84px);
+  }
+}
+
+/* ==========================================================================
+   ChatWindow 原生 Footer 与 36px Status Slot 声明 (单一 CSS 事实源)
+   ========================================================================== */
+.chat-composer-footer {
+  position: relative;
+  flex-shrink: 0;
+}
+
+/* 原生 36px status slot：当会话非新会话且无 extension shelf 时占位 */
+.chat-composer-footer .chat-composer-status-slot {
+  height: 36px;
+  flex-shrink: 0;
+  display: block;
+}

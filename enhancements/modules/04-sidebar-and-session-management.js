@@ -587,6 +587,30 @@
               sessionReadWatermarksRevision: revision,
             };
 
+            // 保护归档与置顶状态：避免未读水位线覆写时使用陈旧服务端快照回滚本地最新修改
+            if (typeof readStoredArchivedEntries === "function") {
+              const localArchived = readStoredArchivedEntries();
+              const localArchivedRev = typeof getLocalArchivedRevision === "function" ? getLocalArchivedRevision() : 0;
+              const serverArchivedRev = Number(currentConfig.archivedRevision) || 0;
+              if (localArchivedRev >= serverArchivedRev || (typeof hasPendingArchivedPush !== "undefined" && hasPendingArchivedPush)) {
+                putPayload.archivedSessions = localArchived;
+                putPayload.archivedRevision = Math.max(localArchivedRev, serverArchivedRev);
+              }
+            }
+            if (typeof readStoredSessionIds === "function" && typeof PINNED_SESSION_STORAGE_KEY !== "undefined") {
+              const localPinnedIds = Array.from(readStoredSessionIds(PINNED_SESSION_STORAGE_KEY));
+              const localPinnedRev = typeof getLocalPinnedRevision === "function" ? getLocalPinnedRevision() : 0;
+              const serverPinnedRev = Number(currentConfig.pinnedRevision) || 0;
+              if (localPinnedRev >= serverPinnedRev) {
+                putPayload.pinnedSessions = localPinnedIds.map((id) => ({
+                  id,
+                  name: (typeof knownSessionTitles !== "undefined" && knownSessionTitles.get(id)) || "",
+                  pinnedAt: Date.now()
+                }));
+                putPayload.pinnedRevision = Math.max(localPinnedRev, serverPinnedRev);
+              }
+            }
+
             let ok = false;
             if (typeof fetchModelsConfigBounded === "function") {
               const { resp: putResp } = await fetchModelsConfigBounded("/api/models-config", {
@@ -758,27 +782,28 @@
   function beginFastSessionDelete(sessionId) {
     if (!sessionId) return;
 
-    const row = getSessionRowById(sessionId);
+    const inFlightDeletes = (typeof window !== "undefined" && window.__PI_ENH_FAST_SESSION_DELETE_IDS__ instanceof Set)
+      ? window.__PI_ENH_FAST_SESSION_DELETE_IDS__
+      : ((typeof window !== "undefined" && (window.__PI_ENH_FAST_SESSION_DELETE_IDS__ = new Set())) || new Set());
+    if (inFlightDeletes.has(sessionId)) return;
+    inFlightDeletes.add(sessionId);
 
-    // 所有删除入口只可标 pending，网络前严禁提前清理或清除 metadata
+    // 所有删除入口只可标 pending，网络前严禁提前清理或清除 metadata。
+    // markSessionAsDeleted 通过 React sidebar bridge 复制本地数组，首帧即可重算过滤与虚拟坐标。
     markSessionAsDeleted(sessionId);
-    if (row) row.setAttribute("data-pi-enh-pending-delete", "true");
-    requestSessionListRefresh(false, true);
     showToast("已移除会话，正在后台删除…", sessionDeleteIcon);
 
     (async () => {
       try {
         await deleteArchivedSession(sessionId);
-        markSessionDeleteConfirmed(sessionId);
-        cleanupDeletedSessionEverywhere(sessionId);
-        if (row) row.removeAttribute("data-pi-enh-pending-delete");
         requestSessionListRefresh(false, true);
         showToast("已删除会话", sessionDeleteIcon);
       } catch (err) {
         restoreSessionDeleteState(sessionId);
-        if (row) row.removeAttribute("data-pi-enh-pending-delete");
         requestSessionListRefresh(false, true);
         showToast("删除会话失败，已恢复会话: " + (err?.message || String(err)), sessionDeleteIcon);
+      } finally {
+        inFlightDeletes.delete(sessionId);
       }
     })();
   }
@@ -913,9 +938,17 @@
     if (action === "archive") {
       const row = getSessionRowById(sessionId);
       const sessionName = extractSessionTitleFromRow(row, sessionId);
-      if (archiveSession(sessionId, { name: sessionName })) {
+      const archiveFn = (typeof archiveSession === "function")
+        ? archiveSession
+        : (typeof window !== "undefined" ? window.__PI_ENH_ARCHIVE_SESSION__ : null);
+      const archived = archiveFn ? archiveFn(sessionId, { name: sessionName }) : false;
+
+      if (archived) {
         syncSessionPinArchiveControls();
-        requestSessionListRefresh();
+        requestSessionListRefresh(false, true);
+        if (typeof window.__PI_ENH_RERENDER_SESSIONS__ === "function") {
+          try { window.__PI_ENH_RERENDER_SESSIONS__(); } catch (e) {}
+        }
         showToast("已归档会话，可在“设置 → 已归档”中还原", sessionArchiveIcon, 4200);
         return;
       }
@@ -940,6 +973,15 @@
 
   function showSessionOverflowMenu(sessionId, trigger) {
     closeMenu();
+    if (typeof window.__PI_ENH_DISMISS_SNAPSHOT_OVERLAY__ === "function") {
+      try { window.__PI_ENH_DISMISS_SNAPSHOT_OVERLAY__("menu-opened"); } catch (e) {}
+    }
+    if (typeof window.__PI_ENH_DISMISS_LOADING_PLACEHOLDER__ === "function") {
+      try { window.__PI_ENH_DISMISS_LOADING_PLACEHOLDER__("menu-opened"); } catch (e) {}
+    }
+    if (typeof document !== "undefined" && document.documentElement) {
+      document.documentElement.classList.remove("pi-enh-scroll-restoring");
+    }
     const pinned = readStoredSessionIds(PINNED_SESSION_STORAGE_KEY).has(sessionId);
     const unread = isSessionUnread(sessionId);
     const menu = document.createElement("div");
@@ -1070,6 +1112,12 @@
         trigger.addEventListener("click", (event) => {
           event.preventDefault();
           event.stopPropagation();
+          if (typeof window.__PI_ENH_DISMISS_SNAPSHOT_OVERLAY__ === "function") {
+            try { window.__PI_ENH_DISMISS_SNAPSHOT_OVERLAY__("menu-trigger-clicked"); } catch (e) {}
+          }
+          if (typeof window.__PI_ENH_DISMISS_LOADING_PLACEHOLDER__ === "function") {
+            try { window.__PI_ENH_DISMISS_LOADING_PLACEHOLDER__("menu-trigger-clicked"); } catch (e) {}
+          }
           showSessionOverflowMenu(sessionId, trigger);
         });
       }
@@ -1173,6 +1221,12 @@
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 3a2.828 2.828 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3z"></path></svg>
         <span>重命名会话</span>
       </div>
+      ${isPluginEnabled("session-pin-archive") ? `
+      <div class="pi-enh-menu-item" data-action="archive-session">
+        ${sessionArchiveIcon}
+        <span>归档会话</span>
+      </div>
+      ` : ""}
       ${isPluginEnabled("session-tags") ? `
       <div class="pi-enh-menu-item pi-enh-menu-item-with-arrow" data-action="open-session-tags">
         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -1316,6 +1370,10 @@
         closeMenu();
         triggerSessionInlineRename(id);
         return;
+      } else if (action === "archive-session") {
+        closeMenu();
+        handleSessionPinArchiveAction(id, "archive");
+        return;
       } else if (action === "open-session-tags") {
         e.stopPropagation();
         const triggerRect = item.getBoundingClientRect();
@@ -1356,9 +1414,21 @@
 
   // ==========================================
   // 会话双击重命名 (Session DblClick Rename)
+  // 手机（含折叠屏展开及桌面模式）不以视口宽度或输入模式偏好判定。
   // ==========================================
+  function isMobileSessionRenameDisabled(event) {
+    if (event?.sourceCapabilities?.firesTouchEvents || event?.pointerType === "touch" || event?.pointerType === "pen") return true;
+    const ua = navigator.userAgent || "";
+    if (/Android|iPhone|iPad|iPod/i.test(ua)) return true;
+    if ((/Macintosh/i.test(ua) || navigator.platform === "MacIntel") && navigator.maxTouchPoints > 1) return true;
+    return window.matchMedia("(pointer: coarse) and (hover: none)").matches;
+  }
+
   function handleSessionRowDblClick(event) {
     if (!isPluginEnabled("session-dblclick-rename")) return;
+    // 手机端/移动端触屏完全取消双击编辑会话标题功能
+    if (isMobileSessionRenameDisabled(event)) return;
+
     const target = event.target;
     // 忽略控制类按钮、链接、输入框、下拉框、或者增强插件控制按钮的点击
     if (target.closest("button, a, input, select, textarea, [role='button'], .pi-enh-session-overflow, .pi-enh-session-pinned-indicator, .pi-enh-session-menu")) {
@@ -1384,6 +1454,9 @@
 
   function handleSessionRowMouseDown(event) {
     if (!isPluginEnabled("session-dblclick-rename")) return;
+    // 手机端/移动端触屏不拦截与处理
+    if (isMobileSessionRenameDisabled(event)) return;
+
     if (event.detail >= 2) {
       const target = event.target;
       if (target.closest("button, a, input, select, textarea, [role='button'], .pi-enh-session-overflow, .pi-enh-session-pinned-indicator, .pi-enh-session-menu")) {
@@ -1397,64 +1470,8 @@
     }
   }
 
-  // 移动端触屏专属 Double-Tap 手势识别器：彻底摆脱移动端 dblclick 吞噬与 300ms 延迟
-  let lastTouchTapTime = 0;
-  let lastTouchTapX = 0;
-  let lastTouchTapY = 0;
-  let lastTouchTapRow = null;
-
-  function handleSessionRowTouchEnd(event) {
-    if (!isPluginEnabled("session-dblclick-rename")) return;
-    const touch = event.changedTouches?.[0];
-    if (!touch) return;
-
-    const target = event.target;
-    if (target.closest("button, a, input, select, textarea, [role='button'], .pi-enh-session-overflow, .pi-enh-session-pinned-indicator, .pi-enh-session-menu")) {
-      lastTouchTapTime = 0;
-      return;
-    }
-
-    const row = target.closest(".pi-enh-session-row-host[data-pi-enh-session-id]");
-    if (!row) {
-      lastTouchTapTime = 0;
-      return;
-    }
-
-    if (row.querySelector("input") || row.getAttribute("data-pi-enh-editing") === "true") {
-      lastTouchTapTime = 0;
-      return;
-    }
-
-    const now = Date.now();
-    const interval = now - lastTouchTapTime;
-    const distX = Math.abs(touch.clientX - lastTouchTapX);
-    const distY = Math.abs(touch.clientY - lastTouchTapY);
-
-    if (interval >= 50 && interval <= 380 && distX < 24 && distY < 24 && lastTouchTapRow === row) {
-      // 成功判定为手机屏幕触屏双击 (Double Tap)
-      lastTouchTapTime = 0;
-      lastTouchTapRow = null;
-
-      if (typeof event.preventDefault === "function") event.preventDefault();
-      if (typeof event.stopPropagation === "function") event.stopPropagation();
-      window.getSelection()?.removeAllRanges();
-
-      const sessionId = row.getAttribute("data-pi-enh-session-id");
-      if (sessionId) {
-        triggerSessionInlineRename(sessionId);
-      }
-      return;
-    }
-
-    lastTouchTapTime = now;
-    lastTouchTapX = touch.clientX;
-    lastTouchTapY = touch.clientY;
-    lastTouchTapRow = row;
-  }
-
   addManagedListener(document, "dblclick", handleSessionRowDblClick, true);
   addManagedListener(document, "mousedown", handleSessionRowMouseDown, true);
-  addManagedListener(document, "touchend", handleSessionRowTouchEnd, { passive: false, capture: true });
 
   // 会话行内重命名焦点与失焦自愈联动：聚焦即刻隐藏模型徽标，失焦即刻精准恢复
   addManagedListener(document, "focusin", (event) => {
@@ -5147,6 +5164,12 @@
     projectStatusModel.markAttention(sessionId, pendingRequests);
     persistProjectStatusState();
     syncProjectStatusIndicators();
+    try {
+      window.__PI_WEB_SESSION_PRELOAD__?.setSessionPriority?.(sessionId, "attention");
+      if (typeof schedulePrioritySessionPreloads === "function") {
+        schedulePrioritySessionPreloads();
+      }
+    } catch (_) {}
     // 绝不盲目强行更新当前标签页标题为 attention！必须完全由 syncProjectStatusIndicators 根据当前标签页所在项目的真实有效状态统一计算判定，杜绝跨项目污染与闪烁
     if (options.notify !== false) {
       syncApprovalSound();
@@ -5189,6 +5212,9 @@
         existing.cwd = session.cwd || existing.cwd || "";
         existing.title = getSessionStatusTitle(session) || existing.title || "";
       }
+    }
+    if (typeof schedulePrioritySessionPreloads === "function") {
+      schedulePrioritySessionPreloads();
     }
   }
 
@@ -5300,7 +5326,7 @@
     return Array.from(document.querySelectorAll("main .text-red-400")).find(node => {
       const classes = node.classList;
       return classes?.contains("flex") && classes.contains("h-full") && classes.contains("items-center")
-        && classes.contains("justify-center") && /^(?:Error|错误)\s*[:：]/i.test(String(node.textContent || "").trim());
+        && classes.contains("justify-center") && /^(?:Error|TypeError|Failed to fetch|错误)\s*[:：]?/i.test(String(node.textContent || "").trim());
     }) || null;
   }
 
@@ -5742,6 +5768,9 @@
     renderAttentionNotices();
     persistProjectStatusState();
     syncProjectStatusIndicators();
+    if (typeof schedulePrioritySessionPreloads === "function") {
+      schedulePrioritySessionPreloads();
+    }
 
     // 立即 reconcile 声音与桌面通知，不让 resolved 旧 payload 复活
     const requests = getDesktopPendingRequests();
@@ -6042,16 +6071,6 @@
     document.querySelector(".pi-enh-status-popover")?.remove();
   }
 
-  function readUnreadSessionIds() {
-    try {
-      const raw = localStorage.getItem("pi-web:unread-session-ids");
-      const parsed = raw ? JSON.parse(raw) : [];
-      return new Set(Array.isArray(parsed) ? parsed.filter((id) => typeof id === "string") : []);
-    } catch (e) {
-      return new Set();
-    }
-  }
-
   const projectStatusAskUserChecks = new Set();
   const projectStatusAttentionScanTokens = new Map();
   const projectStatusAskUserLastChecked = new Map();
@@ -6325,7 +6344,6 @@
   window.__PI_ENH_IS_PROJECT_STATUS_HEALTHY__ = isProjectStatusHealthy;
   window.__PI_ENH_RECEIVE_PROJECT_STATUS__ = receiveProjectStatus;
   window.__PI_ENH_RENDER_NOTIFICATION_PANEL__ = renderNotificationPanel;
-  window.__PI_ENH_SHOW_NOTIFICATION_PANEL__ = showNotificationPanel;
   window.__PI_ENH_DEBUG_NOTIF_CONDITIONS__ = () => ({
     disposed: projectStatusDisposed,
     statusPlugin: isPluginEnabled("project-status-indicator"),
@@ -6369,11 +6387,9 @@
         markProjectCompletionRead(sessionId);
       }
       syncProjectStatusIndicators();
-      const activeId = lastSessionIdBeforeClick !== null ? lastSessionIdBeforeClick : (getActiveSessionId() || getCurrentSessionId());
-      lastSessionIdBeforeClick = null;
-      if (sessionId === activeId && typeof scheduleTerminalSyncCheck === "function") {
-        scheduleTerminalSyncCheck(sessionId, { reason: "sidebar_click_current", force: true });
-      }
+      // The native selector already preserves the current chat. Re-clicking
+      // it marks read only; history reconciliation belongs to actual changes.
+
     }
   });
   addManagedListener(window, "focus", () => {

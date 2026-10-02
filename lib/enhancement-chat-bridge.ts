@@ -1,3 +1,4 @@
+import type { SessionData } from "../hooks/useAgentSession";
 import type {
   AgentMessage,
   AssistantContentBlock,
@@ -6,8 +7,6 @@ import type {
 import {
   getAssistantErrorMessage,
   isAssistantTruncated,
-  isMessageGroupAnchor,
-  splitFinalAssistantBlocks,
 } from "./message-display.ts";
 
 export const PROCESS_COLLAPSE_CHANGE_EVENT = "pi-enh-process-collapse-change";
@@ -39,6 +38,7 @@ export type UserMessageReconcileHook<TMessage = AgentMessage> = (
 
 export interface SessionReloadController {
   getSessionId: () => string | null;
+  getSessionData?: () => SessionData | null;
   isActive?: () => boolean;
   reloadSession: (
     sessionId: string,
@@ -54,6 +54,7 @@ export interface EnhancementWindowLike {
   __PI_ENH_GET_HISTORY_STATE__?: () => EnhancementHistoryState;
   __PI_ENH_LOAD_EARLIER__?: (tail?: unknown, source?: string) => Promise<boolean>;
   __PI_ENH_PREPARE_HISTORY_COMMIT__?: () => void;
+  __PI_WEB_GET_RESIDENT_SESSION_DATA__?: (sessionId: string) => SessionData | null;
   __PI_WEB_RELOAD_SESSION__?: (
     sessionId: string,
     showLoading?: boolean,
@@ -128,169 +129,30 @@ export function subscribeProcessCollapseChange(
   };
 }
 
-export function withAssistantBlocks(
-  message: AssistantMessage,
-  content: AssistantContentBlock[],
-  options: { omitUsage?: boolean } = {},
-): AssistantMessage {
-  const next = { ...message, content };
-  if (options.omitUsage) next.usage = undefined;
-  return next;
-}
-
-export function hasFinalAssistantAnswer(message: AgentMessage): boolean {
-  if (message.role !== "assistant") return false;
-  return splitFinalAssistantBlocks(message as AssistantMessage).answerBlocks.some((block) => (
-    block.type === "image" || (block.type === "text" && block.text.trim().length > 0)
-  ));
-}
-
-export function findFinalAssistantIndex(
-  messages: readonly AgentMessage[],
-  userIdx: number,
-  endIdx: number,
-): number {
-  for (let candidateIdx = endIdx - 1; candidateIdx > userIdx; candidateIdx--) {
-    if (hasFinalAssistantAnswer(messages[candidateIdx])) return candidateIdx;
+/** Preserve public commentary in place; only technical blocks enter disclosure groups. */
+export function splitAssistantDisplayRuns(message: AssistantMessage): { kind: "public" | "process"; message: AssistantMessage }[] {
+  const runs: { kind: "public" | "process"; blocks: AssistantContentBlock[]; indices: number[] }[] = [];
+  for (const [originalIndex, block] of (message.content ?? []).entries()) {
+    if (block.type === "text" && !block.text.trim()) continue;
+    if (block.type === "thinking" && !block.deferred && !block.thinking.trim()) continue;
+    const kind = block.type === "thinking" || block.type === "toolCall" ? "process" : "public";
+    const previous = runs.at(-1);
+    if (previous?.kind === kind) { previous.blocks.push(block); previous.indices.push(originalIndex); }
+    else runs.push({ kind, blocks: [block], indices: [originalIndex] });
   }
-  return findLastAssistantIndex(messages, userIdx, endIdx);
-}
-
-export function findLastAssistantIndex(
-  messages: readonly AgentMessage[],
-  userIdx: number,
-  endIdx: number,
-): number {
-  for (let candidateIdx = endIdx - 1; candidateIdx > userIdx; candidateIdx--) {
-    if (messages[candidateIdx]?.role === "assistant") return candidateIdx;
+  if (runs.at(-1)?.kind !== "public" && (getAssistantErrorMessage(message) || isAssistantTruncated(message))) {
+    runs.push({ kind: "public", blocks: [], indices: [] });
   }
-  return -1;
-}
-
-export function collectTurnPublicOutput(
-  messages: readonly AgentMessage[],
-  startIndex: number,
-  endIndex: number,
-): {
-  visibleBlocks: AssistantContentBlock[];
-  processByIndex: Map<number, AssistantContentBlock[]>;
-} {
-  const visibleBlocks: AssistantContentBlock[] = [];
-  const processByIndex = new Map<number, AssistantContentBlock[]>();
-  for (let index = Math.max(0, startIndex + 1); index <= endIndex; index += 1) {
-    const message = messages[index];
-    if (message?.role !== "assistant") continue;
-    const processBlocks: AssistantContentBlock[] = [];
-    for (const block of (message as AssistantMessage).content ?? []) {
-      if (!block) continue;
-      if (block.type === "text") {
-        if (typeof block.text === "string" && block.text.trim().length > 0) {
-          visibleBlocks.push(block);
-        }
-      } else if (block.type === "thinking" || block.type === "toolCall") {
-        processBlocks.push(block);
-      } else {
-        // Unknown or non-process output types (image, future blocks) fail open.
-        visibleBlocks.push(block);
-      }
+  return runs.map((run, index) => {
+    const last = index === runs.length - 1;
+    const copy = { ...message, content: run.blocks, displayBlockIndices: run.indices };
+    if (!last) {
+      delete copy.usage;
+      delete copy.errorMessage;
+      copy.stopReason = "stop";
     }
-    processByIndex.set(index, processBlocks);
-  }
-  return { visibleBlocks, processByIndex };
-}
-
-export function resolveTurnGroupRange(
-  messages: readonly AgentMessage[],
-  startIndex: number,
-  collapseEnabled: boolean,
-): { userIdx: number; endIdx: number } | null {
-  const msg = messages[startIndex];
-  if (!msg) return null;
-  const isAnchor = isMessageGroupAnchor(msg);
-  if (!isAnchor && !(startIndex === 0 && collapseEnabled)) {
-    return null;
-  }
-  const userIdx = isAnchor ? startIndex : -1;
-  let endIdx = userIdx + 1;
-  while (endIdx < messages.length && !isMessageGroupAnchor(messages[endIdx])) {
-    endIdx += 1;
-  }
-  return { userIdx, endIdx };
-}
-
-export function splitTurnMessagesForDisplay(
-  messages: readonly AgentMessage[],
-  userIdx: number,
-  endIdx: number,
-  collapseEnabled: boolean,
-): {
-  finalAssistantIdx: number;
-  finalAnswerMessage: AssistantMessage | null;
-  getProcessAssistantMessage: (processIdx: number, processMessage: AssistantMessage) => AssistantMessage;
-} {
-  const finalAssistantIdx = collapseEnabled
-    ? findLastAssistantIndex(messages, userIdx, endIdx)
-    : findFinalAssistantIndex(messages, userIdx, endIdx);
-
-  if (finalAssistantIdx === -1) {
-    return {
-      finalAssistantIdx: -1,
-      finalAnswerMessage: null,
-      getProcessAssistantMessage: (_, processMessage) => processMessage,
-    };
-  }
-
-  const finalAssistant = messages[finalAssistantIdx] as AssistantMessage;
-
-  if (collapseEnabled) {
-    const { visibleBlocks, processByIndex } = collectTurnPublicOutput(
-      messages,
-      userIdx,
-      finalAssistantIdx,
-    );
-    const hasPublicAnswer = visibleBlocks.length > 0
-      || Boolean(getAssistantErrorMessage(finalAssistant))
-      || isAssistantTruncated(finalAssistant);
-    const finalAnswerMessage = hasPublicAnswer
-      ? withAssistantBlocks(finalAssistant, visibleBlocks)
-      : null;
-
-    return {
-      finalAssistantIdx,
-      finalAnswerMessage,
-      getProcessAssistantMessage: (processIdx, processMessage) => (
-        withAssistantBlocks(
-          processMessage,
-          processByIndex.get(processIdx) ?? [],
-          { omitUsage: processIdx === finalAssistantIdx && Boolean(finalAnswerMessage) },
-        )
-      ),
-    };
-  }
-
-  const finalSplit = splitFinalAssistantBlocks(finalAssistant);
-  const finalAnswerMessage = finalSplit.answerBlocks.length > 0
-    || Boolean(getAssistantErrorMessage(finalAssistant))
-    || isAssistantTruncated(finalAssistant)
-    ? withAssistantBlocks(finalAssistant, finalSplit.answerBlocks)
-    : null;
-  const finalProcessEnd = finalAssistant.content.indexOf(finalSplit.answerBlocks[0]);
-  const finalProcessBlocks = finalAssistant.content.slice(
-    0,
-    finalProcessEnd < 0 ? undefined : finalProcessEnd,
-  );
-
-  return {
-    finalAssistantIdx,
-    finalAnswerMessage,
-    getProcessAssistantMessage: (processIdx, processMessage) => (
-      processIdx === finalAssistantIdx
-        ? withAssistantBlocks(processMessage, finalProcessBlocks, {
-          omitUsage: Boolean(finalAnswerMessage),
-        })
-        : processMessage
-    ),
-  };
+    return { kind: run.kind, message: copy };
+  });
 }
 
 export function clampHistoryLoadTail(
@@ -423,6 +285,7 @@ export function registerHistoryViewportBridges(
 }
 
 interface ReloadRegistryState {
+  residentDataBridge: (sessionId: string) => SessionData | null;
   controllers: Set<SessionReloadController>;
   reloadSessionBridge: (
     sessionId: string,
@@ -533,7 +396,15 @@ function getOrCreateReloadRegistry(win: EnhancementWindowLike): ReloadRegistrySt
     nativeReloadCurrentBridge(showLoading)
   );
 
+  const residentDataBridge = (sessionId: string): SessionData | null => {
+    const controller = findControllerForSession(controllers, sessionId, win);
+    // Never substitute the active chat for another requested session.
+    if (!controller || controller.getSessionId() !== sessionId || controller.isActive?.() === false) return null;
+    const data = controller.getSessionData?.();
+    return data?.sessionId === sessionId ? data : null;
+  };
   state = {
+    residentDataBridge,
     controllers,
     reloadSessionBridge,
     nativeReloadCurrentBridge,
@@ -553,6 +424,7 @@ export function registerSessionReloadAliases(
   state.controllers.delete(controller);
   state.controllers.add(controller);
 
+  win.__PI_WEB_GET_RESIDENT_SESSION_DATA__ = state.residentDataBridge;
   win.__PI_WEB_RELOAD_SESSION__ = state.reloadSessionBridge;
   win.__PI_WEB_NATIVE_RELOAD_CURRENT_SESSION__ = state.nativeReloadCurrentBridge;
   if (typeof win.__PI_ENH_RELOAD_CURRENT_SESSION__ !== "function") {
@@ -562,6 +434,9 @@ export function registerSessionReloadAliases(
   return () => {
     state.controllers.delete(controller);
     if (state.controllers.size === 0) {
+      if (win.__PI_WEB_GET_RESIDENT_SESSION_DATA__ === state.residentDataBridge) {
+        delete win.__PI_WEB_GET_RESIDENT_SESSION_DATA__;
+      }
       if (win.__PI_WEB_RELOAD_SESSION__ === state.reloadSessionBridge) {
         delete win.__PI_WEB_RELOAD_SESSION__;
       }

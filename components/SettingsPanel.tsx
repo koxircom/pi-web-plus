@@ -1,6 +1,18 @@
 "use client";
 
-import { useEffect, useState, type ReactNode } from "react";
+import {
+  useEffect,
+  useState,
+  useRef,
+  useCallback,
+  useMemo,
+  useSyncExternalStore,
+  type ReactNode,
+  type CSSProperties,
+  type PointerEvent as ReactPointerEvent,
+  type KeyboardEvent as ReactKeyboardEvent,
+} from "react";
+import dynamic from "next/dynamic";
 import { useI18n } from "@/hooks/useI18n";
 import { useTheme } from "@/hooks/useTheme";
 import { THEME_OPTIONS } from "@/lib/theme";
@@ -24,12 +36,47 @@ import {
   isThinkingExpandedByDefault,
   setThinkingExpandedByDefault,
 } from "@/lib/thinking-expansion-preference";
-import { ModelsConfig } from "./ModelsConfig";
 import { setupPushSubscription } from "@/lib/push-client";
-import { SkillsConfig } from "./SkillsConfig";
-import { AgentsConfig } from "./AgentsConfig";
-import { PluginsConfig } from "./PluginsConfig";
 import { ConfigButton, ConfigSwitch } from "./SettingsUi";
+import {
+  readInitialSettingsLayout,
+  saveSidebarWidth,
+  saveSidebarCollapsed,
+  saveDialogSize,
+  clampSidebarWidth,
+  clampDialogSize,
+  SETTINGS_SIDEBAR_WIDTH_DEFAULT,
+  SETTINGS_SIDEBAR_WIDTH_MIN,
+  SETTINGS_SIDEBAR_WIDTH_MAX,
+  SETTINGS_SIDEBAR_WIDTH_COLLAPSED,
+  SETTINGS_DIALOG_WIDTH_DEFAULT,
+  SETTINGS_DIALOG_HEIGHT_DEFAULT,
+  SETTINGS_DIALOG_WIDTH_MIN,
+  SETTINGS_DIALOG_HEIGHT_MIN,
+  type SettingsLayoutState,
+  type SettingsDialogSize,
+} from "@/lib/settings-layout";
+import {
+  settingsExtensionRegistry,
+  LEGACY_SETTINGS_EXTENSIONS,
+  isExtensionEnabled,
+  isSettingsPluginEnabled,
+  type SettingsExtensionDefinition,
+} from "@/lib/settings-extensions";
+import { IsolatedSettingsHost } from "./IsolatedSettingsHost";
+
+const ModelsConfig = dynamic(() =>
+  import("./ModelsConfig").then((module) => module.ModelsConfig),
+);
+const SkillsConfig = dynamic(() =>
+  import("./SkillsConfig").then((module) => module.SkillsConfig),
+);
+const AgentsConfig = dynamic(() =>
+  import("./AgentsConfig").then((module) => module.AgentsConfig),
+);
+const PluginsConfig = dynamic(() =>
+  import("./PluginsConfig").then((module) => module.PluginsConfig),
+);
 
 interface Props {
   cwd: string | null;
@@ -59,12 +106,57 @@ export function SettingsSectionIcon({ section, size = 16, strokeWidth = 1.8 }: {
   if (section === "models") return <svg {...common}><rect x="4" y="4" width="16" height="16" rx="2" /><rect x="9" y="9" width="6" height="6" /><path d="M9 1v3M15 1v3M9 20v3M15 20v3M20 9h3M20 15h3M1 9h3M1 15h3" /></svg>;
   if (section === "skills") return <svg {...common}><path d="m12 2-10 5 10 5 10-5-10-5Z" /><path d="m2 12 10 5 10-5M2 17l10 5 10-5" /></svg>;
   if (section === "agents") return <svg {...common} className="settings-section-icon is-agent"><rect x="5" y="7" width="14" height="11" rx="2" /><path d="M9 11h.01M15 11h.01M9 15h6M12 7V4M10 4h4" /></svg>;
-  return <svg {...common}><path d="M9 7V2M15 7V2M6 13V8a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v5a6 6 0 0 1-12 0ZM12 19v3" /></svg>;
+  if (section === "plugins") return <svg {...common}><path d="M9 7V2M15 7V2M6 13V8a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v5a6 6 0 0 1-12 0ZM12 19v3" /></svg>;
+  if (section === "enhancements") return <svg {...common}><path d="M12 2v4m0 12v4M2 12h4m12 0h4m-3.5-6.5 2.5-2.5m-15 15 2.5-2.5m0-10-2.5-2.5m15 15-2.5-2.5" /><circle cx="12" cy="12" r="4" /></svg>;
+  if (section === "notifications") return <svg {...common}><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9" /><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0" /></svg>;
+  if (section === "archived") return <svg {...common}><rect width="20" height="5" x="2" y="3" rx="1" /><path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8" /><path d="M10 12h4" /></svg>;
+  if (section === "usage") return <svg {...common}><path d="M3 3v18h18" /><path d="m19 9-5 5-4-4-3 3" /></svg>;
+  if (section === "tags") return <svg {...common}><path d="m12 2 8 8-9.5 9.5a2.12 2.12 0 0 1-3 0l-5-5a2.12 2.12 0 0 1 0-3L12 2Z" /><circle cx="16" cy="6" r="1.5" /></svg>;
+  return <svg {...common}><circle cx="12" cy="12" r="9" /></svg>;
 }
 
-function GeneralSettings({ sessionId, onSessionReloaded, quoteSelectionEnabled, onQuoteSelectionChange }: Pick<Props, "sessionId" | "onSessionReloaded" | "quoteSelectionEnabled" | "onQuoteSelectionChange">) {
+interface SettingsHostContextProps {
+  onClose: () => void;
+  activateSection: (id: string) => boolean;
+  availableSections: readonly string[];
+  cwd: string | null;
+  sessionId: string | null;
+}
+
+function MaintenanceHost(props: SettingsHostContextProps) {
+  return <IsolatedSettingsHost {...props} id="maintenance" sectionId="general"
+    className="settings-general-maintenance-host settings-extension-host" hideWhenEmpty />;
+}
+
+function TabActionHost({ sectionId, ...props }: SettingsHostContextProps & { sectionId: string }) {
+  return <IsolatedSettingsHost {...props} id={`tab-action:${sectionId}`} sectionId={sectionId}
+    className="settings-tab-action-host settings-extension-host" hideWhenEmpty />;
+}
+
+const subscribeSettingsPreferences = (listener: () => void) =>
+  settingsExtensionRegistry.subscribePreferences(listener);
+const readDashboardPreference = () => isSettingsPluginEnabled("general-settings-dashboard");
+
+function GeneralSettings({
+  sessionId,
+  onSessionReloaded,
+  quoteSelectionEnabled,
+  onQuoteSelectionChange,
+  onClose,
+  activateSection,
+  availableSections,
+  cwd,
+}: Pick<Props, "sessionId" | "onSessionReloaded" | "quoteSelectionEnabled" | "onQuoteSelectionChange"> & {
+  onClose: () => void;
+  activateSection: (id: string) => boolean;
+  availableSections: readonly string[];
+  cwd: string | null;
+}) {
   const { locale, setLocale, supportedLocales, t } = useI18n();
   const { preference, setThemePreference } = useTheme();
+  const dashboardEnabled = useSyncExternalStore(
+    subscribeSettingsPreferences, readDashboardPreference, readDashboardPreference,
+  );
   const { width: chatContentWidth, setWidth: setChatContentWidth, fontSize, setFontSize } = useChatAppearance();
   const [shellSettings, setShellSettings] = useState<ShellToolSettingsResponse | null>(null);
   const [shellSaving, setShellSaving] = useState(false);
@@ -158,10 +250,10 @@ function GeneralSettings({ sessionId, onSessionReloaded, quoteSelectionEnabled, 
   };
 
   return (
-    <div className="settings-general">
+    <div className={`settings-general${dashboardEnabled ? " settings-general-dashboard" : ""}`}>
       <h2 className="settings-general-title">{t("settings.general")}</h2>
 
-      <section className="settings-general-section">
+      <section className="settings-general-section" data-settings-area="appearance">
         <h3 className="settings-general-heading">{t("settings.appearance")}</h3>
         <div role="radiogroup" aria-label={t("settings.appearance")} className="settings-theme-options">
           {THEME_OPTIONS.map((option) => {
@@ -187,7 +279,7 @@ function GeneralSettings({ sessionId, onSessionReloaded, quoteSelectionEnabled, 
         </div>
       </section>
 
-      <section className="settings-general-section">
+      <section className="settings-general-section" data-settings-area="chat">
         <h3 className="settings-general-heading">{t("settings.chat")}</h3>
         <div className="settings-chat-options">
           <div className="settings-chat-option settings-chat-switch-option">
@@ -269,7 +361,7 @@ function GeneralSettings({ sessionId, onSessionReloaded, quoteSelectionEnabled, 
       </section>
 
       {shellSettings?.isWindows && (
-        <section className="settings-general-section">
+        <section className="settings-general-section" data-settings-area="shell">
           <h3 className="settings-general-heading">{t("settings.shellTool")}</h3>
           <p className="settings-general-description">{t("settings.shellToolDescription")}</p>
           <div className="settings-shell-option">
@@ -285,7 +377,7 @@ function GeneralSettings({ sessionId, onSessionReloaded, quoteSelectionEnabled, 
         </section>
       )}
 
-      <section className="settings-general-section">
+      <section className="settings-general-section" data-settings-area="push">
         <h3 className="settings-general-heading">{t("settings.pushPermission")}</h3>
         <p className="settings-general-description">{t("settings.pushPermissionDescription")}</p>
         <div className="settings-shell-option">
@@ -310,7 +402,7 @@ function GeneralSettings({ sessionId, onSessionReloaded, quoteSelectionEnabled, 
         )}
       </section>
 
-      <section className="settings-general-section">
+      <section className="settings-general-section" data-settings-area="language">
         <h3 className="settings-general-heading">{t("common.language")}</h3>
         <div role="radiogroup" aria-label={t("common.language")} className="settings-language-options">
           {supportedLocales.map((plugin) => {
@@ -336,7 +428,7 @@ function GeneralSettings({ sessionId, onSessionReloaded, quoteSelectionEnabled, 
       </section>
 
       {webAuthEnabled && (
-        <section className="settings-general-section">
+        <section className="settings-general-section" data-settings-area="signout">
           <ConfigButton variant="secondary" disabled={loggingOut} onClick={() => void logOut()}>
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
               <path d="M10 17l5-5-5-5M15 12H3M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4" />
@@ -346,26 +438,144 @@ function GeneralSettings({ sessionId, onSessionReloaded, quoteSelectionEnabled, 
           {logoutError && <p role="alert" className="settings-general-error">{logoutError}</p>}
         </section>
       )}
+
+      {/* 原生 General 提供的独占维护卡片宿主（React 拥有且无孩子） */}
+      <MaintenanceHost
+        onClose={onClose}
+        activateSection={activateSection}
+        availableSections={availableSections}
+        cwd={cwd}
+        sessionId={sessionId}
+      />
     </div>
   );
 }
 
-export function SettingsPanel({ cwd, sessionId, initialSection, onClose, onSessionReloaded, quoteSelectionEnabled, onQuoteSelectionChange }: Props) {
+function ExtensionSectionHost({ definition, ...props }: SettingsHostContextProps & {
+  definition: SettingsExtensionDefinition;
+}) {
+  return (
+    <div className="settings-extension-host-container">
+      <IsolatedSettingsHost {...props} id={definition.id} sectionId={definition.id}
+        className={`settings-extension-host settings-${definition.id}-host`} showLoading fill />
+    </div>
+  );
+}
+
+export function SettingsPanel({
+  cwd,
+  sessionId,
+  initialSection,
+  onClose,
+  onSessionReloaded,
+  quoteSelectionEnabled,
+  onQuoteSelectionChange,
+}: Props) {
   const { t } = useI18n();
+
+  // 1. 同步初始布局状态（0ms 首次 client render 取得，无跳变）
+  const [layout, setLayout] = useState<SettingsLayoutState>(() => readInitialSettingsLayout());
+  const [isResizing, setIsResizing] = useState(false);
+
+  // 拖动状态 ref：记录开始位置和初始尺寸，供取消时回滚
+  const resizingStateRef = useRef<{
+    kind: "sidebar" | "east" | "south" | "se";
+    startX: number;
+    startY: number;
+    initialSidebarWidth: number;
+    initialDialogSize: SettingsDialogSize;
+  } | null>(null);
+
+  // 2. 扩展偏好响应与 sections 列表
+  const [extVersion, setExtVersion] = useState(0);
+
+  useEffect(() => {
+    return settingsExtensionRegistry.subscribePreferences(() => {
+      setExtVersion((v) => v + 1);
+    });
+  }, []);
+
+  const enabledExtensions = useMemo(() => {
+    return LEGACY_SETTINGS_EXTENSIONS.filter((ext) => isExtensionEnabled(ext));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [extVersion]);
+
+  const nativeSections: { id: SettingsSection; label: string; requiresProject: boolean }[] = useMemo(
+    () => [
+      { id: "general", label: t("settings.general"), requiresProject: false },
+      { id: "models", label: t("common.models"), requiresProject: false },
+      { id: "skills", label: t("common.skills"), requiresProject: true },
+      { id: "agents", label: t("common.agents"), requiresProject: true },
+      { id: "plugins", label: t("common.plugins"), requiresProject: true },
+    ],
+    [t],
+  );
+
+  const sections = useMemo(() => {
+    return [
+      ...nativeSections,
+      ...enabledExtensions.map((ext) => ({
+        id: ext.id as SettingsSection,
+        label: ext.label,
+        requiresProject: ext.requiresProject,
+        legacyTabAttr: ext.legacyTabAttr,
+      })),
+    ];
+  }, [nativeSections, enabledExtensions]);
+
+  // 3. 导航与激活状态
   const [section, setSection] = useState<SettingsSection>(initialSection);
   const [mountedSections, setMountedSections] = useState<ReadonlySet<SettingsSection>>(
     () => new Set([section]),
   );
-  const sections: { id: SettingsSection; label: string; requiresProject: boolean }[] = [
-    { id: "general", label: t("settings.general"), requiresProject: false },
-    { id: "models", label: t("common.models"), requiresProject: false },
-    { id: "skills", label: t("common.skills"), requiresProject: true },
-    { id: "agents", label: t("common.agents"), requiresProject: true },
-    { id: "plugins", label: t("common.plugins"), requiresProject: true },
-  ];
+
+  const cwdRef = useRef(cwd);
+  cwdRef.current = cwd;
+  const sectionsRef = useRef(sections);
+  sectionsRef.current = sections;
 
   useEffect(() => setLastSettingsSection(initialSection), [initialSection]);
 
+  const activateSection = useCallback(
+    (nextSection: SettingsSection): boolean => {
+      const target = sectionsRef.current.find((s) => s.id === nextSection);
+      if (!target) return false;
+      if (target.requiresProject && !cwdRef.current) return false;
+
+      setMountedSections((current) => new Set(current).add(nextSection));
+      setSection(nextSection);
+      setLastSettingsSection(nextSection);
+      return true;
+    },
+    [],
+  );
+
+  const activateSectionById = useCallback(
+    (id: string): boolean => {
+      return activateSection(id as SettingsSection);
+    },
+    [activateSection],
+  );
+
+  // 4. 注册 Modal Runtime 到 ABI
+  useEffect(() => {
+    settingsExtensionRegistry.setModalRuntime({
+      activateSection: (id) => activateSectionById(id),
+      getActiveSection: () => section,
+      isModalOpen: () => true,
+      onRendererRegistered: (id) => {
+        if (id === section) {
+          setMountedSections((current) => new Set(current).add(id as SettingsSection));
+        }
+      },
+    });
+
+    return () => {
+      settingsExtensionRegistry.setModalRuntime(null);
+    };
+  }, [section, activateSectionById]);
+
+  // 5. 键盘 Escape 关闭
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key !== "Escape" || event.defaultPrevented) return;
@@ -376,40 +586,288 @@ export function SettingsPanel({ cwd, sessionId, initialSection, onClose, onSessi
     return () => document.removeEventListener("keydown", handleKeyDown);
   }, [onClose]);
 
+  // 6. Project 缺失或被禁用的扩展自动回退
   useEffect(() => {
-    if (cwd || (section !== "skills" && section !== "agents" && section !== "plugins")) return;
-    setSection("general");
-    setMountedSections((current) => new Set(current).add("general"));
-    setLastSettingsSection("general");
-  }, [cwd, section]);
+    const isProjectReq =
+      section === "skills" || section === "agents" || section === "plugins";
+    if (isProjectReq && !cwd) {
+      activateSection("general");
+      return;
+    }
 
-  const activateSection = (nextSection: SettingsSection) => {
-    setMountedSections((current) => new Set(current).add(nextSection));
-    setSection(nextSection);
-    setLastSettingsSection(nextSection);
+    const isExt = LEGACY_SETTINGS_EXTENSIONS.some((e) => e.id === section);
+    if (isExt && !enabledExtensions.some((e) => e.id === section)) {
+      activateSection("general");
+    }
+  }, [cwd, section, enabledExtensions, activateSection]);
+
+  // 7. 折叠切换（纯 CSS 过渡，无多余状态）
+  const toggleCollapse = useCallback(() => {
+    setLayout((prev) => {
+      const nextCollapsed = !prev.isCollapsed;
+      saveSidebarCollapsed(nextCollapsed);
+      return { ...prev, isCollapsed: nextCollapsed };
+    });
+  }, []);
+
+  // 8. 拖动 Pointer Capture 处理
+  const handleSidebarPointerDown = (e: ReactPointerEvent<HTMLDivElement>) => {
+    if (e.button !== 0 || layout.isCollapsed) return;
+    try {
+      e.currentTarget.setPointerCapture(e.pointerId);
+    } catch {}
+    setIsResizing(true);
+    resizingStateRef.current = {
+      kind: "sidebar",
+      startX: e.clientX,
+      startY: e.clientY,
+      initialSidebarWidth: layout.sidebarWidth,
+      initialDialogSize: { ...layout.dialogSize },
+    };
   };
 
-  const sectionHost = (id: SettingsSection, content: ReactNode) => mountedSections.has(id) ? (
-    <div
-      key={id}
-      hidden={section !== id}
-      className="settings-section-host"
-    >
-      {content}
-    </div>
-  ) : null;
+  const handleSidebarDoubleClick = () => {
+    if (layout.isCollapsed) return;
+    setLayout((prev) => ({ ...prev, sidebarWidth: SETTINGS_SIDEBAR_WIDTH_DEFAULT }));
+    saveSidebarWidth(SETTINGS_SIDEBAR_WIDTH_DEFAULT);
+  };
+
+  const handleSidebarKeyDown = (e: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (layout.isCollapsed) return;
+    if (e.key === "ArrowLeft") {
+      e.preventDefault();
+      const next = clampSidebarWidth(layout.sidebarWidth - 16);
+      setLayout((prev) => ({ ...prev, sidebarWidth: next }));
+      saveSidebarWidth(next);
+    } else if (e.key === "ArrowRight") {
+      e.preventDefault();
+      const next = clampSidebarWidth(layout.sidebarWidth + 16);
+      setLayout((prev) => ({ ...prev, sidebarWidth: next }));
+      saveSidebarWidth(next);
+    } else if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      handleSidebarDoubleClick();
+    } else if (e.key === "Home") {
+      e.preventDefault();
+      const next = SETTINGS_SIDEBAR_WIDTH_MIN;
+      setLayout((prev) => ({ ...prev, sidebarWidth: next }));
+      saveSidebarWidth(next);
+    } else if (e.key === "End") {
+      e.preventDefault();
+      const next = SETTINGS_SIDEBAR_WIDTH_MAX;
+      setLayout((prev) => ({ ...prev, sidebarWidth: next }));
+      saveSidebarWidth(next);
+    }
+  };
+
+  const handleDialogPointerDown = (
+    kind: "east" | "south" | "se",
+    e: ReactPointerEvent<HTMLDivElement>,
+  ) => {
+    if (e.button !== 0) return;
+    try {
+      e.currentTarget.setPointerCapture(e.pointerId);
+    } catch {}
+    setIsResizing(true);
+    resizingStateRef.current = {
+      kind,
+      startX: e.clientX,
+      startY: e.clientY,
+      initialSidebarWidth: layout.sidebarWidth,
+      initialDialogSize: { ...layout.dialogSize },
+    };
+  };
+
+  const handleDialogDoubleClick = () => {
+    const defaultSize = clampDialogSize({
+      width: SETTINGS_DIALOG_WIDTH_DEFAULT,
+      height: SETTINGS_DIALOG_HEIGHT_DEFAULT,
+    });
+    setLayout((prev) => ({ ...prev, dialogSize: defaultSize }));
+    saveDialogSize(defaultSize);
+  };
+
+  const handlePointerMove = (e: ReactPointerEvent<HTMLDivElement>) => {
+    const state = resizingStateRef.current;
+    if (!state) return;
+    if (state.kind === "sidebar") {
+      const deltaX = e.clientX - state.startX;
+      const nextWidth = clampSidebarWidth(state.initialSidebarWidth + deltaX);
+      setLayout((prev) => ({ ...prev, sidebarWidth: nextWidth }));
+    } else {
+      const deltaX = e.clientX - state.startX;
+      const deltaY = e.clientY - state.startY;
+      if (state.kind === "east") {
+        const nextSize = clampDialogSize({
+          width: state.initialDialogSize.width + deltaX * 2,
+          height: state.initialDialogSize.height,
+        });
+        setLayout((prev) => ({ ...prev, dialogSize: nextSize }));
+      } else if (state.kind === "south") {
+        const nextSize = clampDialogSize({
+          width: state.initialDialogSize.width,
+          height: state.initialDialogSize.height + deltaY * 2,
+        });
+        setLayout((prev) => ({ ...prev, dialogSize: nextSize }));
+      } else if (state.kind === "se") {
+        const nextSize = clampDialogSize({
+          width: state.initialDialogSize.width + deltaX * 2,
+          height: state.initialDialogSize.height + deltaY * 2,
+        });
+        setLayout((prev) => ({ ...prev, dialogSize: nextSize }));
+      }
+    }
+  };
+
+  // 正常 pointerup 保存尺寸
+  const handlePointerUp = (e: ReactPointerEvent<HTMLDivElement>) => {
+    const state = resizingStateRef.current;
+    if (!state) return;
+    try {
+      if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+        e.currentTarget.releasePointerCapture(e.pointerId);
+      }
+    } catch {}
+    setIsResizing(false);
+    resizingStateRef.current = null;
+
+    if (state.kind === "sidebar") {
+      saveSidebarWidth(layout.sidebarWidth);
+    } else {
+      saveDialogSize(layout.dialogSize);
+    }
+  };
+
+  // pointercancel 恢复初始尺寸，绝对不保存
+  const handlePointerCancel = (e: ReactPointerEvent<HTMLDivElement>) => {
+    const state = resizingStateRef.current;
+    if (!state) return;
+    try {
+      if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+        e.currentTarget.releasePointerCapture(e.pointerId);
+      }
+    } catch {}
+    setIsResizing(false);
+    resizingStateRef.current = null;
+
+    // 恢复到拖拽开始时的尺寸
+    if (state.kind === "sidebar") {
+      setLayout((prev) => ({ ...prev, sidebarWidth: state.initialSidebarWidth }));
+    } else {
+      setLayout((prev) => ({ ...prev, dialogSize: state.initialDialogSize }));
+    }
+  };
+
+  const handleLostPointerCapture = () => {
+    if (resizingStateRef.current) {
+      setIsResizing(false);
+      resizingStateRef.current = null;
+    }
+  };
+
+  const handleDialogResizerKeyDown = (
+    kind: "east" | "south" | "se",
+    e: ReactKeyboardEvent<HTMLDivElement>,
+  ) => {
+    const step = 20;
+    if (e.key === "ArrowLeft") {
+      e.preventDefault();
+      if (kind === "east" || kind === "se") {
+        const next = clampDialogSize({ width: layout.dialogSize.width - step, height: layout.dialogSize.height });
+        setLayout((prev) => ({ ...prev, dialogSize: next }));
+        saveDialogSize(next);
+      }
+    } else if (e.key === "ArrowRight") {
+      e.preventDefault();
+      if (kind === "east" || kind === "se") {
+        const next = clampDialogSize({ width: layout.dialogSize.width + step, height: layout.dialogSize.height });
+        setLayout((prev) => ({ ...prev, dialogSize: next }));
+        saveDialogSize(next);
+      }
+    } else if (e.key === "ArrowUp") {
+      e.preventDefault();
+      if (kind === "south" || kind === "se") {
+        const next = clampDialogSize({ width: layout.dialogSize.width, height: layout.dialogSize.height - step });
+        setLayout((prev) => ({ ...prev, dialogSize: next }));
+        saveDialogSize(next);
+      }
+    } else if (e.key === "ArrowDown") {
+      e.preventDefault();
+      if (kind === "south" || kind === "se") {
+        const next = clampDialogSize({ width: layout.dialogSize.width, height: layout.dialogSize.height + step });
+        setLayout((prev) => ({ ...prev, dialogSize: next }));
+        saveDialogSize(next);
+      }
+    } else if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      handleDialogDoubleClick();
+    }
+  };
+
+  // 9. 渲染 Section 宿主
+  const sectionHost = (id: SettingsSection, content: ReactNode) =>
+    mountedSections.has(id) ? (
+      <div key={id} hidden={section !== id} className="settings-section-host" data-section-id={id}>
+        {content}
+      </div>
+    ) : null;
+
+  const availableSectionIds = useMemo(() => sections.map((s) => s.id), [sections]);
+
+  const dialogStyle: CSSProperties = {
+    "--settings-sidebar-width": `${layout.isCollapsed ? SETTINGS_SIDEBAR_WIDTH_COLLAPSED : layout.sidebarWidth}px`,
+    "--settings-dialog-width": `${layout.dialogSize.width}px`,
+    "--settings-dialog-height": `${layout.dialogSize.height}px`,
+  } as CSSProperties;
+
+  const surfaceClassName = [
+    "settings-dialog-surface",
+    layout.isCollapsed ? "is-collapsed" : "",
+    isResizing ? "is-resizing" : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
 
   return (
     <div
       role="dialog"
       aria-modal="true"
       aria-label={t("settings.title")}
-      onClick={(event) => { if (event.target === event.currentTarget) onClose(); }}
+      onClick={(event) => {
+        if (event.target === event.currentTarget) onClose();
+      }}
       className="settings-dialog-backdrop"
     >
-      <div className="settings-dialog-surface">
-        <div className="settings-dialog-header">
-          <strong className="settings-dialog-title">{t("settings.title")}</strong>
+      <div className={surfaceClassName} style={dialogStyle}>
+        {/* 侧边栏（包含标题行与折叠按钮、竖向导航栏；在 mobile <= 640px 时作为顶部 header） */}
+        <header className="settings-dialog-header">
+          <div className="settings-dialog-title">
+            <span className="settings-dialog-title-text">{t("settings.title")}</span>
+            <button
+              type="button"
+              className="settings-sidebar-collapse-btn"
+              onClick={toggleCollapse}
+              title={layout.isCollapsed ? "展开标签栏" : "折叠标签栏 (只显示图标)"}
+              aria-label={layout.isCollapsed ? "展开标签栏" : "折叠标签栏"}
+              aria-expanded={!layout.isCollapsed}
+            >
+              <svg
+                width="17"
+                height="17"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.8"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                aria-hidden="true"
+              >
+                <rect width="18" height="18" x="3" y="3" rx="2.5" />
+                <path d="M9 3v18" />
+              </svg>
+            </button>
+          </div>
+
           <select
             aria-label={t("settings.title")}
             value={section}
@@ -422,36 +880,180 @@ export function SettingsPanel({ cwd, sessionId, initialSection, onClose, onSessi
               </option>
             ))}
           </select>
+
           <nav aria-label={t("settings.title")} className="settings-section-tabs">
             {sections.map((item) => {
               const selected = section === item.id;
               const disabled = item.requiresProject && !cwd;
+              const legacyTabAttr = "legacyTabAttr" in item ? item.legacyTabAttr : undefined;
               return (
-                <button
-                  key={item.id}
-                  type="button"
-                  className="settings-section-tab"
-                  disabled={disabled}
-                  title={disabled ? t("settings.projectRequired") : item.label}
-                  aria-current={selected ? "page" : undefined}
-                  onClick={() => activateSection(item.id)}
-                >
-                  <SettingsSectionIcon section={item.id} />
-                  <span>{item.label}</span>
-                </button>
+                <div key={item.id} className="settings-section-tab-row">
+                  <button
+                    type="button"
+                    className="settings-section-tab"
+                    disabled={disabled}
+                    title={disabled ? t("settings.projectRequired") : item.label}
+                    aria-current={selected ? "page" : undefined}
+                    data-section-id={item.id}
+                    data-pi-enh-tab={legacyTabAttr}
+                    onClick={() => activateSection(item.id)}
+                  >
+                    <SettingsSectionIcon section={item.id} />
+                    <span>{item.label}</span>
+                  </button>
+                  <TabActionHost
+                    sectionId={item.id}
+                    onClose={onClose}
+                    activateSection={activateSectionById}
+                    availableSections={availableSectionIds}
+                    cwd={cwd}
+                    sessionId={sessionId}
+                  />
+                </div>
               );
             })}
           </nav>
-          <button type="button" onClick={onClose} title={t("i18n.close")} aria-label={t("i18n.close")} className="config-close-button settings-dialog-close">×</button>
+        </header>
+
+        {/* 侧边栏拖拽手柄（带 pointer capture 和键盘控制） */}
+        <div
+          className="settings-sidebar-resizer"
+          onPointerDown={handleSidebarPointerDown}
+          onPointerMove={handlePointerMove}
+          onPointerUp={handlePointerUp}
+          onPointerCancel={handlePointerCancel}
+          onLostPointerCapture={handleLostPointerCapture}
+          onDoubleClick={handleSidebarDoubleClick}
+          onKeyDown={handleSidebarKeyDown}
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize sidebar"
+          aria-valuenow={layout.sidebarWidth}
+          aria-valuemin={SETTINGS_SIDEBAR_WIDTH_MIN}
+          aria-valuemax={SETTINGS_SIDEBAR_WIDTH_MAX}
+          tabIndex={0}
+        >
+          <div className="settings-sidebar-resizer-line" />
         </div>
 
+        {/* 主内容区域与弹窗关闭按钮 */}
         <main className="settings-dialog-main">
-          {sectionHost("general", <GeneralSettings sessionId={sessionId} onSessionReloaded={onSessionReloaded} quoteSelectionEnabled={quoteSelectionEnabled} onQuoteSelectionChange={onQuoteSelectionChange} />)}
+          {sectionHost(
+            "general",
+            <GeneralSettings
+              sessionId={sessionId}
+              onSessionReloaded={onSessionReloaded}
+              quoteSelectionEnabled={quoteSelectionEnabled}
+              onQuoteSelectionChange={onQuoteSelectionChange}
+              onClose={onClose}
+              activateSection={activateSectionById}
+              availableSections={availableSectionIds}
+              cwd={cwd}
+            />,
+          )}
           {sectionHost("models", <ModelsConfig embedded cwd={cwd} onClose={onClose} />)}
-          {cwd && sectionHost("skills", <SkillsConfig embedded key={cwd} cwd={cwd} onClose={onClose} />)}
-          {cwd && sectionHost("agents", <AgentsConfig embedded key={cwd} cwd={cwd} sessionId={sessionId} onClose={onClose} onReloaded={onSessionReloaded} />)}
-          {cwd && sectionHost("plugins", <PluginsConfig embedded key={cwd} cwd={cwd} sessionId={sessionId} onClose={onClose} onReloaded={onSessionReloaded} />)}
+          {cwd &&
+            sectionHost(
+              "skills",
+              <SkillsConfig embedded key={cwd} cwd={cwd} onClose={onClose} />,
+            )}
+          {cwd &&
+            sectionHost(
+              "agents",
+              <AgentsConfig embedded key={cwd} cwd={cwd} sessionId={sessionId} onClose={onClose} onReloaded={onSessionReloaded} />,
+            )}
+          {cwd &&
+            sectionHost(
+              "plugins",
+              <PluginsConfig embedded key={cwd} cwd={cwd} sessionId={sessionId} onClose={onClose} onReloaded={onSessionReloaded} />,
+            )}
+
+          {/* 5 个 legacy extension section host */}
+          {enabledExtensions.map((ext) =>
+            sectionHost(
+              ext.id,
+              <ExtensionSectionHost
+                key={ext.id}
+                definition={ext}
+                onClose={onClose}
+                activateSection={activateSectionById}
+                availableSections={availableSectionIds}
+                cwd={cwd}
+                sessionId={sessionId}
+              />,
+            ),
+          )}
         </main>
+
+        <button
+          type="button"
+          onClick={onClose}
+          title={t("i18n.close")}
+          aria-label={t("i18n.close")}
+          className="config-close-button settings-dialog-close"
+        >
+          ×
+        </button>
+
+        {/* 弹窗尺寸缩放手柄（东、南、东南），支持 pointer 与键盘 */}
+        <div
+          className="settings-dialog-resizer settings-dialog-resizer-east"
+          onPointerDown={(e) => handleDialogPointerDown("east", e)}
+          onPointerMove={handlePointerMove}
+          onPointerUp={handlePointerUp}
+          onPointerCancel={handlePointerCancel}
+          onLostPointerCapture={handleLostPointerCapture}
+          onDoubleClick={handleDialogDoubleClick}
+          onKeyDown={(e) => handleDialogResizerKeyDown("east", e)}
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize settings dialog width"
+          tabIndex={0}
+        />
+        <div
+          className="settings-dialog-resizer settings-dialog-resizer-south"
+          onPointerDown={(e) => handleDialogPointerDown("south", e)}
+          onPointerMove={handlePointerMove}
+          onPointerUp={handlePointerUp}
+          onPointerCancel={handlePointerCancel}
+          onLostPointerCapture={handleLostPointerCapture}
+          onDoubleClick={handleDialogDoubleClick}
+          onKeyDown={(e) => handleDialogResizerKeyDown("south", e)}
+          role="separator"
+          aria-orientation="horizontal"
+          aria-label="Resize settings dialog height"
+          tabIndex={0}
+        />
+        <div
+          className="settings-dialog-resizer settings-dialog-resizer-se"
+          onPointerDown={(e) => handleDialogPointerDown("se", e)}
+          onPointerMove={handlePointerMove}
+          onPointerUp={handlePointerUp}
+          onPointerCancel={handlePointerCancel}
+          onLostPointerCapture={handleLostPointerCapture}
+          onDoubleClick={handleDialogDoubleClick}
+          onKeyDown={(e) => handleDialogResizerKeyDown("se", e)}
+          role="separator"
+          aria-label="Resize settings dialog size"
+          aria-valuenow={layout.dialogSize.width}
+          aria-valuemin={SETTINGS_DIALOG_WIDTH_MIN}
+          tabIndex={0}
+        >
+          <svg
+            className="settings-dialog-resizer-grip"
+            width="10"
+            height="10"
+            viewBox="0 0 10 10"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="1.5"
+            strokeLinecap="round"
+          >
+            <line x1="8" y1="2" x2="2" y2="8" />
+            <line x1="9" y1="5" x2="5" y2="9" />
+            <line x1="9" y1="8" x2="8" y2="9" />
+          </svg>
+        </div>
       </div>
     </div>
   );

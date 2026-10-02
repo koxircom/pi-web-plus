@@ -168,7 +168,7 @@ test("shows the follow-up shortcut in the button tooltip", () => {
     })),
   );
 
-  assert.match(html, /title="Queue this message after the agent finishes \(Alt\/Option\+Enter\)"/);
+  assert.match(html, /title="在 Agent 完成后排队此消息 \(Alt\/Option\+Enter\)"/);
   assert.match(html, /aria-keyshortcuts="Alt\+Enter"/);
 });
 
@@ -184,7 +184,7 @@ test("renders the upstream model error", () => {
   );
 
   assert.match(html, /role="alert"/);
-  assert.match(html, /Model error/);
+  assert.match(html, /模型错误/);
   assert.match(html, /providers\.custom\.models\.0\.id must not be empty/);
 });
 
@@ -208,7 +208,7 @@ test("renders enabledModels scope warnings", () => {
     ),
   );
 
-  assert.match(html, /Model scope warning/);
+  assert.match(html, /模型范围警告/);
   assert.match(html, /ghost-gateway/);
   assert.equal(
     renderToStaticMarkup(
@@ -235,8 +235,8 @@ test("keeps the model selector visible when a model error leaves no options", ()
     ),
   );
 
-  assert.match(html, />No models</);
-  assert.match(html, /title="No available models"/);
+  assert.match(html, />无可用模型</);
+  assert.match(html, /title="无可用模型"/);
 });
 
 test("renders the read-only tool preset as the active selection", () => {
@@ -254,7 +254,7 @@ test("renders the read-only tool preset as the active selection", () => {
     ),
   );
 
-  assert.match(html, /title="Change tool preset: read-only"/);
+  assert.match(html, /title="更改工具预设: read-only"/);
   assert.match(html, />read-only<\/span>/);
 });
 
@@ -273,8 +273,8 @@ test("renders the empty tool preset as Chat only", () => {
     ),
   );
 
-  assert.match(html, /title="Change tool preset: Chat only"/);
-  assert.match(html, />Chat only<\/span>/);
+  assert.match(html, /title="更改工具预设: 仅聊天"/);
+  assert.match(html, />仅聊天<\/span>/);
 });
 
 test("renders the compact composer with the standard Send button and no session controls", () => {
@@ -292,9 +292,24 @@ test("renders the compact composer with the standard Send button and no session 
   );
 
   assert.match(html, /<textarea/);
-  assert.match(html, />Send<\/button>/);
+  assert.match(html, />发送<\/button>/);
   assert.equal((html.match(/<button\b/g) ?? []).length, 1);
   assert.doesNotMatch(html, /type="file"|Attach image|Change tool preset/);
+});
+
+test("running sessions allow choosing the next model while pending changes remain locked", () => {
+  for (const modelSwitching of [false, true]) {
+    const html = renderToStaticMarkup(React.createElement(I18nProvider, null,
+      React.createElement(ChatInput, {
+        onSend() {}, onAbort() {}, onModelChange() {}, isStreaming: true,
+        model: { provider: "owned", modelId: "queued-model" },
+        modelList: [{ provider: "owned", id: "queued-model", name: "Queued model" }],
+        modelSwitching,
+      })));
+    const trigger = html.match(/class="model-selector[^"]*"[\s\S]*?(<button[^>]*>)/)?.[1];
+    assert.ok(trigger, "model trigger exists during streaming");
+    assert.equal(trigger.includes('disabled=""'), modelSwitching);
+  }
 });
 
 test("shows and locks the optimistic model while a switch is pending", () => {
@@ -314,7 +329,7 @@ test("shows and locks the optimistic model while a switch is pending", () => {
     ),
   );
 
-  assert.match(html, /title="Switching model"/);
+  assert.match(html, /title="正在切换模型"/);
   assert.match(html, /aria-busy="true"/);
   assert.match(html, /disabled=""/);
   assert.match(html, />DeepSeek V4 Flash</);
@@ -692,9 +707,9 @@ test("renders image warnings for known text-only defaults without an explicit mo
       );
 
       assert.match(html, /<img/);
-      assert.equal(html.includes("Images may not be sent"), warningExpected, `default model: ${modelId}`);
+      assert.equal(html.includes("图片可能无法发送"), warningExpected, `default model: ${modelId}`);
       if (warningExpected) {
-        assert.match(html, /The selected model \(Text Only\) does not support image input/);
+        assert.match(html, /当前选择的模型（Text Only）不支持图片输入/);
         assert.ok(html.indexOf('role="alert"') < html.indexOf("<textarea"));
       }
     }
@@ -932,9 +947,9 @@ test("over-limit draft (>10 images) renders all previews and warning banner, blo
       ),
     );
     assert.equal((html.match(/<img\b/g) ?? []).length, 11);
-    assert.match(html, /Too many images attached \(11\/10\)/);
-    assert.match(html, /Remove 1 image or send in batches before submitting/);
-    assert.match(html, /disabled=""[^>]*>.*?Send<\/button>/);
+    assert.match(html, /已附加 11 张图片（单次发送上限 10 张）/);
+    assert.match(html, /请先删减多余图片或分批发送/);
+    assert.match(html, /<button(?=[^>]*disabled="")(?=[^>]*aria-label="发送")[^>]*>/);
 
     // 2. Execute actual handleSend & sendQueued from ChatInput.tsx
     const sourceText = readFileSync(new URL("./ChatInput.tsx", import.meta.url), "utf8");
@@ -957,6 +972,8 @@ test("over-limit draft (>10 images) renders all previews and warning banner, blo
     const handleSendFn = new Script(ts.transpileModule(findCallback("handleSend").getText(source), {
       compilerOptions: { target: ts.ScriptTarget.ES2020 },
     }).outputText).runInNewContext({
+      queuedSubmissionPendingRef: { current: false },
+      setQueuedSubmissionPending() {},
       value: "preserve this text and 11 images",
       attachedImages: attachedEleven,
       attachedImagesRef: { current: attachedEleven },
@@ -977,6 +994,8 @@ test("over-limit draft (>10 images) renders all previews and warning banner, blo
     const sendQueuedFn = new Script(ts.transpileModule(findCallback("sendQueued").getText(source), {
       compilerOptions: { target: ts.ScriptTarget.ES2020 },
     }).outputText).runInNewContext({
+      queuedSubmissionPendingRef: { current: false },
+      setQueuedSubmissionPending() {},
       value: "preserve this text and 11 images",
       attachedImages: attachedEleven,
       attachedImagesRef: { current: attachedEleven },
@@ -999,8 +1018,8 @@ test("over-limit draft (>10 images) renders all previews and warning banner, blo
     });
 
     await handleSendFn();
-    sendQueuedFn("steer");
-    sendQueuedFn("followup");
+    await sendQueuedFn("steer");
+    await sendQueuedFn("followup");
 
     assert.equal(sendCalls, 0, "must not call onSend when images > 10");
     assert.equal(steerCalls, 0, "must not call onSteer when images > 10");
@@ -1064,4 +1083,14 @@ test("over-limit draft (>10 images) renders all previews and warning banner, blo
   } finally {
     clearDraft(draftKey);
   }
+});
+
+
+test("queued submission immediately shows pending, clears once and blocks duplicate until acknowledgement", async () => {
+ const source=ts.createSourceFile("ChatInput.tsx",readFileSync(new URL("./ChatInput.tsx",import.meta.url),"utf8"),ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX);
+ let callback;function visit(n){if(ts.isVariableDeclaration(n)&&n.name.getText(source)==="sendQueued")callback=n.initializer.arguments[0];ts.forEachChild(n,visit);}visit(source);assert(callback);
+ let release;const held=new Promise(r=>release=r),pending=[],ref={current:false};let cleared=0,sends=0;
+ const run=new Script(ts.transpileModule(callback.getText(source),{compilerOptions:{target:ts.ScriptTarget.ES2020}}).outputText).runInNewContext({value:"引导内容",attachedImages:[],attachedImagesRef:{current:[]},MAX_ATTACHED_IMAGES:10,queuedSubmissionPendingRef:ref,setQueuedSubmissionPending:v=>pending.push(v),onAudioUnlock:undefined,onBuiltinCommand:undefined,onPromptWithStreamingBehavior:undefined,clearInput:()=>cleared++,onSteer:()=>{sends++;return held;},onFollowUp:undefined});
+ const first=run("steer");assert.deepEqual(pending,[true]);assert.equal(cleared,1);assert.equal(sends,1);
+ await run("steer");assert.equal(sends,1);release();await first;assert.deepEqual(pending,[true,false]);assert.equal(ref.current,false);
 });

@@ -1,5 +1,7 @@
 "use client";
 
+import { registerSessionPreloadBridge, updateSessionPreloadCatalog } from "@/lib/session-preload";
+
 import { useEffect, useLayoutEffect, useState, useCallback, useMemo, useRef, type CSSProperties, type ReactNode } from "react";
 import type { SessionInfo } from "@/lib/types";
 import { listSessionFamilies } from "@/lib/session-family";
@@ -23,6 +25,8 @@ import { useScrollbarVisibility } from "@/hooks/useScrollbarVisibility";
 import { DirectoryPicker } from "./DirectoryPicker";
 import { FileExplorer, type FileExplorerHandle } from "./FileExplorer";
 import { SessionSearch } from "./SessionSearch";
+import { BRAND_NAME, BRAND_GITHUB_URL } from "@/lib/branding";
+import { useBrandingDecorations } from "@/lib/use-branding-decorations";
 
 // Fixed row height for the session list. SessionItem renders at exactly this
 // height, so the list can be windowed (only the visible slice is mounted).
@@ -351,8 +355,9 @@ function PiWebTitle() {
   const [showVersion, setShowVersion] = useState(false);
   const [scrambling, setScrambling] = useState(false);
   const revertTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const isDecorated = useBrandingDecorations();
 
-  const target = showVersion ? `${process.env.NEXT_PUBLIC_APP_VERSION ?? "0.0.0"}p${process.env.NEXT_PUBLIC_PI_VERSION ?? "0.0.0"}` : "Pi Web";
+  const target = showVersion ? `${process.env.NEXT_PUBLIC_APP_VERSION ?? "0.0.0"}p${process.env.NEXT_PUBLIC_PI_VERSION ?? "0.0.0"}` : BRAND_NAME;
   const display = useScramble(target, scrambling);
 
   const triggerScramble = useCallback((toVersion: boolean) => {
@@ -362,6 +367,12 @@ function PiWebTitle() {
   }, []);
 
   const handleClick = useCallback(() => {
+    if (showVersion) {
+      if (typeof window !== "undefined") {
+        window.open(BRAND_GITHUB_URL, "_blank", "noopener,noreferrer");
+      }
+      return;
+    }
     if (revertTimerRef.current) clearTimeout(revertTimerRef.current);
 
     const next = !showVersion;
@@ -377,12 +388,18 @@ function PiWebTitle() {
   return (
     <button
       onClick={handleClick}
+      title={showVersion ? `点击打开 GitHub 仓库 (${BRAND_GITHUB_URL})` : "点击查看版本号"}
       style={{
-        background: "none", border: "none", padding: 0, cursor: "default",
-        fontWeight: 700, fontSize: 15, letterSpacing: "-0.01em",
+        background: "none", border: "none", padding: 0,
+        cursor: showVersion ? "pointer" : "default",
+        fontWeight: 700,
+        fontSize: isDecorated ? 13.5 : 15,
+        letterSpacing: isDecorated ? "-0.03em" : "-0.01em",
         color: showVersion ? "var(--accent)" : "var(--text)",
         fontFamily: "var(--font-mono)",
         minWidth: "6ch",
+        whiteSpace: "nowrap",
+        flexShrink: 0,
       }}
     >
       {display}
@@ -708,6 +725,11 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
       document.removeEventListener("visibilitychange", onVisibilityChange);
     };
   }, [loadSessions]);
+
+  useEffect(() => registerSessionPreloadBridge(), []);
+  useEffect(() => {
+    updateSessionPreloadCatalog(allSessions, runningSessionIds, unreadSessionIds, selectedSessionId ?? null);
+  }, [allSessions, runningSessionIds, unreadSessionIds, selectedSessionId]);
 
   useEffect(() => {
     onRunningSessionIdsChange?.(runningSessionIds);
@@ -1189,9 +1211,9 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
           flexShrink: 0,
         }}
       >
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10, gap: 6, flexWrap: "nowrap" }}>
           <PiWebTitle />
-          <div style={{ display: "flex", gap: 6 }}>
+          <div style={{ display: "flex", gap: 6, alignItems: "center", flexShrink: 0 }}>
             <button
               onClick={handleNewSession}
               disabled={!selectedCwd}

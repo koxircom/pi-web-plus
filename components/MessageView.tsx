@@ -10,10 +10,11 @@ import { useI18n } from "@/hooks/useI18n";
 import { parseCompactionSummary } from "@/lib/compaction-summary";
 import { getAssistantErrorMessage, getThinkingPreview, isAssistantTruncated, isEmptyThinkingBlock } from "@/lib/message-display";
 import { parseUnifiedPatch, type SplitDiffCell, type SplitDiffFile } from "@/lib/patch";
-import { applyPatchPreviewToFiles, applyPatchResultHasFailures, extractApplyPatchPaths, getApplyPatchInputText, parseApplyPatchInput } from "@/lib/apply-patch";
+import { applyPatchPreviewToFiles, getApplyPatchInputText, parseApplyPatchInput } from "@/lib/apply-patch";
 import { isApplyPatchToolName, isEditToolName } from "@/lib/tool-names";
 import { isToolCallExpanded, setToolCallExpanded } from "@/lib/tool-call-expansion";
 import { isThinkingExpandedByDefault, THINKING_EXPANDED_EVENT } from "@/lib/thinking-expansion-preference";
+import { getToolPublicCategoryKey, getToolPublicStatus } from "@/lib/tool-public-status";
 import { TurnWrittenFiles } from "./TurnWrittenFiles";
 import type { WrittenFile } from "@/lib/turn-written-files";
 import { skillExpansionToCommand } from "@/lib/slash-display";
@@ -52,7 +53,7 @@ interface TokenEstimateCacheEntry {
 export function getTokenEstimateText(block: AssistantContentBlock): string | null {
   if (block.type === "text") return block.text;
   if (block.type === "thinking") return block.thinking;
-  if (block.type === "toolCall") return block.rawInput ?? JSON.stringify(block.input ?? {}) ?? "";
+  if (block.type === "toolCall") return block.rawInput ?? null;
   return null;
 }
 
@@ -627,8 +628,8 @@ function AssistantMessageView({
   const { t } = useI18n();
   const time = showTimestamp ? formatTime(message.timestamp) : null;
   const blockItems = useMemo(() => (message.content ?? [])
-    .map((block, originalIndex) => ({ block, originalIndex }))
-    .filter(({ block }) => !isEmptyThinkingBlock(block, { isStreaming })), [message.content, isStreaming]);
+    .map((block, index) => ({ block, originalIndex: message.displayBlockIndices?.[index] ?? index }))
+    .filter(({ block }) => !isEmptyThinkingBlock(block, { isStreaming })), [message.content, message.displayBlockIndices, isStreaming]);
   const blocks = useMemo(() => blockItems.map(({ block }) => block), [blockItems]);
   const providerError = getAssistantErrorMessage(message, { isStreaming });
   const truncated = isAssistantTruncated(message, { isStreaming });
@@ -1051,43 +1052,52 @@ function ToolCallBlock({ block, result, duration, onOpenSession }: { block: Tool
     setToolCallExpanded(block.toolCallId, next);
     setExpanded(next);
   };
-  const inputStr = getToolCallInputText(block);
   const isStreamingInput = block.rawInput !== undefined;
   const isEditTool = isEditToolName(block.toolName);
-  const resultDiff = result && !result.isError ? getResultDiff(result) : null;
-  const patchFiles = getApplyPatchFiles(block, result);
-  const patchLabel = isApplyPatchToolName(block.toolName)
-    ? summarizeApplyPatchInput(block)
+  const status = getToolPublicStatus(block, result);
+  const category = t(getToolPublicCategoryKey(block.toolName));
+  const statusLabel = status === "running"
+    ? t("chat.toolStatus.running")
+    : status === "success"
+      ? t("chat.toolStatus.success")
+      : t("chat.toolStatus.failure");
+  const isError = status === "failure";
+  const resultDiff = expanded && result && !isError ? getResultDiff(result) : null;
+  const patchFiles = expanded ? getApplyPatchFiles(block, result) : null;
+  const inputStr = expanded && (isStreamingInput || !isEditTool) && !patchFiles
+    ? getToolCallInputText(block)
     : null;
-
-  // Result display
-  const resultText = result
+  const resultText = expanded && result
     ? result.content.filter((b): b is { type: "text"; text: string } => b.type === "text").map((b) => b.text).join("\n")
     : null;
   const resultImages = getMessageImages(result?.content ?? []);
   const resultIsEmpty = resultText === null ? false : (resultText.trim() === "(no output)" || resultText.trim() === "");
-  const isError = (result?.isError ?? false)
-    || (isApplyPatchToolName(block.toolName) && applyPatchResultHasFailures(result?.details));
   const subagent = isSubagentToolDetails(result?.details) ? result.details : null;
 
   return (
     <div
+      data-pi-native-tool-status={status}
+      data-pi-native-owner="true"
       style={{
         borderRadius: 7,
         overflow: "hidden",
         fontSize: 12,
-        border: isError ? "1px solid rgba(248,113,113,0.45)" : "1px solid rgba(34,197,94,0.25)",
-        background: isError ? "rgba(248,113,113,0.05)" : "rgba(34,197,94,0.04)",
+        border: isError ? "1px solid rgba(248,113,113,0.45)" : "1px solid var(--border)",
+        background: isError ? "rgba(248,113,113,0.05)" : "var(--bg-subtle)",
       }}
     >
       {/* ── Tool call header ── */}
       <div style={{ display: "flex", alignItems: "stretch", minWidth: 0 }}>
         <button
+          type="button"
           onClick={toggleExpanded}
+          aria-expanded={expanded}
+          aria-label={t(expanded ? "chat.toolDetails.hide" : "chat.toolDetails.show")}
+          title={t(expanded ? "chat.toolDetails.hide" : "chat.toolDetails.show")}
           style={{
             display: "flex",
             alignItems: "center",
-            gap: 7,
+            gap: 8,
             flex: 1,
             minWidth: 0,
             padding: "6px 10px",
@@ -1099,15 +1109,15 @@ function ToolCallBlock({ block, result, duration, onOpenSession }: { block: Tool
             textAlign: "left",
           }}
         >
-          <span style={{ color: isError ? "#f87171" : "#16a34a", fontFamily: "var(--font-mono)", fontWeight: 600, fontSize: 11, flexShrink: 0 }}>
-            {block.toolName}
+          <span style={{ fontWeight: 500, flexShrink: 0 }}>{category}</span>
+          <span aria-hidden="true" style={{ color: "var(--text-dim)" }}>·</span>
+          <span style={{ color: isError ? "#f87171" : "var(--text-muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1, minWidth: 0 }}>
+            {statusLabel}
           </span>
-          <span style={{ color: "var(--text-dim)", fontFamily: "var(--font-mono)", fontSize: 11, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1, minWidth: 0 }}>
-            {isStreamingInput ? t("chat.generatingToolInput") : (patchLabel ?? getToolPreview(block))}
-          </span>
-          {duration !== undefined && (
+          {expanded && duration !== undefined && (
             <span style={{ fontSize: 11, color: "var(--text-dim)", flexShrink: 0, fontVariantNumeric: "tabular-nums" }}>{duration}s</span>
           )}
+          <span style={{ color: "var(--text-dim)", fontSize: 11, flexShrink: 0 }}>{t(expanded ? "chat.toolDetails.hide" : "chat.toolDetails.show")}</span>
           <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="var(--text-dim)" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0, transform: expanded ? "rotate(180deg)" : "none", transition: "transform 0.15s" }}>
             <polyline points="2 3.5 5 6.5 8 3.5" />
           </svg>
@@ -1428,12 +1438,6 @@ function getApplyPatchFiles(block: ToolCallContent, result?: ToolResultMessage):
 }
 
 /** Header label listing the files targeted by an apply_patch call. */
-function summarizeApplyPatchInput(block: ToolCallContent): string | null {
-  const paths = extractApplyPatchPaths(getApplyPatchInputText(block.input, block.rawInput));
-  if (paths.length === 0) return null;
-  return paths.join(", ").slice(0, 120);
-}
-
 function getResultDiff(result: ToolResultMessage): ResultDiff | null {
   const details = (result as ToolResultMessage & { details?: unknown }).details;
   if (!isRecord(details)) return null;
@@ -1820,23 +1824,6 @@ function previewText(text: string): string {
   return normalized.length > 140 ? `${normalized.slice(0, 140)}...` : normalized;
 }
 
-
-function getToolPreview(block: ToolCallContent): string {
-  const input = block.input;
-  if (!input || typeof input !== "object") return "";
-  const keys = Object.keys(input);
-  if (keys.length === 0) return "";
-
-  // Common tool input patterns
-  if ("command" in input) return String(input.command).slice(0, 120);
-  if ("path" in input) return String(input.path).slice(0, 120);
-  if ("file_path" in input) return String(input.file_path).slice(0, 120);
-  if ("pattern" in input) return String(input.pattern).slice(0, 120);
-  if ("query" in input) return String(input.query).slice(0, 120);
-
-  const first = input[keys[0]];
-  return String(first).slice(0, 120);
-}
 
 function formatUsage(usage: {
   input: number;

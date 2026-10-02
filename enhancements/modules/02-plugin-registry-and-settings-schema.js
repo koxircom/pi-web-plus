@@ -3,17 +3,17 @@
   // ==========================================
   const ENHANCEMENT_PLUGINS = [
     {
-      id: "user-message-reconcile",
-      name: "用户消息状态对齐与大图去重",
-      desc: "智能对齐发送含大图消息时的乐观状态与服务端 SSE 消息，消除重复追加气泡，修复 React 状态并杜绝旧轮误匹配。",
+      id: "stop-fast-response",
+      name: "停止即时响应",
+      desc: "消除停止与中断指令被后台 SSE 连接准备阻塞的延迟，直通发送 abort 请求，并提供正在停止即时反馈与网络去重。",
       category: "交互增强",
       defaultEnabled: true,
     },
     {
-      id: "settings-sidebar-layout",
-      name: "设置弹窗左侧导航与加宽",
-      desc: "将设置对话框选项卡重构为现代左侧垂直侧边栏导航，支持一键折叠为迷你图标栏，并适度加宽弹窗，使各项设置面板阅读和操作更宽阔从容。",
-      category: "显示增强",
+      id: "user-message-reconcile",
+      name: "用户消息状态对齐与大图去重",
+      desc: "智能对齐发送含大图消息时的乐观状态与服务端 SSE 消息，消除重复追加气泡，修复 React 状态并杜绝旧轮误匹配。",
+      category: "交互增强",
       defaultEnabled: true,
     },
     {
@@ -565,8 +565,8 @@
     },
     {
       id: "pi-web-plus-branding",
-      name: "Pi Web Plus SVG 品牌",
-      desc: "将新会话与侧边栏品牌升级为矢量「π+ Pi Web Plus」SVG 标识，自适应深浅色主题且支持独立开关无损恢复。",
+      name: "Pi Web Plus 品牌装饰",
+      desc: "控制侧边栏与界面的附加紧凑头距、字体和间距等品牌装饰样式；原生「π+ Pi Web Plus」自有基础品牌标识始终保持生效。",
       version: "1.0.0",
       category: "显示增强",
       defaultEnabled: true,
@@ -602,12 +602,12 @@
     { id: "subagent-dispatch", name: "子 Agent 调度", desc: "管理全部子任务统一使用的服务端模型；实际模型由服务端动态读取。", category: "偏好记忆", version: "1.0.0", defaultEnabled: true, features: ["subagent-model-override"] },
     { id: "selection-context", name: "划选引用与上下文", desc: "管理文本划选引用、注释与发送上下文。", category: "交互增强", version: "1.0.0", defaultEnabled: true, features: ["quick-quote"] },
     { id: "session-sidebar", name: "会话列表增强", desc: "管理会话列表的快捷菜单、归档、标签、布局、颜色、快捷入口和搜索。", category: "交互增强", version: "1.0.0", defaultEnabled: true, features: ["context-menu", "session-pin-archive", "session-section-headers", "session-model-label", "session-item-compact", "session-color", "session-tags", "session-odoo-addons", "session-dblclick-rename", "session-search-shortcut", "session-search-project-folding", "session-batch-actions", "settings-tab-shortcuts", "mobile-swipe-drawer"] },
-    { id: "composer-workflow", name: "输入与附件增强", desc: "管理编辑器快捷操作、草稿、附件和移动端输入保护。", category: "交互增强", version: "1.0.0", defaultEnabled: true, features: ["quick-action-buttons", "empty-send-continue", "composer-draft-cache", "composer-file-paste", "composer-image-zoom", "mobile-enter-newline", "mobile-model-keyboard-guard", "composer-clean-placeholder", "codex-composer-layout", "composer-model-reasoning-pill", "composer-queue-panel", "running-model-switch", "composer-markdown-format", "composer-format-toggle", "composer-compact-button", "composer-tool-preset", "composer-modes", "at-mention-plugins"] },
+    { id: "composer-workflow", name: "输入与附件增强", desc: "管理编辑器快捷操作、草稿、附件和移动端输入保护。", category: "交互增强", version: "1.0.0", defaultEnabled: true, features: ["stop-fast-response", "quick-action-buttons", "empty-send-continue", "composer-draft-cache", "composer-file-paste", "composer-image-zoom", "mobile-enter-newline", "mobile-model-keyboard-guard", "composer-clean-placeholder", "codex-composer-layout", "composer-model-reasoning-pill", "composer-queue-panel", "running-model-switch", "composer-markdown-format", "composer-format-toggle", "composer-compact-button", "composer-tool-preset", "composer-modes", "at-mention-plugins"] },
     { id: "ask-user-experience", name: "ask_user 交互", desc: "管理网页原生问答选择器与批量原型预览。", category: "交互增强", version: "1.1.1", defaultEnabled: true, features: ["ask-user-web-native", "ask-user-batch-prototype"] },
     { id: "background-attention", name: "后台会话提醒", desc: "管理跨项目状态、提示音与桌面通知。", category: "运行监控", version: "1.0.0", defaultEnabled: true, features: ["project-status-indicator", "session-attention-sound", "session-attention-desktop"] },
     { id: "notification-management", name: "通知管理", desc: "管理所有站内通知、网页操作提示、提示音与桌面提醒，并查看通知历史。", category: "偏好记忆", version: "1.0.0", defaultEnabled: true, features: ["notification-center"] },
     { id: "safety-performance", name: "安全与性能保护", desc: "管理误触保护、模型警告可见性和代码块扫描保护。", category: "安全防护", version: "1.0.0", defaultEnabled: true, features: ["model-scope-warning", "esc-guard", "code-block-scan-guard", "streaming-thinking-guard", "client-crash-diagnostics"] },
-    { id: "local-workspace", name: "本地工作区工具", desc: "管理本地路径直达和会话缓存。", category: "快捷操作", version: "1.0.0", defaultEnabled: true, features: ["local-path-launcher", "obsidian-markdown-viewer", "excel-sheet-preview", "session-memory-cache", "session-history-integrity", "session-history-order-guard", "cross-device-session-sync", "session-panel-binding", "file-panel-overlay-guard", "general-settings-dashboard", "workspace-picker-hover", "settings-sidebar-layout", "pi-web-plus-branding"] },
+    { id: "local-workspace", name: "本地工作区工具", desc: "管理本地路径直达和会话缓存。", category: "快捷操作", version: "1.0.0", defaultEnabled: true, features: ["local-path-launcher", "obsidian-markdown-viewer", "excel-sheet-preview", "session-memory-cache", "session-history-integrity", "session-history-order-guard", "cross-device-session-sync", "session-panel-binding", "file-panel-overlay-guard", "general-settings-dashboard", "workspace-picker-hover", "pi-web-plus-branding"] },
     { id: "preference-memory", name: "偏好记忆", desc: "管理思考深度的跨会话记忆与浏览器增强设置归档。", category: "偏好记忆", version: "1.0.0", defaultEnabled: true, features: ["thinking-persistence", "enhancement-settings-archive"] },
   ];
   const ENHANCEMENT_MODULE_SETTINGS = {
@@ -950,46 +950,36 @@
     const next = isPluginEnabled(id);
     if (next !== previous) onPluginStateChanged(id, next);
     syncEnhancementPanelControls();
+    if (typeof window !== "undefined" && window.__PI_WEB_SETTINGS_NATIVE__ && typeof window.__PI_WEB_SETTINGS_NATIVE__.notifyPreferencesChanged === "function") {
+      try {
+        window.__PI_WEB_SETTINGS_NATIVE__.notifyPreferencesChanged();
+      } catch (e) {}
+    }
   }
 
   function onPluginStateChanged(id, enabled) {
     if (id === "settings-tab-shortcuts") syncBottomShortcutsBar(true);
-    if (id === "settings-sidebar-layout") {
-      if (document.documentElement) {
-        document.documentElement.classList.toggle("pi-enh-settings-sidebar-active", Boolean(enabled));
-        if (!enabled) {
-          document.documentElement.classList.remove("pi-enh-settings-sidebar-collapsed");
-          const btn = document.querySelector(".pi-enh-sidebar-collapse-btn");
-          if (btn) btn.remove();
-        }
-      }
-      syncSettingsDialogEnhancements();
-    } else if (id === "general-settings-dashboard") {
-      syncSettingsDialogEnhancements();
+    if (id === "stop-fast-response") {
       if (!enabled) {
-        const generalPanel = document.querySelector(".settings-general");
-        if (generalPanel) {
-          generalPanel.classList.remove("pi-enh-general-dashboard");
-          const shell = generalPanel.querySelector(".pi-enh-dashboard-shell");
-          if (shell) {
-            const allSections = Array.from(shell.querySelectorAll(".settings-general-section"));
-            for (const sec of allSections) {
-              sec.removeAttribute("data-pi-enh-section");
-              generalPanel.appendChild(sec);
-            }
-            shell.remove();
-          }
+        if (typeof window !== "undefined" && typeof window.__PI_ENH_CLEAR_STOP_FEEDBACK__ === "function") {
+          try { window.__PI_ENH_CLEAR_STOP_FEEDBACK__(); } catch (_) {}
+        }
+        if (typeof window !== "undefined" && typeof window.__PI_ENH_REMOVE_STOP_STYLE__ === "function") {
+          try { window.__PI_ENH_REMOVE_STOP_STYLE__(); } catch (_) {}
+        }
+      } else {
+        if (typeof window !== "undefined" && typeof window.__PI_ENH_ENSURE_STOP_STYLE__ === "function") {
+          try { window.__PI_ENH_ENSURE_STOP_STYLE__(); } catch (_) {}
         }
       }
-    } else if (id === "client-crash-diagnostics") {
+    }
+    if (id === "client-crash-diagnostics") {
       window.__PI_ENH_CRASH_DIAGNOSTICS__?.setEnabled(enabled);
     } else if (id === "notification-center") {
       applyNotificationVisibility();
       if (enabled) {
         initNotificationCapture();
       }
-      const nav = document.querySelector(".settings-section-tabs");
-      if (nav) syncSettingsDialogEnhancements();
     } else if (id === "obsidian-markdown-viewer") {
       if (!enabled) removeMarkdownViewerEnhancements();
       else syncMarkdownViewerMode();
@@ -1211,13 +1201,8 @@
           clearTimeout(tagMenuItem._closeSubmenuTimer);
           tagMenuItem.remove();
         }
-        const tagsTab = document.querySelector(".settings-section-tabs [data-pi-enh-tab='tags']");
-        if (tagsTab) tagsTab.remove();
-        const tagsPanel = document.querySelector(".pi-enh-tags-panel");
-        if (tagsPanel) tagsPanel.remove();
       } else {
         syncSessionTags();
-        syncSettingsDialogEnhancements();
       }
     } else if (id === "session-odoo-addons") {
       if (enabled && typeof refreshSessionOdooAddonsManifest === "function") {
@@ -1245,18 +1230,8 @@
       } else {
         syncComposerImageZoom();
       }
-    } else if (id === "codex-composer-layout") {
-      if (!enabled) {
-        removeCodexComposerLayout();
-      } else {
-        syncCodexComposerLayout();
-      }
-    } else if (id === "composer-model-reasoning-pill") {
-      if (!enabled) {
-        removeComposerModelPill();
-      } else {
-        syncComposerModelPill();
-      }
+    } else if (id === "codex-composer-layout" || id === "composer-model-reasoning-pill") {
+      window.dispatchEvent(new Event("pi-native-composer-preferences-change"));
     } else if (id === "mobile-model-keyboard-guard") {
       if (!enabled) {
         removeMobileModelKeyboardGuard();
@@ -1289,6 +1264,7 @@
         syncComposerMarkdownFormat();
       }
     } else if (id === "composer-modes") {
+      window.dispatchEvent(new Event("pi-native-composer-preferences-change"));
       if (!enabled) {
         handleComposerModesDisabled();
       } else {
@@ -1335,17 +1311,13 @@
       }
     } else if (id === "mobile-swipe-drawer") {
       syncMobileSwipeDrawer(enabled);
-    } else if (id === "usage-cost-dashboard") {
-      syncSettingsDialogEnhancements();
-      if (!enabled) {
-        hideUsagePanel(document.querySelector(".settings-section-tabs"));
-        document.querySelectorAll(".settings-dialog-main.pi-enh-usage-panel").forEach((el) => el.remove());
-      }
     } else if (id === "pi-web-plus-branding") {
-      if (typeof syncPiWebPlusBranding === "function") {
-        syncPiWebPlusBranding();
-      } else if (typeof window !== "undefined" && typeof window.__PI_ENH_SYNC_BRANDING__ === "function") {
-        window.__PI_ENH_SYNC_BRANDING__();
+      if (typeof window !== "undefined" && typeof window.dispatchEvent === "function") {
+        try {
+          window.dispatchEvent(new CustomEvent("pi-web-plus-branding-change", { detail: { enabled } }));
+        } catch (_) {
+          window.dispatchEvent(new Event("pi-web-plus-branding-change"));
+        }
       }
     }
   }
@@ -1721,6 +1693,60 @@
   // ==========================================
   const PINNED_SESSION_STORAGE_KEY = "pi-enh-session-pinned";
   const ARCHIVED_SESSION_STORAGE_KEY = "pi-enh-session-archived";
+  const RECENTLY_RESTORED_ARCHIVED_KEY = "pi-enh-recently-restored-archived-v1";
+
+  function getRecentlyRestoredArchivedIds() {
+    try {
+      const raw = localStorage.getItem(RECENTLY_RESTORED_ARCHIVED_KEY);
+      if (!raw) return new Set();
+      const parsed = JSON.parse(raw);
+      if (typeof parsed !== "object" || parsed === null) return new Set();
+      const now = Date.now();
+      const valid = new Set();
+      for (const [id, ts] of Object.entries(parsed)) {
+        if (id && typeof ts === "number" && now - ts < 120000) {
+          valid.add(id);
+        }
+      }
+      return valid;
+    } catch (e) {
+      return new Set();
+    }
+  }
+
+  function markSessionAsRecentlyRestored(sessionId) {
+    if (!sessionId) return;
+    try {
+      const raw = localStorage.getItem(RECENTLY_RESTORED_ARCHIVED_KEY);
+      const parsed = (raw && typeof raw === "string") ? JSON.parse(raw) : {};
+      parsed[sessionId] = Date.now();
+      const now = Date.now();
+      for (const [id, ts] of Object.entries(parsed)) {
+        if (now - Number(ts) >= 120000) delete parsed[id];
+      }
+      localStorage.setItem(RECENTLY_RESTORED_ARCHIVED_KEY, JSON.stringify(parsed));
+    } catch (e) {}
+    if (typeof window !== "undefined" && window.__PI_ENH_RECENTLY_RESTORED_ARCHIVED_IDS__ instanceof Set) {
+      window.__PI_ENH_RECENTLY_RESTORED_ARCHIVED_IDS__.add(sessionId);
+    }
+  }
+
+  function unmarkSessionAsRecentlyRestored(sessionId) {
+    if (!sessionId) return;
+    try {
+      const raw = localStorage.getItem(RECENTLY_RESTORED_ARCHIVED_KEY);
+      if (raw) {
+        const parsed = JSON.parse(raw);
+        if (typeof parsed === "object" && parsed !== null && sessionId in parsed) {
+          delete parsed[sessionId];
+          localStorage.setItem(RECENTLY_RESTORED_ARCHIVED_KEY, JSON.stringify(parsed));
+        }
+      }
+    } catch (e) {}
+    if (typeof window !== "undefined" && window.__PI_ENH_RECENTLY_RESTORED_ARCHIVED_IDS__ instanceof Set) {
+      window.__PI_ENH_RECENTLY_RESTORED_ARCHIVED_IDS__.delete(sessionId);
+    }
+  }
   const SESSION_MODEL_STORAGE_KEY = "pi-enh-session-model-meta-v1";
   const knownSessionTitles = new Map();
   const knownSessionsMap = new Map();
@@ -2186,7 +2212,7 @@
       if (!loc) return false;
       const hostname = loc.hostname;
       const port = String(loc.port || "");
-      const allowedHosts = ["127.0.0.1", "127.0.0.1", "localhost"];
+      const allowedHosts = ["10.0.0.2", "127.0.0.1", "localhost"];
       if (!allowedHosts.includes(hostname)) return false;
       if (port !== "30141" && port !== "30142") return false;
       return true;
@@ -2209,7 +2235,7 @@
 
   function getDurableStateInstanceParam() {
     try {
-      const port = String(window.location?.port || "");
+      const port = window.location?.port;
       if (port === "30142") return "30142";
       return "30141";
     } catch (e) {
@@ -2467,7 +2493,6 @@
   let activeDurableStateSyncPromise = null;
   async function syncDurableState(force = false) {
     if (isDisposed) return Promise.resolve();
-    if (window.__PI_ENH_NATIVE_STATE_API__ === true && window.__PI_ENH_DURABLE_STATE_ENABLED__ === false) return Promise.resolve();
     if (activeDurableStateSyncPromise) return activeDurableStateSyncPromise;
     activeDurableStateSyncPromise = (async () => {
       try {
@@ -2491,10 +2516,6 @@
         }
 
         if (!res?.ok || !isValidDurablePostResponse({ ...data, acknowledgedOpIds: [] }, [])) {
-          if (res?.status === 409 && data?.error === "NOT_INITIALIZED") {
-            // 状态服务未初始化（空库正常状态），保留本地状态，不打印异常警告
-            return;
-          }
           console.warn("[pi-enh] 独立状态服务返回异常或格式错误:", res?.status);
           return;
         }
@@ -2824,9 +2845,9 @@
 
             try {
               const isNative = window.__PI_ENH_NATIVE_STATE_API__ === true;
-              const endpoint = isNative
-                ? `${getDurableStateBaseUrl()}/enhancement-state/operations`
-                : `${getDurableStateBaseUrl()}/enhancement-state/operations?instance=${getDurableStateInstanceParam()}`;
+        const endpoint = isNative
+          ? `${getDurableStateBaseUrl()}/enhancement-state/operations`
+          : `${getDurableStateBaseUrl()}/enhancement-state/operations?instance=${getDurableStateInstanceParam()}`;
               let resp, result;
               try {
                 const fetchRes = await fetchModelsConfigBounded(endpoint, {
@@ -4193,62 +4214,11 @@
     };
   }
 
-  function showTagsPanel(nav, tagsTab) {
-    for (const t of nav.querySelectorAll(".settings-section-tab")) {
-      t.removeAttribute("aria-current");
-    }
-    tagsTab.setAttribute("aria-current", "page");
-
-    const dialog = (nav.closest && (nav.closest(".settings-dialog-backdrop") || nav.closest("[role='dialog']"))) || (nav.parentElement && nav.parentElement.parentElement) || document.body;
-    const allMains = dialog.querySelectorAll("main.settings-dialog-main");
-    for (const m of allMains) {
-      m.style.display = "none";
-    }
-
-    let panel = dialog.querySelector(".pi-enh-tags-panel");
-    if (!panel) {
-      panel = document.createElement("main");
-      panel.className = "settings-dialog-main pi-enh-tags-panel";
-      const parent = (allMains[0] && allMains[0].parentElement) || dialog;
-      parent.appendChild(panel);
-    }
-    panel.style.display = "block";
-    panel.hidden = false;
-    syncMobilePickerOption(nav, "tags");
-    renderTagsPanel(panel, nav);
-  }
-
-  function hideTagsPanel(nav) {
-    const tagsTab = nav?.querySelector?.("[data-pi-enh-tab='tags']");
-    if (tagsTab) tagsTab.removeAttribute("aria-current");
-
-    const dialog = (nav?.closest && (nav.closest(".settings-dialog-backdrop") || nav.closest("[role='dialog']"))) || (nav?.parentElement && nav.parentElement.parentElement) || document.body;
-    const panel = dialog.querySelector(".pi-enh-tags-panel");
-    if (panel) {
-      panel.style.display = "none";
-      panel.hidden = true;
-    }
-
-    const enhTab = nav?.querySelector?.("[data-pi-enh-tab='plugins']");
-    const notificationTab = nav?.querySelector?.("[data-pi-enh-tab='notifications']");
-    const archivedTab = nav?.querySelector?.("[data-pi-enh-tab='archived']");
-    const usageTab = nav?.querySelector?.("[data-pi-enh-tab='usage']");
-
-    const isEnhActive = enhTab && enhTab.getAttribute("aria-current") === "page";
-    const isNotificationActive = notificationTab && notificationTab.getAttribute("aria-current") === "page";
-    const isArchivedActive = archivedTab && archivedTab.getAttribute("aria-current") === "page";
-    const isUsageActive = usageTab && usageTab.getAttribute("aria-current") === "page";
-
-    if (!isEnhActive && !isNotificationActive && !isArchivedActive && !isUsageActive) {
-      const originalMains = dialog.querySelectorAll("main.settings-dialog-main:not(.pi-enh-plugins-panel):not(.pi-enh-archived-panel):not(.pi-enh-notifications-panel):not(.pi-enh-usage-panel):not(.pi-enh-tags-panel)");
-      for (const m of originalMains) {
-        m.style.display = "";
-      }
-    }
-  }
-
   function renderTagsPanel(panel, nav) {
     if (!panel) return;
+    if (!panel.classList.contains("pi-enh-tags-panel")) {
+      panel.classList.add("pi-enh-tags-panel");
+    }
 
     let allTags = readSessionTagsDefinitions();
     let currentNewColor = getRecommendedTagColor(allTags).color;
@@ -5259,7 +5229,10 @@
     try {
       const parsed = JSON.parse(localStorage.getItem(ARCHIVED_SESSION_STORAGE_KEY) || "[]");
       if (!Array.isArray(parsed)) return [];
-      return parsed.map(normalizeArchivedEntry).filter(Boolean);
+      const restoredIds = getRecentlyRestoredArchivedIds();
+      return parsed
+        .map(normalizeArchivedEntry)
+        .filter((e) => Boolean(e) && !restoredIds.has(e.id));
     } catch (e) {
       return [];
     }
@@ -5269,6 +5242,21 @@
     try {
       localStorage.setItem(ARCHIVED_SESSION_STORAGE_KEY, JSON.stringify(entries));
     } catch (e) {}
+  }
+
+  // 版本号只用于同步排序；归档内容相同时不重复重写整个 models.json。
+  function archivedEntriesHaveSameContent(left, right) {
+    if (!Array.isArray(left) || !Array.isArray(right)) return false;
+    const canonical = (value) => {
+      if (Array.isArray(value)) return value.map(canonical);
+      if (value && typeof value === "object") {
+        const result = {};
+        for (const key of Object.keys(value).sort()) result[key] = canonical(value[key]);
+        return result;
+      }
+      return value;
+    };
+    return JSON.stringify(canonical(left)) === JSON.stringify(canonical(right));
   }
 
   let pendingPersistArchivedTimer = null;
@@ -5338,6 +5326,17 @@
 
             const latestEntries = latestArchivedEntriesToPersist || readStoredArchivedEntries();
             const serverRev = Number(currentConfig.archivedRevision) || 0;
+            if (archivedEntriesHaveSameContent(currentConfig.archivedSessions, latestEntries)) {
+              window.__PI_ENH_ARCHIVED_MANIFEST__ = latestEntries;
+              // 不清除 GET 期间新排队的真实改动。
+              if (writeSeq === archivedPersistSeq) {
+                hasPendingArchivedPush = false;
+                setLocalArchivedRevision(serverRev);
+              }
+              archivedPersistFailures = 0;
+              currentResolvers.forEach((r) => r(true));
+              return true;
+            }
             const finalRevision = Math.max(Date.now(), serverRev + 1, getLocalArchivedRevision() || revision);
             setLocalArchivedRevision(finalRevision);
 
@@ -5455,12 +5454,21 @@
             const data = await resp.json();
             if (data && typeof data === "object" && "archivedSessions" in data) {
               remoteHasArchivedConfig = true;
+              remoteRevision = Number(data.archivedRevision) || 0;
               if (Array.isArray(data.archivedSessions)) {
                 remoteEntries = data.archivedSessions.map(normalizeArchivedEntry).filter(Boolean);
               } else {
                 remoteEntries = [];
               }
-              remoteRevision = Number(data.archivedRevision) || 0;
+              const restoredIds = getRecentlyRestoredArchivedIds();
+              if (restoredIds.size > 0 && Array.isArray(remoteEntries)) {
+                const prevCount = remoteEntries.length;
+                remoteEntries = remoteEntries.filter((e) => !restoredIds.has(e.id));
+                if (remoteEntries.length < prevCount) {
+                  remoteRevision = Math.max(Date.now(), remoteRevision + 1);
+                  void persistArchivedSessionsToServer(remoteEntries, remoteRevision, true);
+                }
+              }
             }
           }
         } catch (e) {}
@@ -5552,6 +5560,15 @@
           setLocalArchivedRevision(pushRev);
           window.__PI_ENH_ARCHIVED_MANIFEST__ = localEntries;
           void persistArchivedSessionsToServer(localEntries, pushRev, false, true);
+          return;
+        }
+
+        // 相同内容只对齐服务端版本，终止不同标签页互相抬高版本号的反馈循环。
+        if (remoteRevision > 0 && archivedEntriesHaveSameContent(remoteEntries, localEntries)) {
+          setLocalArchivedRevision(remoteRevision);
+          hasPendingArchivedPush = false;
+          archivedPersistFailures = 0;
+          window.__PI_ENH_ARCHIVED_MANIFEST__ = remoteEntries;
           return;
         }
 
@@ -5907,6 +5924,11 @@
     if (!sessionId) return;
     pendingDeletedSessionIds.add(sessionId);
     confirmedDeletedSessionIds.set(sessionId, Date.now() + retentionMs);
+    try {
+      if (typeof window !== "undefined" && typeof window.__PI_ENH_RERENDER_SESSIONS__ === "function") {
+        window.__PI_ENH_RERENDER_SESSIONS__();
+      }
+    } catch (e) {}
   }
 
   function markSessionDeleteConfirmed(sessionId, retentionMs = 60000) {
@@ -5919,6 +5941,11 @@
     if (!sessionId) return;
     pendingDeletedSessionIds.delete(sessionId);
     confirmedDeletedSessionIds.delete(sessionId);
+    try {
+      if (typeof window !== "undefined" && typeof window.__PI_ENH_RERENDER_SESSIONS__ === "function") {
+        window.__PI_ENH_RERENDER_SESSIONS__();
+      }
+    } catch (e) {}
   }
 
   function cleanupDeletedSessionEverywhere(sessionId) {
@@ -6632,8 +6659,13 @@
 
   function archiveSession(sessionId, meta = {}) {
     if (!sessionId) return false;
+    unmarkSessionAsRecentlyRestored(sessionId);
     const entries = readStoredArchivedEntries();
-    if (entries.some((e) => e.id === sessionId)) return false;
+    if (entries.some((e) => e.id === sessionId)) {
+      writeStoredArchivedEntries(entries);
+      void persistArchivedSessionsToServer(entries, undefined, true);
+      return true;
+    }
     const knownTitle = knownSessionTitles.get(sessionId);
     const finalName = (meta.name && meta.name !== sessionId) ? meta.name : (knownTitle || meta.name || sessionId.slice(0, 12));
     entries.unshift({
@@ -6657,21 +6689,38 @@
         }
       }
     } catch (e) {}
-    void persistArchivedSessionsToServer(entries);
+    void persistArchivedSessionsToServer(entries, undefined, true);
     return true;
+  }
+
+  function restoreArchivedSessions(sessionIds) {
+    if (!Array.isArray(sessionIds) || sessionIds.length === 0) return 0;
+    const targetSet = new Set(sessionIds.map((id) => (typeof id === "string" ? id.trim() : id?.id)).filter(Boolean));
+    if (targetSet.size === 0) return 0;
+
+    const entries = readStoredArchivedEntries();
+    const next = entries.filter((e) => !targetSet.has(e.id));
+    const restoredCount = entries.length - next.length;
+    if (restoredCount === 0) return 0;
+
+    for (const sid of targetSet) {
+      markSessionAsRecentlyRestored(sid);
+    }
+
+    writeStoredArchivedEntries(next);
+    if (Array.isArray(window.__PI_ENH_ARCHIVED_MANIFEST__)) {
+      window.__PI_ENH_ARCHIVED_MANIFEST__ = window.__PI_ENH_ARCHIVED_MANIFEST__.filter((e) => {
+        const id = typeof e === "string" ? e : e?.id;
+        return id && !targetSet.has(id);
+      });
+    }
+    void persistArchivedSessionsToServer(next, undefined, true);
+    return restoredCount;
   }
 
   function restoreArchivedSession(sessionId) {
     if (!sessionId) return false;
-    const entries = readStoredArchivedEntries();
-    const next = entries.filter((e) => e.id !== sessionId);
-    if (next.length === entries.length) return false;
-    writeStoredArchivedEntries(next);
-    if (Array.isArray(window.__PI_ENH_ARCHIVED_MANIFEST__)) {
-      window.__PI_ENH_ARCHIVED_MANIFEST__ = window.__PI_ENH_ARCHIVED_MANIFEST__.filter((e) => (typeof e === "string" ? e !== sessionId : e?.id !== sessionId));
-    }
-    void persistArchivedSessionsToServer(next);
-    return true;
+    return restoreArchivedSessions([sessionId]) > 0;
   }
 
   function isArchiveAutoRestoreOnPromptEnabled() {
@@ -6891,6 +6940,9 @@
   window.__PI_ENH_TOGGLE_SESSION_PIN__ = toggleSessionPin;
   window.__PI_ENH_ARCHIVE_SESSION__ = archiveSession;
   window.__PI_ENH_RESTORE_ARCHIVED_SESSION__ = restoreArchivedSession;
+  window.__PI_ENH_RESTORE_ARCHIVED_SESSIONS__ = restoreArchivedSessions;
+  window.__PI_ENH_UNMARK_RECENTLY_RESTORED__ = unmarkSessionAsRecentlyRestored;
+  window.__PI_ENH_GET_RECENTLY_RESTORED__ = getRecentlyRestoredArchivedIds;
   window.__PI_ENH_DELETE_ARCHIVED_SESSION__ = deleteArchivedSession;
   window.__PI_ENH_HANDLE_SESSION_WAKEUP_IF_ARCHIVED__ = handleSessionWakeupIfArchived;
   window.__PI_ENH_IS_ARCHIVE_AUTO_RESTORE_ENABLED__ = isArchiveAutoRestoreOnPromptEnabled;

@@ -40,8 +40,8 @@ test("all active-session transitions share one persistence effect", () => {
 });
 
 test("keeps chat scroll positions in page memory by session id", () => {
-  assert.match(source, /useRef\(new Map<string, ChatScrollPosition>\(\)\)/);
-  assert.match(source, /sessionScrollPositionsRef\.current\.set\(sessionId, position\)/);
+  assert.match(source, /useRef\(sessionScrollPositions\)/);
+  assert.match(source, /positions\.set\(sessionId, position\)/);
   assert.match(source, /initialScrollPosition=\{selectedSession \? sessionScrollPositionsRef\.current\.get\(selectedSession\.id\) \?\? null : null\}/);
   assert.match(source, /onScrollPositionChange=\{handleSessionScrollPositionChange\}/);
   assert.doesNotMatch(source, /localStorage[^\n]*sessionScroll/i);
@@ -77,7 +77,7 @@ test("New restores the draft after session navigation and workspace auto-restore
         queueMicrotask,
         URLSearchParams,
         window: { location: { pathname: "/", search: "" } },
-        router: { replace() {} },
+        replaceSessionUrl() {},
         fetch: () => response.promise,
         getLastOpenSession: (key) => key === cwd ? session.id : null,
         clearLastOpen() {},
@@ -127,6 +127,7 @@ test("New restores the draft after session navigation and workspace auto-restore
         const getSessionViewSnapshot = () => null;
         const setSessionViewSnapshot = () => false;
         const deleteSessionViewSnapshot = () => {};
+        const saveResidentView = () => {};
         ${hookSource.slice(cleanupStart, cleanupEnd)}
       })`), context);
       let mountedKey = context.sessionKey;

@@ -1,11 +1,11 @@
 "use client";
 
 import { useState, useCallback, useRef, useEffect, useLayoutEffect, useMemo } from "react";
-import { useRouter, useSearchParams } from "next/navigation";
+import { useSearchParams } from "next/navigation";
 import { useGlobalKeyboardShortcuts } from "@/hooks/useKeyboardShortcuts";
 import { SessionSidebar } from "./SessionSidebar";
 import { ChatWindow } from "./ChatWindow";
-import type { ChatScrollPosition } from "@/lib/chat-scroll-position";
+import { CHAT_SCROLL_STORAGE_KEY, MAX_SAVED_CHAT_POSITIONS, readChatScrollPositions, serializeChatScrollPositions, type ChatScrollPosition } from "@/lib/chat-scroll-position";
 import { FileViewer } from "./FileViewer";
 import { TabBar, type Tab } from "./TabBar";
 import { openFileTab, saveFileViewerState } from "./file-tab-state";
@@ -18,6 +18,7 @@ import { AgentSessionPanel } from "./AgentSessionPanel";
 import { TerminalPanel } from "./TerminalPanel";
 import { newTerminalTab, restoreTerminalTabs, TERMINAL_TABS_KEY, type TerminalTab } from "./terminal-tab-state";
 import { useTheme } from "@/hooks/useTheme";
+import { BRAND_NAME } from "@/lib/branding";
 import { useI18n } from "@/hooks/useI18n";
 import { useIsMobile, useIsNarrowMobile } from "@/hooks/useIsMobile";
 import { useViewportHeight } from "@/hooks/useViewportHeight";
@@ -33,6 +34,7 @@ import {
   showBrowserNotification,
 } from "@/lib/browser-notifications";
 import { setupPushSubscription } from "@/lib/push-client";
+import { replaceSessionUrl } from "@/lib/session-navigation";
 import { getInitialNavigation, withTabOpen } from "@/lib/initial-navigation";
 import { clearTabOpenSession, getTabOpen, setTabOpenNewSession, setTabOpenSession } from "@/lib/tab-session";
 import { mergeCatalogRow } from "./session-catalog-helpers";
@@ -82,7 +84,6 @@ function parkedNewSessionDraftKey(cwd: string): string {
 }
 
 export function AppShell() {
-  const router = useRouter();
   const searchParams = useSearchParams();
   const [initialNavigation, setInitialNavigation] = useState(() => getInitialNavigation(searchParams));
   // Keep the system-theme subscription mounted for the lifetime of the app.
@@ -166,9 +167,18 @@ export function AppShell() {
   const [initialCwdError, setInitialCwdError] = useState<string | null>(null);
   const [refreshKey, setRefreshKey] = useState(0);
   const [sessionKey, setSessionKey] = useState(0);
-  const sessionScrollPositionsRef = useRef(new Map<string, ChatScrollPosition>());
+  const [sessionScrollPositions] = useState(() => {
+    try { return readChatScrollPositions(typeof window === "undefined" ? null : sessionStorage.getItem(CHAT_SCROLL_STORAGE_KEY)); }
+    catch { return new Map<string, ChatScrollPosition>(); }
+  });
+  const sessionScrollPositionsRef = useRef(sessionScrollPositions);
   const handleSessionScrollPositionChange = useCallback((sessionId: string, position: ChatScrollPosition) => {
-    sessionScrollPositionsRef.current.set(sessionId, position);
+    const positions = sessionScrollPositionsRef.current;
+    positions.delete(sessionId);
+    positions.set(sessionId, position);
+    if (positions.size > MAX_SAVED_CHAT_POSITIONS) positions.delete(positions.keys().next().value!);
+    try { sessionStorage.setItem(CHAT_SCROLL_STORAGE_KEY, serializeChatScrollPositions(positions)); }
+    catch { /* Position remains available in memory when storage is unavailable. */ }
   }, []);
   const [searchTarget, setSearchTarget] = useState<{ sessionId: string; entryId: string; blockIndex?: number } | null>(null);
   const handleSearchTargetHandled = useCallback((target: { sessionId: string; entryId: string }) => {
@@ -595,7 +605,7 @@ export function AppShell() {
         setNewSessionCwd(data.cwd);
         setInitialCwdStatus("ready");
         if (!new URLSearchParams(window.location.search).get("cwd")) {
-          router.replace(`?cwd=${encodeURIComponent(data.cwd)}`, { scroll: false });
+          replaceSessionUrl(`?cwd=${encodeURIComponent(data.cwd)}`);
         }
       })
       .catch((error: unknown) => {
@@ -605,7 +615,7 @@ export function AppShell() {
       });
 
     return () => controller.abort();
-  }, [initialNavigation, router]);
+  }, [initialNavigation]);
 
   // Restore the workspace's last open session after switching to it. Called
   // from handleCwdChange once the outgoing context has been reset. The session
@@ -644,7 +654,7 @@ export function AppShell() {
       setSelectedSession(s);
       setSessionKey((k) => k + 1);
       if (new URLSearchParams(window.location.search).get("session") !== s.id) {
-        router.replace(`?session=${encodeURIComponent(s.id)}`, { scroll: false });
+        replaceSessionUrl(`?session=${encodeURIComponent(s.id)}`);
       }
     };
     // Fast path: the sidebar already delivered the catalogue — restore
@@ -659,7 +669,7 @@ export function AppShell() {
       .catch(() => {
         // Network hiccup: keep the remembered session for a later retry.
       });
-  }, [router, sessionCatalog]);
+  }, [sessionCatalog]);
 
   const handleCwdChange = useCallback((
     cwd: string | null,
@@ -731,8 +741,8 @@ export function AppShell() {
       // the default welcome page when none is remembered.
       restoreWorkspaceContext(newProject, cwd);
     }
-    router.replace(typeof window !== "undefined" ? window.location.pathname : "/", { scroll: false });
-  }, [activeCwd, activeFileTabId, invalidateWorkspaceRestore, newSessionCwd, router, selectedSession, restoreWorkspaceContext]);
+    replaceSessionUrl(typeof window !== "undefined" ? window.location.pathname : "/");
+  }, [activeCwd, activeFileTabId, invalidateWorkspaceRestore, newSessionCwd, selectedSession, restoreWorkspaceContext]);
 
   const handleSelectSession = useCallback((session: SessionInfo, isRestore = false, entryId?: string, blockIndex?: number) => {
     setSearchTarget(entryId ? { sessionId: session.id, entryId, blockIndex } : null);
@@ -783,14 +793,12 @@ export function AppShell() {
       // onCwdChange effect firing after setSelectedCwd in the sidebar
       suppressCwdBumpRef.current = true;
     }
-    // Skip router.replace when the URL already has this session — calling
-    // replace in production Next.js triggers a Suspense remount loop.
-    // Tab-memory restore lands on `/` and must write `?session=` so reload
-    // and copy-link keep this session.
+    // Session selection is client state; updating its shareable URL must
+    // preserve the shell and resident chat rather than navigate the RSC tree.
     if (!isRestore || new URLSearchParams(window.location.search).get("session") !== session.id) {
-      router.replace(`?session=${encodeURIComponent(session.id)}`, { scroll: false });
+      replaceSessionUrl(`?session=${encodeURIComponent(session.id)}`);
     }
-  }, [activeCwd, activeFileTabId, invalidateWorkspaceRestore, router, isMobile, newSessionCwd, selectedSession]);
+  }, [activeCwd, activeFileTabId, invalidateWorkspaceRestore, isMobile, newSessionCwd, selectedSession]);
 
   const handleNewSession = useCallback((sessionId: string, cwd: string) => {
     invalidateWorkspaceRestore();
@@ -808,8 +816,8 @@ export function AppShell() {
     setSystemInfoLoading(false);
     setActiveTopPanel(null);
     if (isMobile) setSidebarOpen(false);
-    router.replace(`?cwd=${encodeURIComponent(cwd)}`, { scroll: false });
-  }, [invalidateWorkspaceRestore, router, isMobile]);
+    replaceSessionUrl(`?cwd=${encodeURIComponent(cwd)}`);
+  }, [invalidateWorkspaceRestore, isMobile]);
 
   // Global keyboard shortcuts (handles Esc, Ctrl+Alt+N etc.)
   useGlobalKeyboardShortcuts({
@@ -856,15 +864,15 @@ export function AppShell() {
 
   // Called by ChatWindow when a new session gets its real id from pi
   const handleSessionCreated = useCallback((session: SessionInfo, sourceDraftKey: string) => {
-    setRefreshKey((k) => k + 1);
     if (activeNewSessionDraftKeyRef.current !== sourceDraftKey) return;
+    setRefreshKey((k) => k + 1);
     invalidateWorkspaceRestore();
     activeNewSessionDraftKeyRef.current = null;
     setNewSessionCwd(null);
     setSelectedSession(session);
     hydrateSelectedSession(session.id);
-    router.replace(`?session=${encodeURIComponent(session.id)}`, { scroll: false });
-  }, [invalidateWorkspaceRestore, router, hydrateSelectedSession]);
+    replaceSessionUrl(`?session=${encodeURIComponent(session.id)}`);
+  }, [invalidateWorkspaceRestore, hydrateSelectedSession]);
 
   const deliverSessionNotification = useCallback(({
     targetSession,
@@ -989,8 +997,8 @@ export function AppShell() {
       transient: false,
     }));
     hydrateSelectedSession(newSessionId);
-    router.replace(`?session=${encodeURIComponent(newSessionId)}`, { scroll: false });
-  }, [invalidateWorkspaceRestore, router, hydrateSelectedSession]);
+    replaceSessionUrl(`?session=${encodeURIComponent(newSessionId)}`);
+  }, [invalidateWorkspaceRestore, hydrateSelectedSession]);
 
   const handleAskInNewChat = useCallback(async (
     prompt: string,
@@ -1030,9 +1038,9 @@ export function AppShell() {
       setSystemTools(null);
       setSystemInfoLoading(false);
       setActiveTopPanel(null);
-      router.replace(cwd ? `?cwd=${encodeURIComponent(cwd)}` : (typeof window !== "undefined" ? window.location.pathname : "/"), { scroll: false });
+      replaceSessionUrl(cwd ? `?cwd=${encodeURIComponent(cwd)}` : (typeof window !== "undefined" ? window.location.pathname : "/"));
     }
-  }, [invalidateWorkspaceRestore, selectedSession, router]);
+  }, [invalidateWorkspaceRestore, selectedSession]);
 
   const handleOpenFile = useCallback((
     filePath: string,
@@ -1164,7 +1172,7 @@ export function AppShell() {
 
   const activeFileTab = fileTabs.find((tab) => tab.id === activeFileTabId) ?? null;
   const activeCwdName = activeCwd ? getFileName(activeCwd) || activeCwd : null;
-  const windowTitle = activeCwdName ? `${activeCwdName} - Pi Web` : "Pi Web";
+  const windowTitle = activeCwdName ? `${activeCwdName} - ${BRAND_NAME}` : BRAND_NAME;
 
   useEffect(() => {
     const win = window as unknown as Record<string, any>;

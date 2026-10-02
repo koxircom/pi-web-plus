@@ -83,7 +83,9 @@ export async function GET(
     }
 
     const state = await session.send({ type: "get_state" });
-    return NextResponse.json({ running: true, state });
+    // Use the same activity predicate as the sidebar snapshot. A retained
+    // wrapper is still reachable after a turn finishes, but it is not running.
+    return NextResponse.json({ running: session.isRunning(), runtimeAlive: true, state });
   } catch (error) {
     return NextResponse.json({ error: String(error) }, { status: 500 });
   }

@@ -85,7 +85,10 @@ export function resolveTitleThinkingLevel(model: Model<Api>): ThinkingLevel {
  * session id, and cacheRetention "none". The request is too small and too
  * unique to reuse the live session's prefix or write a cache nobody will read.
  */
-export function buildTitleRequest(source: Agent, transcript: string): TitleRequest {
+// Consume the public request fields, so identical SDK copies do not require class-private identity.
+type TitleRequestSource = Pick<Agent, "state" | "transport" | "thinkingBudgets" | "maxRetryDelayMs">;
+
+export function buildTitleRequest(source: TitleRequestSource, transcript: string): TitleRequest {
   const model = source.state.model;
   const thinkingLevel = resolveTitleThinkingLevel(model);
   return {

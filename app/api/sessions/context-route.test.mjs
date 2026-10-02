@@ -1,25 +1,45 @@
-// Static + behavior coverage for the context pagination API (the #555 transfer fix):
-// ?tail bounds the returned chain, ?before rewinds the walk and excludes its own
-// boundary so prepending the page never duplicates it. Data behavior is covered
-// end-to-end in lib/session-reader.pagination.test.mjs; here we assert the route wires
-// the params through to buildSessionContext (excludeLeaf on ?before).
+// Behavior coverage for the context pagination API: test query wiring and
+// boundary exclusion without coupling assertions to local variable names.
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import test from "node:test";
 import { createJiti } from "jiti";
 
-const routeSrc = await readFileSync(new URL("./[id]/context/route.ts", import.meta.url), "utf8");
 const jiti = createJiti(import.meta.url, {
   alias: { "@": process.cwd() },
   interopDefault: true,
   moduleCache: false,
 });
 const { buildSessionContext } = await jiti.import("@/lib/session-reader");
+const { handleSessionContextRequest } = await jiti.import("@/lib/session-context-service");
 
-test("context route parses ?tail and ?before, excluding the boundary on paging", () => {
-  assert.match(routeSrc, /const tail = Number\.isFinite\(rawTail\) && rawTail > 0 \? Math\.min\(rawTail, 1000\) : 50/);
-  assert.match(routeSrc, /const before = url\.searchParams\.get\("before"\)/);
-  assert.match(routeSrc, /buildSessionContext\(sm\.getEntries\(\) as never, before \?\? leafId, \{[^}]*excludeLeaf: Boolean\(before\)/);
+test("context route parses ?tail and ?before, excluding the boundary on paging", async () => {
+  for (const [query, expectedTail] of [["",50],["tail=NaN",50],["tail=-1",50],["tail=1001",1000],["tail=5",5]]) {
+    let captured;
+    const response = await handleSessionContextRequest(
+      new Request(`http://localhost/api/sessions/s/context?before=cursor&leafId=ignored&deferThinking&deferMedia&${query}`),
+      {id:"s"}, {
+        getRpc:()=>undefined,
+        resolvePath:async()=>"/known/session.jsonl",
+        pool:{queryContext:async(file,options)=>{
+          captured={file,options};
+          return JSON.stringify({context:{messages:[],entryIds:[]},tail:options.tail,before:options.before});
+        }},
+      });
+    assert.equal(response.status,200);
+    assert.equal(captured.file,"/known/session.jsonl");
+    assert.equal(captured.options.tail,expectedTail);
+    assert.equal(captured.options.before,"cursor");
+    assert.equal(captured.options.deferThinking,true);
+    assert.equal(captured.options.deferToolResultImages,true);
+  }
+  const entries=[{id:"root",parentId:null,type:"message",message:{role:"user",content:"root"}}];
+  const response=await handleSessionContextRequest(
+    new Request("http://localhost/api/sessions/s/context?before=root&leafId=ignored"),{id:"s"},{
+      getRpc:()=>({isAlive:()=>true,inner:{sessionManager:{getEntries:()=>entries,getLeafId:()=>"root"}}}),
+      resolvePath:async()=>{throw Error("Live context must not scan disk");},
+    });
+  assert.equal(response.status,200);
+  assert.deepEqual((await response.json()).context.entryIds,[]);
 });
 
 test("context route: ?before pages upward without duplicating the boundary", () => {

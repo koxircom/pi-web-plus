@@ -1,12 +1,12 @@
 {
   "schemaVersion": 1,
-  "edition": "koxir-standalone-1.1.0",
-  "version": "1.1.0",
+  "edition": "koxir-standalone-1.2.0",
+  "version": "1.2.0",
   "targetFile": "enhancements/pi-web-enhancements.js",
   "mirrorFile": "public/pi-web-enhancements.js",
-  "totalLines": 65412,
-  "totalBytes": 3067828,
-  "bundleSha256": "d62008c4c1d17fb22e7f2ff0c09e4caff43b90dd6bd0c6e607de10a70b7d0982",
+  "totalLines": 47194,
+  "totalBytes": 2060863,
+  "bundleSha256": "4231bd30d2ec681a52310ddafbecf148c1f145083b8685a717a00676981c6ed4",
   "modules": [
     {
       "index": 1,
@@ -14,66 +14,66 @@
       "name": "01-bootstrap-and-core-state.js",
       "file": "01-bootstrap-and-core-state.js",
       "startLine": 1,
-      "endLine": 9239,
-      "lineCount": 9239,
+      "endLine": 773,
+      "lineCount": 773,
       "lineRange": [
         1,
-        9239
+        773
       ],
-      "lineRangeText": "1-9239",
-      "bytes": 327834,
-      "sha256": "8ef16903a3184878f233724d81d4b51e6cf1899be2359b6532f34ec32e4fc046",
-      "responsibility": "IIFE 启动引导、路由自愈保护、页面标题脱敏防抖、顶层 TDZ 声明提升、Managed Lifecycle 零泄漏注册表、全局 CSS 样式表注入、通知偏好与历史、Toast 与剪贴板工具。"
+      "lineRangeText": "1-773",
+      "bytes": 31607,
+      "sha256": "3e1e71dd77755efad3edf0966d1a9ba21160cd92ddd36492637fce2d0c1bb562",
+      "responsibility": "IIFE 启动引导、路由自愈保护、页面标题脱敏防抖、顶层 TDZ 声明提升、Managed Lifecycle 零泄漏注册表、原生样式生命周期契约、通知偏好与历史、Toast 与剪贴板工具。"
     },
     {
       "index": 2,
       "id": "02-plugin-registry-and-settings-schema",
       "name": "02-plugin-registry-and-settings-schema.js",
       "file": "02-plugin-registry-and-settings-schema.js",
-      "startLine": 9240,
-      "endLine": 16140,
-      "lineCount": 6901,
+      "startLine": 774,
+      "endLine": 7726,
+      "lineCount": 6953,
       "lineRange": [
-        9240,
-        16140
+        774,
+        7726
       ],
-      "lineRangeText": "9240-16140",
-      "bytes": 291217,
-      "sha256": "78f4fde28d38bebc3afb16ce20676b4f1de6435d050eb32e7657b6474d162955",
-      "responsibility": "ENHANCEMENT_PLUGINS (77 个插件) 注册表与默认配置 Schema、模块与插件启闭持久化、用户消息状态对齐与大图去重、会话置顶/归档/背景色/多维彩色标签/Odoo 插件更新状态胶囊与分组保留策略。"
+      "lineRangeText": "774-7726",
+      "bytes": 292981,
+      "sha256": "aeec3f475080c468bb85d0414d0ece499f3bebbe234716583c9ad631c846f42b",
+      "responsibility": "ENHANCEMENT_PLUGINS (76 个插件) 注册表与默认配置 Schema、模块与插件启闭持久化、用户消息状态对齐与大图去重、会话置顶/归档/背景色/多维彩色标签/Odoo 插件更新状态胶囊与分组保留策略。"
     },
     {
       "index": 3,
       "id": "03-session-cache-and-sync-engine",
       "name": "03-session-cache-and-sync-engine.js",
       "file": "03-session-cache-and-sync-engine.js",
-      "startLine": 16141,
-      "endLine": 22310,
-      "lineCount": 6170,
+      "startLine": 7727,
+      "endLine": 13839,
+      "lineCount": 6113,
       "lineRange": [
-        16141,
-        22310
+        7727,
+        13839
       ],
-      "lineRangeText": "16141-22310",
-      "bytes": 271706,
-      "sha256": "a928604928c8b5ce9c8f28908aa31fd6a0f5a9b2545481bd0cc2fec909fe4a01",
-      "responsibility": "会话内存秒开缓存 (Session Memory Cache)、CacheStorage/IndexedDB 统一持久化存储抽象、会话历史顺序防回退守卫 (session-history-order-guard)、高性能会话搜索 LRU 缓存与归档折叠管理、权威终态核验引擎 (Terminal Reconcile Engine)、DOM 快照秒开与跨端多标签页同步。"
+      "lineRangeText": "7727-13839",
+      "bytes": 268551,
+      "sha256": "9c7c69fdc0802f921377c1fdf593b416f90895edc2c6ff124bc94e6a07bb6aa3",
+      "responsibility": "会话内存秒开缓存 (Session Memory Cache)、CacheStorage/IndexedDB 统一持久化存储抽象、会话历史顺序防回退守卫 (session-history-order-guard)、高性能会话搜索 LRU 缓存与归档折叠管理、权威终态核验引擎 (Terminal Reconcile Engine)、原生缓存预加载与跨端多标签页同步。"
     },
     {
       "index": 4,
       "id": "04-sidebar-and-session-management",
       "name": "04-sidebar-and-session-management.js",
       "file": "04-sidebar-and-session-management.js",
-      "startLine": 22311,
-      "endLine": 28999,
-      "lineCount": 6689,
+      "startLine": 13840,
+      "endLine": 20544,
+      "lineCount": 6705,
       "lineRange": [
-        22311,
-        28999
+        13840,
+        20544
       ],
-      "lineRangeText": "22311-28999",
-      "bytes": 299952,
-      "sha256": "1222f85aaa5472d3d11ec6885f91cd5fa924c557876aace9fce14645e6b1b3f8",
+      "lineRangeText": "13840-20544",
+      "bytes": 302121,
+      "sha256": "a3d88115d9ae8407c80cace574486036402b602b068beee0b3ccdb1c8d812501",
       "responsibility": "侧边栏会话行右键上下文菜单、未读水位线管理、会话行内重命名与双击重命名、快捷引用工具条与文本批注 (Quote Toolbar & Annotations)、ask_user 网页原生选择器与四题交互原型、跨项目会话状态提示 (Cross-project Session Status Indicator)。"
     },
     {
@@ -81,16 +81,16 @@
       "id": "05-composer-and-input-workflow",
       "name": "05-composer-and-input-workflow.js",
       "file": "05-composer-and-input-workflow.js",
-      "startLine": 29000,
-      "endLine": 47401,
-      "lineCount": 18402,
+      "startLine": 20545,
+      "endLine": 33477,
+      "lineCount": 12933,
       "lineRange": [
-        29000,
-        47401
+        20545,
+        33477
       ],
-      "lineRangeText": "29000-47401",
-      "bytes": 800229,
-      "sha256": "9ee7fd4a6b40839abaa293e19694b89d7a625ca928362422b4907aeabc1ce314",
+      "lineRangeText": "20545-33477",
+      "bytes": 546230,
+      "sha256": "95db7274bdda96237df393925c7d371becd75ef0be59a152ed4b628034ddc4ce",
       "responsibility": "AI 快捷操作建议、空输入发送继续、输入框草稿与图片本地记忆、文件直接粘贴与拖放胶囊卡片、输入框图片点击放大、流式思考聚合守卫、运行中切换后续模型、Cursor/Codex 风格统一输入框与模型思考胶囊、Markdown 格式化粘贴、Goal/Plan 模式、@ 提及聚焦插件、全站图片双击预览、右侧面板会话绑定、移动端软键盘与手势守护、会话批量管理与删除。"
     },
     {
@@ -98,16 +98,16 @@
       "id": "06-chat-view-and-tool-cards",
       "name": "06-chat-view-and-tool-cards.js",
       "file": "06-chat-view-and-tool-cards.js",
-      "startLine": 47402,
-      "endLine": 57079,
-      "lineCount": 9678,
+      "startLine": 33478,
+      "endLine": 40450,
+      "lineCount": 6973,
       "lineRange": [
-        47402,
-        57079
+        33478,
+        40450
       ],
-      "lineRangeText": "47402-57079",
-      "bytes": 676849,
-      "sha256": "83eccf18556d1cbbde0ffdb12e83be4aa6065099967f028f18cac049a8598520",
+      "lineRangeText": "33478-40450",
+      "bytes": 288644,
+      "sha256": "a1163b56f505030163f574b2cee6d9a0a6aa06012774aa86d16def7f29366e56",
       "responsibility": "回合耗时拆解与消耗明细气泡、工具调用自动折叠与子代理派发卡片增强、孤立过程消息吸附聚合器、会话压缩摘要自动折叠、runAllSyncOperations 全量同步步骤编排、原生消息字体与滚动条增强、目录选择器悬停与新建文件夹、Minimap 全导航、回到底部按钮、会话阅读位置记忆与恢复、代码块免扫描保护、本地路径快捷唤起与 Obsidian/Markdown 预览增强。"
     },
     {
@@ -115,16 +115,16 @@
       "id": "07-kernel-scheduler-and-observers",
       "name": "07-kernel-scheduler-and-observers.js",
       "file": "07-kernel-scheduler-and-observers.js",
-      "startLine": 57080,
-      "endLine": 58705,
-      "lineCount": 1626,
+      "startLine": 40451,
+      "endLine": 42110,
+      "lineCount": 1660,
       "lineRange": [
-        57080,
-        58705
+        40451,
+        42110
       ],
-      "lineRangeText": "57080-58705",
-      "bytes": 69852,
-      "sha256": "c547b94f2db9239c999dd208dd9074619a9ca778e7dfc88cdcb93e8e5d7eadda",
+      "lineRangeText": "40451-42110",
+      "bytes": 71653,
+      "sha256": "4a26d0c9515258801dbee5b8e1ba6723799f782f2faf15ba78177a9ff745818e",
       "responsibility": "防抖 DOM 同步调度器 (scheduleDomSync)、聊天区/弹窗/侧边栏 MutationObserver 观察器、耗时与用量明细浮层渲染 (showDurationTooltip / showUsageTooltip)、实时运行秒表与浏览器标签页计时器 (Live Running Stopwatch)、思考深度持久化与自动恢复。"
     },
     {
@@ -132,16 +132,16 @@
       "id": "08-settings-panels-and-lifecycle",
       "name": "08-settings-panels-and-lifecycle.js",
       "file": "08-settings-panels-and-lifecycle.js",
-      "startLine": 58706,
-      "endLine": 65412,
-      "lineCount": 6707,
+      "startLine": 42111,
+      "endLine": 47194,
+      "lineCount": 5084,
       "lineRange": [
-        58706,
-        65412
+        42111,
+        47194
       ],
-      "lineRangeText": "58706-65412",
-      "bytes": 330189,
-      "sha256": "441e22e338d60513c3c46e8292525e0cffbe9b6c3165b780be817da1625addf5",
+      "lineRangeText": "42111-47194",
+      "bytes": 259076,
+      "sha256": "835a0b6d091f5023363469ce55f8a27774670f2db1aed0324839e16ba2ecb337",
       "responsibility": "设置对话框尺寸与侧边栏宽度拖拽调节、设置侧边栏折叠控制器、设置弹窗增强插件面板与归档管理标签页、设置项双击快捷入口与底部快捷栏、全局用量与成本大盘 (Usage & Cost Dashboard)、静默热载探针、零泄漏清理钩子 (__PI_WEB_ENHANCEMENTS_CLEANUP__)、Plugin Micro-Kernel 异常隔离沙箱与首屏 0ms 同步立即执行挂载。"
     }
   ]

@@ -1,15 +1,8 @@
 "use client";
 
-import { memo, useEffect, useRef, useState, useCallback, useMemo, type RefObject } from "react";
-import ReactMarkdown, { type Options as ReactMarkdownOptions } from "react-markdown";
-import rehypeKatex from "rehype-katex";
-import {
-  markdownPreviewRemarkPlugins,
-  normalizeDisplayMath,
-} from "@/lib/markdown";
-import { isMessageGroupAnchor, splitFinalAssistantBlocks } from "@/lib/message-display";
-import type { AgentMessage, AssistantMessage, CustomMessage, TextContent, UserMessage } from "@/lib/types";
-import { useI18n } from "@/hooks/useI18n";
+import { useEffect, useLayoutEffect, useRef, useState, useCallback, useMemo, type RefObject } from "react";
+import { isMessageGroupAnchor } from "@/lib/message-display";
+import type { AgentMessage, TextContent, UserMessage } from "@/lib/types";
 import styles from "./ChatMinimap.module.css";
 
 interface Props {
@@ -24,181 +17,73 @@ const MINIMAP_WIDTH = 36;
 const MAX_NODE_GAP = 50;
 const MINIMAP_PADDING = 12;
 const PREVIEW_HIDE_DELAY = 250;
-const NAVIGATION_ACTIVE_LOCK_MS = 1600;
+// Explicit selections remain stable until the user scrolls the chat again.
+const NAVIGATION_ACTIVE_LOCK_MS = Infinity;
 
-interface AssistantPreview {
-  markdown: string;
-  element: HTMLDivElement | null;
-}
-
-interface TurnInfo {
-  userMessage: UserMessage | CustomMessage;
-  assistantPreviews: AssistantPreview[];
+export interface TurnInfo {
+  userTurnNumber: number;
+  userMessage: UserMessage;
   scrollTop: number | null;
-  /** Tool calls issued anywhere in this turn's assistant replies. */
-  toolCount: number;
+  element?: HTMLDivElement | null;
+  entryId?: string;
 }
 
-interface NodeInfo {
+export interface NodeInfo {
   topRatio: number;
   targetTurn: TurnInfo;
   index: number;
 }
 
-function getUserPreview(message: UserMessage | CustomMessage): string {
+export function getUserPreview(message: UserMessage): string {
   if (typeof message.content === "string") return message.content.trim();
-  return message.content
-    .filter((block): block is TextContent => block.type === "text")
-    .map((block) => block.text)
-    .join("\n")
-    .trim();
+  if (Array.isArray(message.content)) {
+    const text = message.content
+      .filter((block): block is TextContent => block.type === "text")
+      .map((block) => block.text)
+      .join("\n")
+      .trim();
+    if (text) return text;
+    const hasImage = message.content.some((block) => block.type === "image");
+    if (hasImage) return "[图片]";
+  }
+  return "";
 }
 
-/** Tool calls in one assistant message. A reply can both answer and call
- *  tools, so this counts blocks rather than text-less messages. */
-export function countToolCalls(message: AgentMessage | Partial<AgentMessage>): number {
-  if (message.role !== "assistant" || !Array.isArray(message.content)) return 0;
-  return message.content.reduce(
-    (total, block) => total + (block.type === "toolCall" ? 1 : 0),
-    0,
-  );
+/** Assign 1-based serial numbers strictly to loaded user turns.
+ *  Reads window.__PI_ENH_GET_HISTORY_STATE__() safely (SSR-guarded) to resolve total turns. */
+export function computeUserTurnNumbers(
+  turns: TurnInfo[],
+  historyTotalTurns?: number | null,
+): void {
+  const loadedUserCount = turns.length;
+  let totalTurns = loadedUserCount;
+  if (
+    typeof historyTotalTurns === "number" &&
+    Number.isFinite(historyTotalTurns) &&
+    historyTotalTurns >= loadedUserCount
+  ) {
+    totalTurns = historyTotalTurns;
+  } else if (typeof window !== "undefined") {
+    try {
+      const history = (window as any).__PI_ENH_GET_HISTORY_STATE__?.();
+      if (
+        history &&
+        typeof history.totalTurns === "number" &&
+        Number.isFinite(history.totalTurns) &&
+        history.totalTurns >= loadedUserCount
+      ) {
+        totalTurns = history.totalTurns;
+      }
+    } catch {}
+  }
+
+  const userOffset = Math.max(0, totalTurns - loadedUserCount);
+  for (let i = 0; i < turns.length; i++) {
+    turns[i].userTurnNumber = userOffset + i + 1;
+  }
 }
 
-function getAssistantAnswerMarkdown(message: AgentMessage | Partial<AgentMessage>): string {
-  if (message.role !== "assistant") return "";
-  const { answerBlocks } = splitFinalAssistantBlocks(message as AssistantMessage);
-  return answerBlocks
-    .filter((block): block is TextContent => block.type === "text")
-    .map((block) => block.text)
-    .join("\n\n")
-    .trim();
-}
-
-function PreviewHeading({
-  level,
-  children,
-  headingIndex,
-  onClick,
-}: {
-  level: 1 | 2 | 3;
-  children: React.ReactNode;
-  headingIndex: number | null;
-  onClick?: (headingIndex: number) => void;
-}) {
-  return (
-    <button
-      type="button"
-      className={styles.heading}
-      data-level={level}
-      data-preview-heading-index={headingIndex ?? undefined}
-      disabled={headingIndex === null || !onClick}
-      onClick={(event) => {
-        event.stopPropagation();
-        if (headingIndex !== null) onClick?.(headingIndex);
-      }}
-    >
-      {children}
-    </button>
-  );
-}
-
-interface PreviewAstNode {
-  type?: string;
-  depth?: number;
-  data?: {
-    hProperties?: Record<string, unknown>;
-  };
-}
-
-function remarkPreviewOutline() {
-  return (tree: { children?: PreviewAstNode[] }) => {
-    if (!Array.isArray(tree.children)) return;
-    const headings = tree.children.filter((node) => (
-      node.type === "heading" && typeof node.depth === "number" && node.depth <= 3
-    ));
-    if (headings.length > 0) {
-      headings.forEach((node, headingIndex) => {
-        node.data = {
-          ...node.data,
-          hProperties: {
-            ...node.data?.hProperties,
-            "data-preview-heading-index": headingIndex,
-          },
-        };
-      });
-      tree.children = headings;
-      return;
-    }
-    const firstParagraph = tree.children.find((node) => node.type === "paragraph");
-    tree.children = firstParagraph ? [firstParagraph] : [];
-  };
-}
-
-const previewRemarkPlugins = [
-  ...(markdownPreviewRemarkPlugins ?? []),
-  remarkPreviewOutline,
-];
-const previewRehypePlugins: ReactMarkdownOptions["rehypePlugins"] = [
-  [rehypeKatex, { throwOnError: false, strict: false }],
-];
-
-function getPreviewHeadingIndex(node: unknown): number | null {
-  const properties = (node as { properties?: Record<string, unknown> } | undefined)?.properties;
-  const value = properties?.dataPreviewHeadingIndex ?? properties?.["data-preview-heading-index"];
-  if (typeof value === "number") return value;
-  if (typeof value === "string" && /^\d+$/.test(value)) return Number(value);
-  return null;
-}
-
-export const AssistantOutline = memo(function AssistantOutline({
-  markdown,
-  onHeadingClick,
-  onAnswerClick,
-}: {
-  markdown: string;
-  onHeadingClick?: (headingIndex: number) => void;
-  onAnswerClick?: () => void;
-}) {
-  const normalizedMarkdown = useMemo(() => normalizeDisplayMath(markdown), [markdown]);
-  if (!markdown) return null;
-  return (
-    <div className={styles.outline}>
-      <ReactMarkdown
-        remarkPlugins={previewRemarkPlugins}
-        rehypePlugins={previewRehypePlugins}
-        components={{
-          h1: ({ children, node }) => <PreviewHeading level={1} headingIndex={getPreviewHeadingIndex(node)} onClick={onHeadingClick}>{children}</PreviewHeading>,
-          h2: ({ children, node }) => <PreviewHeading level={2} headingIndex={getPreviewHeadingIndex(node)} onClick={onHeadingClick}>{children}</PreviewHeading>,
-          h3: ({ children, node }) => <PreviewHeading level={3} headingIndex={getPreviewHeadingIndex(node)} onClick={onHeadingClick}>{children}</PreviewHeading>,
-          h4: () => null,
-          h5: () => null,
-          h6: () => null,
-          p: ({ children }) => (
-            <button
-              type="button"
-              className={styles.paragraph}
-              onClick={onAnswerClick}
-            >
-              {children}
-            </button>
-          ),
-          blockquote: () => null,
-          ul: () => null,
-          ol: () => null,
-          pre: () => null,
-          table: () => null,
-          hr: () => null,
-          a: ({ children }) => <>{children}</>,
-          code: ({ children }) => <>{children}</>,
-        }}
-      >
-        {normalizedMarkdown}
-      </ReactMarkdown>
-    </div>
-  );
-});
-
-function createTurnNodes(turns: TurnInfo[]): NodeInfo[] {
+export function createTurnNodes(turns: TurnInfo[]): NodeInfo[] {
   return turns.map((turn, index) => ({
     topRatio: 0,
     targetTurn: turn,
@@ -206,13 +91,13 @@ function createTurnNodes(turns: TurnInfo[]): NodeInfo[] {
   }));
 }
 
-interface NodeLayout {
+export interface NodeLayout {
   nodes: NodeInfo[];
   gap: number;
   fillsHeight: boolean;
 }
 
-function layoutNodes(allNodes: NodeInfo[], minimapHeight: number): NodeLayout {
+export function layoutNodes(allNodes: NodeInfo[], minimapHeight: number): NodeLayout {
   if (allNodes.length === 0) {
     return { nodes: [], gap: MAX_NODE_GAP, fillsHeight: false };
   }
@@ -239,6 +124,62 @@ function layoutNodes(allNodes: NodeInfo[], minimapHeight: number): NodeLayout {
   };
 }
 
+export function getMinimapHistorySettings(): { initialTurns: number; stepTurns: number } {
+  if (typeof window !== "undefined") {
+    try {
+      const fn = (window as any).__PI_ENH_GET_MINIMAP_HISTORY_SETTINGS__;
+      if (typeof fn === "function") {
+        const s = fn();
+        return {
+          initialTurns: Math.max(3, Number(s?.initialTurns) || 3),
+          stepTurns: Math.max(1, Number(s?.stepTurns) || 5),
+        };
+      }
+    } catch {}
+  }
+  return { initialTurns: 3, stepTurns: 5 };
+}
+
+export function readMinimapHistoryState(loadedCount: number): {
+  sessionId: string;
+  totalTurns: number;
+  hasEarlierMessages: boolean;
+  oldestEntryId?: string | null;
+} {
+  let nativeState: any = null;
+  if (typeof window !== "undefined") {
+    try {
+      const fn = (window as any).__PI_ENH_GET_HISTORY_STATE__;
+      if (typeof fn === "function") nativeState = fn();
+    } catch {}
+  }
+  const currentSessionId = nativeState?.sessionId || "current";
+  const nativeTotal = Number(nativeState?.totalTurns);
+  const totalTurns = Number.isFinite(nativeTotal) && nativeTotal > 0
+    ? Math.max(loadedCount, Math.floor(nativeTotal))
+    : loadedCount;
+  return {
+    sessionId: currentSessionId,
+    totalTurns,
+    hasEarlierMessages: Boolean(nativeState?.hasEarlierMessages),
+    oldestEntryId: nativeState?.oldestEntryId || null,
+  };
+}
+
+function waitForCommitFrames(): Promise<void> {
+  return new Promise((resolve) => {
+    if (typeof requestAnimationFrame === "function") {
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          resolve();
+        });
+      });
+    } else {
+      setTimeout(resolve, 32);
+    }
+  });
+}
+
 export function ChatMinimap({
   messages,
   streamingMessage,
@@ -246,14 +187,42 @@ export function ChatMinimap({
   messageRefs,
   onRevealHistory,
 }: Props) {
-  const { t } = useI18n();
+  const currentSessionIdRef = useRef<string | null>(null);
+  const sessionGenerationRef = useRef(0);
+  const closedByUserRef = useRef(false);
+  const lastPointerTypeRef = useRef("mouse");
+  const justSwipedRef = useRef(false);
+  const gestureTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const suppressClickTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const anchorGuardRef = useRef<{ entryId: string; topBefore: number } | null>(null);
+
   const [visible, setVisible] = useState(false);
   const [allNodes, setAllNodes] = useState<NodeInfo[]>([]);
   const [activeIndex, setActiveIndex] = useState<number | null>(null);
   const [minimapHeight, setMinimapHeight] = useState(600);
   const [minimapHovered, setMinimapHovered] = useState(false);
   const [mouseYRatio, setMouseYRatio] = useState<number | null>(null);
-  const draggingRef = useRef(false);
+  const [targetTurns, setTargetTurns] = useState<number>(() => Math.max(3, getMinimapHistorySettings().initialTurns));
+  useEffect(() => {
+    const syncPreferences = () => setTargetTurns(Math.max(3, getMinimapHistorySettings().initialTurns));
+    window.addEventListener("pi:minimap-preferences-change", syncPreferences);
+    return () => window.removeEventListener("pi:minimap-preferences-change", syncPreferences);
+  }, []);
+  const targetTurnsRef = useRef(targetTurns);
+  targetTurnsRef.current = targetTurns;
+  const [isLoadingEarlier, setIsLoadingEarlier] = useState(false);
+  const isLoadingEarlierRef = useRef(false);
+  const [loadError, setLoadError] = useState(false);
+
+  const historyState = readMinimapHistoryState(allNodes.length);
+  if (historyState.sessionId !== currentSessionIdRef.current) {
+    currentSessionIdRef.current = historyState.sessionId;
+    sessionGenerationRef.current++;
+    closedByUserRef.current = false;
+    const initial = Math.max(3, getMinimapHistorySettings().initialTurns);
+    targetTurnsRef.current = initial;
+  }
+
   const containerRef = useRef<HTMLDivElement>(null);
   const allNodesRef = useRef<NodeInfo[]>([]);
   const nodeLayoutRef = useRef<NodeLayout>({
@@ -265,12 +234,18 @@ export function ChatMinimap({
   const previewItemRefs = useRef(new Map<number, HTMLDivElement>());
   const previewHideTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const activeNodeLockRef = useRef<{ index: number; until: number } | null>(null);
-  const pendingNavigationRef = useRef<{
-    nodeIndex: number;
-    target: "user" | "assistant" | "heading";
-    assistantIndex?: number;
-    headingIndex?: number;
+  const lockedUserMessageRef = useRef<UserMessage | null>(null);
+  const pointerDownStateRef = useRef<{
+    pointerId: number;
+    startX: number;
+    startY: number;
+    startTime: number;
+    startActiveIndex: number | null;
+    startNode: NodeInfo | null;
+    wasPreviewOpen: boolean;
+    hasMoved: boolean;
   } | null>(null);
+  const pendingNavigationNodeIndexRef = useRef<number | null>(null);
 
   const allMessages = useMemo(
     () => (streamingMessage ? [...messages, streamingMessage] : messages) as (AgentMessage | Partial<AgentMessage>)[],
@@ -287,6 +262,10 @@ export function ChatMinimap({
   nodeLayoutRef.current = nodeLayout;
 
   const lockActiveNode = useCallback((index: number) => {
+    const targetNode = allNodesRef.current.find((n) => n.index === index);
+    if (targetNode) {
+      lockedUserMessageRef.current = targetNode.targetTurn.userMessage;
+    }
     activeNodeLockRef.current = {
       index,
       until: Date.now() + NAVIGATION_ACTIVE_LOCK_MS,
@@ -301,6 +280,7 @@ export function ChatMinimap({
       return;
     }
     activeNodeLockRef.current = null;
+    lockedUserMessageRef.current = null;
 
     const measuredNodes = nextNodes.filter((node) => node.targetTurn.scrollTop !== null);
     if (measuredNodes.length === 0) {
@@ -339,7 +319,6 @@ export function ChatMinimap({
       const containerRect = scrollEl.getBoundingClientRect();
       const turns: TurnInfo[] = [];
       let refIndex = 0;
-      let currentTurn: TurnInfo | null = null;
 
       for (const message of allMessagesRef.current) {
         const isAnchor = isMessageGroupAnchor(message);
@@ -347,71 +326,86 @@ export function ChatMinimap({
         const element = refs?.[refIndex];
         refIndex++;
 
-        if (isAnchor) {
-          currentTurn = null;
+        // Only genuine user messages become minimap navigation nodes
+        if (message.role === "user") {
           const elementRect = element?.getBoundingClientRect();
-          currentTurn = {
-            userMessage: message as UserMessage | CustomMessage,
-            assistantPreviews: [],
-            scrollTop: elementRect
+          const entryId = element?.getAttribute("data-entry-id") ||
+            (message as any).entryId ||
+            (message as any).id ||
+            `user-${refIndex}`;
+          turns.push({
+            userTurnNumber: 0,
+            userMessage: message as UserMessage,
+            element,
+            entryId,
+            scrollTop: elementRect && elementRect.height > 0 && element?.getClientRects().length
               ? elementRect.top - containerRect.top + scrollEl.scrollTop
               : null,
-            toolCount: 0,
-          };
-          turns.push(currentTurn);
-          continue;
-        }
-
-        if (!currentTurn) continue;
-        currentTurn.toolCount += countToolCalls(message);
-        const answerMarkdown = getAssistantAnswerMarkdown(message);
-        if (answerMarkdown) {
-          currentTurn.assistantPreviews.push({
-            markdown: answerMarkdown,
-            element,
           });
         }
       }
+
+      // 锚点保护基准记录：记录当前 preview 视口内第一张卡片的稳定 entryId 与屏幕 top
+      const box = previewBoxRef.current;
+      if (box) {
+        const boxRect = box.getBoundingClientRect();
+        const cards = Array.from(box.querySelectorAll<HTMLElement>('[data-minimap-preview-index]'))
+          .filter((el) => el.style.display !== "none");
+        for (const el of cards) {
+          const rect = el.getBoundingClientRect();
+          if (rect.bottom > boxRect.top && rect.top < boxRect.bottom) {
+            const entryId = el.getAttribute("data-minimap-preview-entry-id");
+            if (entryId) {
+              anchorGuardRef.current = { entryId, topBefore: rect.top };
+              break;
+            }
+          }
+        }
+      }
+
+      computeUserTurnNumbers(turns);
 
       const nextNodes = createTurnNodes(turns);
       setMinimapHeight(minimapEl.clientHeight);
       allNodesRef.current = nextNodes;
       setAllNodes(nextNodes);
       setVisible(scrollEl.scrollHeight - scrollEl.clientHeight > 20);
-      syncActiveNode(scrollEl, nextNodes);
 
-      const pendingNavigation = pendingNavigationRef.current;
-      const pendingNode = pendingNavigation
-        ? nextNodes[pendingNavigation.nodeIndex]
-        : null;
-      if (pendingNavigation && pendingNode) {
-        const assistant = pendingNavigation.assistantIndex === undefined
-          ? null
-          : pendingNode.targetTurn.assistantPreviews[pendingNavigation.assistantIndex];
-        let targetTop: number | null = pendingNode.targetTurn.scrollTop;
-        if (pendingNavigation.target === "assistant") {
-          const assistantRect = assistant?.element?.getBoundingClientRect();
-          targetTop = assistantRect
-            ? assistantRect.top - containerRect.top + scrollEl.scrollTop
-            : null;
-        } else if (pendingNavigation.target === "heading") {
-          const heading = (
-            pendingNavigation.headingIndex === undefined
-              ? null
-              : assistant?.element
-                ?.querySelectorAll<HTMLElement>("h1, h2, h3")
-                .item(pendingNavigation.headingIndex)
-          );
-          const headingRect = heading?.getBoundingClientRect();
-          targetTop = headingRect
-            ? headingRect.top - containerRect.top + scrollEl.scrollTop
-            : null;
+      // Stable entry identity or message reference lock to preserve position across prepends
+      const now = Date.now();
+      const isLockActive = (pointerDownStateRef.current !== null) ||
+        (activeNodeLockRef.current !== null && now < activeNodeLockRef.current.until);
+
+      let restoredIndex: number | null = null;
+      if (isLockActive && lockedUserMessageRef.current) {
+        const matched = nextNodes.find((n) => n.targetTurn.userMessage === lockedUserMessageRef.current);
+        if (matched) {
+          restoredIndex = matched.index;
+          if (activeNodeLockRef.current) {
+            activeNodeLockRef.current.index = matched.index;
+          }
+          setActiveIndex(matched.index);
         }
-        if (targetTop === null) return;
-        pendingNavigationRef.current = null;
+      } else {
+        // 锁期已过或不在拖动中，必须期满清理，恢复手滚正常同步
+        lockedUserMessageRef.current = null;
+        activeNodeLockRef.current = null;
+      }
+
+      if (restoredIndex === null) {
+        syncActiveNode(scrollEl, nextNodes);
+      }
+
+      const pendingNodeIndex = pendingNavigationNodeIndexRef.current;
+      const pendingNode = pendingNodeIndex !== null ? nextNodes[pendingNodeIndex] : null;
+      if (pendingNode && pendingNode.targetTurn.scrollTop !== null) {
+        pendingNavigationNodeIndexRef.current = null;
         lockActiveNode(pendingNode.index);
         const targetOffset = scrollEl.clientHeight * 0.3;
-        scrollEl.scrollTo({ top: Math.max(0, targetTop - targetOffset), behavior: "smooth" });
+        scrollEl.scrollTo({
+          top: Math.max(0, pendingNode.targetTurn.scrollTop - targetOffset),
+          behavior: "smooth",
+        });
       }
     }, 150);
   }, [lockActiveNode, messageRefs, scrollContainer, syncActiveNode]);
@@ -419,8 +413,24 @@ export function ChatMinimap({
   useEffect(() => {
     const el = scrollContainer.current;
     if (!el) return;
+    const releaseSelection = () => {
+      activeNodeLockRef.current = null;
+      lockedUserMessageRef.current = null;
+      setMouseYRatio(null);
+    };
+    const releaseForKey = (event: KeyboardEvent) => {
+      if (["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(event.key)) releaseSelection();
+    };
     el.addEventListener("scroll", updateScroll, { passive: true });
-    return () => el.removeEventListener("scroll", updateScroll);
+    el.addEventListener("wheel", releaseSelection, { passive: true });
+    el.addEventListener("pointerdown", releaseSelection, { passive: true });
+    el.addEventListener("keydown", releaseForKey);
+    return () => {
+      el.removeEventListener("scroll", updateScroll);
+      el.removeEventListener("wheel", releaseSelection);
+      el.removeEventListener("pointerdown", releaseSelection);
+      el.removeEventListener("keydown", releaseForKey);
+    };
   }, [scrollContainer, updateScroll]);
 
   useEffect(() => {
@@ -454,45 +464,29 @@ export function ChatMinimap({
   const scrollToNode = useCallback((node: NodeInfo, behavior: ScrollBehavior) => {
     const scrollEl = scrollContainer.current;
     if (!scrollEl) return;
+    scrollEl.dispatchEvent(new CustomEvent("pi:minimap-navigation", { bubbles: true }));
+    setMouseYRatio(null);
     lockActiveNode(node.index);
-    if (node.targetTurn.scrollTop === null) {
-      pendingNavigationRef.current = { nodeIndex: node.index, target: "user" };
+    const element = node.targetTurn.element;
+    const rect = element?.isConnected ? element.getBoundingClientRect() : null;
+    const liveTop = element
+      ? rect && rect.height > 0 && element.getClientRects().length
+        ? rect.top - scrollEl.getBoundingClientRect().top + scrollEl.scrollTop
+        : null
+      : node.targetTurn.scrollTop;
+    if (liveTop === null) {
+      pendingNavigationNodeIndexRef.current = node.index;
       onRevealHistory();
       return;
     }
     const targetTop = Math.max(
       0,
-      node.targetTurn.scrollTop - scrollEl.clientHeight * 0.3,
+      liveTop - scrollEl.clientHeight * 0.3,
     );
     scrollEl.scrollTo({ top: targetTop, behavior });
   }, [lockActiveNode, onRevealHistory, scrollContainer]);
 
-  const scrollToAssistant = useCallback((node: NodeInfo, assistantIndex: number) => {
-    const scrollEl = scrollContainer.current;
-    if (!scrollEl) return;
-    const assistantElement = node.targetTurn.assistantPreviews[assistantIndex]?.element;
-    if (!assistantElement) {
-      pendingNavigationRef.current = {
-        nodeIndex: node.index,
-        target: "assistant",
-        assistantIndex,
-      };
-      onRevealHistory();
-      return;
-    }
-    const containerRect = scrollEl.getBoundingClientRect();
-    const assistantRect = assistantElement.getBoundingClientRect();
-    const targetTop = (
-      assistantRect.top
-      - containerRect.top
-      + scrollEl.scrollTop
-      - scrollEl.clientHeight * 0.3
-    );
-    lockActiveNode(node.index);
-    scrollEl.scrollTo({ top: Math.max(0, targetTop), behavior: "smooth" });
-  }, [lockActiveNode, onRevealHistory, scrollContainer]);
-
-  const findNearestNode = useCallback((ratio: number): NodeInfo | null => {
+  const findNearestNode = useCallback((ratio: number, clamp = false): NodeInfo | null => {
     const { nodes, gap, fillsHeight } = nodeLayoutRef.current;
     const height = containerRef.current?.clientHeight ?? 0;
     if (nodes.length === 0 || height <= 0) return null;
@@ -503,45 +497,13 @@ export function ChatMinimap({
     const nodeIndex = Math.max(0, Math.min(nodes.length - 1, rawIndex));
     const nearestNode = nodes[nodeIndex];
 
-    if (!fillsHeight) {
+    if (!fillsHeight && !clamp) {
       const nodeY = nearestNode.topRatio * height;
-      const hitRadius = Math.max(10, gap / 2);
+      const hitRadius = Math.max(24, gap);
       if (Math.abs(pointerY - nodeY) > hitRadius) return null;
     }
     return nearestNode;
   }, []);
-
-  const scrollToHeading = useCallback((
-    node: NodeInfo,
-    assistantIndex: number,
-    headingIndex: number,
-  ) => {
-    const scrollEl = scrollContainer.current;
-    if (!scrollEl) return;
-    const answerElement = node.targetTurn.assistantPreviews[assistantIndex]?.element;
-    if (!answerElement) {
-      pendingNavigationRef.current = {
-        nodeIndex: node.index,
-        target: "heading",
-        assistantIndex,
-        headingIndex,
-      };
-      onRevealHistory();
-      return;
-    }
-    const heading = answerElement.querySelectorAll<HTMLElement>("h1, h2, h3").item(headingIndex);
-    if (!heading) return;
-    const containerRect = scrollEl.getBoundingClientRect();
-    const headingRect = heading.getBoundingClientRect();
-    const targetTop = (
-      headingRect.top
-      - containerRect.top
-      + scrollEl.scrollTop
-      - scrollEl.clientHeight * 0.3
-    );
-    lockActiveNode(node.index);
-    scrollEl.scrollTo({ top: Math.max(0, targetTop), behavior: "smooth" });
-  }, [lockActiveNode, onRevealHistory, scrollContainer]);
 
   const cancelPreviewHide = useCallback(() => {
     if (!previewHideTimerRef.current) return;
@@ -549,12 +511,24 @@ export function ChatMinimap({
     previewHideTimerRef.current = null;
   }, []);
 
-  const showPreview = useCallback(() => {
+  const showPreview = useCallback((event?: React.MouseEvent<HTMLDivElement>) => {
+    if (event && (lastPointerTypeRef.current !== "mouse" || (event.nativeEvent as any)?.sourceCapabilities?.firesTouchEvents)) return;
+    if (closedByUserRef.current) return;
+    if (gestureTimerRef.current) {
+      clearTimeout(gestureTimerRef.current);
+      gestureTimerRef.current = null;
+    }
+    if (previewBoxRef.current) {
+      previewBoxRef.current.style.transform = "";
+      previewBoxRef.current.style.opacity = "";
+      previewBoxRef.current.style.transition = "";
+    }
     cancelPreviewHide();
     setMinimapHovered(true);
   }, [cancelPreviewHide]);
 
   const schedulePreviewHide = useCallback(() => {
+    if (pointerDownStateRef.current) return;
     cancelPreviewHide();
     previewHideTimerRef.current = setTimeout(() => {
       previewHideTimerRef.current = null;
@@ -563,16 +537,262 @@ export function ChatMinimap({
     }, PREVIEW_HIDE_DELAY);
   }, [cancelPreviewHide]);
 
-  useEffect(() => () => cancelPreviewHide(), [cancelPreviewHide]);
+  const handleMouseLeave = useCallback((event?: React.MouseEvent<HTMLDivElement>) => {
+    // Touch generates compatibility mouse events after release; it must not hide a just-opened drawer.
+    if (lastPointerTypeRef.current !== "mouse" || (event?.nativeEvent as any)?.sourceCapabilities?.firesTouchEvents) return;
+    schedulePreviewHide();
+    closedByUserRef.current = false;
+  }, [schedulePreviewHide]);
+
+  const preservePreviewScroll = useCallback(() => {
+    const box = previewBoxRef.current;
+    if (!box) return;
+    const boxRect = box.getBoundingClientRect();
+    const cards = Array.from(box.querySelectorAll<HTMLElement>('[data-minimap-preview-index]'))
+      .filter((el) => el.style.display !== "none");
+    for (const el of cards) {
+      const rect = el.getBoundingClientRect();
+      if (rect.bottom > boxRect.top && rect.top < boxRect.bottom) {
+        const entryId = el.getAttribute("data-minimap-preview-entry-id");
+        if (entryId) {
+          anchorGuardRef.current = { entryId, topBefore: rect.top };
+          break;
+        }
+      }
+    }
+  }, []);
+
+  useLayoutEffect(() => {
+    const guard = anchorGuardRef.current;
+    if (!guard) return;
+    anchorGuardRef.current = null;
+    const box = previewBoxRef.current;
+    if (!box) return;
+    const el = box.querySelector<HTMLElement>(`[data-minimap-preview-entry-id="${guard.entryId}"]`);
+    if (!el || el.style.display === "none") return;
+    const topAfter = el.getBoundingClientRect().top;
+    const diff = topAfter - guard.topBefore;
+    if (Math.abs(diff) >= 0.5) {
+      box.scrollTop += diff;
+    }
+  });
+
+  const runContinuousLoad = useCallback((desiredTargetTurns: number, source: string) => {
+    if (isLoadingEarlierRef.current) return false;
+
+    const loader = typeof window !== "undefined" ? (window as any).__PI_ENH_LOAD_EARLIER__ : null;
+    if (typeof loader !== "function") return false;
+
+    preservePreviewScroll();
+    isLoadingEarlierRef.current = true;
+    setIsLoadingEarlier(true);
+    setLoadError(false);
+
+    const generation = sessionGenerationRef.current;
+
+    (async () => {
+      let pageCount = 0;
+      let consecutiveNoUser = 0;
+
+      try {
+        while (true) {
+          if (sessionGenerationRef.current !== generation) return;
+
+          const loadedUserCount = allMessagesRef.current.filter((message) => message.role === "user").length;
+          const history = readMinimapHistoryState(loadedUserCount);
+
+          // 1. 已达到目标用户数或服务端无更早消息，成功停止
+          if (loadedUserCount >= desiredTargetTurns || !history.hasEarlierMessages) {
+            break;
+          }
+
+          // 2. 熔断保护：单次交互最多 30 页，连续无新增 user 最多 10 页
+          if (pageCount >= 30 || consecutiveNoUser >= 10) {
+            break;
+          }
+
+          // 3. 请求条数：初始不足 3 轮保底 100，否则 50
+          const fetchTail = loadedUserCount < 3 ? 100 : 50;
+
+          // 记录本轮请求前消息状态与 cursor/entryId
+          const messagesBefore = allMessagesRef.current;
+          const msgCountBefore = messagesBefore.length;
+          const oldestEntryIdBefore = history.oldestEntryId || (messagesBefore[0] as any)?.entryId || null;
+
+          pageCount++;
+          let res: any;
+          try {
+            res = await loader(fetchTail, source);
+          } catch (e) {
+            if (sessionGenerationRef.current !== generation) return;
+            setLoadError(true);
+            break;
+          }
+
+          if (sessionGenerationRef.current !== generation) return;
+          if (res === false) {
+            setLoadError(true);
+            break;
+          }
+
+          // 4. 等待两帧，确保 React commit 并更新 DOM/refs
+          await waitForCommitFrames();
+          if (sessionGenerationRef.current !== generation) return;
+
+          // 5. 检查进展
+          const nextLoadedUserCount = allMessagesRef.current.filter((message) => message.role === "user").length;
+          const nextHistory = readMinimapHistoryState(nextLoadedUserCount);
+          const messagesAfter = allMessagesRef.current;
+          const msgCountAfter = messagesAfter.length;
+          const oldestEntryIdAfter = nextHistory.oldestEntryId || (messagesAfter[0] as any)?.entryId || null;
+
+          const userProgress = nextLoadedUserCount > loadedUserCount;
+          if (userProgress) {
+            consecutiveNoUser = 0;
+          } else {
+            consecutiveNoUser++;
+          }
+
+          const cursorProgress = msgCountAfter > msgCountBefore ||
+            oldestEntryIdAfter !== oldestEntryIdBefore;
+
+          // 若既无 user 进展，也无 cursor/消息集合进展，判定为无进展错误，停止重试
+          if (!userProgress && !cursorProgress) {
+            setLoadError(true);
+            break;
+          }
+
+          if (!nextHistory.hasEarlierMessages) {
+            break;
+          }
+        }
+      } finally {
+        if (sessionGenerationRef.current === generation) {
+          isLoadingEarlierRef.current = false;
+          setIsLoadingEarlier(false);
+        }
+      }
+    })();
+
+    return true;
+  }, [preservePreviewScroll]);
+
+  const triggerLoadEarlier = useCallback((source = "button") => {
+    if (isLoadingEarlierRef.current) return false;
+    const loadedCount = allNodesRef.current.length;
+    const history = readMinimapHistoryState(loadedCount);
+    const settings = getMinimapHistorySettings();
+
+    // 1. 优先本地展开未显示的已加载轮次
+    const currentTarget = targetTurnsRef.current;
+    if (currentTarget < loadedCount) {
+      preservePreviewScroll();
+      const nextTarget = Math.min(loadedCount, currentTarget + settings.stepTurns);
+      targetTurnsRef.current = nextTarget;
+      setTargetTurns(nextTarget);
+      setLoadError(false);
+      return true;
+    }
+
+    // 2. 本地已完全展开，请求服务端更早消息
+    if (!history.hasEarlierMessages && !loadError) {
+      return false;
+    }
+
+    // 若当前处于错误状态，用户主动重试
+    setLoadError(false);
+
+    // 一次触发目标只加一次 step 5
+    const nextTarget = currentTarget + settings.stepTurns;
+    targetTurnsRef.current = nextTarget;
+    setTargetTurns(nextTarget);
+
+    return runContinuousLoad(nextTarget, source);
+  }, [loadError, preservePreviewScroll, runContinuousLoad]);
+
+  const expandAllLoadedTurns = useCallback(() => {
+    const loadedCount = allNodesRef.current.length;
+    if (loadedCount <= 0 || targetTurnsRef.current >= loadedCount) return;
+    preservePreviewScroll();
+    targetTurnsRef.current = loadedCount;
+    setTargetTurns(loadedCount);
+  }, [preservePreviewScroll]);
+
+  useEffect(() => {
+    const loadedCount = allNodes.length;
+    const history = readMinimapHistoryState(loadedCount);
+
+    const initial = Math.max(3, getMinimapHistorySettings().initialTurns);
+    if (targetTurnsRef.current < initial) {
+      targetTurnsRef.current = initial;
+      setTargetTurns(initial);
+    }
+
+    const settings = getMinimapHistorySettings();
+    const minPreload = Math.min(history.totalTurns, Math.max(3, settings.initialTurns));
+
+    if (targetTurnsRef.current < minPreload) {
+      targetTurnsRef.current = minPreload;
+      setTargetTurns(minPreload);
+    }
+
+    // Initial navigation uses the confirmed tail already loaded for the chat.
+    // Fetch older pages only after an explicit navigation gesture or click.
+  }, [allNodes.length]);
+
+  useEffect(() => {
+    return () => {
+      sessionGenerationRef.current++;
+      isLoadingEarlierRef.current = false;
+      cancelPreviewHide();
+      if (gestureTimerRef.current) {
+        clearTimeout(gestureTimerRef.current);
+        gestureTimerRef.current = null;
+      }
+      if (suppressClickTimerRef.current) {
+        clearTimeout(suppressClickTimerRef.current);
+        suppressClickTimerRef.current = null;
+      }
+    };
+  }, [cancelPreviewHide]);
 
   useEffect(() => {
     if (typeof window === "undefined") return;
-    (window as any).__PI_ENH_CLOSE_MINIMAP__ = () => {
+    (window as any).__PI_ENH_CLOSE_MINIMAP__ = (animate?: boolean) => {
       cancelPreviewHide();
-      setMinimapHovered(false);
-      setMouseYRatio(null);
+      closedByUserRef.current = true;
+      if (animate && previewBoxRef.current) {
+        const box = previewBoxRef.current;
+        box.style.transition = "transform 0.16s ease-out, opacity 0.16s ease-out";
+        box.style.transform = "translateX(100%)";
+        box.style.opacity = "0";
+        if (gestureTimerRef.current) clearTimeout(gestureTimerRef.current);
+        gestureTimerRef.current = setTimeout(() => {
+          gestureTimerRef.current = null;
+          setMinimapHovered(false);
+          setMouseYRatio(null);
+          if (box) {
+            box.style.transform = "";
+            box.style.opacity = "";
+            box.style.transition = "";
+          }
+        }, 160);
+      } else {
+        setMinimapHovered(false);
+        setMouseYRatio(null);
+      }
     };
     (window as any).__PI_ENH_OPEN_MINIMAP__ = (ratio?: number) => {
+      if (gestureTimerRef.current) {
+        clearTimeout(gestureTimerRef.current);
+        gestureTimerRef.current = null;
+      }
+      if (previewBoxRef.current) {
+        previewBoxRef.current.style.transform = "";
+        previewBoxRef.current.style.opacity = "";
+        previewBoxRef.current.style.transition = "";
+      }
+      closedByUserRef.current = false;
       cancelPreviewHide();
       setMinimapHovered(true);
       if (typeof ratio === "number") {
@@ -587,65 +807,416 @@ export function ChatMinimap({
     };
   }, [cancelPreviewHide, minimapHovered]);
 
-  const handleMouseDown = useCallback((event: React.MouseEvent<HTMLDivElement>) => {
+  const handlePointerDown = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    lastPointerTypeRef.current = event.pointerType || "mouse";
     if (!visible) return;
-
-    draggingRef.current = true;
-    showPreview();
-    const rect = event.currentTarget.getBoundingClientRect();
-    const pointerRatio = Math.max(0, Math.min(1, (event.clientY - rect.top) / rect.height));
-    setMouseYRatio(pointerRatio);
-    const jumpToPointer = (clientY: number, behavior: ScrollBehavior) => {
-      const ratio = Math.max(0, Math.min(1, (clientY - rect.top) / rect.height));
-      const node = findNearestNode(ratio);
-      if (node) {
-        scrollToNode(node, behavior);
-      }
-    };
-
-    jumpToPointer(event.clientY, "smooth");
-    const onMove = (moveEvent: MouseEvent) => {
-      if (!draggingRef.current) return;
-      jumpToPointer(moveEvent.clientY, "auto");
-    };
-    const onUp = () => {
-      draggingRef.current = false;
-      window.removeEventListener("mousemove", onMove);
-      window.removeEventListener("mouseup", onUp);
-    };
-    window.addEventListener("mousemove", onMove);
-    window.addEventListener("mouseup", onUp);
-  }, [findNearestNode, scrollToNode, showPreview, visible]);
-
-  const handleTouchStart = useCallback((event: React.TouchEvent<HTMLDivElement>) => {
-    if (!visible) return;
-    const touch = event.touches[0];
-    if (!touch) return;
-    showPreview();
-    const rect = event.currentTarget.getBoundingClientRect();
-    const clientY = touch.clientY;
-    const ratio = Math.max(0, Math.min(1, (clientY - rect.top) / rect.height));
-    setMouseYRatio(ratio);
-    const node = findNearestNode(ratio);
-    if (node) {
-      scrollToNode(node, "smooth");
+    if (!event.isPrimary || (typeof event.button === "number" && event.button !== 0)) return;
+    if (pointerDownStateRef.current !== null) return;
+    if ((event.target as HTMLElement)?.closest?.('[data-minimap-preview-box], [data-pi-enh-minimap-toolbar]')) {
+      return;
     }
-  }, [findNearestNode, scrollToNode, showPreview, visible]);
 
-  const nearestNode = mouseYRatio === null ? null : findNearestNode(mouseYRatio);
+    const rect = event.currentTarget.getBoundingClientRect();
+    if (rect.height <= 0) return;
+
+    const pointerId = event.pointerId;
+    const clientY = event.clientY;
+    const ratio = Math.max(0, Math.min(1, (clientY - rect.top) / rect.height));
+    const node = findNearestNode(ratio, true);
+
+    const wasPreviewOpen = minimapHovered;
+    pointerDownStateRef.current = {
+      pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      startTime: Date.now(),
+      startActiveIndex: activeIndex,
+      startNode: node,
+      wasPreviewOpen,
+      hasMoved: false,
+    };
+
+    try {
+      event.currentTarget.setPointerCapture(pointerId);
+    } catch {}
+
+    setMouseYRatio(ratio);
+    if (node) {
+      setActiveIndex(node.index);
+      lockActiveNode(node.index);
+    }
+  }, [activeIndex, findNearestNode, lockActiveNode, minimapHovered, visible]);
+
+  const handlePointerMove = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    if (!(event.nativeEvent as any)?.sourceCapabilities?.firesTouchEvents) {
+      lastPointerTypeRef.current = event.pointerType || "mouse";
+    }
+    if ((event.target as HTMLElement)?.closest?.('[data-minimap-preview-box], [data-pi-enh-minimap-toolbar]')) {
+      return;
+    }
+    const downState = pointerDownStateRef.current;
+    const rect = containerRef.current?.getBoundingClientRect();
+    if (!rect || rect.height <= 0) return;
+
+    const clientY = event.clientY;
+    const ratio = Math.max(0, Math.min(1, (clientY - rect.top) / rect.height));
+
+    if (downState && downState.pointerId === event.pointerId) {
+      const dy = Math.abs(event.clientY - downState.startY);
+      const dx = Math.abs(event.clientX - downState.startX);
+      if (dy > 3 || dx > 3) {
+        downState.hasMoved = true;
+        if (!minimapHovered) {
+          closedByUserRef.current = false;
+          cancelPreviewHide();
+          setMinimapHovered(true);
+        }
+      }
+      setMouseYRatio(ratio);
+      const node = findNearestNode(ratio, true);
+      if (node) {
+        setActiveIndex(node.index);
+        lockActiveNode(node.index);
+      }
+      return;
+    }
+
+    // Pure mouse hover when not dragging
+    if (event.buttons === 0 && minimapHovered) {
+      setMouseYRatio(ratio);
+    }
+  }, [cancelPreviewHide, findNearestNode, lockActiveNode, minimapHovered]);
+
+  const handlePointerUp = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    const downState = pointerDownStateRef.current;
+    if (!downState || downState.pointerId !== event.pointerId) return;
+
+    pointerDownStateRef.current = null;
+    try {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    } catch {}
+
+    const rect = containerRef.current?.getBoundingClientRect();
+    const ratio = rect && rect.height > 0
+      ? Math.max(0, Math.min(1, (event.clientY - rect.top) / rect.height))
+      : null;
+    if (ratio !== null) {
+      setMouseYRatio(ratio);
+    }
+    const currentNode = ratio !== null ? findNearestNode(ratio, true) : null;
+    const finalNode = currentNode || downState.startNode;
+
+    if (!downState.hasMoved) {
+      // Tap (movement <= 3px)
+      if (downState.wasPreviewOpen) {
+        if (
+          downState.startActiveIndex !== null &&
+          finalNode &&
+          downState.startActiveIndex === finalNode.index
+        ) {
+          cancelPreviewHide();
+          setMinimapHovered(false);
+          setMouseYRatio(null);
+          closedByUserRef.current = true;
+          return;
+        }
+        if (finalNode) {
+          closedByUserRef.current = false;
+          setActiveIndex(finalNode.index);
+          lockActiveNode(finalNode.index);
+          scrollToNode(finalNode, "smooth");
+        }
+        return;
+      }
+
+      if (
+        downState.startActiveIndex !== null &&
+        finalNode &&
+        downState.startActiveIndex === finalNode.index
+      ) {
+        closedByUserRef.current = false;
+        cancelPreviewHide();
+        setMinimapHovered(true);
+        return;
+      }
+
+      if (finalNode) {
+        closedByUserRef.current = false;
+        cancelPreviewHide();
+        setMinimapHovered(true);
+        setActiveIndex(finalNode.index);
+        lockActiveNode(finalNode.index);
+        scrollToNode(finalNode, "smooth");
+      }
+      return;
+    }
+
+    if (finalNode) {
+      closedByUserRef.current = false;
+      cancelPreviewHide();
+      setMinimapHovered(true);
+      setActiveIndex(finalNode.index);
+      lockActiveNode(finalNode.index);
+      scrollToNode(finalNode, "smooth");
+    }
+  }, [cancelPreviewHide, findNearestNode, lockActiveNode, scrollToNode]);
+
+  const handlePointerCancel = useCallback((event: React.PointerEvent<HTMLDivElement>) => {
+    const downState = pointerDownStateRef.current;
+    if (!downState || downState.pointerId !== event.pointerId) return;
+
+    pointerDownStateRef.current = null;
+    try {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    } catch {}
+
+    setMouseYRatio(null);
+    setActiveIndex(downState.startActiveIndex);
+    if (!downState.wasPreviewOpen) {
+      setMinimapHovered(false);
+    }
+    if (downState.startActiveIndex === null) {
+      activeNodeLockRef.current = null;
+      lockedUserMessageRef.current = null;
+    } else {
+      const startNode = positionedNodes.find((n) => n.index === downState.startActiveIndex);
+      if (startNode) {
+        lockActiveNode(startNode.index);
+      }
+    }
+  }, [lockActiveNode, positionedNodes]);
+
+  const nearestNode = useMemo(() => {
+    if (mouseYRatio !== null) {
+      const node = findNearestNode(mouseYRatio, true);
+      if (node) return node;
+    }
+    if (activeIndex !== null) {
+      return positionedNodes.find((n) => n.index === activeIndex) ?? null;
+    }
+    return null;
+  }, [activeIndex, findNearestNode, mouseYRatio, positionedNodes]);
   const nearestNodeIndex = nearestNode?.index ?? null;
 
   useEffect(() => {
-    if (!minimapHovered || nearestNodeIndex === null) return;
+    // 只有用户在 rail 上主动悬停或拖拽至被隐藏节点时才按需展开
+    if (mouseYRatio === null) return;
+    const node = findNearestNode(mouseYRatio, true);
+    if (!node) return;
+    const loadedCount = allNodes.length;
+    const currentTarget = targetTurnsRef.current;
+    const hiddenCount = Math.max(0, loadedCount - currentTarget);
+    if (node.index < hiddenCount) {
+      const needed = loadedCount - node.index;
+      preservePreviewScroll();
+      targetTurnsRef.current = Math.max(currentTarget, needed);
+      setTargetTurns(targetTurnsRef.current);
+    }
+  }, [allNodes.length, findNearestNode, mouseYRatio, preservePreviewScroll]);
+
+  const lastCenteredEntryRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (!minimapHovered || nearestNodeIndex === null) {
+      lastCenteredEntryRef.current = null;
+      return;
+    }
+    // Prepending changes array indices, not the user's reading target.
+    const entryId = allNodesRef.current[nearestNodeIndex]?.targetTurn.entryId ?? null;
+    if (entryId && lastCenteredEntryRef.current === entryId) return;
+    lastCenteredEntryRef.current = entryId;
+
     const previewBox = previewBoxRef.current;
     const previewItem = previewItemRefs.current.get(nearestNodeIndex);
     if (!previewBox || !previewItem) return;
     const targetTop = previewItem.offsetTop
       - (previewBox.clientHeight - previewItem.offsetHeight) / 2;
-    previewBox.scrollTop = Math.max(0, targetTop);
-  }, [allNodes, minimapHovered, nearestNodeIndex]);
+    previewBox.scrollTo({ top: Math.max(0, targetTop), behavior: "auto" });
+  }, [minimapHovered, nearestNodeIndex]);
 
-  if (!visible) return null;
+  useEffect(() => {
+    const previewBox = previewBoxRef.current;
+    if (!previewBox) return;
+
+    if (gestureTimerRef.current) {
+      clearTimeout(gestureTimerRef.current);
+      gestureTimerRef.current = null;
+    }
+    previewBox.style.transform = "";
+    previewBox.style.opacity = "";
+    previewBox.style.transition = "";
+
+    const handleWheel = (e: WheelEvent) => {
+      if (previewBox.scrollTop <= 1 && e.deltaY < 0) {
+        if (triggerLoadEarlier("wheel")) {
+          e.preventDefault();
+        }
+      }
+    };
+    previewBox.addEventListener("wheel", handleWheel, { passive: false });
+
+    let touchStartX = 0;
+    let touchStartY = 0;
+    let touchStartTime = 0;
+    let gestureIntent: null | "scroll" | "swipe-right" = null;
+    let currentTranslateX = 0;
+    let isAtTop = false;
+
+    const resetSwipe = (animate = false) => {
+      touchStartX = 0;
+      touchStartY = 0;
+      touchStartTime = 0;
+      gestureIntent = null;
+      currentTranslateX = 0;
+      isAtTop = false;
+      if (previewBox) {
+        if (animate) previewBox.style.transition = "transform 0.18s ease-out";
+        previewBox.style.transform = "";
+        if (animate) {
+          if (gestureTimerRef.current) clearTimeout(gestureTimerRef.current);
+          gestureTimerRef.current = setTimeout(() => {
+            gestureTimerRef.current = null;
+            if (previewBox) previewBox.style.transition = "";
+          }, 180);
+        }
+      }
+    };
+
+    const handleTouchStart = (e: TouchEvent) => {
+      const touch = e.touches?.[0];
+      if (!touch) return;
+      touchStartX = touch.clientX;
+      touchStartY = touch.clientY;
+      touchStartTime = Date.now();
+      gestureIntent = null;
+      currentTranslateX = 0;
+      justSwipedRef.current = false;
+      if (suppressClickTimerRef.current) {
+        clearTimeout(suppressClickTimerRef.current);
+        suppressClickTimerRef.current = null;
+      }
+      isAtTop = previewBox.scrollTop <= 1;
+    };
+
+    const handleTouchMove = (e: TouchEvent) => {
+      const touch = e.touches?.[0];
+      if (!touch) return;
+      const dx = touch.clientX - touchStartX;
+      const dy = touch.clientY - touchStartY;
+
+      if (!gestureIntent) {
+        if (Math.abs(dy) > 8 && Math.abs(dy) >= Math.abs(dx)) {
+          gestureIntent = "scroll";
+          justSwipedRef.current = true;
+        } else if (dx > 10 && dx > Math.abs(dy) * 1.1) {
+          gestureIntent = "swipe-right";
+          justSwipedRef.current = true;
+        }
+      }
+
+      if (gestureIntent === "scroll" || !gestureIntent) {
+        if (isAtTop && dy >= 32) {
+          isAtTop = false;
+          justSwipedRef.current = true;
+          if (triggerLoadEarlier("touch") && e.cancelable) {
+            e.preventDefault();
+          }
+        }
+        return;
+      }
+
+      if (gestureIntent === "swipe-right") {
+        if (dx > 0) {
+          if (e.cancelable) e.preventDefault();
+          currentTranslateX = dx;
+          previewBox.style.transition = "none";
+          previewBox.style.transform = `translateX(${dx}px)`;
+        } else {
+          currentTranslateX = 0;
+          previewBox.style.transform = "";
+        }
+      }
+    };
+
+    const handleTouchEnd = () => {
+      if (gestureIntent === null) {
+        resetSwipe(false);
+        return; // A normal tap must reach the user's native button onClick.
+      }
+      if (gestureIntent === "swipe-right" && currentTranslateX > 0) {
+        const elapsed = Math.max(1, Date.now() - touchStartTime);
+        const vx = currentTranslateX / elapsed;
+        const shouldClose = currentTranslateX >= 48 || (currentTranslateX >= 24 && vx > 0.25);
+        if (shouldClose) {
+          closedByUserRef.current = true; // Hover during the exit animation must not cancel the user's close.
+          justSwipedRef.current = true;
+          previewBox.style.transition = "transform 0.16s ease-out, opacity 0.16s ease-out";
+          previewBox.style.transform = "translateX(100%)";
+          previewBox.style.opacity = "0";
+          if (gestureTimerRef.current) clearTimeout(gestureTimerRef.current);
+          gestureTimerRef.current = setTimeout(() => {
+            gestureTimerRef.current = null;
+            closedByUserRef.current = true;
+            cancelPreviewHide();
+            setMinimapHovered(false);
+            setMouseYRatio(null);
+            resetSwipe(false);
+            if (suppressClickTimerRef.current) clearTimeout(suppressClickTimerRef.current);
+            suppressClickTimerRef.current = setTimeout(() => {
+              suppressClickTimerRef.current = null;
+              justSwipedRef.current = false;
+            }, 100);
+          }, 160);
+          return;
+        }
+      }
+
+      justSwipedRef.current = true;
+      resetSwipe(true);
+      if (suppressClickTimerRef.current) clearTimeout(suppressClickTimerRef.current);
+      suppressClickTimerRef.current = setTimeout(() => {
+        suppressClickTimerRef.current = null;
+        justSwipedRef.current = false;
+      }, 200);
+    };
+
+    const handleTouchCancel = () => {
+      justSwipedRef.current = true;
+      resetSwipe(true);
+      if (suppressClickTimerRef.current) clearTimeout(suppressClickTimerRef.current);
+      suppressClickTimerRef.current = setTimeout(() => {
+        suppressClickTimerRef.current = null;
+        justSwipedRef.current = false;
+      }, 200);
+    };
+
+    previewBox.addEventListener("touchstart", handleTouchStart, { passive: true });
+    previewBox.addEventListener("touchmove", handleTouchMove, { passive: false });
+    previewBox.addEventListener("touchend", handleTouchEnd, { passive: true });
+    previewBox.addEventListener("touchcancel", handleTouchCancel, { passive: true });
+
+    return () => {
+      previewBox.removeEventListener("wheel", handleWheel);
+      previewBox.removeEventListener("touchstart", handleTouchStart);
+      previewBox.removeEventListener("touchmove", handleTouchMove);
+      previewBox.removeEventListener("touchend", handleTouchEnd);
+      previewBox.removeEventListener("touchcancel", handleTouchCancel);
+      if (gestureTimerRef.current) {
+        clearTimeout(gestureTimerRef.current);
+        gestureTimerRef.current = null;
+      }
+      if (suppressClickTimerRef.current) {
+        clearTimeout(suppressClickTimerRef.current);
+        suppressClickTimerRef.current = null;
+      }
+    };
+  }, [cancelPreviewHide, minimapHovered, triggerLoadEarlier, visible]);
+
+  // 导航测量前保留固定宽度，避免消息先按全宽渲染后再次换行。
+  if (!visible) return (
+    <div ref={containerRef} data-minimap-native-owner="true" aria-hidden="true"
+      style={{ width: MINIMAP_WIDTH, flexShrink: 0, visibility: "hidden" }} />
+  );
 
   const lastNodeTop = positionedNodes.length > 0
     ? positionedNodes[positionedNodes.length - 1].topRatio * minimapHeight
@@ -655,13 +1226,17 @@ export function ChatMinimap({
   return (
     <div
       ref={containerRef}
-      onMouseDown={handleMouseDown}
-      onTouchStart={handleTouchStart}
+      data-minimap-native-owner="true"
+      onPointerDown={handlePointerDown}
+      onPointerMove={handlePointerMove}
+      onPointerUp={handlePointerUp}
+      onPointerCancel={handlePointerCancel}
+      onLostPointerCapture={handlePointerCancel}
       onMouseEnter={showPreview}
-      onMouseLeave={schedulePreviewHide}
-      onMouseMove={(event) => {
-        const rect = event.currentTarget.getBoundingClientRect();
-        setMouseYRatio((event.clientY - rect.top) / rect.height);
+      onMouseLeave={handleMouseLeave}
+      onMouseDown={(e) => {
+        // Prevent default text selection during pointer scrubbing
+        if (e.button === 0) e.preventDefault();
       }}
       style={{
         width: MINIMAP_WIDTH,
@@ -669,11 +1244,25 @@ export function ChatMinimap({
         position: "relative",
         cursor: "pointer",
         userSelect: "none",
+        touchAction: "pan-y",
         borderLeft: "1px solid var(--border)",
         background: "var(--bg-panel)",
         overflow: "visible",
       }}
     >
+      {/* 实际轨道独占 child hit surface */}
+      <div
+        data-minimap-rail-hit="true"
+        style={{
+          position: "absolute",
+          top: 0,
+          left: 0,
+          right: 0,
+          bottom: 0,
+          touchAction: "none",
+          zIndex: 1,
+        }}
+      />
       <div
         style={{
           position: "absolute",
@@ -726,87 +1315,126 @@ export function ChatMinimap({
         );
       })}
 
-      {minimapHovered && allNodes.length > 0 && (
-        <div
-          ref={previewBoxRef}
-          className={styles.preview}
-          data-minimap-preview-box=""
-          onMouseEnter={showPreview}
-          onMouseDown={(event) => event.stopPropagation()}
-          onMouseMove={(event) => event.stopPropagation()}
-        >
-          {allNodes.map((node) => {
-            const isLocated = nearestNodeIndex === node.index;
-            return (
-              <div
-                key={node.index}
-                ref={(element) => {
-                  if (element) previewItemRefs.current.set(node.index, element);
-                  else previewItemRefs.current.delete(node.index);
-                }}
-                className={styles.turn}
-                data-minimap-preview-index={node.index}
-                data-located={isLocated ? "true" : undefined}
-              >
-                <span className={styles.number}>
-                  <span aria-hidden="true">
-                    {String(node.index + 1)}
-                  </span>
-                  {node.targetTurn.toolCount > 0 && (
-                    <span
-                      className={styles.toolBadge}
-                      role="img"
-                      title={t("chatMinimap.toolCalls", { count: node.targetTurn.toolCount })}
-                      aria-label={t("chatMinimap.toolCalls", { count: node.targetTurn.toolCount })}
-                    >
-                      {node.targetTurn.toolCount > 99 ? "99+" : node.targetTurn.toolCount}
-                    </span>
-                  )}
-                </span>
-                <div className={styles.content}>
-                  <button
-                    type="button"
-                    className={styles.user}
-                    data-minimap-preview-user={node.index}
-                    onClick={() => {
-                      scrollToNode(node, "smooth");
-                    }}
-                  >
-                    <span className={styles.userText}>
-                      {getUserPreview(node.targetTurn.userMessage)}
-                    </span>
-                  </button>
+      {minimapHovered && allNodes.length > 0 && (() => {
+        const visibleTurnsCount = Math.min(allNodes.length, targetTurns);
+        const hiddenCount = Math.max(0, allNodes.length - visibleTurnsCount);
+        const totalTurnsCount = historyState.totalTurns || allNodes.length;
 
-                  {node.targetTurn.assistantPreviews.map((assistant, assistantIndex) => (
-                    <div
-                      key={assistantIndex}
-                      className={styles.assistant}
-                    >
-                      <button
-                        type="button"
-                        className={styles.assistantJump}
-                        data-minimap-preview-assistant={`${node.index}-${assistantIndex}`}
-                        onClick={() => scrollToAssistant(node, assistantIndex)}
-                        aria-label={t("chatMinimap.locateAssistant")}
-                        title={t("chatMinimap.locateAssistant")}
-                      >
-                        A
-                      </button>
-                      <AssistantOutline
-                        markdown={assistant.markdown}
-                        onAnswerClick={() => scrollToAssistant(node, assistantIndex)}
-                        onHeadingClick={(headingIndex) => (
-                          scrollToHeading(node, assistantIndex, headingIndex)
-                        )}
-                      />
-                    </div>
-                  ))}
-                </div>
+        let loadEarlierLabel = "加载更早轮次";
+        let loadEarlierDisabled = false;
+        let loadEarlierTitle = "向上滚轮或点击加载更早对话";
+        let loadEarlierAriaLabel = "加载更早对话";
+
+        if (isLoadingEarlier) {
+          loadEarlierLabel = "正在加载...";
+          loadEarlierDisabled = true;
+          loadEarlierTitle = "正在从服务端拉取更早轮次";
+          loadEarlierAriaLabel = "正在加载更早对话";
+        } else if (loadError) {
+          loadEarlierLabel = "加载失败，点击重试";
+          loadEarlierDisabled = false;
+          loadEarlierTitle = "加载历史记录失败，点击重新尝试";
+          loadEarlierAriaLabel = "加载历史记录失败，点击重新尝试";
+        } else if (hiddenCount > 0) {
+          loadEarlierLabel = `展开更早轮次 (${hiddenCount} 轮未显示)`;
+          loadEarlierDisabled = false;
+          loadEarlierTitle = `展开本地未显示的 ${hiddenCount} 轮对话`;
+          loadEarlierAriaLabel = `展开更早 ${hiddenCount} 轮对话`;
+        } else if (!historyState.hasEarlierMessages) {
+          loadEarlierLabel = "已显示全部轮次";
+          loadEarlierDisabled = true;
+          loadEarlierTitle = "当前会话的全部轮次已完全显示";
+          loadEarlierAriaLabel = "当前会话的全部轮次已完全显示";
+        }
+
+        const activeTurn = nearestNode ?? (activeIndex !== null ? allNodes[activeIndex] : null);
+        const focusLabel = activeTurn
+          ? ` · 定位第 ${activeTurn.targetTurn.userTurnNumber} 轮`
+          : "";
+
+        return (
+          <div
+            ref={previewBoxRef}
+            className={styles.preview}
+            data-minimap-preview-box=""
+            data-minimap-native-preview=""
+            onMouseEnter={showPreview}
+            onMouseDown={(event) => event.stopPropagation()}
+            onMouseMove={(event) => event.stopPropagation()}
+          >
+            <div className={styles.toolbar} data-pi-enh-minimap-toolbar="">
+              <div
+                className={styles.header}
+                title="双击可展开当前已加载的全部轮次"
+                onDoubleClick={(e) => {
+                  e.stopPropagation();
+                  e.preventDefault();
+                  expandAllLoadedTurns();
+                }}
+              >
+                <span>会话导航</span>
+                <span className={styles.badge}>
+                  💬 共 {totalTurnsCount} 轮 · 已显示 {visibleTurnsCount} 轮{focusLabel}
+                </span>
               </div>
-            );
-          })}
-        </div>
-      )}
+              <button
+                type="button"
+                className={`${styles.loadEarlier} ${isLoadingEarlier ? styles.loading : ""}`}
+                data-pi-enh-minimap-load-earlier=""
+                disabled={loadEarlierDisabled}
+                onClick={() => triggerLoadEarlier("button")}
+                aria-label={loadEarlierAriaLabel}
+                title={loadEarlierTitle}
+              >
+                {loadEarlierLabel}
+              </button>
+            </div>
+
+            {allNodes.map((node) => {
+              const isHidden = node.index < hiddenCount;
+              const isLocated = nearestNodeIndex === node.index;
+              return (
+                <div
+                  key={node.index}
+                  ref={(element) => {
+                    if (element) previewItemRefs.current.set(node.index, element);
+                    else previewItemRefs.current.delete(node.index);
+                  }}
+                  className={styles.turn}
+                  style={isHidden ? { display: "none" } : undefined}
+                  data-minimap-preview-index={node.index}
+                  data-minimap-preview-entry-id={node.targetTurn.entryId || node.targetTurn.element?.dataset.entryId}
+                  data-located={isLocated ? "true" : undefined}
+                >
+                  <span
+                    className={styles.number}
+                    data-minimap-turn-number={String(node.targetTurn.userTurnNumber)}
+                  >
+                    <span aria-hidden="true">
+                      {String(node.targetTurn.userTurnNumber)}
+                    </span>
+                  </span>
+                  <div className={styles.content}>
+                    <button
+                      type="button"
+                      className={styles.user}
+                      data-minimap-preview-user={node.index}
+                      onClick={() => {
+                        if (justSwipedRef.current) return;
+                        scrollToNode(node, "smooth");
+                      }}
+                    >
+                      <span className={styles.userText}>
+                        {getUserPreview(node.targetTurn.userMessage)}
+                      </span>
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        );
+      })()}
     </div>
   );
 }

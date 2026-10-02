@@ -1,1831 +1,369 @@
   // ==========================================
-  // 设置对话框可调节尺寸与侧边栏可调节宽度 (Settings Dialog & Sidebar Resizable)
+  // 设置对话框原生托管与独立 Host 架构 (Native Owner & Isolated Extension Hosts)
   // ==========================================
-  const SETTINGS_SIDEBAR_WIDTH_KEY = "pi-enh-settings-sidebar-width";
-  const SETTINGS_DIALOG_SIZE_KEY = "pi-enh-settings-dialog-size";
 
-  function applySavedSettingsDialogDimensions(surface) {
-    if (!surface) return;
-    // 保护守卫：若正在拖拽调整中，严禁从存储中覆写正在调整的临时尺寸，防止拉扯回弹
-    if (surface.classList.contains("is-resizing") || (document.documentElement && document.documentElement.classList.contains("pi-enh-settings-resizing"))) {
-      return;
-    }
-    // 1. 恢复侧边栏宽度
-    try {
-      const savedSidebarWidth = readEnhancementStorage(SETTINGS_SIDEBAR_WIDTH_KEY);
-      if (savedSidebarWidth && !isNaN(Number(savedSidebarWidth))) {
-        const w = Math.max(160, Math.min(500, Math.round(Number(savedSidebarWidth))));
-        surface.style.setProperty("--settings-sidebar-width", `${w}px`);
-      }
-    } catch (e) {}
+  // 1. 独占 Maintenance Host 渲染（用于 General 维护/版本卡，不搬移原生 sections）
+  function mountMaintenanceHost(host, context) {
+    if (!host) return () => {};
+    if (host.__piEnhMaintenanceMounted) return () => {};
+    host.__piEnhMaintenanceMounted = true;
 
-    // 2. 恢复弹窗尺寸
-    try {
-      const savedDialogSize = readEnhancementStorage(SETTINGS_DIALOG_SIZE_KEY);
-      if (savedDialogSize) {
-        const parsed = typeof savedDialogSize === "string" ? JSON.parse(savedDialogSize) : savedDialogSize;
-        if (parsed && typeof parsed.width === "number" && typeof parsed.height === "number") {
-          const maxW = Math.max(760, (window.innerWidth || 1440) - 32);
-          const maxH = Math.max(480, (window.innerHeight || 900) - 32);
-          const w = Math.max(760, Math.min(maxW, Math.round(parsed.width)));
-          const h = Math.max(480, Math.min(maxH, Math.round(parsed.height)));
-          surface.style.setProperty("--settings-dialog-width", `${w}px`);
-          surface.style.setProperty("--settings-dialog-height", `${h}px`);
-        }
-      }
-    } catch (e) {}
-  }
+    // 清理既有内容
+    host.innerHTML = "";
 
-  let activeResizingSurface = null;
-  let cancelActiveResizing = null;
+    // 卡片 1: 页面维护与服务管理
+    const cacheSection = document.createElement("section");
+    cacheSection.className = "settings-general-section pi-enh-cache-section";
+    cacheSection.setAttribute("data-pi-enh-section", "maintenance");
 
-  function isResizerActiveAndEligible(surface) {
-    if (!surface) return false;
-    let pluginEnabled = true;
-    if (typeof isPluginEnabled === "function") {
-      pluginEnabled = isPluginEnabled("settings-sidebar-layout");
-    } else if (typeof window !== "undefined" && typeof window.__PI_ENH_IS_PLUGIN_ENABLED__ === "function") {
-      pluginEnabled = window.__PI_ENH_IS_PLUGIN_ENABLED__("settings-sidebar-layout");
-    }
-    if (!pluginEnabled) return false;
-    if (surface.hasAttribute("disabled") || surface.getAttribute("aria-disabled") === "true") return false;
-    const connected = typeof surface.isConnected === "boolean"
-      ? surface.isConnected
-      : (typeof document !== "undefined" && document.body && document.body.contains(surface));
-    if (!connected) return false;
-    if (typeof window !== "undefined" && window.innerWidth <= 640) return false;
-    return true;
-  }
+    const heading = document.createElement("h3");
+    heading.className = "settings-general-heading";
+    heading.innerHTML = `
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color: #f59e0b;">
+        <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>
+      </svg>
+      <span>页面维护与服务管理</span>
+    `;
 
-  function unbindSettingsDialogResizable(surface) {
-    if (!surface) return;
-    if (typeof surface.__piEnhResizableCleanup === "function") {
-      try {
-        surface.__piEnhResizableCleanup();
-      } catch (err) {}
-    }
-    delete surface.__piEnhResizableCleanup;
-    delete surface.__piEnhResizableBound;
-  }
+    const desc = document.createElement("div");
+    desc.className = "settings-general-description";
+    desc.textContent = "遇到手机端显示旧版本、界面未更新或 Service Worker 缓存异常时可清理缓存；如需重启 Pi Web 服务，可在此手动一键重启。";
 
-  function cleanupDetachedSettingsResizeSurface() {
-    const surface = activeResizingSurface;
-    if (!surface) return;
-    const detached = typeof surface.isConnected === "boolean"
-      ? !surface.isConnected : !document.body?.contains(surface);
-    if (detached) unbindSettingsDialogResizable(surface);
-  }
+    const actionsRow = document.createElement("div");
+    actionsRow.className = "pi-enh-service-actions-row";
 
-  function cleanupSettingsDialogResizers() {
-    if (activeResizingSurface) unbindSettingsDialogResizable(activeResizingSurface);
-    document.querySelectorAll(".settings-dialog-surface").forEach(unbindSettingsDialogResizable);
-  }
+    // 按钮 1：强制清除缓存刷新
+    const btnReload = document.createElement("button");
+    btnReload.type = "button";
+    btnReload.className = "pi-enh-btn-sm pi-enh-force-reload-btn";
+    btnReload.title = "穿透 HTTP 强缓存并更新前端静态资源与网页";
+    btnReload.innerHTML = `
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2"/>
+      </svg>
+      <span>⚡ 强制清除缓存并刷新网页</span>
+    `;
+    btnReload.addEventListener("click", forceHardReloadApp);
 
-  function bindSettingsDialogResizable(surface) {
-    if (!surface) return;
-    // 防重复绑定与防反复重置：同一 surface 仅在首次挂载时恢复一次存储尺寸并绑定事件，防止后续 DOM Mutation 触发时将拖动中的尺寸覆盖
-    if (surface.__piEnhResizableBound) return;
-    surface.__piEnhResizableBound = true;
+    // 按钮 2：一键重启 Pi Web
+    const btnRestart = document.createElement("button");
+    btnRestart.type = "button";
+    btnRestart.className = "pi-enh-btn-sm pi-enh-restart-service-btn";
+    btnRestart.title = "手动重启 Pi Web 后台服务并在恢复后自动重新连接";
+    btnRestart.innerHTML = `
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M3 12a9 9 0 0 1 15-6.7L21 8"/>
+        <path d="M21 3v5h-5"/>
+        <path d="M21 12a9 9 0 0 1-15 6.7L3 16"/>
+        <path d="M3 21v-5h5"/>
+      </svg>
+      <span>⚡ 一键重启 Pi Web</span>
+    `;
+    btnRestart.addEventListener("click", triggerManualRestartPiWebModal);
 
-    // 记录绑定前原始尺寸变量与优先级，以便在关闭布局 (off) 时精确还原原生样式
-    const origSidebarWidth = surface.style.getPropertyValue("--settings-sidebar-width");
-    const origSidebarWidthPriority = surface.style.getPropertyPriority("--settings-sidebar-width");
-    const origDialogWidth = surface.style.getPropertyValue("--settings-dialog-width");
-    const origDialogWidthPriority = surface.style.getPropertyPriority("--settings-dialog-width");
-    const origDialogHeight = surface.style.getPropertyValue("--settings-dialog-height");
-    const origDialogHeightPriority = surface.style.getPropertyPriority("--settings-dialog-height");
+    actionsRow.appendChild(btnReload);
+    actionsRow.appendChild(btnRestart);
 
-    applySavedSettingsDialogDimensions(surface);
+    cacheSection.appendChild(heading);
+    cacheSection.appendChild(desc);
+    cacheSection.appendChild(actionsRow);
+    host.appendChild(cacheSection);
 
-    const cleanups = [];
+    // 卡片 2: 系统版本与 Pi Agent 上游更新
+    const versionSection = document.createElement("section");
+    versionSection.className = "settings-general-section pi-enh-version-section";
+    versionSection.setAttribute("data-pi-enh-section", "version-info");
 
-    // 1. 侧边栏可调节手柄 (Sidebar Splitter Resizer) - 防拉扯防回弹抗抖动架构
-    let splitter = surface.querySelector(".pi-enh-sidebar-resizer");
-    if (!splitter) {
-      splitter = document.createElement("div");
-      splitter.className = "pi-enh-sidebar-resizer";
-      splitter.setAttribute("title", "左右拖拽调整侧边栏宽度 (双击恢复默认)");
-      splitter.innerHTML = `<div class="pi-enh-sidebar-resizer-line"></div>`;
-      surface.appendChild(splitter);
+    const vHeading = document.createElement("h3");
+    vHeading.className = "settings-general-heading";
+    vHeading.innerHTML = `
+      <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color: #10b981;">
+        <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/>
+      </svg>
+      <span>系统版本与上游更新</span>
+    `;
 
-      let isDraggingSplitter = false;
-      let startX = 0;
-      let startWidth = 200;
-      let minSidebarW = 160;
-      let maxSidebarW = 450;
-      let activePointerId = null;
-      let hasMovedDuringDrag = false;
-      let lastDragEndTime = 0;
-      let rafId = null;
-      let latestTargetWidth = 200;
-      let isDraggingOwned = false;
-      let prevBodyCursor = "";
-      let prevBodyCursorPriority = "";
-      let prevBodyUserSelect = "";
-      let prevBodyUserSelectPriority = "";
-      let dragStartSidebarWidth = "";
-      let dragStartSidebarWidthPriority = "";
+    const vDesc = document.createElement("div");
+    vDesc.className = "settings-general-description";
+    vDesc.textContent = "监控上游官方 Pi Coding Agent 发布动态。当有新版本时在新建会话页面与设置中自动提示。";
 
-      const restoreBodyStyles = () => {
-        if (!isDraggingOwned) return;
-        isDraggingOwned = false;
-        if (typeof document !== "undefined" && document.body) {
-          const curCursor = document.body.style.getPropertyValue("cursor");
-          const curCursorPri = document.body.style.getPropertyPriority("cursor");
-          if (curCursor === "col-resize" && curCursorPri === "important") {
-            if (prevBodyCursor) {
-              document.body.style.setProperty("cursor", prevBodyCursor, prevBodyCursorPriority);
-            } else {
-              document.body.style.removeProperty("cursor");
+    const card = document.createElement("div");
+    card.className = "pi-enh-version-card";
+    card.style.cssText = "display: flex; flex-direction: column; gap: 8px; padding: 10px 12px; background: var(--bg-surface, rgba(255,255,255,0.03)); border: 1px solid var(--border, rgba(255,255,255,0.08)); border-radius: 8px; margin-top: 8px; font-size: 12px;";
+
+    const state = (typeof window !== "undefined" && window.__PI_AGENT_UPDATE_STATE__) || {
+      currentVersion: "0.99.1",
+      latestVersion: null,
+      updateAvailable: false,
+      releaseUrl: "https://github.com/earendil-works/pi/releases",
+      isChecking: false,
+    };
+    const suiteVer = (typeof window !== "undefined" && window.__PI_WEB_STANDALONE_VERSION__) || "1.0.5";
+    const updateTag = state.updateAvailable
+      ? `<span style="display:inline-flex;align-items:center;gap:3px;padding:1px 6px;border-radius:9999px;font-size:10px;font-weight:600;background:rgba(16,185,129,0.15);color:#10b981;border:1px solid rgba(16,185,129,0.4);"><span style="width:4px;height:4px;border-radius:50%;background:#10b981;"></span>可升级至 v${state.latestVersion}</span>`
+      : (state.latestVersion ? `<span style="display:inline-flex;padding:1px 6px;border-radius:9999px;font-size:10px;color:var(--text-muted);background:rgba(255,255,255,0.05);">已是最新</span>` : `<span style="font-size:10px;color:var(--text-muted);">未检测</span>`);
+
+    card.innerHTML = `
+      <div style="display: flex; justify-content: space-between; align-items: center; line-height: 1.5;">
+        <span style="color: var(--text-muted);">Web 前端发行版</span>
+        <span style="font-family: var(--font-mono, monospace); font-weight: 600;">v${suiteVer} (Koxir Standalone)</span>
+      </div>
+      <div style="display: flex; justify-content: space-between; align-items: center; line-height: 1.5;">
+        <span style="color: var(--text-muted);">Pi Agent 本地核心</span>
+        <span style="font-family: var(--font-mono, monospace); font-weight: 600;">v${state.currentVersion}</span>
+      </div>
+      <div style="display: flex; justify-content: space-between; align-items: center; line-height: 1.5;">
+        <span style="color: var(--text-muted);">官方上游最新版本</span>
+        <div style="display: flex; align-items: center; gap: 6px; font-family: var(--font-mono, monospace);">
+          <span>${state.latestVersion ? "v" + state.latestVersion : "检测中…"}</span>
+          ${updateTag}
+        </div>
+      </div>
+      <div style="display: flex; gap: 8px; margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--border, rgba(255,255,255,0.06));">
+        <a href="${state.releaseUrl || 'https://github.com/earendil-works/pi/releases'}" target="_blank" rel="noopener noreferrer" class="pi-enh-btn-sm" style="flex: 1; text-align: center; text-decoration: none; display: inline-flex; align-items: center; justify-content: center; gap: 4px;">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6M15 3h6v6M10 14L21 3"/></svg>
+          <span>查看 Release Notes</span>
+        </a>
+        <button type="button" class="pi-enh-btn-sm pi-enh-check-agent-update-btn" style="flex: 1; display: inline-flex; align-items: center; justify-content: center; gap: 4px;">
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2"/></svg>
+          <span>${state.isChecking ? "正在检测…" : "立即检查更新"}</span>
+        </button>
+      </div>
+    `;
+
+    const btnCheck = card.querySelector(".pi-enh-check-agent-update-btn");
+    if (btnCheck) {
+      btnCheck.addEventListener("click", async () => {
+        if (typeof window !== "undefined" && typeof window.__PI_ENH_CHECK_AGENT_UPDATE__ === "function") {
+          btnCheck.disabled = true;
+          btnCheck.innerHTML = "<span>⏳ 正在检测上游版本…</span>";
+          try {
+            await window.__PI_ENH_CHECK_AGENT_UPDATE__(true);
+            if (typeof showToast === "function") {
+              const st = window.__PI_AGENT_UPDATE_STATE__;
+              if (st && st.updateAvailable) {
+                showToast(`发现 Pi Agent 新版本 v${st.latestVersion}！`);
+              } else if (st && st.latestVersion) {
+                showToast(`Pi Agent 已是最新版本 (v${st.latestVersion})`);
+              } else if (st && st.error) {
+                showToast(`检测失败: ${st.error}`);
+              }
             }
+          } finally {
+            btnCheck.disabled = false;
+            btnCheck.innerHTML = `
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2"/></svg>
+              <span>立即检查更新</span>
+            `;
           }
-          const curUserSelect = document.body.style.getPropertyValue("user-select");
-          const curUserSelectPri = document.body.style.getPropertyPriority("user-select");
-          if (curUserSelect === "none" && curUserSelectPri === "important") {
-            if (prevBodyUserSelect) {
-              document.body.style.setProperty("user-select", prevBodyUserSelect, prevBodyUserSelectPriority);
-            } else {
-              document.body.style.removeProperty("user-select");
-            }
-          }
-        }
-      };
-
-      const removeSplitterWindowListeners = () => {
-        if (typeof window !== "undefined") {
-          window.removeEventListener("pointermove", onSplitterMove, true);
-          window.removeEventListener("pointerup", onSplitterEnd, true);
-          window.removeEventListener("pointercancel", onSplitterCancel, true);
-          window.removeEventListener("mousemove", onSplitterMove, true);
-          window.removeEventListener("mouseup", onSplitterEnd, true);
-        }
-      };
-
-      const applyWidthStyle = () => {
-        rafId = null;
-        if (!isDraggingSplitter) return;
-        surface.style.setProperty("--settings-sidebar-width", `${latestTargetWidth}px`);
-      };
-
-      const cancelSplitterDrag = () => {
-        if (!isDraggingSplitter) return;
-        isDraggingSplitter = false;
-        if (rafId) {
-          if (typeof cancelAnimationFrame === "function") {
-            cancelAnimationFrame(rafId);
-          }
-          rafId = null;
-        }
-
-        // 取消正在进行的拖拽：还原拖拽前临时应用的尺寸变量与优先级，不写入 localStorage
-        if (dragStartSidebarWidth) {
-          surface.style.setProperty("--settings-sidebar-width", dragStartSidebarWidth, dragStartSidebarWidthPriority);
-        } else {
-          surface.style.removeProperty("--settings-sidebar-width");
-        }
-
-        surface.classList.remove("is-resizing");
-        splitter.classList.remove("is-dragging");
-        if (document.documentElement) {
-          if (!activeResizingSurface || activeResizingSurface === surface) {
-            document.documentElement.classList.remove("pi-enh-settings-resizing");
-          }
-        }
-        restoreBodyStyles();
-
-        if (activePointerId !== null && typeof splitter.releasePointerCapture === "function") {
-          try {
-            splitter.releasePointerCapture(activePointerId);
-          } catch (err) {}
-        }
-        activePointerId = null;
-
-        removeSplitterWindowListeners();
-
-        if (activeResizingSurface === surface) {
-          activeResizingSurface = null;
-          cancelActiveResizing = null;
-        }
-      };
-
-      const onSplitterMove = (e) => {
-        if (!isDraggingSplitter) return;
-        if (activePointerId !== null && e.pointerId !== undefined && e.pointerId !== activePointerId) return;
-
-        // 若拖拽期间脱离 DOM、切至移动视图或插件已关闭/disabled，立即取消拖拽
-        if (!isResizerActiveAndEligible(surface)) {
-          cancelSplitterDrag();
-          return;
-        }
-
-        const deltaX = e.clientX - startX;
-        if (Math.abs(deltaX) > 2) {
-          hasMovedDuringDrag = true;
-        }
-
-        const newWidth = Math.max(minSidebarW, Math.min(maxSidebarW, Math.round(startWidth + deltaX)));
-        latestTargetWidth = newWidth;
-
-        // 使用 requestAnimationFrame 单帧节流视觉写入，杜绝事件堆积与强制同步重排掉帧
-        if (!rafId && typeof requestAnimationFrame === "function") {
-          rafId = requestAnimationFrame(applyWidthStyle);
-        } else if (!rafId) {
-          applyWidthStyle();
-        }
-      };
-
-      const onSplitterCancel = (e) => {
-        if (!isDraggingSplitter) return;
-        if (activePointerId !== null && e && e.pointerId !== undefined && e.pointerId !== activePointerId) return;
-        cancelSplitterDrag();
-      };
-
-      const onSplitterEnd = (e) => {
-        if (!isDraggingSplitter) return;
-        if (activePointerId !== null && e && e.pointerId !== undefined && e.pointerId !== activePointerId) return;
-
-        // 尤其鼠标 up 先于 observer 时不得提交断开/已关闭拖拽
-        if (!isResizerActiveAndEligible(surface)) {
-          cancelSplitterDrag();
-          return;
-        }
-
-        isDraggingSplitter = false;
-        if (rafId) {
-          if (typeof cancelAnimationFrame === "function") {
-            cancelAnimationFrame(rafId);
-          }
-          rafId = null;
-        }
-
-        if (hasMovedDuringDrag) {
-          lastDragEndTime = Date.now();
-        }
-
-        const finalWidth = latestTargetWidth || startWidth;
-        surface.style.setProperty("--settings-sidebar-width", `${finalWidth}px`);
-
-        // 清理拖拽状态
-        surface.classList.remove("is-resizing");
-        splitter.classList.remove("is-dragging");
-        if (document.documentElement) {
-          if (!activeResizingSurface || activeResizingSurface === surface) {
-            document.documentElement.classList.remove("pi-enh-settings-resizing");
-          }
-        }
-        restoreBodyStyles();
-
-        // 释放 Pointer Capture
-        if (activePointerId !== null && typeof splitter.releasePointerCapture === "function") {
-          try {
-            splitter.releasePointerCapture(activePointerId);
-          } catch (err) {}
-        }
-        activePointerId = null;
-
-        removeSplitterWindowListeners();
-
-        if (activeResizingSurface === surface) {
-          activeResizingSurface = null;
-          cancelActiveResizing = null;
-        }
-
-        // 立即持久化存储最新宽度，保证后续任何状态恢复均以本次调整为准
-        try {
-          localStorage.setItem(SETTINGS_SIDEBAR_WIDTH_KEY, String(finalWidth));
-        } catch (err) {}
-      };
-
-      const onSplitterStart = (e) => {
-        if (e.button !== 0) return;
-        // 拒绝已有活跃拖拽 surface，保护首拖拽 owner 不被覆盖破坏
-        if (activeResizingSurface || isDraggingSplitter) return;
-        // 真实 flag / connected / mobile / disabled 检查
-        if (!isResizerActiveAndEligible(surface)) return;
-
-        e.preventDefault();
-        e.stopPropagation();
-
-        isDraggingSplitter = true;
-        hasMovedDuringDrag = false;
-        startX = e.clientX;
-        dragStartSidebarWidth = surface.style.getPropertyValue("--settings-sidebar-width");
-        dragStartSidebarWidthPriority = surface.style.getPropertyPriority("--settings-sidebar-width");
-
-        // 清除任何选区，防止文本选中导致指针行为畸变
-        try {
-          const sel = window.getSelection();
-          if (sel && sel.removeAllRanges) sel.removeAllRanges();
-        } catch (err) {}
-
-        // 精确获取当前基准宽度：优先读取受控 CSS 逻辑变量，杜绝 transition 补间动画或 subpixel 造成的中间值跌落
-        let curW = 200;
-        const styleW = surface.style.getPropertyValue("--settings-sidebar-width");
-        if (styleW) {
-          const parsed = parseInt(styleW, 10);
-          if (!isNaN(parsed) && parsed > 0) curW = parsed;
-        } else {
-          const header = surface.querySelector(".settings-dialog-header");
-          if (header) {
-            const rect = header.getBoundingClientRect();
-            if (rect.width > 0) curW = Math.round(rect.width);
-          }
-        }
-        startWidth = curW;
-        latestTargetWidth = curW;
-
-        // 在拖拽起点一次性获取容器宽度，避免在高频 move 中重复读取 getBoundingClientRect 引发布局颠簸 (Layout Thrashing)
-        const currentSurfaceW = surface.getBoundingClientRect().width || 1220;
-        minSidebarW = 160;
-        // 确保右侧内容区至少保留 360px，上限 500px，不挤压主面板
-        maxSidebarW = Math.max(minSidebarW, Math.min(500, Math.floor(currentSurfaceW - 360), Math.floor(currentSurfaceW * 0.45)));
-
-        surface.classList.add("is-resizing");
-        splitter.classList.add("is-dragging");
-        if (document.documentElement) {
-          document.documentElement.classList.add("pi-enh-settings-resizing");
-        }
-
-        // 仅在拖拽时拥有并修改 body cursor/user-select
-        if (typeof document !== "undefined" && document.body) {
-          prevBodyCursor = document.body.style.getPropertyValue("cursor");
-          prevBodyCursorPriority = document.body.style.getPropertyPriority("cursor");
-          prevBodyUserSelect = document.body.style.getPropertyValue("user-select");
-          prevBodyUserSelectPriority = document.body.style.getPropertyPriority("user-select");
-          isDraggingOwned = true;
-          document.body.style.setProperty("cursor", "col-resize", "important");
-          document.body.style.setProperty("user-select", "none", "important");
-        }
-
-        activeResizingSurface = surface;
-        cancelActiveResizing = cancelSplitterDrag;
-
-        // 优先使用 setPointerCapture 锁定指针，确保快速拖拽或滑出窗口边界时不丢失事件
-        if (e.pointerId !== undefined && typeof splitter.setPointerCapture === "function") {
-          activePointerId = e.pointerId;
-          try {
-            splitter.setPointerCapture(e.pointerId);
-          } catch (err) {}
-        } else {
-          activePointerId = null;
-        }
-
-        if (typeof window !== "undefined") {
-          window.addEventListener("pointermove", onSplitterMove, true);
-          window.addEventListener("pointerup", onSplitterEnd, true);
-          window.addEventListener("pointercancel", onSplitterCancel, true);
-          window.addEventListener("mousemove", onSplitterMove, true);
-          window.addEventListener("mouseup", onSplitterEnd, true);
-        }
-      };
-
-      const isPointer = typeof window !== "undefined" && !!window.PointerEvent;
-      const startEventType = isPointer ? "pointerdown" : "mousedown";
-      splitter.addEventListener(startEventType, onSplitterStart);
-
-      // 双击恢复默认侧边栏宽度 200px (具备严格的防误触阻断：拖拽移动过或拖拽结束后 500ms 内禁止重置)
-      const onSplitterDblClick = (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-
-        if (hasMovedDuringDrag || (Date.now() - lastDragEndTime < 500)) {
-          return;
-        }
-
-        latestTargetWidth = 200;
-        startWidth = 200;
-        surface.style.setProperty("--settings-sidebar-width", "200px");
-        try {
-          localStorage.removeItem(SETTINGS_SIDEBAR_WIDTH_KEY);
-        } catch (err) {}
-        if (typeof showToast === "function") {
-          showToast("已恢复默认侧边栏宽度 (200px)");
-        }
-      };
-      splitter.addEventListener("dblclick", onSplitterDblClick);
-
-      cleanups.push(() => {
-        cancelSplitterDrag();
-        splitter.removeEventListener(startEventType, onSplitterStart);
-        splitter.removeEventListener("dblclick", onSplitterDblClick);
-        if (splitter.parentNode) {
-          splitter.remove();
         }
       });
     }
 
-    // 2. 弹窗四周与右下角缩放手柄 (Dialog Edge & Corner Resizers)
-    const resizerConfigs = [
-      { type: "east", className: "pi-enh-dialog-resizer-east", cursor: "ew-resize", title: "左右拖拽调整弹窗宽度" },
-      { type: "south", className: "pi-enh-dialog-resizer-south", cursor: "ns-resize", title: "上下拖拽调整弹窗高度" },
-      { type: "se", className: "pi-enh-dialog-resizer-se", cursor: "nwse-resize", title: "拖拽调整弹窗大小 (双击恢复默认)" },
-    ];
+    versionSection.appendChild(vHeading);
+    versionSection.appendChild(vDesc);
+    versionSection.appendChild(card);
+    host.appendChild(versionSection);
 
-    resizerConfigs.forEach(({ type, className, cursor, title }) => {
-      let handle = surface.querySelector(`.${className}`);
-      if (!handle) {
-        handle = document.createElement("div");
-        handle.className = `pi-enh-dialog-resizer ${className}`;
-        handle.setAttribute("title", title);
-        if (type === "se") {
-          handle.innerHTML = `
-            <svg width="10" height="10" viewBox="0 0 10 10" fill="currentColor" class="pi-enh-dialog-resizer-grip" aria-hidden="true">
-              <circle cx="8" cy="8" r="1.2"></circle>
-              <circle cx="4" cy="8" r="1.2"></circle>
-              <circle cx="8" cy="4" r="1.2"></circle>
-              <circle cx="8" cy="0" r="1.2"></circle>
-              <circle cx="0" cy="8" r="1.2"></circle>
-              <circle cx="4" cy="4" r="1.2"></circle>
-            </svg>
-          `;
-        }
-        surface.appendChild(handle);
-
-        let isResizingDialog = false;
-        let startX = 0;
-        let startY = 0;
-        let startWidth = 1220;
-        let startHeight = 650;
-        let isDraggingOwned = false;
-        let prevBodyCursor = "";
-        let prevBodyCursorPriority = "";
-        let prevBodyUserSelect = "";
-        let prevBodyUserSelectPriority = "";
-        let dragStartDialogWidth = "";
-        let dragStartDialogWidthPriority = "";
-        let dragStartDialogHeight = "";
-        let dragStartDialogHeightPriority = "";
-
-        const restoreBodyStyles = () => {
-          if (!isDraggingOwned) return;
-          isDraggingOwned = false;
-          if (typeof document !== "undefined" && document.body) {
-            const curCursor = document.body.style.getPropertyValue("cursor");
-            const curCursorPri = document.body.style.getPropertyPriority("cursor");
-            if (curCursor === cursor && curCursorPri === "important") {
-              if (prevBodyCursor) {
-                document.body.style.setProperty("cursor", prevBodyCursor, prevBodyCursorPriority);
-              } else {
-                document.body.style.removeProperty("cursor");
-              }
-            }
-            const curUserSelect = document.body.style.getPropertyValue("user-select");
-            const curUserSelectPri = document.body.style.getPropertyPriority("user-select");
-            if (curUserSelect === "none" && curUserSelectPri === "important") {
-              if (prevBodyUserSelect) {
-                document.body.style.setProperty("user-select", prevBodyUserSelect, prevBodyUserSelectPriority);
-              } else {
-                document.body.style.removeProperty("user-select");
-              }
-            }
-          }
-        };
-
-        const removeDialogWindowListeners = () => {
-          if (typeof window !== "undefined") {
-            window.removeEventListener("mousemove", onDialogMouseMove, true);
-            window.removeEventListener("mouseup", onDialogMouseUp, true);
-          }
-        };
-
-        const cancelDialogDrag = () => {
-          if (!isResizingDialog) return;
-          isResizingDialog = false;
-
-          // 取消正在进行的拖拽：还原拖拽前临时应用的尺寸变量与优先级，不写入 localStorage
-          if (dragStartDialogWidth) {
-            surface.style.setProperty("--settings-dialog-width", dragStartDialogWidth, dragStartDialogWidthPriority);
-          } else {
-            surface.style.removeProperty("--settings-dialog-width");
-          }
-          if (dragStartDialogHeight) {
-            surface.style.setProperty("--settings-dialog-height", dragStartDialogHeight, dragStartDialogHeightPriority);
-          } else {
-            surface.style.removeProperty("--settings-dialog-height");
-          }
-
-          surface.classList.remove("is-resizing");
-          handle.classList.remove("is-dragging");
-          if (document.documentElement) {
-            if (!activeResizingSurface || activeResizingSurface === surface) {
-              document.documentElement.classList.remove("pi-enh-settings-resizing");
-            }
-          }
-          restoreBodyStyles();
-          removeDialogWindowListeners();
-
-          if (activeResizingSurface === surface) {
-            activeResizingSurface = null;
-            cancelActiveResizing = null;
-          }
-        };
-
-        const onDialogMouseMove = (e) => {
-          if (!isResizingDialog) return;
-
-          // 若拖拽期间脱离 DOM、切至移动视图或插件已关闭/disabled，立即取消拖拽
-          if (!isResizerActiveAndEligible(surface)) {
-            cancelDialogDrag();
-            return;
-          }
-
-          e.preventDefault();
-
-          const maxW = Math.max(760, (window.innerWidth || 1440) - 32);
-          const maxH = Math.max(480, (window.innerHeight || 900) - 32);
-
-          if (type === "east" || type === "se") {
-            const deltaX = (e.clientX - startX) * 2;
-            const newW = Math.max(760, Math.min(maxW, Math.round(startWidth + deltaX)));
-            surface.style.setProperty("--settings-dialog-width", `${newW}px`);
-          }
-
-          if (type === "south" || type === "se") {
-            const deltaY = (e.clientY - startY) * 2;
-            const newH = Math.max(480, Math.min(maxH, Math.round(startHeight + deltaY)));
-            surface.style.setProperty("--settings-dialog-height", `${newH}px`);
-          }
-        };
-
-        const onDialogMouseUp = (e) => {
-          if (!isResizingDialog) return;
-
-          // 尤其鼠标 up 先于 observer 时不得提交断开/已关闭拖拽
-          if (!isResizerActiveAndEligible(surface)) {
-            cancelDialogDrag();
-            return;
-          }
-
-          isResizingDialog = false;
-          surface.classList.remove("is-resizing");
-          handle.classList.remove("is-dragging");
-          if (document.documentElement) {
-            if (!activeResizingSurface || activeResizingSurface === surface) {
-              document.documentElement.classList.remove("pi-enh-settings-resizing");
-            }
-          }
-          restoreBodyStyles();
-          removeDialogWindowListeners();
-
-          if (activeResizingSurface === surface) {
-            activeResizingSurface = null;
-            cancelActiveResizing = null;
-          }
-
-          try {
-            const rect = surface.getBoundingClientRect();
-            const w = Math.round(rect.width);
-            const h = Math.round(rect.height);
-            localStorage.setItem(SETTINGS_DIALOG_SIZE_KEY, JSON.stringify({ width: w, height: h }));
-          } catch (err) {}
-        };
-
-        const onDialogMouseDown = (e) => {
-          if (e.button !== 0) return;
-          // 拒绝已有活跃拖拽 surface，保护首拖拽 owner 不被覆盖破坏
-          if (activeResizingSurface || isResizingDialog) return;
-          // 真实 flag / connected / mobile / disabled 检查
-          if (!isResizerActiveAndEligible(surface)) return;
-
-          e.preventDefault();
-          isResizingDialog = true;
-          startX = e.clientX;
-          startY = e.clientY;
-          dragStartDialogWidth = surface.style.getPropertyValue("--settings-dialog-width");
-          dragStartDialogWidthPriority = surface.style.getPropertyPriority("--settings-dialog-width");
-          dragStartDialogHeight = surface.style.getPropertyValue("--settings-dialog-height");
-          dragStartDialogHeightPriority = surface.style.getPropertyPriority("--settings-dialog-height");
-
-          const rect = surface.getBoundingClientRect();
-          startWidth = rect.width;
-          startHeight = rect.height;
-
-          surface.classList.add("is-resizing");
-          handle.classList.add("is-dragging");
-          if (document.documentElement) {
-            document.documentElement.classList.add("pi-enh-settings-resizing");
-          }
-
-          // 仅在拖拽时拥有并修改 body cursor/user-select
-          if (typeof document !== "undefined" && document.body) {
-            prevBodyCursor = document.body.style.getPropertyValue("cursor");
-            prevBodyCursorPriority = document.body.style.getPropertyPriority("cursor");
-            prevBodyUserSelect = document.body.style.getPropertyValue("user-select");
-            prevBodyUserSelectPriority = document.body.style.getPropertyPriority("user-select");
-            isDraggingOwned = true;
-            document.body.style.setProperty("cursor", cursor, "important");
-            document.body.style.setProperty("user-select", "none", "important");
-          }
-
-          activeResizingSurface = surface;
-          cancelActiveResizing = cancelDialogDrag;
-
-          if (typeof window !== "undefined") {
-            window.addEventListener("mousemove", onDialogMouseMove, true);
-            window.addEventListener("mouseup", onDialogMouseUp, true);
-          }
-        };
-
-        handle.addEventListener("mousedown", onDialogMouseDown);
-
-        let onDialogDblClick = null;
-        if (type === "se") {
-          onDialogDblClick = (e) => {
-            e.preventDefault();
-            surface.style.removeProperty("--settings-dialog-width");
-            surface.style.removeProperty("--settings-dialog-height");
-            try {
-              localStorage.removeItem(SETTINGS_DIALOG_SIZE_KEY);
-            } catch (err) {}
-            if (typeof showToast === "function") {
-              showToast("已恢复默认弹窗尺寸 (1220px × 86vh)");
-            }
-          };
-          handle.addEventListener("dblclick", onDialogDblClick);
-        }
-
-        cleanups.push(() => {
-          cancelDialogDrag();
-          handle.removeEventListener("mousedown", onDialogMouseDown);
-          if (onDialogDblClick) {
-            handle.removeEventListener("dblclick", onDialogDblClick);
-          }
-          if (handle.parentNode) {
-            handle.remove();
-          }
-        });
-      }
-    });
-
-    surface.__piEnhResizableCleanup = () => {
-      // 1. 执行所有句柄的销毁与解绑
-      while (cleanups.length > 0) {
-        try {
-          const fn = cleanups.pop();
-          fn();
-        } catch (e) {}
-      }
-
-      // 2. 恢复 surface 绑定前的 3 个 CSS 逻辑变量，恢复原生尺寸表现
-      if (origSidebarWidth) {
-        surface.style.setProperty("--settings-sidebar-width", origSidebarWidth, origSidebarWidthPriority);
-      } else {
-        surface.style.removeProperty("--settings-sidebar-width");
-      }
-      if (origDialogWidth) {
-        surface.style.setProperty("--settings-dialog-width", origDialogWidth, origDialogWidthPriority);
-      } else {
-        surface.style.removeProperty("--settings-dialog-width");
-      }
-      if (origDialogHeight) {
-        surface.style.setProperty("--settings-dialog-height", origDialogHeight, origDialogHeightPriority);
-      } else {
-        surface.style.removeProperty("--settings-dialog-height");
-      }
-
-      // 3. 清理 surface 与 documentElement 状态类
-      surface.classList.remove("is-resizing");
-      if (document.documentElement) {
-        if (!activeResizingSurface || activeResizingSurface === surface) {
-          document.documentElement.classList.remove("pi-enh-settings-resizing");
-        }
-      }
-
-      if (activeResizingSurface === surface) {
-        activeResizingSurface = null;
-        cancelActiveResizing = null;
-      }
+    return () => {
+      host.__piEnhMaintenanceMounted = false;
+      host.innerHTML = "";
     };
   }
 
-  SHORTCUT_TIP_STORAGE_KEY = "pi-enh-settings-shortcut-tip-dismissed";
-
-  function syncSidebarShortcutTip(header) {
-    if (!header) return;
-    if (typeof window !== "undefined" && window.innerWidth < 641) return;
-    let isDismissed = false;
-    try {
-      isDismissed = readEnhancementStorage(SHORTCUT_TIP_STORAGE_KEY) === "true";
-    } catch (e) {}
-
-    let tip = header.querySelector(".pi-enh-sidebar-shortcut-tip");
-    if (isDismissed) {
-      if (tip) tip.remove();
-      return;
-    }
-
-    if (!tip) {
-      tip = document.createElement("div");
-      tip.className = "pi-enh-sidebar-shortcut-tip";
-      tip.innerHTML = `
-        <div class="pi-enh-sidebar-tip-main">
-          <svg class="pi-enh-sidebar-tip-icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-            <path d="M12 2v1M12 21v1M4.22 4.22l.71.71M18.36 18.36l.71.71M2 12h1M21 12h1M4.22 19.78l.71-.71M18.36 5.64l.71-.71M9 18h6M10 22h4M12 15a4 4 0 1 0-4-4c0 1.5.8 2.3 1.5 3 .6.6.5 1 .5 1z"/>
-          </svg>
-          <div class="pi-enh-sidebar-tip-text">
-            <div class="pi-enh-sidebar-tip-title">双击可添加至快捷入口</div>
-            <div class="pi-enh-sidebar-tip-sub">再次双击可取消固定</div>
-          </div>
-        </div>
-        <button type="button" class="pi-enh-sidebar-tip-close" title="不再提示" aria-label="不再提示">×</button>
-      `;
-
-      const closeBtn = tip.querySelector(".pi-enh-sidebar-tip-close");
-      if (closeBtn) {
-        closeBtn.addEventListener("click", (e) => {
-          e.preventDefault();
-          e.stopPropagation();
-          tip.style.opacity = "0";
-          tip.style.transform = "translateY(4px)";
-          try {
-            localStorage.setItem(SHORTCUT_TIP_STORAGE_KEY, "true");
-          } catch (err) {}
-          addManagedTimeout(() => {
-            tip.remove();
-          }, 200);
-          showToast("已关闭提示");
-        });
-      }
-
-      header.appendChild(tip);
-    }
-  }
-
-  // ==========================================
-  // 设置侧边栏折叠/展开控制器 (Settings Sidebar Collapse / Mini Mode)
-  // ==========================================
-  const SETTINGS_SIDEBAR_COLLAPSED_KEY = "pi-enh-settings-sidebar-collapsed";
-
-  function isSettingsSidebarCollapsed() {
-    try {
-      return readEnhancementStorage(SETTINGS_SIDEBAR_COLLAPSED_KEY) === "true";
-    } catch (e) {
-      return false;
-    }
-  }
-
-  function setSettingsSidebarCollapsed(collapsed) {
-    try {
-      localStorage.setItem(SETTINGS_SIDEBAR_COLLAPSED_KEY, collapsed ? "true" : "false");
-    } catch (e) {}
-  }
-
-  function applySettingsSidebarCollapsedState(header, isCollapsed) {
-    if (document.documentElement) {
-      document.documentElement.classList.toggle("pi-enh-settings-sidebar-collapsed", Boolean(isCollapsed));
-    }
-    const collapseBtn = header ? header.querySelector(".pi-enh-sidebar-collapse-btn") : document.querySelector(".pi-enh-sidebar-collapse-btn");
-    if (collapseBtn) {
-      collapseBtn.setAttribute("title", isCollapsed ? "展开标签栏" : "折叠标签栏 (只显示图标)");
-      collapseBtn.setAttribute("aria-label", isCollapsed ? "展开标签栏" : "折叠标签栏");
-      collapseBtn.innerHTML = `<svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-          <rect width="18" height="18" x="3" y="3" rx="2.5"></rect>
-          <path d="M9 3v18"></path>
-        </svg>`;
-    }
-  }
-
-  function isMobileSettingsView(header) {
-    if (typeof window === "undefined") return false;
-    // 严格以 640px 为界区分手机直屏 (<= 640px) 与折叠屏展开/平板/桌面 (>= 641px)
-    // 注意：select.settings-mobile-section-picker 在 React DOM 中常驻，绝不可用 querySelector 存在性判断！
-    if (typeof window.innerWidth === "number" && window.innerWidth > 0) {
-      return window.innerWidth <= 640;
-    }
-    if (window.matchMedia && window.matchMedia("(max-width: 640px)").matches) return true;
-    return false;
-  }
-
-  function syncSettingsSidebarCollapse(header) {
-    if (!header || typeof header.querySelector !== "function") return;
-
-    // 插件关闭或移动端视图：清除按钮，禁止后续同步重新创建。
-    if (!isPluginEnabled("settings-sidebar-layout") || isMobileSettingsView(header)) {
-      const existingBtn = header.querySelector(".pi-enh-sidebar-collapse-btn");
-      if (existingBtn) existingBtn.remove();
-      const existingTip = header.querySelector(".pi-enh-sidebar-shortcut-tip");
-      if (existingTip) existingTip.remove();
-      if (document.documentElement) {
-        document.documentElement.classList.remove("pi-enh-settings-sidebar-collapsed");
-      }
-      return;
-    }
-
-    const titleEl = header.querySelector(".settings-dialog-title");
-    if (!titleEl) return;
-
-    let textSpan = titleEl.querySelector(".pi-enh-sidebar-title-text");
-    if (!textSpan) {
-      const childNodes = Array.from(titleEl.childNodes || []);
-      const textNodes = childNodes.filter((n) => n && (n.nodeType === 3 || n.nodeType === "text"));
-      const rawText = textNodes.map((n) => (n.textContent || "").trim()).filter(Boolean).join("") || (titleEl.textContent || "").trim() || "设置";
-      textNodes.forEach((n) => {
-        if (typeof n.remove === "function") n.remove();
-      });
-      if (typeof document.createElement === "function") {
-        textSpan = document.createElement("span");
-        textSpan.className = "pi-enh-sidebar-title-text";
-        textSpan.textContent = rawText;
-        if (typeof titleEl.prepend === "function") {
-          titleEl.prepend(textSpan);
-        } else if (typeof titleEl.insertBefore === "function") {
-          titleEl.insertBefore(textSpan, titleEl.firstChild);
-        } else if (typeof titleEl.appendChild === "function") {
-          titleEl.appendChild(textSpan);
-        }
-      }
-    }
-
-    let collapseBtn = titleEl.querySelector(".pi-enh-sidebar-collapse-btn");
-    if (!collapseBtn && typeof document.createElement === "function") {
-      collapseBtn = document.createElement("button");
-      collapseBtn.type = "button";
-      collapseBtn.className = "pi-enh-sidebar-collapse-btn";
-      titleEl.appendChild(collapseBtn);
-
-      if (typeof collapseBtn.addEventListener === "function") {
-        collapseBtn.addEventListener("click", (e) => {
-          if (e && typeof e.preventDefault === "function") e.preventDefault();
-          if (e && typeof e.stopPropagation === "function") e.stopPropagation();
-          const nextCollapsed = !isSettingsSidebarCollapsed();
-          setSettingsSidebarCollapsed(nextCollapsed);
-          applySettingsSidebarCollapsedState(header, nextCollapsed);
-          if (typeof showToast === "function") {
-            showToast(nextCollapsed ? "已折叠侧边栏" : "已展开侧边栏");
-          }
-        });
-      }
-    }
-
-    applySettingsSidebarCollapsedState(header, isSettingsSidebarCollapsed());
-  }
-
-  // ==========================================
-  // 6.0 Mobile Section Picker & Active Enhancement Authority Helper
-  // ==========================================
-  const ENHANCEMENT_PICKER_SECTIONS = [
-    {
-      value: "enhancements",
-      label: "增强插件",
-      tabSelector: "[data-pi-enh-tab='plugins']",
-      panelSelector: ".pi-enh-plugins-panel",
-      isEnabled: () => true,
-    },
-    {
-      value: "archived",
-      label: "已归档",
-      tabSelector: "[data-pi-enh-tab='archived']",
-      panelSelector: ".pi-enh-archived-panel",
-      isEnabled: () => isPluginEnabled("session-pin-archive"),
-    },
-    {
-      value: "notifications",
-      label: "通知管理",
-      tabSelector: "[data-pi-enh-tab='notifications']",
-      panelSelector: ".pi-enh-notifications-panel",
-      isEnabled: () => isPluginEnabled("notification-center"),
-    },
-    {
-      value: "usage",
-      label: "Usage",
-      tabSelector: "[data-pi-enh-tab='usage']",
-      panelSelector: ".pi-enh-usage-panel",
-      isEnabled: () => isPluginEnabled("usage-cost-dashboard"),
-    },
-    {
-      value: "tags",
-      label: "会话标签",
-      tabSelector: "[data-pi-enh-tab='tags']",
-      panelSelector: ".pi-enh-tags-panel",
-      isEnabled: () => isPluginEnabled("session-tags"),
-    },
-  ];
-
-  function isEnhancementPickerValue(val) {
-    return ENHANCEMENT_PICKER_SECTIONS.some((sec) => sec.value === val);
-  }
-
-  function isPanelEffectivelyVisible(panel, dialog) {
-    if (!panel) return false;
-    if (panel.hidden) return false;
-    if (panel.style && (panel.style.display === "none" || panel.style.visibility === "hidden")) return false;
-    if (dialog && typeof dialog.contains === "function" && !dialog.contains(panel)) return false;
-    if (typeof panel.isConnected === "boolean" && panel.ownerDocument?.documentElement && !panel.isConnected) return false;
-
-    if (typeof panel.getClientRects === "function") {
-      try {
-        const rects = panel.getClientRects();
-        if (rects.length === 0) return false;
-        const r = rects[0];
-        if (r && r.width === 0 && r.height === 0) return false;
-      } catch (e) {}
-    }
-
-    const win = (panel.ownerDocument && panel.ownerDocument.defaultView) || (typeof window !== "undefined" ? window : null);
-    let curr = panel;
-    while (curr && curr !== dialog && curr !== curr.ownerDocument?.documentElement) {
-      if (curr.hidden) return false;
-      if (curr.style && (curr.style.display === "none" || curr.style.visibility === "hidden")) return false;
-      if (win && typeof win.getComputedStyle === "function") {
-        try {
-          const comp = win.getComputedStyle(curr);
-          if (comp && (comp.display === "none" || comp.visibility === "hidden")) {
-            return false;
-          }
-        } catch (e) {}
-      }
-      curr = curr.parentElement;
-    }
-    return true;
-  }
-
-  function resolveActiveEnhancementSection(dialog, nav) {
-    if (!dialog) return null;
-    const bodyEl = (dialog.ownerDocument && dialog.ownerDocument.body) || (typeof document !== "undefined" ? document.body : null);
-    if (nav && typeof dialog.contains === "function") {
-      let navRoot = nav;
-      while (navRoot.parentElement && navRoot.parentElement !== bodyEl && navRoot.parentElement.tagName !== "BODY" && navRoot.parentElement.tagName !== "HTML") {
-        navRoot = navRoot.parentElement;
-      }
-      if (navRoot !== nav && !navRoot.contains(dialog) && !dialog.contains(navRoot)) {
-        return null;
-      }
-    }
-    for (const sec of ENHANCEMENT_PICKER_SECTIONS) {
-      if (!sec.isEnabled()) continue;
-      const panel = dialog.querySelector(sec.panelSelector);
-      if (!panel || !isPanelEffectivelyVisible(panel, dialog)) {
-        continue;
-      }
-      if (nav) {
-        const tab = nav.querySelector(sec.tabSelector);
-        if (!tab || tab.getAttribute("aria-current") !== "page") {
-          continue;
-        }
-      }
-      return sec.value;
-    }
-    return null;
-  }
-
-  function getFallbackNativeSection(picker) {
-    if (!picker) return "general";
-    if (picker.__piEnhNativeValue && picker.querySelector(`option[value='${picker.__piEnhNativeValue}']`)) {
-      return picker.__piEnhNativeValue;
-    }
-    const nativeOpt = picker.querySelector("option:not([value='enhancements']):not([value='archived']):not([value='notifications']):not([value='usage']):not([value='tags'])");
-    return nativeOpt ? nativeOpt.value : "general";
-  }
-
-  function resolveActiveNativeSection(nav, picker) {
-    if (picker) return getFallbackNativeSection(picker);
-    if (nav) {
-      const header = (nav.closest && nav.closest(".settings-dialog-header")) || nav.parentElement;
-      const p = header ? header.querySelector("select.settings-mobile-section-picker") : null;
-      if (p) return getFallbackNativeSection(p);
-      const activeNativeTab = nav.querySelector(".settings-section-tab[aria-current='page']:not([data-pi-enh-tab])");
-      if (activeNativeTab) {
-        const text = (activeNativeTab.textContent || "").trim();
-        if (text.includes("插件") || text.includes("Plugins")) return "plugins";
-        if (text.includes("模型") || text.includes("Models")) return "models";
-        if (text.includes("技能") || text.includes("Skills")) return "skills";
-        if (text.includes("子代理") || text.includes("Agents")) return "agents";
-      }
-    }
-    return "general";
-  }
-
-  function syncMobilePickerState(header, nav, dialog) {
-    const mobilePicker = header ? header.querySelector("select.settings-mobile-section-picker") : null;
-    if (!mobilePicker) return;
-
-    const currentVal = mobilePicker.value;
-    if (currentVal && !isEnhancementPickerValue(currentVal)) {
-      mobilePicker.__piEnhNativeValue = currentVal;
-    }
-
-    let wasSelectedDisabledEnhancement = false;
-    for (const sec of ENHANCEMENT_PICKER_SECTIONS) {
-      const enabled = sec.isEnabled();
-      if (!enabled && currentVal === sec.value) {
-        wasSelectedDisabledEnhancement = true;
-      }
-    }
-
-    for (const sec of ENHANCEMENT_PICKER_SECTIONS) {
-      const existingOpt = mobilePicker.querySelector(`option[value='${sec.value}']`);
-      const enabled = sec.isEnabled();
-      if (enabled) {
-        if (!existingOpt) {
-          const opt = document.createElement("option");
-          opt.value = sec.value;
-          opt.textContent = sec.label;
-          mobilePicker.appendChild(opt);
-        }
-      } else if (existingOpt) {
-        existingOpt.remove();
-      }
-    }
-
-    if (!mobilePicker.__piEnhChangeHandler) {
-      const changeHandler = (e) => {
-        const val = mobilePicker.value;
-        if (isEnhancementPickerValue(val)) {
-          e.stopPropagation();
-          if (typeof e.stopImmediatePropagation === "function") {
-            e.stopImmediatePropagation();
-          }
-
-          const targetSec = ENHANCEMENT_PICKER_SECTIONS.find((s) => s.value === val);
-          if (targetSec) {
-            const tab = nav?.querySelector(targetSec.tabSelector);
-            tab?.click();
-          }
-
-          if (mobilePicker.value !== val) {
-            mobilePicker.value = val;
-          }
-        } else {
-          mobilePicker.__piEnhNativeValue = val;
-          hideEnhancementsPanel(nav);
-          hideNotificationPanel(nav);
-          hideArchivedPanel(nav);
-          hideUsagePanel(nav);
-          hideTagsPanel(nav);
-        }
-      };
-      mobilePicker.__piEnhChangeHandler = changeHandler;
-      mobilePicker.addEventListener("change", changeHandler);
-    }
-
-    const effectiveDialog = dialog || (nav?.closest && (nav.closest(".settings-dialog-backdrop") || nav.closest("[role='dialog']"))) || header?.closest?.(".settings-dialog-backdrop, [role='dialog']") || document.body;
-    const activeEnh = resolveActiveEnhancementSection(effectiveDialog, nav);
-    if (activeEnh) {
-      if (mobilePicker.value !== activeEnh && mobilePicker.querySelector(`option[value='${activeEnh}']`)) {
-        mobilePicker.value = activeEnh;
-      }
-    } else if (wasSelectedDisabledEnhancement || isEnhancementPickerValue(mobilePicker.value)) {
-      const nativeSec = getFallbackNativeSection(mobilePicker);
-      if (mobilePicker.value !== nativeSec) {
-        mobilePicker.value = nativeSec;
-      }
-      hideEnhancementsPanel(nav);
-      hideNotificationPanel(nav);
-      hideArchivedPanel(nav);
-      hideUsagePanel(nav);
-      hideTagsPanel(nav);
-      // Restore through the native tab owner, including React's selected tab/host.
-      const nativeOptions = Array.from(mobilePicker.options).filter((opt) => !isEnhancementPickerValue(opt.value));
-      const nativeIndex = nativeOptions.findIndex((opt) => opt.value === nativeSec);
-      const nativeTabs = nav?.querySelectorAll(".settings-section-tab:not([data-pi-enh-tab])");
-      if (nativeIndex >= 0 && nativeTabs?.[nativeIndex]) {
-        nativeTabs[nativeIndex].click();
-        // Enhancement activation cleared these DOM attributes; React may keep
-        // identical native props and therefore not write them back itself.
-        nativeTabs.forEach((tab, index) => {
-          if (index === nativeIndex) tab.setAttribute("aria-current", "page");
-          else tab.removeAttribute("aria-current");
-        });
-      }
-    }
-  }
-
-  // ==========================================
-  // 5.9 Pi Web Plus SVG Branding (π+ Pi Web Plus 矢量品牌标识)
-  // ==========================================
-  const BRAND_IMG_TRACKED_ATTRS = ["src", "srcset", "sizes", "loading", "width", "height", "style", "alt", "decoding", "fetchpriority"];
-  const BRAND_SPAN_TRACKED_ATTRS = ["style", "hidden", "aria-hidden"];
-  const BRAND_SIDEBAR_TRACKED_ATTRS = ["style", "title", "aria-label"];
-  const brandElementSnapshots = new WeakMap();
-
-  const PI_WEB_THEME_PALETTES = {
-    light: "#1a1a1a",
-    dark: "#e8e8e8",
-    mist: "#202e2b",
-    rose: "#34282e",
-    pine: "#e6ede8",
+  const SECTION_SHORTCUT_METADATA = {
+    general: { id: "settings", label: "常规", aliasId: "general" },
+    settings: { id: "settings", label: "常规", aliasId: "general" },
+    models: { id: "models", label: "模型" },
+    skills: { id: "skills", label: "技能" },
+    agents: { id: "agents", label: "子代理" },
+    plugins: { id: "plugins", label: "插件" },
+    enhancements: { id: "enhancements", label: "增强插件" },
+    notifications: { id: "notifications", label: "通知管理" },
+    archived: { id: "archived", label: "已归档" },
+    usage: { id: "usage", label: "Usage" },
+    tags: { id: "tags", label: "会话标签" },
   };
 
-  function captureBrandAttrsSnapshot(el, attrNames, includeText = false) {
-    if (!el) return null;
-    if (brandElementSnapshots.has(el)) return brandElementSnapshots.get(el);
-    const attrs = {};
-    for (const name of attrNames) {
-      attrs[name] = {
-        has: el.hasAttribute(name),
-        value: el.getAttribute(name),
-      };
+  function getSectionShortcutMetadata(sectionId, context) {
+    const predefined = SECTION_SHORTCUT_METADATA[sectionId];
+    let label = predefined ? predefined.label : sectionId;
+    let id = predefined ? predefined.id : sectionId;
+
+    if (context?.nav?.availableSections && Array.isArray(context.nav.availableSections)) {
+      const match = context.nav.availableSections.find((s) => s.id === sectionId);
+      if (match?.label) label = match.label;
     }
-    const snap = {
-      attrs,
-      textContent: includeText ? el.textContent : null,
+
+    const iconHtml = SHORTCUT_ICONS[sectionId] || SHORTCUT_ICONS[id] || SHORTCUT_ICONS.settings || "";
+    return { id, label, iconHtml };
+  }
+
+  const mountedPinHosts = new Map();
+
+  function notifyMountedPinHosts() {
+    for (const record of mountedPinHosts.values()) {
+      try { record.update(); } catch (_) {}
+    }
+  }
+
+  // 2. 独立快捷 Pin 控件 Host 渲染 (处于 button 外同行，不污染 React tab DOM)
+  function mountTabActionPin(sectionId, host, context) {
+    if (!host) return () => {};
+    host.innerHTML = "";
+
+    const meta = getSectionShortcutMetadata(sectionId, context);
+
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "pi-enh-tab-pin-btn";
+    btn.style.cssText = "background: none; border: none; padding: 2px 4px; cursor: pointer; color: var(--text-muted); display: inline-flex; align-items: center; justify-content: center;";
+
+    function updatePinState() {
+      const shortcuts = getStoredQuickShortcuts();
+      const isPinned = isShortcutActive(shortcuts, sectionId);
+      btn.classList.toggle("is-pinned", isPinned);
+      btn.setAttribute("aria-label", isPinned ? `取消快捷入口固定: ${meta.label}` : `添加到快捷入口: ${meta.label}`);
+      btn.setAttribute("title", isPinned ? `点击从快捷入口移除「${meta.label}」` : `点击添加「${meta.label}」到左下角快捷入口`);
+      btn.innerHTML = `<svg width="12" height="12" viewBox="0 0 24 24" fill="${isPinned ? "currentColor" : "none"}" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/></svg>`;
+    }
+
+    updatePinState();
+
+    const onClick = (e) => {
+      e.stopPropagation();
+      e.preventDefault();
+      const currentShortcuts = getStoredQuickShortcuts();
+      const idx = currentShortcuts.findIndex((s) => s.id === sectionId || (sectionId === "general" && s.id === "settings") || (sectionId === "settings" && s.id === "general"));
+      if (idx >= 0) {
+        currentShortcuts.splice(idx, 1);
+        setStoredQuickShortcuts(currentShortcuts);
+        if (typeof showToast === "function") showToast(`已从快捷入口移除「${meta.label}」`, meta.iconHtml);
+      } else {
+        const newItem = {
+          id: meta.id,
+          label: meta.label,
+          iconHtml: meta.iconHtml || ""
+        };
+        const settingsIdx = currentShortcuts.findIndex((s) => s.id === "settings" || s.id === "general");
+        if (settingsIdx >= 0) {
+          currentShortcuts.splice(settingsIdx, 0, newItem);
+        } else {
+          currentShortcuts.push(newItem);
+        }
+        setStoredQuickShortcuts(currentShortcuts);
+        if (typeof showToast === "function") showToast(`已添加「${meta.label}」到左下角快捷入口`, meta.iconHtml);
+      }
+      syncBottomShortcutsBar(true);
+      notifyMountedPinHosts();
     };
-    brandElementSnapshots.set(el, snap);
-    return snap;
+
+    btn.addEventListener("click", onClick);
+    host.appendChild(btn);
+
+    const record = { sectionId, update: updatePinState };
+    mountedPinHosts.set(host, record);
+
+    return () => {
+      mountedPinHosts.delete(host);
+      btn.removeEventListener("click", onClick);
+      btn.remove();
+    };
   }
 
-  function restoreBrandAttrsSnapshot(el, attrNames, restoreText = false) {
-    if (!el) return;
-    const snap = brandElementSnapshots.get(el);
-    if (!snap) return;
-    for (const name of attrNames) {
-      const entry = snap.attrs[name];
-      if (!entry) continue;
-      if (entry.has && entry.value !== null) {
-        if (el.getAttribute(name) !== entry.value) {
-          el.setAttribute(name, entry.value);
-        }
-      } else if (el.hasAttribute(name)) {
-        el.removeAttribute(name);
-      }
-    }
-    if (restoreText && typeof snap.textContent === "string") {
-      if ((el.textContent || "").trim() === "Pi Web Plus" || !el.textContent) {
-        el.textContent = snap.textContent;
-      }
-    }
-    brandElementSnapshots.delete(el);
+  // 3. 注册桥 (向 Native ABI 注册 5 扩展面板、maintenance 与 tab-action)
+  let nativeBridgeRegistered = false;
+  let unregisterNativeRenderers = [];
+
+  function onSettingsNativeReady() {
+    initSettingsNativeBridge();
   }
 
-  function isBrandColorLight(colorStr) {
-    const m = String(colorStr || "").match(/rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/i);
-    if (m) {
-      const r = Number(m[1]), g = Number(m[2]), b = Number(m[3]);
-      return (r * 0.299 + g * 0.587 + b * 0.114) > 140;
-    }
-    const hex = String(colorStr || "").trim().replace(/^#/, "");
-    if (/^[0-9a-f]{3}$/i.test(hex)) {
-      const r = parseInt(hex[0] + hex[0], 16);
-      const g = parseInt(hex[1] + hex[1], 16);
-      const b = parseInt(hex[2] + hex[2], 16);
-      return (r * 0.299 + g * 0.587 + b * 0.114) > 140;
-    }
-    if (/^[0-9a-f]{6}$/i.test(hex)) {
-      const r = parseInt(hex.slice(0, 2), 16);
-      const g = parseInt(hex.slice(2, 4), 16);
-      const b = parseInt(hex.slice(4, 6), 16);
-      return (r * 0.299 + g * 0.587 + b * 0.114) > 140;
-    }
-    return false;
-  }
+  function initSettingsNativeBridge() {
+    if (nativeBridgeRegistered) return;
+    const abi = typeof window !== "undefined" ? window.__PI_WEB_SETTINGS_NATIVE__ : undefined;
+    if (!abi || typeof abi.registerRenderer !== "function") return;
+    nativeBridgeRegistered = true;
 
-  function resolvePiWebBrandTextColor(labelSpan, img) {
-    const docEl = typeof document !== "undefined" ? document.documentElement : null;
-    const themeAttr = String(docEl?.getAttribute?.("data-theme") || docEl?.dataset?.theme || "").trim().toLowerCase();
-    const hasDarkClass = Boolean(docEl?.classList?.contains?.("dark"));
-    const isDark = hasDarkClass || themeAttr === "dark" || themeAttr === "pine";
-
-    let computedColor = "";
-    try {
-      const probeEl = labelSpan || img?.parentElement || document.body || docEl;
-      if (probeEl && typeof window !== "undefined" && typeof window.getComputedStyle === "function") {
-        const cs = window.getComputedStyle(probeEl);
-        const rawColor = (cs.color || "").trim();
-        if (rawColor && rawColor !== "transparent" && rawColor !== "rgba(0, 0, 0, 0)") {
-          computedColor = rawColor;
+    unregisterNativeRenderers = [
+      abi.registerRenderer("enhancements", (host, context) => {
+        if (!host.classList.contains("pi-enh-plugins-panel")) host.classList.add("pi-enh-plugins-panel");
+        renderEnhancementsPanel(host, context);
+        return () => {
+          host.classList.remove("pi-enh-plugins-panel");
+          host.innerHTML = "";
+        };
+      }),
+      abi.registerRenderer("notifications", (host, context) => {
+        if (!host.classList.contains("pi-enh-notifications-panel")) host.classList.add("pi-enh-notifications-panel");
+        renderNotificationPanel(host, context);
+        return () => {
+          host.classList.remove("pi-enh-notifications-panel");
+          host.innerHTML = "";
+        };
+      }),
+      abi.registerRenderer("archived", (host, context) => {
+        if (!host.classList.contains("pi-enh-archived-panel")) host.classList.add("pi-enh-archived-panel");
+        renderArchivedPanel(host, context);
+        return () => {
+          host.classList.remove("pi-enh-archived-panel");
+          host.innerHTML = "";
+        };
+      }),
+      abi.registerRenderer("usage", (host, context) => {
+        if (!host.classList.contains("pi-enh-usage-panel")) host.classList.add("pi-enh-usage-panel");
+        renderUsagePanel(host, context);
+        return () => {
+          window.PiUsagePanel?.dispose?.(host);
+          host.classList.remove("pi-enh-usage-panel");
+          host.innerHTML = "";
+        };
+      }),
+      abi.registerRenderer("tags", (host, context) => {
+        if (!host.classList.contains("pi-enh-tags-panel")) host.classList.add("pi-enh-tags-panel");
+        if (typeof renderTagsPanel === "function") {
+          renderTagsPanel(host, context);
         }
-      }
-    } catch (e) {}
+        return () => {
+          host.classList.remove("pi-enh-tags-panel");
+          host.innerHTML = "";
+        };
+      }),
+      abi.registerRenderer("maintenance", (host, context) => {
+        return mountMaintenanceHost(host, context);
+      }),
+    ];
 
-    let cssVarText = "";
-    try {
-      if (docEl && typeof window !== "undefined" && typeof window.getComputedStyle === "function") {
-        cssVarText = window.getComputedStyle(docEl).getPropertyValue("--text").trim();
-        if (!cssVarText && document.body) {
-          cssVarText = window.getComputedStyle(document.body).getPropertyValue("--text").trim();
-        }
-      }
-    } catch (e) {}
-
-    const candidate = cssVarText || computedColor;
-    if (candidate) {
-      const candidateIsLight = isBrandColorLight(candidate);
-      if (isDark && !candidateIsLight) {
-        return PI_WEB_THEME_PALETTES[themeAttr] || PI_WEB_THEME_PALETTES.dark;
-      }
-      if (!isDark && candidateIsLight && (themeAttr === "light" || !themeAttr)) {
-        return PI_WEB_THEME_PALETTES.light;
-      }
-      return candidate;
-    }
-
-    if (themeAttr && PI_WEB_THEME_PALETTES[themeAttr]) {
-      return PI_WEB_THEME_PALETTES[themeAttr];
-    }
-    return isDark ? PI_WEB_THEME_PALETTES.dark : PI_WEB_THEME_PALETTES.light;
-  }
-
-  function buildPiWebPlusBrandSvg(textColor) {
-    const safeColor = String(textColor || "#1a1a1a").replace(/"/g, "'");
-    return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 32" width="200" height="32" role="img" aria-label="π+ Pi Web Plus"><title>π+ Pi Web Plus</title><path data-pi-brand-part="bubble" d="M16 1.5 H30 C37.73 1.5 44 7.77 44 15.5 C44 23.23 37.73 29.5 30 29.5 H15.7 L5 31.6 L7.8 25.1 C4.2 22.55 2 19.12 2 15.5 C2 7.77 8.27 1.5 16 1.5 Z" fill="#23454b"/><path data-pi-brand-part="pi-bar" d="M8.8 12.4 C9.6 10.4 10.9 9.8 12.8 9.8 H23.6" fill="none" stroke="#ffffff" stroke-width="2.45" stroke-linecap="round" stroke-linejoin="round"/><path data-pi-brand-part="pi-left-leg" d="M13.6 10.1 L11.7 21.5" fill="none" stroke="#ffffff" stroke-width="2.45" stroke-linecap="round"/><path data-pi-brand-part="pi-right-leg" d="M20.4 10.1 L20 19.2 C19.9 20.9 20.8 21.6 22.4 21.3" fill="none" stroke="#ffffff" stroke-width="2.45" stroke-linecap="round" stroke-linejoin="round"/><path data-pi-brand-part="plus" d="M33.1 11.3 V18.7 M29.4 15 H36.8" fill="none" stroke="#ffffff" stroke-width="2.2" stroke-linecap="round"/><text data-pi-brand-part="wordmark" x="56" y="23.2" fill="${safeColor}" font-family="ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace" font-size="21.5" font-weight="700" letter-spacing="-0.3">Pi Web Plus</text></svg>`;
-  }
-
-  function removePiWebPlusBranding() {
-    if (typeof document === "undefined") return;
-    try {
-      for (const img of document.querySelectorAll("img[data-pi-brand-logo]")) {
-        restoreBrandAttrsSnapshot(img, BRAND_IMG_TRACKED_ATTRS, false);
-        img.removeAttribute("data-pi-brand-logo");
-        img.removeAttribute("data-pi-brand-color");
-      }
-      for (const span of document.querySelectorAll("[data-pi-brand-hidden-label]")) {
-        restoreBrandAttrsSnapshot(span, BRAND_SPAN_TRACKED_ATTRS, false);
-        span.removeAttribute("data-pi-brand-hidden-label");
-      }
-      for (const btn of document.querySelectorAll("[data-pi-brand-sidebar-title]")) {
-        restoreBrandAttrsSnapshot(btn, BRAND_SIDEBAR_TRACKED_ATTRS, true);
-        btn.removeAttribute("data-pi-brand-sidebar-title");
-      }
-      for (const row of document.querySelectorAll("[data-pi-brand-sidebar-row]")) {
-        restoreBrandAttrsSnapshot(row, ["style"], false);
-        row.removeAttribute("data-pi-brand-sidebar-row");
-      }
-      for (const actions of document.querySelectorAll("[data-pi-brand-sidebar-actions]")) {
-        restoreBrandAttrsSnapshot(actions, ["style"], false);
-        actions.removeAttribute("data-pi-brand-sidebar-actions");
-      }
-      for (const newBtn of document.querySelectorAll("[data-pi-brand-sidebar-newbtn]")) {
-        restoreBrandAttrsSnapshot(newBtn, ["style"], false);
-        newBtn.removeAttribute("data-pi-brand-sidebar-newbtn");
-      }
-    } catch (e) {}
-  }
-
-  function syncPiWebPlusBranding() {
-    if (typeof document === "undefined" || isDisposed) return;
-    if (!isPluginEnabled("pi-web-plus-branding")) {
-      removePiWebPlusBranding();
-      return;
-    }
-
-    try {
-      if (document.head) {
-        for (const preloadLink of document.head.querySelectorAll('link[rel="preload"][href*="/icons/apple-touch-icon.png"]')) {
-          preloadLink.remove();
-        }
-      }
-      delete window.__PI_ENH_LOGO_PRELOAD_IMG__;
-    } catch (e) {}
-
-    try {
-      const candidateImgs = document.querySelectorAll('img[data-pi-brand-logo], img[src*="apple-touch-icon"], img[srcset*="apple-touch-icon"]');
-      for (const img of candidateImgs) {
-        if (img.closest?.(".web-login-brand")) continue;
-        const nextEl = img.nextElementSibling;
-        const labelSpan = (nextEl && nextEl.tagName === "SPAN" && (
-          nextEl.hasAttribute("data-pi-brand-hidden-label") ||
-          /^(?:π\+\s*)?Pi\s*Web(?:\s+Plus|\+)?$/i.test((nextEl.textContent || "").trim())
-        )) ? nextEl : null;
-
-        if (!labelSpan && !img.hasAttribute("data-pi-brand-logo")) continue;
-
-        captureBrandAttrsSnapshot(img, BRAND_IMG_TRACKED_ATTRS, false);
-        if (labelSpan) {
-          captureBrandAttrsSnapshot(labelSpan, BRAND_SPAN_TRACKED_ATTRS, false);
-        }
-
-        const textColor = resolvePiWebBrandTextColor(labelSpan, img);
-        const needsUpdate =
-          img.getAttribute("data-pi-brand-logo") !== "true" ||
-          img.getAttribute("data-pi-brand-color") !== textColor ||
-          img.hasAttribute("srcset") ||
-          img.getAttribute("width") !== "200" ||
-          img.getAttribute("height") !== "32";
-
-        if (needsUpdate) {
-          const svg = buildPiWebPlusBrandSvg(textColor);
-          const dataUri = "data:image/svg+xml;utf8," + encodeURIComponent(svg);
-          if (img.hasAttribute("srcset")) img.removeAttribute("srcset");
-          if (img.hasAttribute("sizes")) img.removeAttribute("sizes");
-          img.setAttribute("src", dataUri);
-          img.setAttribute("width", "200");
-          img.setAttribute("height", "32");
-          img.setAttribute("alt", "π+ Pi Web Plus");
-          img.setAttribute("data-pi-brand-logo", "true");
-          img.setAttribute("data-pi-brand-color", textColor);
-          img.style.width = "200px";
-          img.style.height = "32px";
-          img.style.maxWidth = "100%";
-          img.style.objectFit = "contain";
-          img.style.objectPosition = "left center";
-          img.style.flexShrink = "0";
-          img.style.display = "block";
-        }
-
-        if (labelSpan) {
-          if (labelSpan.getAttribute("data-pi-brand-hidden-label") !== "true") {
-            labelSpan.setAttribute("data-pi-brand-hidden-label", "true");
-          }
-          if (labelSpan.getAttribute("aria-hidden") !== "true") {
-            labelSpan.setAttribute("aria-hidden", "true");
-          }
-          if (labelSpan.style.display !== "none") {
-            labelSpan.style.display = "none";
-          }
-        }
-      }
-
-      for (const btn of document.querySelectorAll("button")) {
-        if (btn.closest?.(".pi-enh-plugins-panel, .settings-dialog-backdrop, [role='dialog']")) continue;
-        const isMarked = btn.hasAttribute("data-pi-brand-sidebar-title");
-        const rawText = (btn.textContent || "").trim();
-        if (!isMarked && rawText !== "Pi Web" && rawText !== "Pi Web Plus") continue;
-        const row = btn.parentElement;
-        if (!row) continue;
-        const hasSiblingButtons = Boolean(
-          row.querySelector?.('button[aria-controls="session-search-input"], #pi-enh-session-batch-btn') ||
-          (btn.nextElementSibling && btn.nextElementSibling.querySelector?.("button")) ||
-          btn.style?.minWidth === "6ch"
-        );
-        if (!isMarked && !hasSiblingButtons) continue;
-
-        captureBrandAttrsSnapshot(btn, BRAND_SIDEBAR_TRACKED_ATTRS, true);
-        if (!isMarked) btn.setAttribute("data-pi-brand-sidebar-title", "true");
-        if (rawText === "Pi Web") {
-          btn.textContent = "Pi Web Plus";
-        }
-        if (btn.style.fontSize !== "13.5px") btn.style.fontSize = "13.5px";
-        if (btn.style.letterSpacing !== "-0.03em") btn.style.letterSpacing = "-0.03em";
-        if (btn.style.whiteSpace !== "nowrap") btn.style.whiteSpace = "nowrap";
-        if (btn.style.flexShrink !== "0") btn.style.flexShrink = "0";
-
-        if (row) {
-          captureBrandAttrsSnapshot(row, ["style"], false);
-          if (!row.hasAttribute("data-pi-brand-sidebar-row")) row.setAttribute("data-pi-brand-sidebar-row", "true");
-          if (row.style.gap !== "6px") row.style.gap = "6px";
-          if (row.style.flexWrap !== "nowrap") row.style.flexWrap = "nowrap";
-        }
-        const actions = btn.nextElementSibling;
-        if (actions && actions.tagName === "DIV") {
-          captureBrandAttrsSnapshot(actions, ["style"], false);
-          if (!actions.hasAttribute("data-pi-brand-sidebar-actions")) actions.setAttribute("data-pi-brand-sidebar-actions", "true");
-          if (actions.style.gap !== "4px") actions.style.gap = "4px";
-          if (actions.style.flexShrink !== "0") actions.style.flexShrink = "0";
-          if (actions.style.alignItems !== "center") actions.style.alignItems = "center";
-          const firstActionBtn = actions.querySelector("button:first-child");
-          if (firstActionBtn && firstActionBtn.getAttribute("aria-controls") !== "session-search-input" && firstActionBtn.id !== "pi-enh-session-batch-btn") {
-            captureBrandAttrsSnapshot(firstActionBtn, ["style"], false);
-            if (!firstActionBtn.hasAttribute("data-pi-brand-sidebar-newbtn")) firstActionBtn.setAttribute("data-pi-brand-sidebar-newbtn", "true");
-            if (firstActionBtn.style.paddingLeft !== "8px") firstActionBtn.style.paddingLeft = "8px";
-            if (firstActionBtn.style.paddingRight !== "9px") firstActionBtn.style.paddingRight = "9px";
-          }
-        }
-      }
-    } catch (e) {}
-  }
-
-  window.__PI_ENH_SYNC_BRANDING__ = syncPiWebPlusBranding;
-  window.__PI_ENH_REMOVE_BRANDING__ = removePiWebPlusBranding;
-
-  // ==========================================
-  // 6. Settings Dialog Enhancements & Archived Tabs (设置对话框增强与归档管理)
-  // ==========================================
-  function syncSettingsDialogEnhancements() {
-    syncPiWebPlusBranding();
-    // 弹窗打开瞬间立即静默并发预热模型数据，确保切换至模型标签页时 0ms 瞬间秒开
-    if (typeof window !== "undefined" && typeof window.__PI_ENH_PRELOAD_MODELS_CACHE__ === "function") {
-      void window.__PI_ENH_PRELOAD_MODELS_CACHE__();
-    }
-    const isSidebarActive = isPluginEnabled("settings-sidebar-layout");
-    const nav = document.querySelector(".settings-section-tabs");
-    const header = (nav?.closest && nav.closest(".settings-dialog-header")) || (nav?.parentElement ? nav.parentElement : null) || document.querySelector(".settings-dialog-header");
-    const isMobile = isMobileSettingsView(header);
-
-    if (document.documentElement) {
-      document.documentElement.classList.toggle("pi-enh-settings-sidebar-active", isSidebarActive && !isMobile);
-      if (isSidebarActive && !isMobile) {
-        document.documentElement.classList.toggle("pi-enh-settings-sidebar-collapsed", isSettingsSidebarCollapsed());
-      } else {
-        document.documentElement.classList.remove("pi-enh-settings-sidebar-collapsed");
-      }
-    }
-    if (header) {
-      syncSettingsSidebarCollapse(header);
-    }
-    if (!nav) return;
-
-    const surface = nav.closest(".settings-dialog-surface") || document.querySelector(".settings-dialog-surface");
-    if (surface && isSidebarActive && !isMobile) {
-      bindSettingsDialogResizable(surface);
-    } else if (surface) {
-      unbindSettingsDialogResizable(surface);
-    }
-    if (header && isSidebarActive && !isMobile) {
-      syncSidebarShortcutTip(header);
-    }
-
-    // 1. 增强插件 Tab
-    let enhTab = nav.querySelector("[data-pi-enh-tab='plugins']");
-    if (!enhTab) {
-      enhTab = document.createElement("button");
-      enhTab.type = "button";
-      enhTab.className = "settings-section-tab";
-      enhTab.setAttribute("data-pi-enh-tab", "plugins");
-      enhTab.setAttribute("title", "增强插件");
-      enhTab.innerHTML = `
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" class="settings-section-icon">
-          <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"></path>
-        </svg>
-        <span>增强插件</span>
-      `;
-      nav.appendChild(enhTab);
-
-      enhTab.addEventListener("click", () => {
-        showEnhancementsPanel(nav, enhTab);
+    const allSections = ["general", "models", "skills", "agents", "plugins", "enhancements", "notifications", "archived", "usage", "tags"];
+    for (const sec of allSections) {
+      const unreg = abi.registerRenderer(`tab-action:${sec}`, (host, context) => {
+        return mountTabActionPin(sec, host, context);
       });
-    }
-
-    // 2. 通知管理 Tab
-    let notificationTab = nav.querySelector("[data-pi-enh-tab='notifications']");
-    if (isPluginEnabled("notification-center")) {
-      if (!notificationTab) {
-        notificationTab = document.createElement("button");
-        notificationTab.type = "button";
-        notificationTab.className = "settings-section-tab";
-        notificationTab.setAttribute("data-pi-enh-tab", "notifications");
-        notificationTab.setAttribute("title", "通知管理");
-        notificationTab.innerHTML = `
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" class="settings-section-icon">
-            <path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9"></path><path d="M10 21h4"></path>
-          </svg>
-          <span>通知管理</span>
-        `;
-        nav.appendChild(notificationTab);
-        notificationTab.addEventListener("click", () => {
-          showNotificationPanel(nav, notificationTab);
-        });
-      }
-    } else if (notificationTab) {
-      notificationTab.remove();
-      hideNotificationPanel(nav);
-    }
-
-    // 3. 已归档会话 Tab (对齐 Codex Desktop: Settings -> Archived chats)
-    let archivedTab = nav.querySelector("[data-pi-enh-tab='archived']");
-    if (isPluginEnabled("session-pin-archive")) {
-      if (!archivedTab) {
-        archivedTab = document.createElement("button");
-        archivedTab.type = "button";
-        archivedTab.className = "settings-section-tab";
-        archivedTab.setAttribute("data-pi-enh-tab", "archived");
-        archivedTab.setAttribute("title", "已归档");
-        archivedTab.innerHTML = `
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" class="settings-section-icon">
-            <path d="M21 8v13H3V8"></path><path d="M1 3h22v5H1z"></path><path d="M10 12h4"></path>
-          </svg>
-          <span>已归档</span>
-        `;
-        nav.appendChild(archivedTab);
-
-        archivedTab.addEventListener("click", () => {
-          showArchivedPanel(nav, archivedTab);
-        });
-      }
-    } else if (archivedTab) {
-      archivedTab.remove();
-      hideArchivedPanel(nav);
-    }
-
-    // 4. 用量与成本大盘 Tab
-    let usageTab = nav.querySelector("[data-pi-enh-tab='usage']");
-    if (isPluginEnabled("usage-cost-dashboard")) {
-      if (!usageTab) {
-        usageTab = document.createElement("button");
-        usageTab.type = "button";
-        usageTab.className = "settings-section-tab";
-        usageTab.setAttribute("data-pi-enh-tab", "usage");
-        usageTab.setAttribute("title", "Usage");
-        usageTab.innerHTML = `
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" class="settings-section-icon">
-            <line x1="18" y1="20" x2="18" y2="10"></line><line x1="12" y1="20" x2="12" y2="4"></line><line x1="6" y1="20" x2="6" y2="14"></line>
-          </svg>
-          <span>Usage</span>
-        `;
-        nav.appendChild(usageTab);
-
-        usageTab.addEventListener("click", () => {
-          showUsagePanel(nav, usageTab);
-        });
-      }
-    } else if (usageTab) {
-      usageTab.remove();
-      hideUsagePanel(nav);
-      document.querySelectorAll(".settings-dialog-main.pi-enh-usage-panel").forEach((el) => el.remove());
-    }
-
-    // 5. 会话标签 Tab
-    let tagsTab = nav.querySelector("[data-pi-enh-tab='tags']");
-    if (isPluginEnabled("session-tags")) {
-      if (!tagsTab) {
-        tagsTab = document.createElement("button");
-        tagsTab.type = "button";
-        tagsTab.className = "settings-section-tab";
-        tagsTab.setAttribute("data-pi-enh-tab", "tags");
-        tagsTab.setAttribute("title", "会话标签");
-        tagsTab.innerHTML = `
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" class="settings-section-icon">
-            <path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"></path>
-            <line x1="7" y1="7" x2="7.01" y2="7"></line>
-          </svg>
-          <span>会话标签</span>
-        `;
-        nav.appendChild(tagsTab);
-
-        tagsTab.addEventListener("click", () => {
-          showTagsPanel(nav, tagsTab);
-        });
-      }
-    } else if (tagsTab) {
-      tagsTab.remove();
-      hideTagsPanel(nav);
-      document.querySelectorAll(".settings-dialog-main.pi-enh-tags-panel").forEach((el) => el.remove());
-    }
-
-    // 6. 监听所有页签点击，统一协调各面板的显隐
-    if (!nav.__piEnhTabsBound) {
-      nav.__piEnhTabsBound = true;
-      nav.addEventListener("click", (e) => {
-        const clickedTab = e.target && e.target.closest ? e.target.closest(".settings-section-tab") : null;
-        if (!clickedTab) return;
-        const currentEnhTab = nav.querySelector("[data-pi-enh-tab='plugins']");
-        const currentNotificationTab = nav.querySelector("[data-pi-enh-tab='notifications']");
-        const currentArchivedTab = nav.querySelector("[data-pi-enh-tab='archived']");
-        const currentUsageTab = nav.querySelector("[data-pi-enh-tab='usage']");
-        const currentTagsTab = nav.querySelector("[data-pi-enh-tab='tags']");
-
-        if (clickedTab !== currentEnhTab) {
-          hideEnhancementsPanel(nav);
-        }
-        if (clickedTab !== currentNotificationTab) {
-          hideNotificationPanel(nav);
-        }
-        if (clickedTab !== currentArchivedTab) {
-          hideArchivedPanel(nav);
-        }
-        if (clickedTab !== currentUsageTab) {
-          hideUsagePanel(nav);
-        }
-        if (clickedTab !== currentTagsTab) {
-          hideTagsPanel(nav);
-        }
-      });
-    }
-
-    // Mobile select picker sync
-    syncMobilePickerState(header, nav, surface?.parentElement || document.body);
-
-    // 4. 在通用 (General) 设置面板构建自平衡双列仪表盘与运维卡片
-    const generalPanel = document.querySelector(".settings-general");
-    if (generalPanel) {
-      if (isPluginEnabled("general-settings-dashboard")) {
-        generalPanel.classList.add("pi-enh-general-dashboard");
-
-        // 确保“页面维护与服务管理”卡片已存在
-        let cacheSection = generalPanel.querySelector(".pi-enh-cache-section");
-        if (!cacheSection) {
-          cacheSection = document.createElement("section");
-          cacheSection.className = "settings-general-section pi-enh-cache-section";
-          cacheSection.setAttribute("data-pi-enh-section", "maintenance");
-
-          const heading = document.createElement("h3");
-          heading.className = "settings-general-heading";
-          heading.innerHTML = `
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color: #f59e0b;">
-              <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>
-            </svg>
-            <span>页面维护与服务管理</span>
-          `;
-
-          const desc = document.createElement("div");
-          desc.className = "settings-general-description";
-          desc.textContent = "遇到手机端显示旧版本、界面未更新或 Service Worker 缓存异常时可清理缓存；如需重启 Pi Web 服务，可在此手动一键重启。";
-
-          const actionsRow = document.createElement("div");
-          actionsRow.className = "pi-enh-service-actions-row";
-
-          // 按钮 1：强制清除缓存刷新
-          const btnReload = document.createElement("button");
-          btnReload.type = "button";
-          btnReload.className = "pi-enh-btn-sm pi-enh-force-reload-btn";
-          btnReload.title = "穿透 HTTP 强缓存并更新前端静态资源与网页";
-          btnReload.innerHTML = `
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2"/>
-            </svg>
-            <span>⚡ 强制清除缓存并刷新网页</span>
-          `;
-          btnReload.addEventListener("click", forceHardReloadApp);
-
-          // 按钮 2：一键重启 Pi Web（红框位置！）
-          const btnRestart = document.createElement("button");
-          btnRestart.type = "button";
-          btnRestart.className = "pi-enh-btn-sm pi-enh-restart-service-btn";
-          btnRestart.title = "手动重启 Pi Web 后台服务并在恢复后自动重新连接";
-          btnRestart.innerHTML = `
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-              <path d="M3 12a9 9 0 0 1 15-6.7L21 8"/>
-              <path d="M21 3v5h-5"/>
-              <path d="M21 12a9 9 0 0 1-15 6.7L3 16"/>
-              <path d="M3 21v-5h5"/>
-            </svg>
-            <span>⚡ 一键重启 Pi Web</span>
-          `;
-          btnRestart.addEventListener("click", triggerManualRestartPiWebModal);
-
-          actionsRow.appendChild(btnReload);
-          actionsRow.appendChild(btnRestart);
-
-          cacheSection.appendChild(heading);
-          cacheSection.appendChild(desc);
-          cacheSection.appendChild(actionsRow);
-          generalPanel.appendChild(cacheSection);
-        }
-
-        // 确保“系统版本与 Pi Agent 上游更新”卡片已存在
-        let versionSection = generalPanel.querySelector(".pi-enh-version-section");
-        if (!versionSection) {
-          versionSection = document.createElement("section");
-          versionSection.className = "settings-general-section pi-enh-version-section";
-          versionSection.setAttribute("data-pi-enh-section", "version-info");
-
-          const heading = document.createElement("h3");
-          heading.className = "settings-general-heading";
-          heading.innerHTML = `
-            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="color: #10b981;">
-              <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"/>
-            </svg>
-            <span>系统版本与上游更新</span>
-          `;
-
-          const desc = document.createElement("div");
-          desc.className = "settings-general-description";
-          desc.textContent = "监控上游官方 Pi Coding Agent (https://github.com/earendil-works/pi) 发布动态。当有新版本时在新建会话页面与设置中自动提示。";
-
-          const card = document.createElement("div");
-          card.className = "pi-enh-version-card";
-          card.style.cssText = "display: flex; flex-direction: column; gap: 8px; padding: 10px 12px; background: var(--bg-surface, rgba(255,255,255,0.03)); border: 1px solid var(--border, rgba(255,255,255,0.08)); border-radius: 8px; margin-top: 8px; font-size: 12px;";
-
-          versionSection.appendChild(heading);
-          versionSection.appendChild(desc);
-          versionSection.appendChild(card);
-          generalPanel.appendChild(versionSection);
-        }
-
-        if (versionSection) {
-          const card = versionSection.querySelector(".pi-enh-version-card");
-          if (card) {
-            const state = (typeof window !== "undefined" && window.__PI_AGENT_UPDATE_STATE__) || {
-              currentVersion: (typeof window !== "undefined" && window.__PI_OFFICIAL_AGENT_VERSION__) || "0.87.1",
-              latestVersion: null,
-              updateAvailable: false,
-              releaseUrl: "https://github.com/earendil-works/pi/releases",
-              isChecking: false,
-            };
-            const suiteVer = window.__PI_WEB_STANDALONE_VERSION__ || "1.0.5";
-            const updateTag = state.updateAvailable
-              ? `<span style="display:inline-flex;align-items:center;gap:3px;padding:1px 6px;border-radius:9999px;font-size:10px;font-weight:600;background:rgba(16,185,129,0.15);color:#10b981;border:1px solid rgba(16,185,129,0.4);"><span style="width:4px;height:4px;border-radius:50%;background:#10b981;"></span>可升级至 v${state.latestVersion}</span>`
-              : (state.latestVersion ? `<span style="display:inline-flex;padding:1px 6px;border-radius:9999px;font-size:10px;color:var(--text-muted);background:rgba(255,255,255,0.05);">已是最新</span>` : `<span style="font-size:10px;color:var(--text-muted);">未检测</span>`);
-
-            card.innerHTML = `
-              <div style="display: flex; justify-content: space-between; align-items: center; line-height: 1.5;">
-                <span style="color: var(--text-muted);">Web 前端发行版</span>
-                <span style="font-family: var(--font-mono, monospace); font-weight: 600;">v${suiteVer} (Koxir Standalone)</span>
-              </div>
-              <div style="display: flex; justify-content: space-between; align-items: center; line-height: 1.5;">
-                <span style="color: var(--text-muted);">Pi Agent 本地核心</span>
-                <span style="font-family: var(--font-mono, monospace); font-weight: 600;">v${state.currentVersion}</span>
-              </div>
-              <div style="display: flex; justify-content: space-between; align-items: center; line-height: 1.5;">
-                <span style="color: var(--text-muted);">官方上游最新版本</span>
-                <div style="display: flex; align-items: center; gap: 6px; font-family: var(--font-mono, monospace);">
-                  <span>${state.latestVersion ? `v${state.latestVersion}` : "检测中…"}</span>
-                  ${updateTag}
-                </div>
-              </div>
-              <div style="display: flex; gap: 8px; margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--border, rgba(255,255,255,0.06));">
-                <a href="${state.releaseUrl || 'https://github.com/earendil-works/pi/releases'}" target="_blank" rel="noopener noreferrer" class="pi-enh-btn-sm" style="flex: 1; text-align: center; text-decoration: none; display: inline-flex; align-items: center; justify-content: center; gap: 4px;">
-                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6M15 3h6v6M10 14L21 3"/></svg>
-                  <span>查看 Release Notes</span>
-                </a>
-                <button type="button" class="pi-enh-btn-sm pi-enh-check-agent-update-btn" style="flex: 1; display: inline-flex; align-items: center; justify-content: center; gap: 4px;">
-                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0 1 18.8-4.3M22 12.5a10 10 0 0 1-18.8 4.2"/></svg>
-                  <span>${state.isChecking ? "正在检测…" : "立即检查更新"}</span>
-                </button>
-              </div>
-            `;
-
-            const btnCheck = card.querySelector(".pi-enh-check-agent-update-btn");
-            if (btnCheck) {
-              btnCheck.addEventListener("click", async () => {
-                if (typeof window.__PI_ENH_CHECK_AGENT_UPDATE__ === "function") {
-                  btnCheck.disabled = true;
-                  btnCheck.innerHTML = `<span>⏳ 正在检测上游版本…</span>`;
-                  await window.__PI_ENH_CHECK_AGENT_UPDATE__(true);
-                  if (typeof showToast === "function") {
-                    const st = window.__PI_AGENT_UPDATE_STATE__;
-                    if (st && st.updateAvailable) {
-                      showToast(`发现 Pi Agent 新版本 v${st.latestVersion}！`);
-                    } else if (st && st.latestVersion) {
-                      showToast(`Pi Agent 已是最新版本 (v${st.latestVersion})`);
-                    } else if (st && st.error) {
-                      showToast(`检测失败: ${st.error}`);
-                    }
-                  }
-                  if (typeof scheduleDomSync === "function") {
-                    scheduleDomSync();
-                  }
-                }
-              });
-            }
-          }
-        }
-
-        // 确保双列外壳容器存在
-        let shell = generalPanel.querySelector(".pi-enh-dashboard-shell");
-        if (!shell) {
-          shell = document.createElement("div");
-          shell.className = "pi-enh-dashboard-shell";
-          const grid = document.createElement("div");
-          grid.className = "pi-enh-dashboard-grid";
-          const cl = document.createElement("div");
-          cl.className = "pi-enh-dashboard-col pi-enh-col-left";
-          const cr = document.createElement("div");
-          cr.className = "pi-enh-dashboard-col pi-enh-col-right";
-          grid.appendChild(cl);
-          grid.appendChild(cr);
-          const ft = document.createElement("div");
-          ft.className = "pi-enh-dashboard-footer";
-          shell.appendChild(grid);
-          shell.appendChild(ft);
-          generalPanel.appendChild(shell);
-        }
-
-        const colLeft = shell.querySelector(".pi-enh-col-left") || shell;
-        const colRight = shell.querySelector(".pi-enh-col-right") || shell;
-        const footer = shell.querySelector(".pi-enh-dashboard-footer") || shell;
-
-        // 将所有直接位于 generalPanel 根级的 section 归类分配到对应列中
-        const directSections = Array.from(generalPanel.children).filter(
-          (c) => c && c.classList && c.classList.contains("settings-general-section")
-        );
-
-        for (const sec of directSections) {
-          if (sec.querySelector('input[name="theme"]')) {
-            sec.setAttribute("data-pi-enh-section", "appearance");
-            colLeft.appendChild(sec);
-          } else if (sec.querySelector('.settings-shell-option')) {
-            sec.setAttribute("data-pi-enh-section", "push");
-            colLeft.appendChild(sec);
-          } else if (sec.classList.contains("pi-enh-cache-section")) {
-            sec.setAttribute("data-pi-enh-section", "maintenance");
-            colLeft.appendChild(sec);
-          } else if (sec.classList.contains("pi-enh-version-section")) {
-            sec.setAttribute("data-pi-enh-section", "version-info");
-            colLeft.appendChild(sec);
-          } else if (sec.querySelector('#settings-chat-content-width') || sec.querySelector('.settings-chat-options')) {
-            sec.setAttribute("data-pi-enh-section", "chat");
-            colRight.appendChild(sec);
-          } else if (sec.querySelector('button[role="radio"]') || sec.querySelector('.settings-language-options')) {
-            sec.setAttribute("data-pi-enh-section", "language");
-            colRight.appendChild(sec);
-          } else if (sec.textContent && sec.textContent.includes("退出登录")) {
-            sec.setAttribute("data-pi-enh-section", "signout");
-            footer.appendChild(sec);
-          }
-        }
-      } else {
-        generalPanel.classList.remove("pi-enh-general-dashboard");
-        const shell = generalPanel.querySelector(".pi-enh-dashboard-shell");
-        if (shell) {
-          const allSections = Array.from(shell.querySelectorAll(".settings-general-section"));
-          for (const sec of allSections) {
-            sec.removeAttribute("data-pi-enh-section");
-            generalPanel.appendChild(sec);
-          }
-          shell.remove();
-        }
-      }
-    }
-
-    // 5. 设置选项卡双击快速添加到左下角快捷入口
-    syncTabShortcutsInSettings(nav);
-
-    // 6. 如果存在挂起的快捷入口直达目标，立即无缝激活对应选项卡与面板
-    const targetId = pendingShortcutNavigation || window.__PI_PENDING_SHORTCUT_TARGET__;
-    if (targetId) {
-      const success = activateSettingsTab(nav, targetId);
-      if (success) {
-        pendingShortcutNavigation = null;
-        window.__PI_PENDING_SHORTCUT_TARGET__ = null;
-        if (document.documentElement) {
-          document.documentElement.removeAttribute("data-pi-opening-tab");
-        }
+      if (typeof unreg === "function") {
+        unregisterNativeRenderers.push(unreg);
       }
     }
   }
 
-  pendingShortcutNavigation = null;
-  settingsDialogObserver = null;
+  function cleanupSettingsNativeBridge() {
+    if (typeof window !== "undefined") {
+      window.removeEventListener("pi-web:settings-native-ready", onSettingsNativeReady);
+    }
+    for (const unreg of unregisterNativeRenderers) {
+      try { if (typeof unreg === "function") unreg(); } catch (_) {}
+    }
+    unregisterNativeRenderers = [];
+    nativeBridgeRegistered = false;
+  }
+
+  // 4. 模块初始化：单次注册 Native 桥
+  if (typeof window !== "undefined") {
+    if (window.__PI_WEB_SETTINGS_NATIVE__) {
+      initSettingsNativeBridge();
+    } else {
+      window.addEventListener("pi-web:settings-native-ready", onSettingsNativeReady, { once: true });
+    }
+  }
 
   // ==========================================
   // 6.1 Settings Tab Shortcuts & Bottom Bar (设置选项卡双击快捷入口与跨设备同步)
@@ -1855,67 +393,83 @@
 
   isPersistingShortcutsToServer = false;
   pendingPersistShortcutsTimer = null;
+  let pendingQuickShortcutsPersistRequest = null;
 
   async function persistQuickShortcutsToServer(list) {
     if (pendingPersistShortcutsTimer) {
       clearTimeout(pendingPersistShortcutsTimer);
       pendingPersistShortcutsTimer = null;
     }
-    const revision = Date.now();
+    const revision = Math.max(Date.now(), getLocalShortcutsRevision() + 1);
+    const snapshot = Array.isArray(list) ? list.map((item) => ({ ...item })) : list;
     setLocalShortcutsRevision(revision);
 
     // 1. 同设备跨标签页广播
     try {
       crossDeviceSyncChannel?.postMessage({
         type: "quick_shortcuts_updated",
-        shortcuts: list,
+        shortcuts: snapshot,
         revision: revision,
         at: Date.now()
       });
     } catch (e) {}
 
-    // 2. 防抖向服务端 models.json 持久化
+    // 同一短时间内的连续修改只保留最新快照；已开始的 PUT 完成后继续冲刷，不能因并发而丢弃。
     return new Promise((resolve) => {
-      pendingPersistShortcutsTimer = setTimeout(async () => {
-        if (isPersistingShortcutsToServer) return resolve(false);
-        isPersistingShortcutsToServer = true;
-        try {
-          const activeFetch = typeof window !== "undefined" && window.fetch ? window.fetch : (typeof fetch === "function" ? fetch : null);
-          if (!activeFetch) return resolve(false);
+      if (pendingQuickShortcutsPersistRequest) {
+        pendingQuickShortcutsPersistRequest.resolve(false);
+      }
+      pendingQuickShortcutsPersistRequest = { list: snapshot, revision, resolve };
 
-          let currentConfig = { providers: {} };
+      const schedulePendingPersist = () => {
+        if (pendingPersistShortcutsTimer) clearTimeout(pendingPersistShortcutsTimer);
+        pendingPersistShortcutsTimer = setTimeout(async () => {
+          pendingPersistShortcutsTimer = null;
+          if (!pendingQuickShortcutsPersistRequest || isPersistingShortcutsToServer) return;
+
+          const request = pendingQuickShortcutsPersistRequest;
+          pendingQuickShortcutsPersistRequest = null;
+          isPersistingShortcutsToServer = true;
+          let saved = false;
           try {
+            const activeFetch = typeof window !== "undefined" && window.fetch ? window.fetch : (typeof fetch === "function" ? fetch : null);
+            if (!activeFetch) return;
+
             const getResp = await activeFetch("/api/models-config", { cache: "no-store" });
-            if (getResp?.ok) {
-              const data = await getResp.json();
-              if (data && typeof data === "object") currentConfig = data;
+            if (!getResp?.ok) return;
+            const currentConfig = await getResp.json();
+            if (!currentConfig || typeof currentConfig !== "object" || Array.isArray(currentConfig)) return;
+
+            // 不允许迟到的旧快照覆盖服务端更新的快捷入口配置。
+            if ((Number(currentConfig.shortcutsRevision) || 0) > request.revision) return;
+
+            const putPayload = {
+              ...currentConfig,
+              quickShortcuts: request.list,
+              shortcutsRevision: request.revision
+            };
+
+            const putResp = await activeFetch("/api/models-config", {
+              method: "PUT",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(putPayload)
+            });
+
+            if (putResp?.ok) {
+              window.__PI_ENH_SHORTCUTS_MANIFEST__ = request.list;
+              saved = true;
             }
-          } catch (e) {}
-
-          const putPayload = {
-            ...currentConfig,
-            quickShortcuts: list,
-            shortcutsRevision: revision
-          };
-
-          const putResp = await activeFetch("/api/models-config", {
-            method: "PUT",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(putPayload)
-          });
-
-          if (putResp?.ok) {
-            window.__PI_ENH_SHORTCUTS_MANIFEST__ = list;
-            resolve(true);
-          } else {
-            resolve(false);
+          } catch (err) {
+            saved = false;
+          } finally {
+            isPersistingShortcutsToServer = false;
+            request.resolve(saved);
+            if (pendingQuickShortcutsPersistRequest) schedulePendingPersist();
           }
-        } catch (err) {
-          resolve(false);
-        } finally {
-          isPersistingShortcutsToServer = false;
-        }
-      }, 150);
+        }, 150);
+      };
+
+      schedulePendingPersist();
     });
   }
 
@@ -1991,8 +545,7 @@
             if (remoteRevision > 0) setLocalShortcutsRevision(remoteRevision);
             window.__PI_ENH_SHORTCUTS_MANIFEST__ = remoteList;
             syncBottomShortcutsBar(true);
-            const nav = document.querySelector(".settings-section-tabs");
-            if (nav) syncTabShortcutsInSettings(nav);
+            notifyMountedPinHosts();
           } else if (remoteRevision > 0 && remoteRevision > localRev) {
             setLocalShortcutsRevision(remoteRevision);
           }
@@ -2071,56 +624,8 @@
       if (shouldPersist) {
         void persistQuickShortcutsToServer(list);
       }
+      notifyMountedPinHosts();
     } catch (e) {}
-  }
-
-  function extractTabMetadata(tab) {
-    if (!tab) return null;
-    const dataTab = tab.getAttribute("data-pi-enh-tab");
-    const rawText = (tab.textContent || "").trim();
-    const cleanText = rawText.replace(/📌/g, "").trim();
-    const svg = tab.querySelector("svg");
-    let iconHtml = svg ? svg.outerHTML : "";
-
-    let id = "";
-    let label = cleanText;
-
-    if (dataTab === "plugins") {
-      id = "enhancements";
-      label = label || "增强插件";
-    } else if (dataTab === "archived") {
-      id = "archived";
-      label = label || "已归档";
-    } else if (dataTab === "usage") {
-      id = "usage";
-      label = label || "Usage";
-    } else if (dataTab === "notifications") {
-      id = "notifications";
-      label = label || "通知管理";
-    } else if (cleanText === "常规" || cleanText === "General") {
-      id = "general";
-      label = "常规";
-    } else if (cleanText === "模型" || cleanText === "Models") {
-      id = "models";
-      label = "模型";
-    } else if (cleanText === "技能" || cleanText === "Skills") {
-      id = "skills";
-      label = "技能";
-    } else if (cleanText === "子代理" || cleanText === "Agents") {
-      id = "agents";
-      label = "子代理";
-    } else if (cleanText === "插件" || cleanText === "Plugins") {
-      id = "plugins";
-      label = "插件";
-    } else {
-      id = dataTab || cleanText.toLowerCase().replace(/\s+/g, "-");
-    }
-
-    if (!iconHtml && SHORTCUT_ICONS[id]) {
-      iconHtml = SHORTCUT_ICONS[id];
-    }
-
-    return { id, label, iconHtml };
   }
 
   function isShortcutActive(shortcutList, tabId) {
@@ -2130,107 +635,6 @@
       if (tabId === "settings" && item.id === "general") return true;
       return false;
     });
-  }
-
-  function syncTabShortcutsInSettings(nav) {
-    if (!nav) return;
-    const tabs = Array.from(nav.querySelectorAll(".settings-section-tab"));
-    const shortcuts = getStoredQuickShortcuts();
-
-    for (const tab of tabs) {
-      const meta = extractTabMetadata(tab);
-      if (!meta || !meta.id) continue;
-
-      const active = isShortcutActive(shortcuts, meta.id);
-
-      if (active) {
-        tab.setAttribute("title", `${meta.label} (已添加到左下角快捷入口，双击可取消)`);
-        tab.classList.add("pi-enh-tab-pinned");
-      } else {
-        tab.setAttribute("title", `${meta.label} (双击快速添加到左下角快捷入口)`);
-        tab.classList.remove("pi-enh-tab-pinned");
-      }
-
-      let pinBadge = tab.querySelector(".pi-enh-tab-pin-indicator");
-      if (active) {
-        if (!pinBadge) {
-          pinBadge = document.createElement("span");
-          pinBadge.className = "pi-enh-tab-pin-indicator";
-          pinBadge.setAttribute("aria-hidden", "true");
-          pinBadge.innerHTML = `<svg width="6" height="6" viewBox="0 0 24 24" fill="currentColor" stroke="none"><circle cx="12" cy="12" r="10"></circle></svg>`;
-          tab.appendChild(pinBadge);
-        }
-      } else if (pinBadge) {
-        pinBadge.remove();
-      }
-
-      if (meta.id === "models" && !tab.__piEnhModelPrewarmBound) {
-        tab.__piEnhModelPrewarmBound = true;
-        const prewarm = () => {
-          if (typeof window !== "undefined" && typeof window.__PI_ENH_PRELOAD_MODELS_CACHE__ === "function") {
-            void window.__PI_ENH_PRELOAD_MODELS_CACHE__();
-          }
-        };
-        tab.addEventListener("pointerenter", prewarm, { passive: true });
-        tab.addEventListener("touchstart", prewarm, { passive: true });
-      }
-
-      if (!tab.__piEnhShortcutDblBound) {
-        tab.__piEnhShortcutDblBound = true;
-        tab.style.userSelect = "none";
-        tab.style.webkitUserSelect = "none";
-
-        tab.addEventListener("dblclick", (e) => {
-          e.preventDefault();
-          e.stopPropagation();
-          window.getSelection()?.removeAllRanges();
-
-          handleToggleTabShortcut(tab);
-        });
-      }
-    }
-  }
-
-  function handleToggleTabShortcut(tab) {
-    const meta = extractTabMetadata(tab);
-    if (!meta || !meta.id) return;
-
-    const shortcuts = getStoredQuickShortcuts();
-    const existingIndex = shortcuts.findIndex((item) => {
-      if (item.id === meta.id) return true;
-      if (meta.id === "general" && item.id === "settings") return true;
-      if (meta.id === "settings" && item.id === "general") return true;
-      return false;
-    });
-
-    const actionIcon = meta.iconHtml || SHORTCUT_ICONS[meta.id] || SHORTCUT_ICONS.settings;
-
-    if (existingIndex >= 0) {
-      shortcuts.splice(existingIndex, 1);
-      setStoredQuickShortcuts(shortcuts);
-      showToast(`已从快捷入口移除「${meta.label}」`, actionIcon, 2000);
-    } else {
-      const newItem = {
-        id: meta.id,
-        label: meta.label,
-        iconHtml: meta.iconHtml || SHORTCUT_ICONS[meta.id] || ""
-      };
-      const settingsIdx = shortcuts.findIndex((s) => s.id === "settings" || s.id === "general");
-      if (settingsIdx >= 0) {
-        shortcuts.splice(settingsIdx, 0, newItem);
-      } else {
-        shortcuts.push(newItem);
-      }
-      setStoredQuickShortcuts(shortcuts);
-      showToast(`已添加「${meta.label}」到左下角快捷入口`, actionIcon, 2000);
-    }
-
-    const nav = tab.closest(".settings-section-tabs");
-    if (nav) {
-      syncTabShortcutsInSettings(nav);
-    }
-
-    syncBottomShortcutsBar(true);
   }
 
   function locateShortcutsContainer() {
@@ -2311,11 +715,12 @@
   }
 
   function bindShortcutButtonsEvents(bar) {
-    if (!bar || bar.__piEnhEventsBound) return;
-    bar.__piEnhEventsBound = true;
+    if (!bar) return;
 
     const renderedButtons = Array.from(bar.querySelectorAll(".pi-enh-shortcut-btn"));
     for (const btn of renderedButtons) {
+      if (btn.__piEnhShortcutEventsBound) continue;
+      btn.__piEnhShortcutEventsBound = true;
       const id = btn.getAttribute("data-shortcut-id");
 
       if (id === "models" && !btn.__piEnhModelPrewarmBound) {
@@ -2353,11 +758,8 @@
         const icon = removed?.iconHtml || SHORTCUT_ICONS[id] || SHORTCUT_ICONS.settings;
         showToast(`已从快捷入口移除「${removed ? removed.label : id}」`, icon, 2000);
 
-        bar.__piEnhEventsBound = false;
         syncBottomShortcutsBar(true);
-
-        const nav = document.querySelector(".settings-section-tabs");
-        if (nav) syncTabShortcutsInSettings(nav);
+        notifyMountedPinHosts();
       });
     }
   }
@@ -2366,331 +768,55 @@
     if (shortcutId === "models" && typeof window !== "undefined" && typeof window.__PI_ENH_PRELOAD_MODELS_CACHE__ === "function") {
       void window.__PI_ENH_PRELOAD_MODELS_CACHE__();
     }
-    const existingNav = document.querySelector(".settings-section-tabs");
-    if (existingNav) {
-      activateSettingsTab(existingNav, shortcutId);
-      return;
-    }
-
-    // 1. 标记挂起直达目标，并在 html 上打标激活物理级 CSS 守卫（瞬间屏蔽常规设置在第一帧的绘制）
-    pendingShortcutNavigation = shortcutId;
-    window.__PI_PENDING_SHORTCUT_TARGET__ = shortcutId;
-    if (document.documentElement) {
-      document.documentElement.setAttribute("data-pi-opening-tab", shortcutId);
-    }
-
-    // 2. 优先通过 React 原生 setter 直达目标 section（彻底消除通过 click 模拟点击触发 general 的中间脏态）
     const targetSection = shortcutId === "settings" ? "general" : shortcutId;
-    if (typeof window.__PI_OPEN_SETTINGS__ === "function") {
-      try {
-        window.__PI_OPEN_SETTINGS__(targetSection);
-        fastCheckSettingsModal(shortcutId);
-        return;
-      } catch (e) {}
-    }
 
-    // 3. 回退机制：原生按钮触发
-    const host = locateShortcutsContainer();
-    if (host) {
-      const nativeButtons = Array.from(host.querySelectorAll("button:not(.pi-enh-shortcut-btn)"));
-
-      if (shortcutId === "models") {
-        const nativeModelBtn = nativeButtons.find((b) => (b.textContent || "").includes("模型") || (b.textContent || "").includes("Models"));
-        if (nativeModelBtn) {
-          nativeModelBtn.click();
-          fastCheckSettingsModal(shortcutId);
-          return;
-        }
-      } else if (shortcutId === "skills") {
-        const nativeSkillsBtn = nativeButtons.find((b) => (b.textContent || "").includes("技能") || (b.textContent || "").includes("Skills"));
-        if (nativeSkillsBtn) {
-          nativeSkillsBtn.click();
-          fastCheckSettingsModal(shortcutId);
-          return;
+    if (typeof window !== "undefined") {
+      // 若弹窗已打开，直接通过 Native ABI 激活目标 section
+      const abi = window.__PI_WEB_SETTINGS_NATIVE__;
+      if (abi && typeof abi.isModalOpen === "function" && abi.isModalOpen()) {
+        if (typeof abi.activateSection === "function") {
+          try {
+            if (abi.activateSection(targetSection)) return;
+          } catch (e) {}
         }
       }
 
-      const nativeSettingsBtn = nativeButtons.find((b) => {
-        const txt = (b.textContent || "").trim();
-        const ttl = b.getAttribute("title") || b.getAttribute("aria-label") || "";
-        return txt === "设置" || txt === "Settings" || ttl === "设置" || ttl === "Settings";
-      }) || nativeButtons[nativeButtons.length - 1];
-
-      if (nativeSettingsBtn) {
-        nativeSettingsBtn.click();
+      // 原有快捷打开由现 AppShell __PI_ENH_OPEN_SETTINGS__ 统一路由，不再轮询等待/扫描激活 tab
+      if (typeof window.__PI_ENH_OPEN_SETTINGS__ === "function") {
+        try {
+          window.__PI_ENH_OPEN_SETTINGS__(targetSection);
+          return;
+        } catch (e) {}
+      }
+      if (typeof window.__PI_OPEN_SETTINGS__ === "function") {
+        try {
+          window.__PI_OPEN_SETTINGS__(targetSection);
+          return;
+        } catch (e) {}
+      }
+      if (abi && typeof abi.activateSection === "function") {
+        try {
+          abi.activateSection(targetSection);
+          return;
+        } catch (e) {}
       }
     }
-
-    fastCheckSettingsModal(shortcutId);
   }
   window.__PI_ENH_TRIGGER_SHORTCUT__ = triggerShortcutNavigation;
 
-  function fastCheckSettingsModal(shortcutId) {
-    let attempts = 0;
-    const maxAttempts = 60; // 60 * 15ms = 900ms
-    const pollTimer = setInterval(() => {
-      attempts += 1;
-      const nav = document.querySelector(".settings-section-tabs");
-      if (nav) {
-        const ok = activateSettingsTab(nav, shortcutId);
-        if (ok || attempts >= maxAttempts) {
-          clearInterval(pollTimer);
-          if (ok) {
-            pendingShortcutNavigation = null;
-            window.__PI_PENDING_SHORTCUT_TARGET__ = null;
-          }
-          if (document.documentElement) {
-            document.documentElement.removeAttribute("data-pi-opening-tab");
-          }
-        }
-      } else if (attempts >= maxAttempts) {
-        clearInterval(pollTimer);
-        if (document.documentElement) {
-          document.documentElement.removeAttribute("data-pi-opening-tab");
-        }
-      }
-    }, 15);
-  }
-
-  function syncMobilePickerOption(nav, val) {
-    if (!nav) return;
-    try {
-      const header = (nav.closest && nav.closest(".settings-dialog-header")) || (nav.parentElement ? nav.parentElement : null);
-      const mobilePicker = header ? header.querySelector("select.settings-mobile-section-picker") : null;
-      if (mobilePicker && val) {
-        if (!isEnhancementPickerValue(mobilePicker.value)) {
-          mobilePicker.__piEnhNativeValue = mobilePicker.value;
-        }
-        if (!mobilePicker.querySelector(`option[value='${val}']`)) {
-          const matchedSec = ENHANCEMENT_PICKER_SECTIONS.find((sec) => sec.value === val);
-          if (matchedSec && matchedSec.isEnabled()) {
-            const opt = document.createElement("option");
-            opt.value = matchedSec.value;
-            opt.textContent = matchedSec.label;
-            mobilePicker.appendChild(opt);
-          }
-        }
-        if (mobilePicker.value !== val) {
-          mobilePicker.value = val;
-        }
-      }
-    } catch (e) {}
-  }
-
   function activateSettingsTab(nav, shortcutId) {
-    if (!nav) return false;
-    if (shortcutId === "models" && typeof window !== "undefined" && typeof window.__PI_ENH_PRELOAD_MODELS_CACHE__ === "function") {
-      void window.__PI_ENH_PRELOAD_MODELS_CACHE__();
-    }
-
-    let enhTab = nav.querySelector("[data-pi-enh-tab='plugins']");
-    let archTab = nav.querySelector("[data-pi-enh-tab='archived']");
-    let notificationTab = nav.querySelector("[data-pi-enh-tab='notifications']");
-    let usageTab = nav.querySelector("[data-pi-enh-tab='usage']");
-
-    if (shortcutId === "usage") {
-      if (!usageTab) {
-        syncSettingsDialogEnhancements();
-        usageTab = nav.querySelector("[data-pi-enh-tab='usage']");
+    const targetSection = shortcutId === "settings" ? "general" : shortcutId;
+    if (typeof window !== "undefined") {
+      if (window.__PI_WEB_SETTINGS_NATIVE__ && typeof window.__PI_WEB_SETTINGS_NATIVE__.activateSection === "function") {
+        return window.__PI_WEB_SETTINGS_NATIVE__.activateSection(targetSection);
       }
-      if (usageTab) {
-        showUsagePanel(nav, usageTab);
-        syncMobilePickerOption(nav, "usage");
+      if (typeof window.__PI_ENH_OPEN_SETTINGS__ === "function") {
+        window.__PI_ENH_OPEN_SETTINGS__(targetSection);
         return true;
       }
-      return false;
-    }
-
-    if (shortcutId === "notifications") {
-      if (!notificationTab) {
-        syncSettingsDialogEnhancements();
-        notificationTab = nav.querySelector("[data-pi-enh-tab='notifications']");
-      }
-      if (notificationTab) {
-        showNotificationPanel(nav, notificationTab);
-        syncMobilePickerOption(nav, "notifications");
-        return true;
-      }
-      return false;
-    }
-
-    if (shortcutId === "enhancements") {
-      if (!enhTab) {
-        syncSettingsDialogEnhancements();
-        enhTab = nav.querySelector("[data-pi-enh-tab='plugins']");
-      }
-      if (enhTab) {
-        showEnhancementsPanel(nav, enhTab);
-        syncMobilePickerOption(nav, "enhancements");
-        return true;
-      }
-      return false;
-    }
-
-    if (shortcutId === "archived") {
-      if (!archTab) {
-        syncSettingsDialogEnhancements();
-        archTab = nav.querySelector("[data-pi-enh-tab='archived']");
-      }
-      if (archTab) {
-        showArchivedPanel(nav, archTab);
-        syncMobilePickerOption(nav, "archived");
-        return true;
-      }
-      return false;
-    }
-
-    if (shortcutId === "tags") {
-      let tagsTab = nav.querySelector("[data-pi-enh-tab='tags']");
-      if (!tagsTab) {
-        syncSettingsDialogEnhancements();
-        tagsTab = nav.querySelector("[data-pi-enh-tab='tags']");
-      }
-      if (tagsTab) {
-        showTagsPanel(nav, tagsTab);
-        syncMobilePickerOption(nav, "tags");
-        return true;
-      }
-      return false;
-    }
-
-    hideEnhancementsPanel(nav);
-    hideNotificationPanel(nav);
-    hideArchivedPanel(nav);
-    hideUsagePanel(nav);
-    hideTagsPanel(nav);
-
-    const tabs = Array.from(nav.querySelectorAll(".settings-section-tab"));
-    let matched = null;
-    if (shortcutId === "general" || shortcutId === "settings") {
-      matched = tabs.find((t) => (t.textContent || "").includes("常规") || (t.textContent || "").includes("General")) || tabs[0];
-      syncMobilePickerOption(nav, "general");
-    } else if (shortcutId === "models") {
-      matched = tabs.find((t) => (t.textContent || "").includes("模型") || (t.textContent || "").includes("Models"));
-      syncMobilePickerOption(nav, "models");
-    } else if (shortcutId === "skills") {
-      matched = tabs.find((t) => (t.textContent || "").includes("技能") || (t.textContent || "").includes("Skills"));
-      syncMobilePickerOption(nav, "skills");
-    } else if (shortcutId === "agents") {
-      matched = tabs.find((t) => (t.textContent || "").includes("子代理") || (t.textContent || "").includes("Agents"));
-      syncMobilePickerOption(nav, "agents");
-    } else if (shortcutId === "plugins") {
-      matched = tabs.find((t) => !t.hasAttribute("data-pi-enh-tab") && ((t.textContent || "").includes("插件") || (t.textContent || "").includes("Plugins")));
-      syncMobilePickerOption(nav, "plugins");
-    } else {
-      matched = tabs.find((t) => (t.textContent || "").trim() === shortcutId);
-      syncMobilePickerOption(nav, shortcutId);
-    }
-
-    if (matched) {
-      matched.click();
-      return true;
     }
     return false;
   }
-
-  function initSettingsDialogObserver() {
-    if (settingsDialogObserver || typeof MutationObserver !== "function") return;
-    try {
-      settingsDialogObserver = new MutationObserver((mutations) => {
-        // Detachment must also be cleaned during internal DOM updates.
-        cleanupDetachedSettingsResizeSurface();
-        if (isMutatingInternally) return;
-
-        let shouldSync = false;
-        for (const m of mutations) {
-          if (m.type === "childList" && m.addedNodes && m.addedNodes.length > 0) {
-            for (const node of m.addedNodes) {
-              if (node.nodeType !== 1) continue;
-              scanNativeNotices(node);
-              if (
-                node.matches?.(".file-viewer-shell, [role='tablist'], [role='tab']") ||
-                node.querySelector?.(".file-viewer-shell, [role='tablist'], [role='tab']")
-              ) {
-                scheduleDomSync();
-              }
-              if (
-                node.matches?.(".settings-dialog-backdrop, .settings-dialog-surface, .settings-section-tabs, .directory-picker-backdrop, .directory-picker-panel, [role='dialog']") ||
-                node.querySelector?.(".settings-section-tabs, .settings-dialog-backdrop, .directory-picker-panel, [role='dialog']")
-              ) {
-                shouldSync = true;
-              }
-            }
-          }
-          if (shouldSync) break;
-        }
-        if (shouldSync) {
-          syncSettingsDialogEnhancements();
-          syncWorkspacePickerHover();
-        }
-      });
-
-      const targetRoot = document.body || document.documentElement;
-      if (targetRoot) {
-        settingsDialogObserver.observe(targetRoot, { childList: true, subtree: true });
-      }
-    } catch (e) {
-      console.warn("[Pi Web Enhancements] settingsDialogObserver warning:", e);
-    }
-  }
-
-  initSettingsDialogObserver();
-  syncSettingsDialogEnhancements();
-  activeCleanups.push(() => {
-    cleanupSettingsDialogResizers();
-    if (settingsDialogObserver) {
-      settingsDialogObserver.disconnect();
-      settingsDialogObserver = null;
-    }
-  });
-
-  let settingsResizeRaf = 0;
-  function handleCoalescedResize() {
-    if (settingsResizeRaf) return;
-    if (typeof requestAnimationFrame === "function") {
-      settingsResizeRaf = requestAnimationFrame(() => {
-        settingsResizeRaf = 0;
-        syncSettingsDialogEnhancements();
-      });
-    }
-  }
-  if (typeof window !== "undefined") {
-    addManagedListener(window, "resize", handleCoalescedResize, { passive: true });
-    activeCleanups.push(() => {
-      if (settingsResizeRaf) {
-        if (typeof cancelAnimationFrame === "function") {
-          cancelAnimationFrame(settingsResizeRaf);
-        }
-        settingsResizeRaf = 0;
-      }
-    });
-  }
-
-  addManagedListener(document, "click", (e) => {
-    const target = e.target;
-    if (!target) return;
-    const btn = target.closest && target.closest("button");
-    if (!btn) return;
-    const isTrigger = btn.classList.contains("pi-enh-shortcut-btn") ||
-      (btn.textContent || "").includes("设置") ||
-      (btn.textContent || "").includes("Settings") ||
-      (btn.getAttribute("aria-label") || "").includes("设置") ||
-      (btn.getAttribute("aria-label") || "").includes("Settings") ||
-      (btn.getAttribute("title") || "").includes("设置") ||
-      (btn.getAttribute("title") || "").includes("Settings");
-
-    if (isTrigger) {
-      if (typeof queueMicrotask === "function") {
-        queueMicrotask(syncSettingsDialogEnhancements);
-      }
-      if (typeof requestAnimationFrame === "function") {
-        requestAnimationFrame(syncSettingsDialogEnhancements);
-      }
-      addManagedTimeout(syncSettingsDialogEnhancements, 20);
-      addManagedTimeout(syncSettingsDialogEnhancements, 60);
-      addManagedTimeout(syncSettingsDialogEnhancements, 120);
-    }
-  }, { capture: true });
 
   function removeBottomShortcutsBar() {
     const host = document.querySelector("[data-pi-enh-shortcuts-host='true']") ||
@@ -3098,7 +1224,6 @@
     }
   }
 
-  window.__PI_ENH_SYNC_SETTINGS_DIALOG__ = syncSettingsDialogEnhancements;
   window.__PI_ENH_FORCE_HARD_RELOAD__ = forceHardReloadApp;
 
   function resolveCurrentPiInstanceInfo() {
@@ -3109,54 +1234,56 @@
 
     // 1. 同事端容器 (30142)：无论访问来自内网 IP、域名或手机，端口为 30142 即确定为群晖同事端容器
     if (port === "30142") {
-      const bridgeHost = (hostname && !["localhost", "127.0.0.1"].includes(hostname)) ? hostname : "127.0.0.1";
+      const bridgeHost = (hostname && !["localhost", "127.0.0.1"].includes(hostname)) ? hostname : "10.0.0.2";
       return {
         id: "synology-30142",
         type: "container",
         isSynology: true,
         displayName: "群晖同事端 Pi Web (30142)",
-        containerName: "pi-web-colleague",
+        containerName: "pi-agent-colleague",
         targetParam: "30142",
         port: 30142,
         bridgeCandidateUrls: [
           `http://${bridgeHost}:30149`,
-          "http://127.0.0.1:30149"
+          "http://10.0.0.2:30149"
         ],
         restartApi: "/restart-container",
         statusApi: "/container-status?target=30142",
         probePath: "/login",
-        manualScriptPath: "~/.pi/agent/scripts/restart-pi-web.sh --target 30142",
-        manualCommand: "bash ~/.pi/agent/scripts/restart-pi-web.sh --target 30142",
+        manualScriptPath: "/volume1/docker/pi-agent-colleague/restart-container-30142.sh",
+        manualCommand: 'ssh root@10.0.0.2 -p 2222 "/volume1/docker/pi-agent-colleague/restart-container-30142.sh"',
       };
     }
 
-    // 2. Windows 本地端：在 Windows 系统下的 localhost / 127.0.0.1
+    // 2. Windows 本地端：主机名为 10.0.0.89，或在 Windows 系统下的 localhost / 127.0.0.1
+    const isWindowsHost = hostname === "10.0.0.89";
     const isWindowsLocal = (hostname === "localhost" || hostname === "127.0.0.1") && platform.includes("win");
-    if (isWindowsLocal) {
-      const parsedPort = Number(port) || 30141;
+    if (isWindowsHost || isWindowsLocal) {
+      const host = isWindowsHost ? "10.0.0.89" : "127.0.0.1";
       return {
-        id: `windows-${parsedPort}`,
+        id: "windows-30141",
         type: "process",
         isSynology: false,
-        displayName: `Windows 本地 Pi Web (${parsedPort})`,
+        displayName: "Windows 本地 Pi Web (30141)",
         containerName: null,
         targetParam: "windows",
-        port: parsedPort,
+        port: 30141,
         bridgeCandidateUrls: [
-          `http://${hostname || "127.0.0.1"}:30149`,
+          `http://${host}:30149`,
           "http://127.0.0.1:30149",
           "http://localhost:30149",
+          "http://10.0.0.89:30149"
         ],
         restartApi: "/restart-pi-web",
         statusApi: "/pi-web-status",
         probePath: "/login",
-        manualScriptPath: "~\\.pi\\agent\\scripts\\restart-pi-web-v1.0.js",
-        manualCommand: "node ~\\.pi\\agent\\scripts\\restart-pi-web-v1.0.js",
+        manualScriptPath: "C:\\Users\\KOXIR\\.pi\\agent\\scripts\\restart-pi-web-v1.0.js",
+        manualCommand: "node C:\\Users\\KOXIR\\.pi\\agent\\scripts\\restart-pi-web-v1.0.js",
       };
     }
 
-    // 3. MacBook 本地端：主机名为 127.0.0.1，或在 Mac 下的 localhost / 127.0.0.1
-    if ((hostname === "localhost" || hostname === "127.0.0.1") && platform.includes("mac")) {
+    // 3. MacBook 本地端：主机名为 10.7.7.2，或在 Mac 下的 localhost / 127.0.0.1
+    if (hostname === "10.7.7.2" || ((hostname === "localhost" || hostname === "127.0.0.1") && platform.includes("mac"))) {
       return {
         id: "mac-30141",
         type: "process",
@@ -3168,35 +1295,35 @@
         bridgeCandidateUrls: [
           "http://127.0.0.1:30149",
           "http://localhost:30149",
-          "http://127.0.0.1:30149"
+          "http://10.7.7.2:30149"
         ],
         restartApi: "/restart-pi-web",
         statusApi: "/pi-web-status",
         probePath: "/login",
-        manualScriptPath: "~/.pi/agent/scripts/restart-pi-web.sh",
-        manualCommand: "bash ~/.pi/agent/scripts/restart-pi-web.sh",
+        manualScriptPath: "/Users/palhan/.pi/agent/scripts/restart-pi-web.sh",
+        manualCommand: "bash /Users/palhan/.pi/agent/scripts/restart-pi-web.sh",
       };
     }
 
-    // 4. 群晖主开发端容器 (30141 / pi-web)：默认全覆盖（127.0.0.1、手机/平板客户端访问、OpenVPN 127.0.0.1、外网域名）
-    const bridgeHost = (hostname && !["localhost", "127.0.0.1"].includes(hostname)) ? hostname : "127.0.0.1";
+    // 4. 群晖主开发端容器 (30141 / pi-agent)：默认全覆盖（10.0.0.2、手机/平板客户端访问、OpenVPN 192.168.255.6、外网域名）
+    const bridgeHost = (hostname && !["localhost", "127.0.0.1"].includes(hostname)) ? hostname : "10.0.0.2";
     return {
       id: "synology-30141",
       type: "container",
       isSynology: true,
       displayName: "群晖 NAS Pi Web (30141)",
-      containerName: "pi-web",
+      containerName: "pi-agent",
       targetParam: "30141",
       port: 30141,
       bridgeCandidateUrls: [
         `http://${bridgeHost}:30149`,
-        "http://127.0.0.1:30149"
+        "http://10.0.0.2:30149"
       ],
       restartApi: "/restart-container",
       statusApi: "/container-status?target=30141",
       probePath: "/login",
-      manualScriptPath: "~/.pi/agent/scripts/restart-pi-web.sh --target 30141",
-      manualCommand: "bash ~/.pi/agent/scripts/restart-pi-web.sh --target 30141",
+      manualScriptPath: "/volume1/docker/pi-agent/restart-container-30141.sh",
+      manualCommand: 'ssh root@10.0.0.2 -p 2222 "/volume1/docker/pi-agent/restart-container-30141.sh"',
     };
   }
 
@@ -3525,7 +1652,7 @@
             const spinner = modal.querySelector(".pi-enh-probe-spinner");
             if (spinner) spinner.style.borderTopColor = "var(--pi-enh-probe-success-color, #15803d)";
             const currentHost = String(window.location.hostname || "").toLowerCase();
-            const alreadyOnWindowsPiWeb = ["127.0.0.1", "localhost", "127.0.0.1"].includes(currentHost);
+            const alreadyOnWindowsPiWeb = ["127.0.0.1", "localhost", "10.0.0.89"].includes(currentHost);
             setTimeout(() => {
               if (alreadyOnWindowsPiWeb) window.location.reload();
               else window.location.assign("http://127.0.0.1:30141/");
@@ -3566,147 +1693,6 @@
 
   window.__PI_ENH_MANUAL_RESTART_PI_WEB__ = triggerManualRestartPiWebModal;
 
-  function hideEnhancementsPanel(nav) {
-    const enhTab = nav?.querySelector?.("[data-pi-enh-tab='plugins']");
-    if (enhTab) enhTab.removeAttribute("aria-current");
-
-    const dialog = (nav?.closest && (nav.closest(".settings-dialog-backdrop") || nav.closest("[role='dialog']"))) || (nav?.parentElement && nav.parentElement.parentElement) || document.body;
-    const panel = dialog.querySelector(".pi-enh-plugins-panel");
-    if (panel) panel.style.display = "none";
-
-    const archivedTab = nav?.querySelector?.("[data-pi-enh-tab='archived']");
-    const notificationTab = nav?.querySelector?.("[data-pi-enh-tab='notifications']");
-    const usageTab = nav?.querySelector?.("[data-pi-enh-tab='usage']");
-    const isArchivedActive = archivedTab && archivedTab.getAttribute("aria-current") === "page";
-    const isNotificationActive = notificationTab && notificationTab.getAttribute("aria-current") === "page";
-    const isUsageActive = usageTab && usageTab.getAttribute("aria-current") === "page";
-    const tagsTab = nav?.querySelector?.("[data-pi-enh-tab='tags']");
-    const isTagsActive = tagsTab && tagsTab.getAttribute("aria-current") === "page";
-    if (!isArchivedActive && !isNotificationActive && !isUsageActive && !isTagsActive) {
-      const originalMains = dialog.querySelectorAll("main.settings-dialog-main:not(.pi-enh-plugins-panel):not(.pi-enh-archived-panel):not(.pi-enh-notifications-panel):not(.pi-enh-usage-panel):not(.pi-enh-tags-panel)");
-      for (const m of originalMains) {
-        m.style.display = "";
-      }
-    }
-  }
-
-  function hideArchivedPanel(nav) {
-    const archivedTab = nav?.querySelector?.("[data-pi-enh-tab='archived']");
-    if (archivedTab) archivedTab.removeAttribute("aria-current");
-
-    const dialog = (nav?.closest && (nav.closest(".settings-dialog-backdrop") || nav.closest("[role='dialog']"))) || (nav?.parentElement && nav.parentElement.parentElement) || document.body;
-    const panel = dialog.querySelector(".pi-enh-archived-panel");
-    if (panel) panel.style.display = "none";
-
-    const enhTab = nav?.querySelector?.("[data-pi-enh-tab='plugins']");
-    const notificationTab = nav?.querySelector?.("[data-pi-enh-tab='notifications']");
-    const usageTab = nav?.querySelector?.("[data-pi-enh-tab='usage']");
-    const isEnhActive = enhTab && enhTab.getAttribute("aria-current") === "page";
-    const isNotificationActive = notificationTab && notificationTab.getAttribute("aria-current") === "page";
-    const isUsageActive = usageTab && usageTab.getAttribute("aria-current") === "page";
-    const tagsTab = nav?.querySelector?.("[data-pi-enh-tab='tags']");
-    const isTagsActive = tagsTab && tagsTab.getAttribute("aria-current") === "page";
-    if (!isEnhActive && !isNotificationActive && !isUsageActive && !isTagsActive) {
-      const originalMains = dialog.querySelectorAll("main.settings-dialog-main:not(.pi-enh-plugins-panel):not(.pi-enh-archived-panel):not(.pi-enh-notifications-panel):not(.pi-enh-usage-panel):not(.pi-enh-tags-panel)");
-      for (const m of originalMains) {
-        m.style.display = "";
-      }
-    }
-  }
-
-  function hideNotificationPanel(nav) {
-    const notificationTab = nav?.querySelector?.("[data-pi-enh-tab='notifications']");
-    if (notificationTab) notificationTab.removeAttribute("aria-current");
-
-    const dialog = (nav?.closest && (nav.closest(".settings-dialog-backdrop") || nav.closest("[role='dialog']"))) || (nav?.parentElement && nav.parentElement.parentElement) || document.body;
-    const panel = dialog.querySelector(".pi-enh-notifications-panel");
-    if (panel) panel.style.display = "none";
-
-    const enhTab = nav?.querySelector?.("[data-pi-enh-tab='plugins']");
-    const archivedTab = nav?.querySelector?.("[data-pi-enh-tab='archived']");
-    const usageTab = nav?.querySelector?.("[data-pi-enh-tab='usage']");
-    const isEnhActive = enhTab && enhTab.getAttribute("aria-current") === "page";
-    const isArchivedActive = archivedTab && archivedTab.getAttribute("aria-current") === "page";
-    const isUsageActive = usageTab && usageTab.getAttribute("aria-current") === "page";
-    const tagsTab = nav?.querySelector?.("[data-pi-enh-tab='tags']");
-    const isTagsActive = tagsTab && tagsTab.getAttribute("aria-current") === "page";
-    if (!isEnhActive && !isArchivedActive && !isUsageActive && !isTagsActive) {
-      const originalMains = dialog.querySelectorAll("main.settings-dialog-main:not(.pi-enh-plugins-panel):not(.pi-enh-archived-panel):not(.pi-enh-notifications-panel):not(.pi-enh-usage-panel):not(.pi-enh-tags-panel)");
-      for (const m of originalMains) m.style.display = "";
-    }
-  }
-
-  function showNotificationPanel(nav, notificationTab) {
-    for (const t of nav.querySelectorAll(".settings-section-tab")) t.removeAttribute("aria-current");
-    notificationTab.setAttribute("aria-current", "page");
-
-    const dialog = (nav.closest && (nav.closest(".settings-dialog-backdrop") || nav.closest("[role='dialog']"))) || (nav.parentElement && nav.parentElement.parentElement) || document.body;
-    const allMains = dialog.querySelectorAll("main.settings-dialog-main");
-    for (const m of allMains) m.style.display = "none";
-
-    let panel = dialog.querySelector(".pi-enh-notifications-panel");
-    if (!panel) {
-      panel = document.createElement("main");
-      panel.className = "settings-dialog-main pi-enh-notifications-panel";
-      const parent = (allMains[0] && allMains[0].parentElement) || dialog;
-      parent.appendChild(panel);
-    }
-    panel.style.display = "";
-    syncMobilePickerOption(nav, "notifications");
-    renderNotificationPanel(panel, nav);
-  }
-
-  function showEnhancementsPanel(nav, enhTab) {
-    for (const t of nav.querySelectorAll(".settings-section-tab")) {
-      t.removeAttribute("aria-current");
-    }
-    enhTab.setAttribute("aria-current", "page");
-
-    const dialog = (nav.closest && (nav.closest(".settings-dialog-backdrop") || nav.closest("[role='dialog']"))) || (nav.parentElement && nav.parentElement.parentElement) || document.body;
-    const allMains = dialog.querySelectorAll("main.settings-dialog-main");
-    for (const m of allMains) {
-      m.style.display = "none";
-    }
-
-    let panel = dialog.querySelector(".pi-enh-plugins-panel");
-    if (!panel) {
-      panel = document.createElement("main");
-      panel.className = "settings-dialog-main pi-enh-plugins-panel";
-      const parent = (allMains[0] && allMains[0].parentElement) || dialog;
-      parent.appendChild(panel);
-    }
-    panel.style.display = "";
-    syncMobilePickerOption(nav, "enhancements");
-    renderEnhancementsPanel(panel, nav);
-  }
-
-  function showArchivedPanel(nav, archivedTab) {
-    for (const t of nav.querySelectorAll(".settings-section-tab")) {
-      t.removeAttribute("aria-current");
-    }
-    archivedTab.setAttribute("aria-current", "page");
-
-    const dialog = (nav.closest && (nav.closest(".settings-dialog-backdrop") || nav.closest("[role='dialog']"))) || (nav.parentElement && nav.parentElement.parentElement) || document.body;
-    const allMains = dialog.querySelectorAll("main.settings-dialog-main");
-    for (const m of allMains) {
-      m.style.display = "none";
-    }
-
-    let panel = dialog.querySelector(".pi-enh-archived-panel");
-    if (!panel) {
-      panel = document.createElement("main");
-      panel.className = "settings-dialog-main pi-enh-archived-panel";
-      panel.setAttribute("data-archived-session-list", "true");
-      const parent = (allMains[0] && allMains[0].parentElement) || dialog;
-      parent.appendChild(panel);
-    }
-    panel.style.display = "";
-    syncMobilePickerOption(nav, "archived");
-    renderArchivedPanel(panel, nav);
-    if (typeof syncManifestArchivedEntries === "function") {
-      void syncManifestArchivedEntries(false);
-    }
-  }
 
 // ==========================================
 // 全局用量与成本大盘 (Usage & Cost Dashboard)
@@ -3752,71 +1738,20 @@ function renderUsagePanel(panel, nav) {
       </div>`;
     }
   } else {
-    // 若尚未就绪，展示 Loading 占位，并延迟 150ms 尝试重新渲染一次
-    panel.innerHTML = `<div class="pi-enh-usage-panel-content" style="padding:60px 0;text-align:center;color:#a1a1aa;">
+    panel.innerHTML = `<div class="pi-enh-usage-panel-content" style="padding:60px 0;text-align:center;color:var(--text-dim);">
       <div class="pi-enh-history-spinner" style="width:24px;height:24px;border-width:2px;margin:0 auto 12px;"></div>
-      <div style="font-size:14px;color:#d4d4d8;">正在载入 Usage 大盘组件...</div>
+      <div>正在载入用量统计组件...</div>
     </div>`;
-    setTimeout(() => {
-      if (panel.isConnected && typeof window !== "undefined" && window.PiUsagePanel && typeof window.PiUsagePanel.render === "function") {
+    const loadingView = panel.firstElementChild;
+    window.__PI_ENH_LOAD_OPTIONAL__("usage-panel").then(() => {
+      if (panel.isConnected && !panel.closest("[hidden]") && panel.firstElementChild === loadingView && isPluginEnabled("usage-cost-dashboard")) {
         renderUsagePanel(panel, nav);
       }
-    }, 150);
-  }
-}
-
-function showUsagePanel(nav, usageTab) {
-  if (!isPluginEnabled("usage-cost-dashboard")) return;
-
-  for (const t of nav.querySelectorAll(".settings-section-tab")) t.removeAttribute("aria-current");
-  usageTab.setAttribute("aria-current", "page");
-
-  const dialog = (nav.closest && (nav.closest(".settings-dialog-backdrop") || nav.closest("[role='dialog']"))) || (nav.parentElement && nav.parentElement.parentElement) || document.body;
-  const allMains = dialog.querySelectorAll("main.settings-dialog-main");
-  for (const m of allMains) m.style.display = "none";
-
-  hideEnhancementsPanel(nav);
-  hideArchivedPanel(nav);
-  hideNotificationPanel(nav);
-
-  let panel = dialog.querySelector(".pi-enh-usage-panel");
-  if (!panel) {
-    panel = document.createElement("main");
-    panel.className = "settings-dialog-main pi-enh-usage-panel";
-    panel.setAttribute("tabindex", "-1");
-    const parent = (allMains[0] && allMains[0].parentElement) || dialog;
-    parent.appendChild(panel);
-  }
-  panel.style.display = "block";
-  syncMobilePickerOption(nav, "usage");
-  renderUsagePanel(panel, nav);
-}
-
-function hideUsagePanel(nav) {
-  const usageTab = nav?.querySelector?.("[data-pi-enh-tab='usage']");
-  if (usageTab) usageTab.removeAttribute("aria-current");
-
-  const dialog = (nav?.closest && (nav.closest(".settings-dialog-backdrop") || nav.closest("[role='dialog']"))) || (nav?.parentElement && nav.parentElement.parentElement) || document.body;
-  const panel = dialog.querySelector(".pi-enh-usage-panel");
-  if (panel) {
-    if (!isPluginEnabled("usage-cost-dashboard")) {
-      panel.remove();
-    } else {
-      panel.style.display = "none";
-    }
-  }
-
-  const enhTab = nav?.querySelector?.("[data-pi-enh-tab='plugins']");
-  const archivedTab = nav?.querySelector?.("[data-pi-enh-tab='archived']");
-  const notificationTab = nav?.querySelector?.("[data-pi-enh-tab='notifications']");
-  const isEnhActive = enhTab && enhTab.getAttribute("aria-current") === "page";
-  const isArchivedActive = archivedTab && archivedTab.getAttribute("aria-current") === "page";
-  const isNotificationActive = notificationTab && notificationTab.getAttribute("aria-current") === "page";
-  const tagsTab = nav?.querySelector?.("[data-pi-enh-tab='tags']");
-  const isTagsActive = tagsTab && tagsTab.getAttribute("aria-current") === "page";
-  if (!isEnhActive && !isArchivedActive && !isNotificationActive && !isTagsActive) {
-    const originalMains = dialog.querySelectorAll("main.settings-dialog-main:not(.pi-enh-plugins-panel):not(.pi-enh-archived-panel):not(.pi-enh-notifications-panel):not(.pi-enh-usage-panel):not(.pi-enh-tags-panel)");
-    for (const m of originalMains) m.style.display = "";
+    }).catch(() => {
+      if (!panel.isConnected || panel.closest("[hidden]") || panel.firstElementChild !== loadingView) return;
+      panel.innerHTML = '<div role="alert">用量统计组件加载失败，请重试。 <button type="button">重试</button></div>';
+      panel.querySelector("button")?.addEventListener("click", () => renderUsagePanel(panel, nav), { once: true });
+    });
   }
 }
 
@@ -3841,6 +1776,10 @@ window.__PI_ENH_RENDER_USAGE_PANEL__ = renderUsagePanel;
 
 
   function renderNotificationPanel(panel, nav) {
+    if (!panel) return;
+    if (!panel.classList.contains("pi-enh-notifications-panel")) panel.classList.add("pi-enh-notifications-panel");
+    if (!panel) return;
+    if (!panel.classList.contains("pi-enh-notifications-panel")) panel.classList.add("pi-enh-notifications-panel");
     const settings = readNotificationSettings();
     const enabledCount = NOTIFICATION_CHANNELS.filter((item) => settings[item.id] !== false).length;
     const grouped = [...new Set(NOTIFICATION_CHANNELS.map((item) => item.group))];
@@ -4084,13 +2023,13 @@ window.__PI_ENH_RENDER_USAGE_PANEL__ = renderUsagePanel;
   }
 
   function renderArchivedPanel(panel, nav) {
-    syncMobilePickerOption(nav, "archived");
+    if (!panel) return;
+    if (!panel.classList.contains("pi-enh-archived-panel")) panel.classList.add("pi-enh-archived-panel");
     const allEntries = readStoredArchivedEntries();
     const needsTitleSync = allEntries.some((e) => !e.name || e.name === e.id || !knownSessionTitles.has(e.id));
     if (needsTitleSync) {
       addManagedTimeout(syncArchivedTitles, 0);
     }
-    addManagedTimeout(syncManifestArchivedEntries, 0);
 
     // 清除已不在列表中的失效勾选项
     const allEntryIds = new Set(allEntries.map((e) => e.id));
@@ -4364,14 +2303,21 @@ window.__PI_ENH_RENDER_USAGE_PANEL__ = renderUsagePanel;
       batchRestoreBtn.addEventListener("click", () => {
         const idsToRestore = [...selectedArchivedIds];
         if (idsToRestore.length === 0) return;
-        let restoredCount = 0;
-        for (const id of idsToRestore) {
-          if (restoreArchivedSession(id)) {
-            restoredCount++;
-            selectedArchivedIds.delete(id);
-          }
+        const restoredCount = (typeof restoreArchivedSessions === "function")
+          ? restoreArchivedSessions(idsToRestore)
+          : (() => {
+              let count = 0;
+              for (const id of idsToRestore) {
+                if (restoreArchivedSession(id)) count++;
+              }
+              return count;
+            })();
+        selectedArchivedIds.clear();
+        lastCheckedArchivedIndex = null;
+        requestSessionListRefresh(false, true);
+        if (typeof window.__PI_ENH_RERENDER_SESSIONS__ === "function") {
+          try { window.__PI_ENH_RERENDER_SESSIONS__(); } catch (e) {}
         }
-        requestSessionListRefresh();
         renderArchivedPanel(panel, nav);
         showToast(`已批量还原 ${restoredCount} 个会话`, sessionArchiveIcon);
       });
@@ -4495,7 +2441,10 @@ window.__PI_ENH_RENDER_USAGE_PANEL__ = renderUsagePanel;
         let sessionId = "";
         try { sessionId = decodeURIComponent(btn.getAttribute("data-session-id") || ""); } catch (e) {}
         if (!restoreArchivedSession(sessionId)) return;
-        requestSessionListRefresh();
+        requestSessionListRefresh(false, true);
+        if (typeof window.__PI_ENH_RERENDER_SESSIONS__ === "function") {
+          try { window.__PI_ENH_RERENDER_SESSIONS__(); } catch (e) {}
+        }
         renderArchivedPanel(panel, nav);
         showToast("已还原会话", sessionArchiveIcon);
       });
@@ -4593,12 +2542,25 @@ window.__PI_ENH_RENDER_USAGE_PANEL__ = renderUsagePanel;
 
     panel.querySelector('[data-action="restore-all-archived"]')?.addEventListener("click", () => {
       const all = readStoredArchivedEntries();
-      for (const item of all) {
-        restoreArchivedSession(item.id);
+      if (all.length === 0) return;
+      const allIds = all.map((item) => item.id).filter(Boolean);
+      const restoredCount = (typeof restoreArchivedSessions === "function")
+        ? restoreArchivedSessions(allIds)
+        : (() => {
+            let count = 0;
+            for (const item of all) {
+              if (restoreArchivedSession(item.id)) count++;
+            }
+            return count;
+          })();
+      selectedArchivedIds.clear();
+      lastCheckedArchivedIndex = null;
+      requestSessionListRefresh(false, true);
+      if (typeof window.__PI_ENH_RERENDER_SESSIONS__ === "function") {
+        try { window.__PI_ENH_RERENDER_SESSIONS__(); } catch (e) {}
       }
-      requestSessionListRefresh();
       renderArchivedPanel(panel, nav);
-      showToast(`已全部还原 ${all.length} 个会话`, sessionArchiveIcon);
+      showToast(`已全部还原 ${restoredCount} 个会话`, sessionArchiveIcon);
     });
 
     for (const titleEl of panel.querySelectorAll(".pi-enh-archived-title")) {
@@ -4811,6 +2773,157 @@ window.__PI_ENH_RENDER_USAGE_PANEL__ = renderUsagePanel;
       </div>`;
   }
 
+  const SUBAGENT_DISPATCH_CLIENT_ID = "subagent-dispatch-control";
+  const SUBAGENT_DISPATCH_PREF_KEY = "pi-enh-plugin-subagent-dispatch-enabled";
+  const SUBAGENT_DISPATCH_ORIGIN_SESSION_KEY = "pi-enh-plugin-subagent-dispatch-origin-session";
+  const SUBAGENT_DISPATCH_RESUME_TOKEN_KEY = "pi-enh-plugin-subagent-dispatch-resume-token";
+  const SUBAGENT_DISPATCH_MODULE_ID = "subagent-dispatch";
+
+  let subagentDispatchCommitPromise = Promise.resolve();
+  let subagentDispatchGeneration = 0;
+
+  function getSubagentDispatchOriginSessionId() {
+    try {
+      let raw = "";
+      if (typeof getCurrentSessionId === "function") {
+        raw = getCurrentSessionId() || "";
+      }
+      if (!raw && typeof window !== "undefined" && window.location) {
+        raw = new URLSearchParams(window.location.search).get("session") || "";
+      }
+      const match = String(raw).trim().match(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i);
+      return match ? match[0] : "";
+    } catch (e) {
+      return "";
+    }
+  }
+
+  async function syncSubagentDispatchRemoteState() {
+    const currentGen = ++subagentDispatchGeneration;
+    try {
+      const isNative = window.__PI_ENH_NATIVE_STATE_API__ === true;
+        const url = isNative
+          ? `${getDurableStateBaseUrl()}/enhancement-state`
+          : `${getDurableStateBaseUrl()}/enhancement-state?instance=${getDurableStateInstanceParam()}`;
+      const data = await fetchSubagentJson(url, { timeoutMs: 20000 });
+      if (currentGen !== subagentDispatchGeneration) return false;
+      const clients = data?.state?.enhancementSettingsByClient;
+      if (!data || data.ok !== true || !Number.isInteger(data.revision) || data.revision < 0 || !clients || typeof clients !== "object" || Array.isArray(clients)) {
+        return false;
+      }
+      const remoteSettings = clients[SUBAGENT_DISPATCH_CLIENT_ID];
+      let remoteEnabled = true;
+      if (remoteSettings !== undefined) {
+        if (!remoteSettings || typeof remoteSettings !== "object" || Array.isArray(remoteSettings)) return false;
+        if (SUBAGENT_DISPATCH_PREF_KEY in remoteSettings) {
+          const rawVal = remoteSettings[SUBAGENT_DISPATCH_PREF_KEY];
+          if (rawVal !== "true" && rawVal !== "false") return false;
+          remoteEnabled = rawVal === "true";
+        }
+      } else {
+        // 合法 schema 且缺 flag：mirror 默认 true，解决 localfalse/servertrue 矛盾
+        remoteEnabled = true;
+      }
+      if (currentGen !== subagentDispatchGeneration) return false;
+      if (isModuleEnabled(SUBAGENT_DISPATCH_MODULE_ID) !== remoteEnabled) {
+        setModuleEnabled(SUBAGENT_DISPATCH_MODULE_ID, remoteEnabled);
+      }
+      return true;
+    } catch (e) {
+      // 离线或异常保留本地，明确返回 false
+      return false;
+    }
+  }
+
+  async function commitSubagentDispatchRemoteState(enabled) {
+    const isCurrentlyEnabled = isModuleEnabled(SUBAGENT_DISPATCH_MODULE_ID);
+    const opId = generateDecorationOpUuid();
+    const timestamp = Date.now();
+    const isNative = window.__PI_ENH_NATIVE_STATE_API__ === true;
+        const url = isNative
+          ? `${getDurableStateBaseUrl()}/enhancement-state/operations`
+          : `${getDurableStateBaseUrl()}/enhancement-state/operations?instance=${getDurableStateInstanceParam()}`;
+    const originSession = getSubagentDispatchOriginSessionId();
+
+    const values = {
+      [SUBAGENT_DISPATCH_PREF_KEY]: String(enabled),
+      [SUBAGENT_DISPATCH_ORIGIN_SESSION_KEY]: originSession,
+    };
+
+    // 协议规范：enabled && 当前权威/已确认本地module为false才设本次opId，关闭时空串，已 true 普通提交不得制造 token 重放
+    const shouldSendResumeToken = !enabled || (enabled && !isCurrentlyEnabled);
+    if (shouldSendResumeToken) {
+      values[SUBAGENT_DISPATCH_RESUME_TOKEN_KEY] = !enabled ? "" : opId;
+    }
+
+    const payload = {
+      operations: [
+        {
+          opId,
+          type: "preferences_snapshot",
+          timestamp,
+          clientId: SUBAGENT_DISPATCH_CLIENT_ID,
+          values,
+        },
+      ],
+    };
+
+    const result = await fetchSubagentJson(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+      timeoutMs: 20000,
+    });
+
+    if (!result || result.ok !== true) {
+      throw new Error(result?.error || "服务端写入状态失败");
+    }
+
+    const revision = Number(result?.revision);
+    const ackOps = Array.isArray(result?.acknowledgedOpIds) ? result.acknowledgedOpIds : [];
+    const clientPrefs = result?.state?.enhancementSettingsByClient?.[SUBAGENT_DISPATCH_CLIENT_ID];
+
+    if (
+      !Number.isInteger(revision) ||
+      revision <= 0 ||
+      !ackOps.includes(opId) ||
+      !clientPrefs ||
+      typeof clientPrefs !== "object" ||
+      Array.isArray(clientPrefs)
+    ) {
+      throw new Error("服务端未确认写入或落盘状态不完整");
+    }
+
+    // 严谨 ACK：验证同一次 preferences_snapshot 中发送的各字段精确值及 opId/revision 后才本地镜像；
+    // 缺 token 的普通提交保留服务端旧 token
+    for (const [key, expectedVal] of Object.entries(values)) {
+      if (clientPrefs[key] !== expectedVal) {
+        throw new Error("服务端未确认写入或落盘状态不完整");
+      }
+    }
+
+    subagentDispatchGeneration++;
+    setModuleEnabled(SUBAGENT_DISPATCH_MODULE_ID, enabled);
+    return true;
+  }
+
+  function enqueueSubagentDispatchCommit(enabled) {
+    const task = () => commitSubagentDispatchRemoteState(enabled);
+    subagentDispatchCommitPromise = subagentDispatchCommitPromise.then(task, task);
+    return subagentDispatchCommitPromise;
+  }
+
+  if (typeof window !== "undefined") {
+    window.__PI_ENH_SYNC_SUBAGENT_DISPATCH_REMOTE_STATE__ = syncSubagentDispatchRemoteState;
+    window.__PI_ENH_COMMIT_SUBAGENT_DISPATCH_REMOTE_STATE__ = commitSubagentDispatchRemoteState;
+    window.__PI_ENH_GET_DURABLE_STATE_BASE_URL__ = getDurableStateBaseUrl;
+    window.__PI_ENH_GET_DURABLE_STATE_INSTANCE_PARAM__ = getDurableStateInstanceParam;
+    window.__PI_ENH_SUBAGENT_DISPATCH_CLIENT_ID__ = SUBAGENT_DISPATCH_CLIENT_ID;
+    window.__PI_ENH_SUBAGENT_DISPATCH_PREF_KEY__ = SUBAGENT_DISPATCH_PREF_KEY;
+    window.__PI_ENH_SUBAGENT_DISPATCH_ORIGIN_SESSION_KEY__ = SUBAGENT_DISPATCH_ORIGIN_SESSION_KEY;
+    window.__PI_ENH_SUBAGENT_DISPATCH_RESUME_TOKEN_KEY__ = SUBAGENT_DISPATCH_RESUME_TOKEN_KEY;
+  }
+
   const SUBAGENT_MODEL_UNAVAILABLE_VALUE = "__subagent_model_unavailable__";
   const SUBAGENT_THINKING_LEVELS = [
     { value: "", label: "遵循默认 (inherit)" },
@@ -4874,16 +2987,35 @@ window.__PI_ENH_RENDER_USAGE_PANEL__ = renderUsagePanel;
     return "";
   }
 
+  const SUBAGENT_SETTINGS_TIMEOUT_MS = 20000;
+  const SUBAGENT_PROFILES_TIMEOUT_MS = 20000;
+  const SUBAGENT_MODELS_TIMEOUT_MS = 30000;
+
   async function fetchSubagentJson(url, options = {}) {
-    const { timeoutMs = 8000, ...requestOptions } = options || {};
+    const { timeoutMs = 20000, ...requestOptions } = options || {};
     let timeoutController = null;
     let timeoutId = null;
-    let signal = requestOptions.signal;
-    if (!signal && typeof AbortController === "function") {
+    const parentSignal = requestOptions.signal;
+    let signal = parentSignal;
+    let abortHandler = null;
+
+    if (typeof AbortController === "function") {
       timeoutController = new AbortController();
+      if (parentSignal) {
+        if (parentSignal.aborted) {
+          try { timeoutController.abort(parentSignal.reason); } catch (_) {}
+        } else {
+          abortHandler = () => {
+            try { timeoutController.abort(parentSignal.reason); } catch (_) {}
+          };
+          parentSignal.addEventListener("abort", abortHandler);
+        }
+      }
       signal = timeoutController.signal;
       if (Number(timeoutMs) > 0) {
-        timeoutId = setTimeout(() => timeoutController.abort(), Number(timeoutMs));
+        timeoutId = setTimeout(() => {
+          try { timeoutController.abort(new Error(`Timeout after ${timeoutMs}ms`)); } catch (_) {}
+        }, Number(timeoutMs));
       }
     }
     try {
@@ -4900,6 +3032,9 @@ window.__PI_ENH_RENDER_USAGE_PANEL__ = renderUsagePanel;
       return data && typeof data === "object" ? data : {};
     } finally {
       if (timeoutId !== null) clearTimeout(timeoutId);
+      if (parentSignal && abortHandler) {
+        try { parentSignal.removeEventListener("abort", abortHandler); } catch (_) {}
+      }
     }
   }
 
@@ -4911,16 +3046,27 @@ window.__PI_ENH_RENDER_USAGE_PANEL__ = renderUsagePanel;
     const moduleId = row?.getAttribute("data-module-row") || "";
     const moduleDisabled = moduleId ? !isModuleEnabled(moduleId) : false;
     const featureDisabled = featureId ? !isPluginEnabled(featureId) : false;
-    const busy = Boolean(state?.loading);
-    const disabled = moduleDisabled || featureDisabled || busy;
+    const commonDisabled = moduleDisabled || featureDisabled;
 
+    // 禁用/特性禁用不能让重新读取按钮永久不可用！
     const reload = control.querySelector("[data-subagent-model-reload]");
-    if (reload) reload.disabled = disabled;
+    if (reload) {
+      reload.disabled = Boolean(state?.loading) || Boolean(state?.savingProfiles && state.savingProfiles.size > 0);
+    }
 
-    for (const select of control.querySelectorAll("select[data-subagent-profile-model], select[data-subagent-profile-thinking]")) {
-      const prof = select.getAttribute("data-subagent-profile-model") || select.getAttribute("data-subagent-profile-thinking") || "";
-      const isSavingThis = state?.savingProfiles?.has(prof.toLowerCase());
-      select.disabled = disabled || isSavingThis || !state?.settingsLoaded;
+    // 只在 models 慢时 thinking 不必全禁用，select 按各自依赖 loaded/settingsLoaded/saving 状态
+    for (const select of control.querySelectorAll("select[data-subagent-profile-model]")) {
+      const prof = (select.getAttribute("data-subagent-profile-model") || "").toLowerCase();
+      const isSavingThis = state?.savingProfiles?.has(prof);
+      const canEditModel = Boolean(state?.settingsLoaded && state?.modelsLoaded && !state?.modelsError);
+      select.disabled = commonDisabled || isSavingThis || !canEditModel;
+    }
+
+    for (const select of control.querySelectorAll("select[data-subagent-profile-thinking]")) {
+      const prof = (select.getAttribute("data-subagent-profile-thinking") || "").toLowerCase();
+      const isSavingThis = state?.savingProfiles?.has(prof);
+      const canEditThinking = Boolean(state?.settingsLoaded);
+      select.disabled = commonDisabled || isSavingThis || !canEditThinking;
     }
   }
 
@@ -4935,28 +3081,56 @@ window.__PI_ENH_RENDER_USAGE_PANEL__ = renderUsagePanel;
     }
 
     if (!matrixBody) return;
-    while (matrixBody.firstChild) matrixBody.removeChild(matrixBody.firstChild);
 
-    if (state.loading) {
-      matrixBody.innerHTML = `<div style="padding:14px;color:var(--text-muted);font-size:12px;text-align:center;">正在读取子 Agent 列表、模型配置与服务端状态…</div>`;
+    const profiles = Array.isArray(state.profiles) ? state.profiles : [];
+    const hasProfiles = profiles.length > 0;
+
+    // 初次读取且尚无任何 profile 时展示 loading
+    if (state.loading && !hasProfiles && !state.profilesLoaded) {
+      matrixBody.innerHTML = `<div class="pi-enh-subagent-message">正在读取子 Agent 列表、模型配置与服务端状态…</div>`;
       if (statusNode) statusNode.textContent = "正在读取子 Agent 列表与可用模型…";
       syncSubagentModelControlDisabled(control);
       return;
     }
 
-    if (!state.settingsLoaded || state.settingsError) {
-      matrixBody.innerHTML = `<div style="padding:14px;color:#ef4444;font-size:12px;text-align:center;">无法读取服务端子任务设置；请检查连接后点击“重新读取”。</div>`;
+    // 独立区分错误：profile 失败且没有已有 profile
+    if (state.profilesError && !hasProfiles) {
+      matrixBody.innerHTML = `<div class="pi-enh-subagent-message" data-error>无法读取子 Agent profile 列表；请检查连接后点击“重新读取”。</div>`;
+      if (statusNode) statusNode.textContent = "子 Agent profile 列表读取失败。";
+      syncSubagentModelControlDisabled(control);
+      return;
+    }
+
+    // 独立区分错误：settings 失败且没有已有 profile
+    if ((!state.settingsLoaded || state.settingsError) && !hasProfiles) {
+      matrixBody.innerHTML = `<div class="pi-enh-subagent-message" data-error>无法读取服务端子任务设置；请检查连接后点击“重新读取”。</div>`;
       if (statusNode) statusNode.textContent = "服务端设置读取失败。";
       syncSubagentModelControlDisabled(control);
       return;
     }
 
-    const profiles = Array.isArray(state.profiles) ? state.profiles : [];
-    if (profiles.length === 0) {
-      matrixBody.innerHTML = `<div style="padding:14px;color:var(--text-muted);font-size:12px;text-align:center;">${state.cwd ? "当前 cwd 下未检测到任何子 Agent profile。" : "当前没有有效 cwd，无法加载子 Agent 列表。"}</div>`;
+    // 不错误显示空 profile：当且仅当 profilesLoaded 且 profiles 数组为空且无 profilesError 时，才显示未检测到
+    if (!state.loading && state.profilesLoaded && profiles.length === 0 && !state.profilesError) {
+      matrixBody.innerHTML = `<div class="pi-enh-subagent-message">${state.cwd ? "当前 cwd 下未检测到任何子 Agent profile。" : "当前没有有效 cwd，无法加载子 Agent 列表。"}</div>`;
       if (statusNode) statusNode.textContent = state.cwd ? "未找到可配置的子 Agent。" : "请在有效工作区会话下配置子 Agent。";
       syncSubagentModelControlDisabled(control);
       return;
+    }
+
+    // 如果 matrixBody 内当前只包含提示信息（.pi-enh-subagent-message），清空它准备渲染列表
+    if (matrixBody.querySelector(".pi-enh-subagent-message")) {
+      while (matrixBody.firstChild) matrixBody.removeChild(matrixBody.firstChild);
+    }
+
+    // profiles 更新成功后删除不在最新列表中的旧行（saving 中的除外）
+    if (state.profilesLoaded) {
+      const activeProfKeys = new Set(profiles.map((p) => String(p?.name || "").trim().toLowerCase()).filter(Boolean));
+      for (const existingRow of matrixBody.querySelectorAll("[data-subagent-row]")) {
+        const profKey = (existingRow.getAttribute("data-subagent-row") || "").trim().toLowerCase();
+        if (profKey && !activeProfKeys.has(profKey) && !state.savingProfiles?.has(profKey)) {
+          existingRow.remove();
+        }
+      }
     }
 
     const models = Array.isArray(state.models) ? state.models : [];
@@ -4980,10 +3154,69 @@ window.__PI_ENH_RENDER_USAGE_PANEL__ = renderUsagePanel;
       const configuredThinking = normalizeSubagentThinking(profOverride.thinking) || "";
       const isSaving = state.savingProfiles?.has(profKey);
 
-      const row = document.createElement("div");
+      // 就地更新以保护正在操作或保存的元素，不重绘破坏正在保存选择
+      let row = matrixBody.querySelector(`[data-subagent-row="${CSS.escape ? CSS.escape(profName) : profName}"]`);
+      if (row) {
+        if (isSaving) {
+          const statusSpan = row.querySelector(`[data-subagent-row-status="${profName}"]`);
+          if (statusSpan) {
+            statusSpan.textContent = "保存中…";
+            statusSpan.style.color = "var(--text-muted)";
+          }
+          continue;
+        }
+
+        // 非 saving 状态下，增量更新 model 下拉菜单选项（慢 models 渐进到达时更新 options）
+        const modelSelect = row.querySelector(`select[data-subagent-profile-model="${profName}"]`);
+        if (modelSelect && document.activeElement !== modelSelect) {
+          const defaultModelOpt = document.createElement("option");
+          defaultModelOpt.value = "";
+          defaultModelOpt.textContent = profile.model ? `遵循 profile (${profile.model})` : "遵循主会话模型";
+
+          while (modelSelect.firstChild) modelSelect.removeChild(modelSelect.firstChild);
+          modelSelect.appendChild(defaultModelOpt);
+
+          let found = false;
+          for (const m of modelOptions) {
+            const opt = document.createElement("option");
+            opt.value = m.value;
+            opt.textContent = m.label;
+            if (m.value === configuredModel) {
+              opt.selected = true;
+              found = true;
+            }
+            modelSelect.appendChild(opt);
+          }
+          if (configuredModel && !found) {
+            const missingOpt = document.createElement("option");
+            if (state.modelsLoaded) {
+              missingOpt.value = SUBAGENT_MODEL_UNAVAILABLE_VALUE;
+              missingOpt.textContent = `不可用: ${configuredModel}`;
+              missingOpt.disabled = true;
+            } else if (state.modelsError) {
+              missingOpt.value = configuredModel;
+              missingOpt.textContent = `${configuredModel} (模型列表加载失败)`;
+            } else {
+              missingOpt.value = configuredModel;
+              missingOpt.textContent = `${configuredModel} (加载中…)`;
+            }
+            missingOpt.selected = true;
+            modelSelect.appendChild(missingOpt);
+          }
+          if (!configuredModel) defaultModelOpt.selected = true;
+        }
+
+        const thinkingSelect = row.querySelector(`select[data-subagent-profile-thinking="${profName}"]`);
+        if (thinkingSelect && document.activeElement !== thinkingSelect) {
+          thinkingSelect.value = configuredThinking || "";
+        }
+        continue;
+      }
+
+      // 新增一行 profile
+      row = document.createElement("div");
       row.className = "pi-enh-subagent-row";
       row.setAttribute("data-subagent-row", profName);
-      row.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:8px 12px;padding:8px 10px;border-radius:6px;background:var(--bg-hover, rgba(255,255,255,0.04));border:1px solid var(--border, rgba(255,255,255,0.08));flex-wrap:wrap;";
 
       const scopeText = profile.scope === "builtin" ? "内置" : profile.scope === "project" ? "项目" : "全局";
       const displayName = profile.displayName || profName;
@@ -4991,29 +3224,25 @@ window.__PI_ENH_RENDER_USAGE_PANEL__ = renderUsagePanel;
 
       const infoCol = document.createElement("div");
       infoCol.className = "pi-enh-subagent-row-info";
-      infoCol.style.cssText = "display:flex;flex-direction:column;gap:2px;min-width:140px;flex:1 1 160px;";
       infoCol.innerHTML = `
-        <div style="display:flex;align-items:center;gap:6px;">
-          <strong style="color:var(--text);font-size:12.5px;">${escapeQuickActionHtml(displayName)}</strong>
-          <span style="font-size:10px;padding:1px 5px;border-radius:3px;background:rgba(255,255,255,0.08);color:var(--text-muted);">${escapeQuickActionHtml(scopeText)}</span>
-          ${profile.model ? `<span style="font-size:10px;color:var(--text-dim);" title="Profile 自身默认模型: ${escapeQuickActionHtml(profile.model)}">(默认: ${escapeQuickActionHtml(profile.model)})</span>` : ""}
+        <div class="pi-enh-subagent-row-heading">
+          <strong class="pi-enh-subagent-row-name">${escapeQuickActionHtml(displayName)}</strong>
+          <span class="pi-enh-subagent-row-scope">${escapeQuickActionHtml(scopeText)}</span>
+          ${profile.model ? `<span class="pi-enh-subagent-row-default" title="Profile 自身默认模型: ${escapeQuickActionHtml(profile.model)}">(默认: ${escapeQuickActionHtml(profile.model)})</span>` : ""}
         </div>
-        <span style="font-size:11px;color:var(--text-muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap;" title="${escapeQuickActionHtml(desc)}">${escapeQuickActionHtml(desc)}</span>
+        <span class="pi-enh-subagent-row-description" title="${escapeQuickActionHtml(desc)}">${escapeQuickActionHtml(desc)}</span>
       `;
       row.appendChild(infoCol);
 
       const ctrlCol = document.createElement("div");
       ctrlCol.className = "pi-enh-subagent-row-controls";
-      ctrlCol.style.cssText = "display:flex;align-items:center;gap:8px;flex-wrap:wrap;";
 
       // Model Select
       const modelLabel = document.createElement("label");
-      modelLabel.style.cssText = "display:inline-flex;align-items:center;gap:4px;font-size:11.5px;color:var(--text-muted);";
       modelLabel.innerHTML = `<span>模型:</span>`;
       const modelSelect = document.createElement("select");
       modelSelect.setAttribute("data-subagent-profile-model", profName);
       modelSelect.setAttribute("aria-label", `${displayName} 模型`);
-      modelSelect.style.cssText = "min-width:140px;max-width:220px;height:26px;padding:2px 6px;border-radius:5px;border:1px solid var(--border);background:var(--bg, #1a1a1a);color:var(--text);font-size:11.5px;";
 
       const defaultModelOpt = document.createElement("option");
       defaultModelOpt.value = "";
@@ -5033,9 +3262,17 @@ window.__PI_ENH_RENDER_USAGE_PANEL__ = renderUsagePanel;
       }
       if (configuredModel && !foundConfigured) {
         const missingOpt = document.createElement("option");
-        missingOpt.value = SUBAGENT_MODEL_UNAVAILABLE_VALUE;
-        missingOpt.textContent = `不可用: ${configuredModel}`;
-        missingOpt.disabled = true;
+        if (state.modelsLoaded) {
+          missingOpt.value = SUBAGENT_MODEL_UNAVAILABLE_VALUE;
+          missingOpt.textContent = `不可用: ${configuredModel}`;
+          missingOpt.disabled = true;
+        } else if (state.modelsError) {
+          missingOpt.value = configuredModel;
+          missingOpt.textContent = `${configuredModel} (模型列表加载失败)`;
+        } else {
+          missingOpt.value = configuredModel;
+          missingOpt.textContent = `${configuredModel} (加载中…)`;
+        }
         missingOpt.selected = true;
         modelSelect.appendChild(missingOpt);
       }
@@ -5045,12 +3282,10 @@ window.__PI_ENH_RENDER_USAGE_PANEL__ = renderUsagePanel;
 
       // Thinking Select
       const thinkingLabel = document.createElement("label");
-      thinkingLabel.style.cssText = "display:inline-flex;align-items:center;gap:4px;font-size:11.5px;color:var(--text-muted);";
       thinkingLabel.innerHTML = `<span>思考:</span>`;
       const thinkingSelect = document.createElement("select");
       thinkingSelect.setAttribute("data-subagent-profile-thinking", profName);
       thinkingSelect.setAttribute("aria-label", `${displayName} 思考深度`);
-      thinkingSelect.style.cssText = "min-width:105px;height:26px;padding:2px 6px;border-radius:5px;border:1px solid var(--border);background:var(--bg, #1a1a1a);color:var(--text);font-size:11.5px;";
 
       for (const lvl of SUBAGENT_THINKING_LEVELS) {
         const opt = document.createElement("option");
@@ -5065,7 +3300,7 @@ window.__PI_ENH_RENDER_USAGE_PANEL__ = renderUsagePanel;
       // Status indicator
       const statusSpan = document.createElement("span");
       statusSpan.setAttribute("data-subagent-row-status", profName);
-      statusSpan.style.cssText = "font-size:11px;min-width:36px;color:var(--text-dim);";
+      statusSpan.className = "pi-enh-subagent-row-status";
       if (isSaving) statusSpan.textContent = "保存中…";
       ctrlCol.appendChild(statusSpan);
 
@@ -5074,7 +3309,18 @@ window.__PI_ENH_RENDER_USAGE_PANEL__ = renderUsagePanel;
     }
 
     if (statusNode) {
-      statusNode.textContent = "每个子 Agent 独立配置模型与思考深度；单次调用显式参数优先。";
+      const warnings = [];
+      if (state.settingsError) warnings.push("服务端设置读取失败(已保留已有配置)");
+      if (state.profilesError) warnings.push("子 Agent profiles 更新失败");
+      if (state.modelsError) warnings.push("模型列表加载失败");
+
+      if (warnings.length > 0) {
+        statusNode.textContent = warnings.join("；") + "。";
+      } else if (state.loading) {
+        statusNode.textContent = "已加载子 Agent profiles；正在读取最新模型配置…";
+      } else {
+        statusNode.textContent = "每个子 Agent 独立配置模型与思考深度；单次调用显式参数优先。";
+      }
     }
     syncSubagentModelControlDisabled(control);
   }
@@ -5085,73 +3331,111 @@ window.__PI_ENH_RENDER_USAGE_PANEL__ = renderUsagePanel;
     const token = (state.requestToken || 0) + 1;
     state.requestToken = token;
     state.loading = true;
-    state.settingsLoaded = false;
-    state.profilesLoaded = false;
     state.settingsError = null;
     state.modelsError = null;
     state.profilesError = null;
-    state.models = [];
-    state.profiles = [];
-    state.overrides = {};
     const controller = typeof AbortController === "function" ? new AbortController() : null;
     state.controller = controller;
     renderSubagentModelControl(control, state);
-    const timeoutId = controller ? setTimeout(() => controller.abort(), 8000) : null;
+
+    const sessionId = (typeof getCurrentSessionId === "function" ? getCurrentSessionId() : "") || new URLSearchParams(window.location.search).get("session") || "";
     const isCurrent = () => control.isConnected && control.__piEnhSubagentModelState === state && state.requestToken === token;
 
-    try {
-      const settingsRequest = fetchSubagentJson("/api/subagents/settings", { signal: controller?.signal });
-      const modelsRequest = state.cwd
-        ? fetchSubagentJson(`/api/models?cwd=${encodeURIComponent(state.cwd)}`, { signal: controller?.signal })
-        : Promise.resolve({ modelList: [] });
-      const profilesRequest = state.cwd
-        ? fetchSubagentJson(`/api/subagents/profiles?cwd=${encodeURIComponent(state.cwd)}`, { signal: controller?.signal })
-        : Promise.resolve({ profiles: [] });
-
-      const [settingsResult, modelsResult, profilesResult] = await Promise.allSettled([
-        settingsRequest,
-        modelsRequest,
-        profilesRequest,
-      ]);
-      if (!isCurrent()) return;
-
-      if (settingsResult.status === "fulfilled") {
-        const settingsData = settingsResult.value;
-        state.overrides = (settingsData && typeof settingsData === "object" && settingsData.subagentOverrides && typeof settingsData.subagentOverrides === "object")
-          ? settingsData.subagentOverrides
-          : {};
-        state.globalModel = normalizeSubagentModel(settingsData?.subagentModel);
-        state.settingsLoaded = true;
-      } else {
-        state.settingsError = settingsResult.reason;
+    // The native workspace picker no longer exports the old DOM/global cwd contract.
+    // Read this session's canonical header, never guess another workspace or POST default-cwd.
+    if (!state.cwd && sessionId) {
+      try {
+        const sessionData = await fetchSubagentJson(`/api/sessions/${encodeURIComponent(sessionId)}?tree=summary&tail=1&deferThinking=1&deferMedia=1`, { signal: controller?.signal, timeoutMs: SUBAGENT_SETTINGS_TIMEOUT_MS });
+        if (!isCurrent()) return;
+        state.cwd = normalizeSubagentCwd(sessionData?.info?.cwd);
+        if (!state.cwd) state.profilesError = new Error("当前会话工作目录无效");
+      } catch (error) {
+        if (!isCurrent()) return;
+        state.profilesError = error;
       }
+    }
 
-      if (!state.cwd) {
-        state.modelsError = null;
+    // 接口独立超时：设置与 profile 20s，models 30s
+    // 独立渐进渲染：慢 models 不得阻塞 profiles/设置，区分错误并保留已有覆盖
+    const settingsPromise = fetchSubagentJson("/api/subagents/settings", {
+      signal: controller?.signal,
+      timeoutMs: SUBAGENT_SETTINGS_TIMEOUT_MS,
+    }).then((data) => {
+      if (!isCurrent()) return;
+      if (data && typeof data === "object" && data.subagentOverrides && typeof data.subagentOverrides === "object") {
+        const nextOverrides = { ...data.subagentOverrides };
+        if (state.savingProfiles && state.savingProfiles.size > 0 && state.overrides) {
+          for (const savingProf of state.savingProfiles) {
+            if (state.overrides[savingProf] !== undefined) {
+              nextOverrides[savingProf] = state.overrides[savingProf];
+            }
+          }
+        }
+        state.overrides = nextOverrides;
+      }
+      state.globalModel = normalizeSubagentModel(data?.subagentModel);
+      state.settingsLoaded = true;
+      state.settingsError = null;
+      renderSubagentModelControl(control, state);
+    }).catch((err) => {
+      if (!isCurrent()) return;
+      state.settingsError = err;
+      renderSubagentModelControl(control, state);
+    });
+
+    const profilesPromise = (state.profilesError && !state.cwd
+      ? Promise.reject(state.profilesError)
+      : state.cwd ? fetchSubagentJson(`/api/subagents/profiles?cwd=${encodeURIComponent(state.cwd)}`, {
+          signal: controller?.signal,
+          timeoutMs: SUBAGENT_PROFILES_TIMEOUT_MS,
+        })
+      : Promise.resolve({ profiles: [] })
+    ).then((data) => {
+      if (!isCurrent()) return;
+      if (Array.isArray(data?.profiles)) {
+        state.profiles = data.profiles;
+        state.profilesLoaded = true;
         state.profilesError = null;
       } else {
-        if (modelsResult.status === "fulfilled" && Array.isArray(modelsResult.value?.modelList)) {
-          state.models = modelsResult.value.modelList;
-          state.modelsError = modelsResult.value.modelError ? new Error(String(modelsResult.value.modelError)) : null;
-        } else {
-          state.modelsError = modelsResult.status === "rejected" ? modelsResult.reason : new Error("Invalid model list response");
-        }
-
-        if (profilesResult.status === "fulfilled" && Array.isArray(profilesResult.value?.profiles)) {
-          state.profiles = profilesResult.value.profiles;
-          state.profilesLoaded = true;
-        } else {
-          state.profilesError = profilesResult.status === "rejected" ? profilesResult.reason : new Error("Invalid profiles response");
-        }
+        state.profilesError = new Error("子 Agent profiles 格式无效");
       }
-    } catch (error) {
-      if (isCurrent()) state.settingsError = error;
-    } finally {
-      if (timeoutId !== null) clearTimeout(timeoutId);
-      if (!isCurrent()) return;
-      state.loading = false;
-      if (state.controller === controller) state.controller = null;
       renderSubagentModelControl(control, state);
+    }).catch((err) => {
+      if (!isCurrent()) return;
+      state.profilesError = err;
+      renderSubagentModelControl(control, state);
+    });
+
+    const modelsPromise = (state.cwd
+      ? fetchSubagentJson(`/api/models?cwd=${encodeURIComponent(state.cwd)}`, {
+          signal: controller?.signal,
+          timeoutMs: SUBAGENT_MODELS_TIMEOUT_MS,
+        })
+      : Promise.resolve({ modelList: [] })
+    ).then((data) => {
+      if (!isCurrent()) return;
+      if (Array.isArray(data?.modelList)) {
+        state.models = data.modelList;
+        state.modelsLoaded = true;
+        state.modelsError = data.modelError ? new Error(String(data.modelError)) : null;
+      } else {
+        state.modelsError = new Error("可用模型列表格式无效");
+      }
+      renderSubagentModelControl(control, state);
+    }).catch((err) => {
+      if (!isCurrent()) return;
+      state.modelsError = err;
+      renderSubagentModelControl(control, state);
+    });
+
+    try {
+      await Promise.allSettled([settingsPromise, profilesPromise, modelsPromise]);
+    } finally {
+      if (isCurrent()) {
+        state.loading = false;
+        if (state.controller === controller) state.controller = null;
+        renderSubagentModelControl(control, state);
+      }
     }
   }
 
@@ -5194,7 +3478,7 @@ window.__PI_ENH_RENDER_USAGE_PANEL__ = renderUsagePanel;
             thinking: nextThinking,
           },
         }),
-        timeoutMs: 8000,
+        timeoutMs: SUBAGENT_SETTINGS_TIMEOUT_MS,
       });
 
       if (!control.isConnected || control.__piEnhSubagentModelState !== state) return;
@@ -5246,6 +3530,7 @@ window.__PI_ENH_RENDER_USAGE_PANEL__ = renderUsagePanel;
         savingProfiles: new Set(),
         settingsLoaded: false,
         profilesLoaded: false,
+        modelsLoaded: false,
         settingsError: null,
         modelsError: null,
         profilesError: null,
@@ -5255,6 +3540,7 @@ window.__PI_ENH_RENDER_USAGE_PANEL__ = renderUsagePanel;
       control.__piEnhSubagentModelState = state;
       const reload = control.querySelector("[data-subagent-model-reload]");
       reload?.addEventListener("click", () => {
+        // 防二次点击：仅当不在 loading 且没有正在 saving 的 profile 时执行重新读取
         if (!state.loading && (!state.savingProfiles || state.savingProfiles.size === 0)) {
           void loadSubagentModelControl(control, state);
         }
@@ -5278,19 +3564,20 @@ window.__PI_ENH_RENDER_USAGE_PANEL__ = renderUsagePanel;
       const featureId = escapeQuickActionHtml(setting.featureId || "");
       const label = escapeQuickActionHtml(setting.label || "子 Agent 独立模型与思考深度");
       const description = escapeQuickActionHtml(setting.description || "为每个子 Agent 独立配置专属模型与思考深度；单次调用显式参数优先。");
-      return `<div class="pi-enh-subagent-model-setting pi-enh-plugin-number-setting" style="width:100%;flex-direction:column;align-items:stretch;white-space:normal;gap:8px;" data-subagent-model-control data-subagent-model-feature="${featureId}">
-        <div style="display:flex;align-items:flex-start;justify-content:space-between;gap:8px 12px;flex-wrap:wrap;">
-          <div class="pi-enh-subagent-model-copy" style="display:flex;flex:1 1 280px;flex-direction:column;gap:2px;min-width:200px;">
-            <span class="pi-enh-plugin-number-setting-label" style="font-weight:600;font-size:12.5px;">${label}</span>
-            <span class="pi-enh-subagent-model-description" style="font-size:11.5px;color:var(--text-muted);">${description}</span>
-            <span class="pi-enh-subagent-model-cwd" data-subagent-model-cwd style="font-size:11px;color:var(--text-dim);margin-top:2px;">当前 cwd：读取中…</span>
+      return `<div class="pi-enh-subagent-model-setting" data-subagent-model-control data-subagent-model-feature="${featureId}">
+        <div class="pi-enh-subagent-model-header">
+          <div class="pi-enh-subagent-model-copy">
+            <span class="pi-enh-subagent-model-label">${label}</span>
+            <span class="pi-enh-subagent-model-description">${description}</span>
+            <span class="pi-enh-subagent-model-policy-hint" data-subagent-model-policy-hint>关闭仅禁止新派发；已运行任务继续。重新开启后，运行会话按需恢复委派，不重复任务。</span>
+            <span class="pi-enh-subagent-model-cwd" data-subagent-model-cwd>当前 cwd：读取中…</span>
           </div>
           <button type="button" class="pi-enh-btn-sm" data-subagent-model-reload ${disabled ? "disabled" : ""}>重新读取</button>
         </div>
-        <div class="pi-enh-subagent-matrix-body" data-subagent-matrix-body style="display:flex;flex-direction:column;gap:6px;width:100%;margin-top:4px;">
-          <div style="padding:10px;color:var(--text-muted);font-size:11.5px;text-align:center;">正在读取状态…</div>
+        <div class="pi-enh-subagent-matrix-body" data-subagent-matrix-body>
+          <div class="pi-enh-subagent-message">正在读取状态…</div>
         </div>
-        <span class="pi-enh-subagent-model-status" data-subagent-model-status role="status" aria-live="polite" style="font-size:11px;color:var(--text-dim);margin-top:2px;">正在读取模型设置…</span>
+        <span class="pi-enh-subagent-model-status" data-subagent-model-status role="status" aria-live="polite">正在读取模型设置…</span>
       </div>`;
     }
     if (setting.kind === "action") {
@@ -5326,8 +3613,16 @@ window.__PI_ENH_RENDER_USAGE_PANEL__ = renderUsagePanel;
     return `<label class="pi-enh-plugin-number-setting"><span>${setting.label}</span><input ${legacyDataAttribute} type="number" inputmode="numeric" data-plugin-setting="${identity}" aria-label="${setting.label}" min="${definition.min}" max="${definition.max}" step="1" value="${value}" ${disabled ? "disabled" : ""}><span>${setting.unit || ""}</span></label>`;
   }
 
-  function moduleStateLabel(state) {
+  function moduleStateLabel(state, enabled) {
+    if (typeof enabled === "boolean") {
+      if (!enabled) return `已关闭 0/${state.total}`;
+      return `${state.selected === state.total ? "全部开启" : (state.selected === 0 ? "已启用" : "部分开启")} ${state.selected}/${state.total}`;
+    }
     return state.state === "off" ? `已关闭 0/${state.total}` : `${state.state === "partial" ? "部分开启" : "全部开启"} ${state.active}/${state.total}`;
+  }
+
+  if (typeof window !== "undefined") {
+    window.moduleStateLabel = moduleStateLabel;
   }
 
   function getKernelHealthSummary() {
@@ -5371,27 +3666,40 @@ window.__PI_ENH_RENDER_USAGE_PANEL__ = renderUsagePanel;
   }
 
   function syncEnhancementPanelControls() {
-    // This hook runs after every plugin change, even with an archived panel open.
-    const picker = document.querySelector("select.settings-mobile-section-picker");
-    if (picker && ENHANCEMENT_PICKER_SECTIONS.some((sec) => sec.isEnabled() !== Boolean(picker.querySelector(`option[value='${sec.value}']`)))) {
-      syncSettingsDialogEnhancements();
-    }
     const panel = document.querySelector(".pi-enh-plugins-panel");
     if (!panel) return;
     for (const row of panel.querySelectorAll("[data-module-row]")) {
       const id = row.getAttribute("data-module-row");
       const state = getModuleState(id);
       if (!state) continue;
-      const disabled = !isModuleEnabled(id);
-      row.setAttribute("data-enabled", String(!disabled));
+      const enabled = isModuleEnabled(id);
+      const disabled = !enabled;
+      row.setAttribute("data-enabled", String(enabled));
       const master = row.querySelector("[data-module-toggle]");
-      if (master) {
-        master.setAttribute("aria-checked", state.state === "partial" ? "mixed" : String(state.state === "on"));
-        master.setAttribute("data-state", state.state);
-        master.setAttribute("title", state.active ? "关闭整组，保留子功能选择" : (state.selected ? "恢复之前的子功能选择" : "开启默认子功能（不启用实验与授权功能）"));
-      }
       const label = row.querySelector("[data-module-status]");
-      if (label) { label.textContent = moduleStateLabel(state); label.setAttribute("data-state", state.state); }
+
+      if (id === SUBAGENT_DISPATCH_MODULE_ID) {
+        if (master) {
+          master.setAttribute("aria-checked", String(enabled));
+          master.setAttribute("data-state", enabled ? "on" : "off");
+          master.setAttribute("title", enabled ? "关闭整组，保留子功能选择" : (state.selected ? "恢复之前的子功能选择" : "开启默认子功能（不启用实验与授权功能）"));
+        }
+        if (label) {
+          label.textContent = moduleStateLabel(state, enabled);
+          label.setAttribute("data-state", enabled ? "on" : "off");
+        }
+      } else {
+        // 其他七模块严格保留原有 mixed aria 与 partial 状态机
+        if (master) {
+          master.setAttribute("aria-checked", state.state === "partial" ? "mixed" : String(state.state === "on"));
+          master.setAttribute("data-state", state.state);
+          master.setAttribute("title", state.active ? "关闭整组，保留子功能选择" : (state.selected ? "恢复之前的子功能选择" : "开启默认子功能（不启用实验与授权功能）"));
+        }
+        if (label) {
+          label.textContent = moduleStateLabel(state);
+          label.setAttribute("data-state", state.state);
+        }
+      }
       const details = row.querySelector("[data-module-settings]");
       details?.setAttribute("data-module-disabled", String(disabled));
       for (const toggle of row.querySelectorAll("[data-plugin-toggle]")) {
@@ -5433,7 +3741,7 @@ window.__PI_ENH_RENDER_USAGE_PANEL__ = renderUsagePanel;
     const candidates = [
       "http://127.0.0.1:30149",
       "http://localhost:30149",
-      "http://127.0.0.1:30149",
+      "http://10.0.0.89:30149",
     ];
     for (const candidate of candidates) {
       try {
@@ -5453,11 +3761,11 @@ window.__PI_ENH_RENDER_USAGE_PANEL__ = renderUsagePanel;
   bridgeBaseSyncUrl = null;
   async function resolveBridgeSyncUrl() {
     if (bridgeBaseSyncUrl) return bridgeBaseSyncUrl;
-    const hostname = (typeof window !== "undefined" && window.location?.hostname) || "127.0.0.1";
+    const hostname = (typeof window !== "undefined" && window.location?.hostname) || "10.0.0.2";
     // On non-Windows localhost there is no desktop bridge; go directly to the NAS.
     const candidates = /^(127\.0\.0\.1|localhost)$/.test(hostname) && !/Win/i.test(navigator.platform || "")
-      ? ["http://127.0.0.1:30149"]
-      : [`http://${hostname}:30149`, "http://127.0.0.1:30149", "http://127.0.0.1:30149"];
+      ? ["http://10.0.0.2:30149"]
+      : [`http://${hostname}:30149`, "http://10.0.0.2:30149", "http://127.0.0.1:30149"];
     for (const cand of candidates) {
       try {
         const res = await fetch(`${cand}/ping`, { signal: AbortSignal.timeout(1500) });
@@ -5698,7 +4006,7 @@ window.__PI_ENH_RENDER_USAGE_PANEL__ = renderUsagePanel;
     });
 
     card.querySelector('[data-sync-action="rollback"]')?.addEventListener("click", async () => {
-      const targetChoice = prompt("请选择要回滚的目标端：\\n输入 1: 回滚 30142 同事端\\n输入 2: 回滚 Windows 本地端\\n输入 3: 回滚 MacBook 本地端 (127.0.0.1)", "1");
+      const targetChoice = prompt("请选择要回滚的目标端：\\n输入 1: 回滚 30142 同事端\\n输入 2: 回滚 Windows 本地端\\n输入 3: 回滚 MacBook 本地端 (10.7.7.2)", "1");
       if (!targetChoice) return;
       let target = "30142";
       let targetName = "30142 同事端";
@@ -5807,14 +4115,14 @@ window.__PI_ENH_RENDER_USAGE_PANEL__ = renderUsagePanel;
               </div>
               <div class="pi-enh-sync-node" data-sync-node="target-windows">
                 <label class="pi-enh-sync-target-check-wrap" title="开启/暂停 Windows 本地端自动同步">
-                  <span class="pi-enh-sync-node-name"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="pi-enh-inline-icon" aria-hidden="true"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect><line x1="8" y1="21" x2="16" y2="21"></line><line x1="12" y1="17" x2="12" y2="21"></line></svg>Windows 本地端 (127.0.0.1)</span>
+                  <span class="pi-enh-sync-node-name"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="pi-enh-inline-icon" aria-hidden="true"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"></rect><line x1="8" y1="21" x2="16" y2="21"></line><line x1="12" y1="17" x2="12" y2="21"></line></svg>Windows 本地端 (10.0.0.89)</span>
                   <input type="checkbox" class="pi-enh-sync-checkbox" data-sync-target-toggle="windows" aria-label="开启/暂停 Windows 本地端自动同步" checked>
                 </label>
                 <span class="pi-enh-sync-node-detail" data-sync-windows-detail>检测中…</span>
               </div>
               <div class="pi-enh-sync-node" data-sync-node="target-mac">
                 <label class="pi-enh-sync-target-check-wrap" title="开启/暂停 MacBook 本地端自动同步">
-                  <span class="pi-enh-sync-node-name"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="pi-enh-inline-icon" aria-hidden="true"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M2 20h20"/></svg>MacBook 本地端 (127.0.0.1)</span>
+                  <span class="pi-enh-sync-node-name"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" class="pi-enh-inline-icon" aria-hidden="true"><rect x="3" y="4" width="18" height="12" rx="2"/><path d="M2 20h20"/></svg>MacBook 本地端 (10.7.7.2)</span>
                   <input type="checkbox" class="pi-enh-sync-checkbox" data-sync-target-toggle="mac" aria-label="开启/暂停 MacBook 本地端自动同步" checked>
                 </label>
                 <span class="pi-enh-sync-node-detail" data-sync-mac-detail>检测中…</span>
@@ -5850,6 +4158,10 @@ window.__PI_ENH_RENDER_USAGE_PANEL__ = renderUsagePanel;
             const disabled = !enabled;
             const state = getModuleState(module.id);
             const features = module.features.map((featureId) => ENHANCEMENT_PLUGINS.find((plugin) => plugin.id === featureId)).filter(Boolean);
+            const isSubagent = module.id === SUBAGENT_DISPATCH_MODULE_ID;
+            const ariaChecked = isSubagent ? String(enabled) : (state.state === "partial" ? "mixed" : String(state.state === "on"));
+            const dataState = isSubagent ? (enabled ? "on" : "off") : state.state;
+            const statusText = isSubagent ? moduleStateLabel(state, enabled) : moduleStateLabel(state);
             return `<article class="pi-enh-plugin-item pi-enh-module-item" data-module-row="${module.id}" data-plugin-category-name="${module.category}" data-enabled="${enabled ? "true" : "false"}">
               <div class="pi-enh-module-header">
                 <div class="pi-enh-plugin-copy">
@@ -5861,8 +4173,8 @@ window.__PI_ENH_RENDER_USAGE_PANEL__ = renderUsagePanel;
                   <div class="pi-enh-plugin-desc">${module.desc}</div>
                 </div>
                 <div class="pi-enh-module-master">
-                  <span class="pi-enh-module-status" id="pi-enh-status-${module.id}" data-module-status data-state="${state.state}" aria-live="polite">${moduleStateLabel(state)}</span>
-                  <button type="button" role="checkbox" aria-checked="${state.state === "partial" ? "mixed" : String(state.state === "on")}" aria-label="${module.name}总开关" aria-describedby="pi-enh-status-${module.id}" class="config-switch pi-enh-module-toggle" data-state="${state.state}" data-module-toggle="${module.id}">
+                  <span class="pi-enh-module-status" id="pi-enh-status-${module.id}" data-module-status data-state="${dataState}" aria-live="polite">${statusText}</span>
+                  <button type="button" role="checkbox" aria-checked="${ariaChecked}" aria-label="${module.name}总开关" aria-describedby="pi-enh-status-${module.id}" class="config-switch pi-enh-module-toggle" data-state="${dataState}" data-module-toggle="${module.id}">
                     <span class="config-switch-knob" aria-hidden="true"></span>
                   </button>
                 </div>
@@ -5908,26 +4220,116 @@ window.__PI_ENH_RENDER_USAGE_PANEL__ = renderUsagePanel;
       } else showToast("已处于最新热载状态");
     });
     panel.querySelector('[data-action="force-hard-reload"]')?.addEventListener("click", forceHardReloadApp);
-    panel.querySelector('[data-action="enable-all"]')?.addEventListener("click", () => {
-      for (const module of ENHANCEMENT_MODULES) setModuleEnabled(module.id, true);
-      showToast("已恢复全部模块；保留原有子功能选择");
+    let isSubagentDispatchBusy = false;
+    function setSubagentDispatchBusyState(busy) {
+      isSubagentDispatchBusy = busy;
+      const masterToggle = panel.querySelector(`[data-module-toggle="${SUBAGENT_DISPATCH_MODULE_ID}"]`);
+      if (masterToggle) {
+        masterToggle.disabled = busy;
+        if (busy) masterToggle.setAttribute("aria-busy", "true");
+        else masterToggle.removeAttribute("aria-busy");
+      }
+      const batchBtns = panel.querySelectorAll('[data-action="enable-all"], [data-action="disable-all"], [data-action="reset-defaults"]');
+      for (const btn of batchBtns) {
+        btn.disabled = busy;
+      }
+    }
+
+    panel.querySelector('[data-action="enable-all"]')?.addEventListener("click", async () => {
+      if (isSubagentDispatchBusy) return;
+      setSubagentDispatchBusyState(true);
+      const prevSubagentEnabled = isModuleEnabled(SUBAGENT_DISPATCH_MODULE_ID);
+      try {
+        await enqueueSubagentDispatchCommit(true);
+        for (const module of ENHANCEMENT_MODULES) {
+          if (module.id !== SUBAGENT_DISPATCH_MODULE_ID) setModuleEnabled(module.id, true);
+        }
+        const mod = getEnhancementModule(SUBAGENT_DISPATCH_MODULE_ID);
+        const st = getModuleState(SUBAGENT_DISPATCH_MODULE_ID);
+        if (st && st.selected === 0 && mod) {
+          for (const fId of mod.features) {
+            const plugin = ENHANCEMENT_PLUGINS.find((p) => p.id === fId);
+            if (plugin?.defaultEnabled) setPluginEnabled(fId, true);
+          }
+        }
+        showToast("已恢复全部模块；保留原有子功能选择");
+      } catch (err) {
+        setModuleEnabled(SUBAGENT_DISPATCH_MODULE_ID, prevSubagentEnabled);
+        showToast(`恢复全部模块时同步子 Agent 调度失败: ${err.message || "请求异常"}`, null, 5000);
+      } finally {
+        setSubagentDispatchBusyState(false);
+        syncEnhancementPanelControls();
+      }
     });
-    panel.querySelector('[data-action="disable-all"]')?.addEventListener("click", () => {
-      for (const module of ENHANCEMENT_MODULES) setModuleEnabled(module.id, false);
-      showToast("已关闭所有增强模块；子功能偏好已保留");
+
+    panel.querySelector('[data-action="disable-all"]')?.addEventListener("click", async () => {
+      if (isSubagentDispatchBusy) return;
+      setSubagentDispatchBusyState(true);
+      const prevSubagentEnabled = isModuleEnabled(SUBAGENT_DISPATCH_MODULE_ID);
+      try {
+        await enqueueSubagentDispatchCommit(false);
+        for (const module of ENHANCEMENT_MODULES) {
+          if (module.id !== SUBAGENT_DISPATCH_MODULE_ID) setModuleEnabled(module.id, false);
+        }
+        showToast("已关闭所有增强模块；子功能偏好已保留");
+      } catch (err) {
+        setModuleEnabled(SUBAGENT_DISPATCH_MODULE_ID, prevSubagentEnabled);
+        showToast(`关闭全部模块时同步子 Agent 调度失败: ${err.message || "请求异常"}`, null, 5000);
+      } finally {
+        setSubagentDispatchBusyState(false);
+        syncEnhancementPanelControls();
+      }
     });
-    panel.querySelector('[data-action="reset-defaults"]')?.addEventListener("click", () => {
-      resetEnhancementSettings();
-      showToast("已恢复默认增强设置");
+
+    panel.querySelector('[data-action="reset-defaults"]')?.addEventListener("click", async () => {
+      if (isSubagentDispatchBusy) return;
+      setSubagentDispatchBusyState(true);
+      const prevSubagentEnabled = isModuleEnabled(SUBAGENT_DISPATCH_MODULE_ID);
+      try {
+        await enqueueSubagentDispatchCommit(true);
+        resetEnhancementSettings();
+        showToast("已恢复默认增强设置");
+      } catch (err) {
+        setModuleEnabled(SUBAGENT_DISPATCH_MODULE_ID, prevSubagentEnabled);
+        showToast(`恢复默认设置时同步子 Agent 调度失败: ${err.message || "请求异常"}`, null, 5000);
+      } finally {
+        setSubagentDispatchBusyState(false);
+        syncEnhancementPanelControls();
+      }
     });
+
     panel.querySelector('[data-pwa-action="copy-flag-origin"]')?.addEventListener("click", () => {
-      const origin = (typeof window !== "undefined" && window.location ? window.location.origin : "http://127.0.0.1:30141");
+      const origin = (typeof window !== "undefined" && window.location ? window.location.origin : "http://10.0.0.2:30141");
       copyText(origin, "已复制局域网安全源地址: " + origin);
       showToast("已复制地址！在手机 Chrome 访问 chrome://flags/#unsafely-treat-insecure-origin-as-secure 粘贴并启用即可一键安装 PWA", null, 6000);
     });
+
     for (const toggle of panel.querySelectorAll("[data-module-toggle]")) {
-      toggle.addEventListener("click", () => {
+      toggle.addEventListener("click", async () => {
         const id = toggle.getAttribute("data-module-toggle");
+        if (id === SUBAGENT_DISPATCH_MODULE_ID) {
+          if (isSubagentDispatchBusy) return;
+          const nextEnabled = !isModuleEnabled(SUBAGENT_DISPATCH_MODULE_ID);
+          setSubagentDispatchBusyState(true);
+          try {
+            await enqueueSubagentDispatchCommit(nextEnabled);
+            const mod = getEnhancementModule(SUBAGENT_DISPATCH_MODULE_ID);
+            const st = getModuleState(SUBAGENT_DISPATCH_MODULE_ID);
+            if (nextEnabled && st && st.selected === 0 && mod) {
+              for (const fId of mod.features) {
+                const plugin = ENHANCEMENT_PLUGINS.find((p) => p.id === fId);
+                if (plugin?.defaultEnabled) setPluginEnabled(fId, true);
+              }
+            }
+            showToast(`子 Agent 调度已${nextEnabled ? "开启" : "关闭"}`);
+          } catch (err) {
+            showToast(`保存子 Agent 调度服务端总开关失败: ${err.message || "请求异常"}`, null, 5000);
+          } finally {
+            setSubagentDispatchBusyState(false);
+            syncEnhancementPanelControls();
+          }
+          return;
+        }
         toggleModuleFromPanel(id);
       });
     }
@@ -5987,6 +4389,9 @@ window.__PI_ENH_RENDER_USAGE_PANEL__ = renderUsagePanel;
     }
     bindSubagentModelControls(panel);
     syncEnhancementPanelControls();
+    void syncSubagentDispatchRemoteState().then(() => {
+      syncEnhancementPanelControls();
+    });
     const syncCard = panel.querySelector("[data-pi-enh-sync-card]");
     if (syncCard) {
       initCrossDeviceSyncController(syncCard);
@@ -6026,6 +4431,10 @@ window.__PI_ENH_RENDER_USAGE_PANEL__ = renderUsagePanel;
   }
 
   function renderEnhancementsPanel(panel, nav) {
+    if (!panel) return;
+    if (!panel.classList.contains("pi-enh-plugins-panel")) panel.classList.add("pi-enh-plugins-panel");
+    if (!panel) return;
+    if (!panel.classList.contains("pi-enh-plugins-panel")) panel.classList.add("pi-enh-plugins-panel");
     // Keep the v3 renderer as a one-release recovery surface while v4 modules
     // migrate existing browser preferences. Normal users always get modules.
     if (!window.__PI_ENH_LEGACY_SETTINGS_RENDERER__) return renderEnhancementModulesPanel(panel, nav);
@@ -6214,7 +4623,10 @@ window.__PI_ENH_RENDER_USAGE_PANEL__ = renderUsagePanel;
         let sessionId = "";
         try { sessionId = decodeURIComponent(restoreButton.getAttribute("data-session-id") || ""); } catch (e) {}
         if (!restoreArchivedSession(sessionId)) return;
-        requestSessionListRefresh();
+        requestSessionListRefresh(false, true);
+        if (typeof window.__PI_ENH_RERENDER_SESSIONS__ === "function") {
+          try { window.__PI_ENH_RERENDER_SESSIONS__(); } catch (e) {}
+        }
         renderEnhancementsPanel(panel, nav);
         showToast("已还原会话", sessionArchiveIcon);
       });
@@ -6324,10 +4736,6 @@ window.__PI_ENH_RENDER_USAGE_PANEL__ = renderUsagePanel;
 
   async function checkImmutableBundleAndHotSyncOnBoot() {
     if (typeof window === "undefined" || isLoginPage()) return;
-    if (window.__PI_ENH_NATIVE_STATE_API__ === true && window.__PI_WEB_STANDALONE_EDITION__) {
-      // Standalone native 模式由运行时与 Next 静态构建内联锚定，跳过 legacy 探测
-      return;
-    }
     try {
       const res = await fetch(`/pi-web-enhancement-loader.js?t=${Date.now()}`, { cache: "no-store" });
       if (!res.ok) return;
@@ -6512,7 +4920,6 @@ window.__PI_ENH_RENDER_USAGE_PANEL__ = renderUsagePanel;
       removeAnnotationUi();
       removeBottomShortcutsBar();
       clearModelScopeWarningVisibility();
-      removePiWebPlusBranding();
       if (typeof cleanupSessionScrollTracking === "function") {
         try { cleanupSessionScrollTracking(); } catch (e) {}
       }
@@ -6520,39 +4927,9 @@ window.__PI_ENH_RENDER_USAGE_PANEL__ = renderUsagePanel;
       if (typeof dismissToast === "function") {
         try { dismissToast(true); } catch (e) {}
       }
-      for (const el of document.querySelectorAll(".pi-enh-menu, .pi-enh-quote-bar, #pi-enh-protocol-frame, .pi-enh-draft-badge, .pi-enh-plugins-panel, .pi-enh-notifications-panel, .pi-enh-archived-panel, .pi-enh-usage-panel, .pi-enh-tags-panel, [data-pi-enh-tab], .pi-enh-search-group-divider, .pi-enh-search-archived-badge, .pi-enh-search-restore-btn, .pi-enh-attachments-bar, .pi-enh-attachment-card, .pi-enh-video-preview-backdrop, dialog.pi-enh-image-zoom-dialog, .pi-enh-toast, .pi-enh-annotation-rail")) {
+      cleanupSettingsNativeBridge();
+      for (const el of document.querySelectorAll(".pi-enh-menu, .pi-enh-quote-bar, #pi-enh-protocol-frame, .pi-enh-draft-badge, .pi-enh-search-group-divider, .pi-enh-search-archived-badge, .pi-enh-search-restore-btn, .pi-enh-attachments-bar, .pi-enh-attachment-card, .pi-enh-video-preview-backdrop, dialog.pi-enh-image-zoom-dialog, .pi-enh-toast, .pi-enh-annotation-rail")) {
         try { el.remove(); } catch (e) {}
-      }
-      cleanupSettingsDialogResizers();
-      for (const r of document.querySelectorAll(".pi-enh-sidebar-resizer, .pi-enh-dialog-resizer")) {
-        try { r.remove(); } catch (e) {}
-      }
-      for (const picker of document.querySelectorAll("select.settings-mobile-section-picker")) {
-        try {
-          if (picker.__piEnhChangeHandler) {
-            picker.removeEventListener("change", picker.__piEnhChangeHandler);
-            delete picker.__piEnhChangeHandler;
-          }
-          delete picker.__piEnhBound;
-
-          let targetNativeVal = picker.__piEnhNativeValue;
-          if (!targetNativeVal || !picker.querySelector(`option[value='${targetNativeVal}']`)) {
-            const firstNativeOpt = picker.querySelector("option:not([value='enhancements']):not([value='archived']):not([value='notifications']):not([value='usage']):not([value='tags'])");
-            targetNativeVal = firstNativeOpt ? firstNativeOpt.value : "general";
-          }
-
-          for (const opt of picker.querySelectorAll("option[value='enhancements'], option[value='archived'], option[value='notifications'], option[value='usage'], option[value='tags']")) {
-            opt.remove();
-          }
-
-          picker.value = targetNativeVal;
-          delete picker.__piEnhNativeValue;
-        } catch (e) {}
-      }
-      for (const m of document.querySelectorAll("main.settings-dialog-main:not(.pi-enh-plugins-panel):not(.pi-enh-notifications-panel):not(.pi-enh-archived-panel):not(.pi-enh-usage-panel):not(.pi-enh-tags-panel)")) {
-        try {
-          m.style.display = "";
-        } catch (e) {}
       }
       if (durationTooltip && durationTooltip.parentNode) {
         try { durationTooltip.parentNode.removeChild(durationTooltip); } catch (e) {}
@@ -6563,12 +4940,6 @@ window.__PI_ENH_RENDER_USAGE_PANEL__ = renderUsagePanel;
         usageTooltip = null;
       }
       activeTooltipType = null;
-      if (styleEl && styleEl.parentNode) {
-        try { styleEl.parentNode.removeChild(styleEl); } catch (e) {}
-      }
-      for (const s of document.querySelectorAll("#pi-web-enhancements-style")) {
-        try { s.remove(); } catch (e) {}
-      }
       delete window.__PI_WEB_ENHANCEMENTS_LOADED__;
       for (const b of document.querySelectorAll(".pi-enh-duration-badge")) {
         try { b.remove(); } catch (e) {}
@@ -6592,8 +4963,10 @@ window.__PI_ENH_RENDER_USAGE_PANEL__ = renderUsagePanel;
       delete window.__PI_ENH_GET_QUEUE_DETAIL_CACHE_STATS__;
       delete window.__PI_ENH_RECONCILE_USER_MESSAGE__;
       delete window.__PI_ENH_SESSION_HISTORY_ORDER_GUARD__;
-      delete window.__PI_ENH_SYNC_BRANDING__;
-      delete window.__PI_ENH_REMOVE_BRANDING__;
+      delete window.__PI_ENH_SYNC_SUBAGENT_DISPATCH_REMOTE_STATE__;
+      delete window.__PI_ENH_COMMIT_SUBAGENT_DISPATCH_REMOTE_STATE__;
+      delete window.__PI_ENH_GET_DURABLE_STATE_BASE_URL__;
+      delete window.__PI_ENH_GET_DURABLE_STATE_INSTANCE_PARAM__;
     } catch (e) {
       console.warn("[Pi Web Enhancements] cleanup warning:", e);
     }
@@ -6658,6 +5031,10 @@ window.__PI_ENH_RENDER_USAGE_PANEL__ = renderUsagePanel;
     }
   }
   window.__PI_ENH_RUN_ISOLATED_STEP__ = runIsolatedKernelStep;
+  window.__PI_ENH_SYNC_SUBAGENT_DISPATCH_REMOTE_STATE__ = syncSubagentDispatchRemoteState;
+  window.__PI_ENH_COMMIT_SUBAGENT_DISPATCH_REMOTE_STATE__ = commitSubagentDispatchRemoteState;
+  window.__PI_ENH_GET_DURABLE_STATE_BASE_URL__ = getDurableStateBaseUrl;
+  window.__PI_ENH_GET_DURABLE_STATE_INSTANCE_PARAM__ = getDurableStateInstanceParam;
 
   window.__PI_WEB_ENHANCEMENTS_LOADED__ = true;
   runIsolatedKernelStep("initialDomSyncImmediate", () => {

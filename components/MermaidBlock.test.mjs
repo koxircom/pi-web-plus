@@ -8,6 +8,7 @@ const jiti = createJiti(import.meta.url, {
 });
 const React = await jiti.import("react");
 const { renderToStaticMarkup } = await jiti.import("react-dom/server");
+const { default: PrismAsyncLight } = await jiti.import("react-syntax-highlighter/dist/esm/prism-async-light");
 const { MermaidBlock, CodeBlock, downloadMermaidSvg } = await jiti.import("./MermaidBlock.tsx");
 const { I18nProvider } = await jiti.import("@/hooks/useI18n");
 
@@ -29,7 +30,7 @@ function renderMermaid(props) {
 test("MermaidBlock renders source by default", () => {
   const html = renderMermaid({ code: mermaidSrc });
 
-  assert.match(html, />Preview</);
+  assert.match(html, />预览</);
   assert.match(html, /Alice/);
   assert.doesNotMatch(html, /mermaid-block-loading/);
 });
@@ -37,7 +38,7 @@ test("MermaidBlock renders source by default", () => {
 test("MermaidBlock can render preview by default", () => {
   const html = renderMermaid({ code: mermaidSrc, defaultPreview: true });
 
-  assert.match(html, />Source</);
+  assert.match(html, />源代码</);
   assert.match(html, /mermaid-block-loading/);
   assert.doesNotMatch(html, /Alice/);
 });
@@ -46,7 +47,7 @@ test("MermaidBlock with isStreaming falls back to source view", () => {
   const html = renderMermaid({ code: mermaidSrc, isStreaming: true, defaultPreview: true });
 
   assert.match(html, /disabled/);
-  assert.match(html, />Preview</);
+  assert.match(html, />预览</);
   assert.match(html, /Alice/);
   assert.match(html, /-&gt;&gt;/);
 });
@@ -68,11 +69,24 @@ function renderCode(props) {
   );
 }
 
-test("CodeBlock highlights code when not streaming", () => {
+test("CodeBlock highlights code after asynchronously loading its core and language", async () => {
+  await PrismAsyncLight.preload();
+  await PrismAsyncLight.loadLanguage("javascript");
+
   const html = renderCode({ code: "const x = 1;", lang: "javascript" });
 
   assert.match(html, /class="token/);
   assert.match(html, /const/);
+});
+
+test("CodeBlock renders unsupported languages as plain text", async () => {
+  await PrismAsyncLight.preload();
+
+  const html = renderCode({ code: "plain text stays readable", lang: "not-a-supported-language" });
+
+  assert.match(html, /plain text stays readable/);
+  assert.doesNotMatch(html, /class="token/);
+  assert.doesNotMatch(html, /language-not-a-supported-language/);
 });
 
 test("CodeBlock renders plain text without tokenization while streaming", () => {

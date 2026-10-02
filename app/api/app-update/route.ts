@@ -29,7 +29,7 @@ async function fetchLatestVersion(): Promise<AppUpdateResponse> {
     cache: "no-store",
     headers: {
       Accept: "application/vnd.github+json",
-      "User-Agent": "pi-web-plus-update-check",
+      "User-Agent": "pi-web-standalone-update-check",
     },
     signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
   });

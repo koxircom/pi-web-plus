@@ -13,6 +13,9 @@ try {
 
 const nextConfig: NextConfig = {
   outputFileTracingRoot: configDir,
+  outputFileTracingIncludes: {
+    "/api/sessions/**/context": ["./bin/session-history-worker.cjs"],
+  },
   experimental: {
     // proxy.ts matches /api/:path*, and Next buffers the request body whenever
     // a proxy is present, capped at 10 MB by default. The upload route accepts
@@ -64,6 +67,10 @@ const nextConfig: NextConfig = {
         headers: [
           { key: "Cache-Control", value: "private, no-cache, max-age=0, must-revalidate" },
         ],
+      },
+      {
+        source: "/pi-web-assets/:path*",
+        headers: [{ key: "Cache-Control", value: "public, max-age=31536000, immutable" }],
       },
       {
         source: "/sw.js",

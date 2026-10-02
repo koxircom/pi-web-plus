@@ -180,16 +180,13 @@ test("session listing supports cheap summaries and honors force refresh", () => 
   assert.match(listRoute, /"Cache-Control": "no-store"/);
 });
 
-test("session reads use the live SessionManager before requiring a JSONL path", () => {
-  for (const source of [detailRoute, contextRoute]) {
-    const liveLookup = source.indexOf("getRpcSession(id)");
-    const pathLookup = source.indexOf("resolveSessionPath(id)");
-    assert.ok(liveLookup >= 0);
-    assert.ok(pathLookup > liveLookup);
-    // openSessionManager is the cached read-only opener; the live wrapper's
-    // manager must still win over any disk read, cached or not.
-    assert.match(source, /liveRpc\?\.inner\.sessionManager \?\? openSessionManager\(/);
-  }
+test("session reads prefer active writers while context delegates to its read service", () => {
+  const liveLookup = detailRoute.indexOf("getRpcSession(id)");
+  assert.ok(liveLookup >= 0);
+  assert.ok(detailRoute.indexOf("resolveSessionPath(id)") > liveLookup);
+  assert.match(detailRoute, /selectSessionReadRuntime\(liveWrapper\)/);
+  assert.match(detailRoute, /liveRpc\?\.inner.sessionManager \?\? openSessionManager\(/);
+  assert.match(contextRoute, /return handleSessionContextRequest\(req, \{ id \}\)/);
 });
 
 test("detail reads probe disk only on force/mount and evict a stale idle wrapper", () => {
@@ -343,6 +340,7 @@ test("live detail and state routes work without a persisted JSONL file", async (
   assert.equal(stateResponse.status, 200);
   assert.deepEqual(await stateResponse.json(), {
     running: true,
+    runtimeAlive: true,
     state: { isStreaming: true },
   });
 });
@@ -369,7 +367,7 @@ test("session detail returns a gzip-compressed response when the client accepts 
   };
   globalThis.__piSessions = new Map([[id, {
     isAlive: () => true,
-    isRunning: () => false,
+    isRunning: () => true,
     inner: { sessionManager },
     sessionFile: sessionManager.getSessionFile(),
     sessionId: id,

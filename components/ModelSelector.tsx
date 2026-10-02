@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import { createPortal } from "react-dom";
 import { useI18n } from "@/hooks/useI18n";
 import { useIsMobile } from "@/hooks/useIsMobile";
 
@@ -62,6 +63,7 @@ export function ModelSelector({
   const { t } = useI18n();
   const isMobile = useIsMobile();
   const rootRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
   const [open, setOpen] = useState(false);
   const [anchorRect, setAnchorRect] = useState<{ top: number; right: number; bottom: number; left: number; width: number } | null>(null);
@@ -80,7 +82,7 @@ export function ModelSelector({
 
   const currentName = selectedLabel ?? (value
     ? sortedOptions.find((option) => option.modelId === value.modelId && option.provider === value.provider)?.name ?? value.modelId
-    : emptyLabel ?? (sortedOptions.length > 0 ? "Select model" : "No models"));
+    : emptyLabel ?? (sortedOptions.length > 0 ? t("chat.selectModel") : t("chat.noAvailableModels")));
 
   useEffect(() => {
     const handleOutsideClick = (event: MouseEvent) => {
@@ -101,6 +103,39 @@ export function ModelSelector({
     setOpen(false);
     setFilter("");
   }, [locked]);
+
+  useEffect(() => {
+    if (!open) return;
+
+    const updateAnchorRect = (force = false) => {
+      const trigger = triggerRef.current;
+      if (!trigger) return;
+      const rect = trigger.getBoundingClientRect();
+      setAnchorRect((current) => !force && current
+        && current.top === rect.top
+        && current.right === rect.right
+        && current.bottom === rect.bottom
+        && current.left === rect.left
+        && current.width === rect.width
+        ? current
+        : { top: rect.top, right: rect.right, bottom: rect.bottom, left: rect.left, width: rect.width });
+    };
+    const updateForViewportChange = () => updateAnchorRect(true);
+    const updateOnScroll = () => updateAnchorRect();
+
+    const viewport = window.visualViewport;
+    window.addEventListener("resize", updateForViewportChange);
+    window.addEventListener("scroll", updateOnScroll, true);
+    viewport?.addEventListener("resize", updateForViewportChange);
+    viewport?.addEventListener("scroll", updateForViewportChange);
+
+    return () => {
+      window.removeEventListener("resize", updateForViewportChange);
+      window.removeEventListener("scroll", updateOnScroll, true);
+      viewport?.removeEventListener("resize", updateForViewportChange);
+      viewport?.removeEventListener("scroll", updateForViewportChange);
+    };
+  }, [open]);
 
   const buttonStyle: CSSProperties = variant === "field"
     ? {
@@ -151,7 +186,7 @@ export function ModelSelector({
     <div
       ref={rootRef}
       className={`model-selector is-${variant}${locked ? " is-disabled" : ""}`}
-      style={{ position: "relative", width: variant === "field" || isMobile ? "100%" : undefined, minWidth: 0, flex: variant === "toolbar" && isMobile ? "1 1 auto" : undefined, zIndex: open ? 1200 : undefined }}
+      style={{ position: "relative", width: variant === "field" || isMobile ? "100%" : undefined, minWidth: 0, flex: variant === "toolbar" && isMobile ? "1 1 auto" : undefined }}
       onKeyDown={(event) => {
         if (event.key !== "Escape" || !open) return;
         event.preventDefault();
@@ -161,13 +196,14 @@ export function ModelSelector({
       }}
     >
       <button
+        ref={triggerRef}
         type="button"
         aria-label={ariaLabel}
         aria-haspopup="listbox"
         aria-expanded={open}
         aria-busy={busy || undefined}
         disabled={locked}
-        title={busy ? "Switching model" : locked ? currentName : sortedOptions.length > 0 || onClear ? "Change model" : "No available models"}
+        title={busy ? t("chat.switchingModel") : locked ? currentName : sortedOptions.length > 0 || onClear ? t("chat.changeModel") : t("chat.noAvailableModels")}
         style={buttonStyle}
         onClick={(event) => {
           const rect = event.currentTarget.getBoundingClientRect();
@@ -214,7 +250,7 @@ export function ModelSelector({
         )}
       </button>
 
-      {open && anchorRect && (() => {
+      {open && anchorRect && typeof document !== "undefined" && (() => {
         const viewportHeight = window.visualViewport?.height ?? window.innerHeight;
         const viewportWidth = window.visualViewport?.width ?? window.innerWidth;
         const spaceAbove = Math.max(0, anchorRect.top - 8);
@@ -229,7 +265,7 @@ export function ModelSelector({
           ? { left: 8, right: 8, maxWidth: "calc(100vw - 16px)" }
           : { left: anchorRect.left, width: "max-content", minWidth: anchorRect.width, maxWidth: Math.max(anchorRect.width, viewportWidth - anchorRect.left - 8) };
 
-        return (
+        return createPortal(
           <div
             ref={panelRef}
             role="listbox"
@@ -285,7 +321,7 @@ export function ModelSelector({
               )}
               {modelsByProvider.length === 0 ? (
                 <div style={{ padding: "8px 12px", color: "var(--text-dim)", fontSize: 12, whiteSpace: "nowrap" }}>
-                  {filter.trim() ? t("chat.noMatchingModels") : "No available models"}
+                  {filter.trim() ? t("chat.noMatchingModels") : t("chat.noAvailableModels")}
                 </div>
               ) : modelsByProvider.map((group, index) => (
                 <div key={group.provider}>
@@ -305,7 +341,8 @@ export function ModelSelector({
                 </div>
               ))}
             </div>
-          </div>
+          </div>,
+          document.body,
         );
       })()}
     </div>

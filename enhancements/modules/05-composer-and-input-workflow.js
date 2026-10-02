@@ -996,71 +996,6 @@
       document.querySelector("textarea");
   }
 
-  let composerHeightRafId = null;
-  let lastMeasuredValueLength = -1;
-  let lastMeasuredScrollHeight = -1;
-
-  function syncComposerTextareaAutoHeight(textarea, { immediate = false } = {}) {
-    if (!textarea || textarea.tagName !== "TEXTAREA") return;
-    if (!textarea.hasAttribute("rows")) textarea.setAttribute("rows", "1");
-    if (textarea.style.display === "none") return;
-
-    const card = textarea.closest?.('.pi-enh-cursor-composer, fieldset > div[style*="max-width"]');
-    // 若用户已手动拉大/拉小高度，保持用户自定义尺寸，彻底跳过高度重排
-    if (card && card.classList.contains("pi-enh-composer-custom-height")) {
-      return;
-    }
-
-    const val = textarea.value || "";
-    if (!val) {
-      if (composerHeightRafId) {
-        cancelAnimationFrame(composerHeightRafId);
-        composerHeightRafId = null;
-      }
-      textarea.style.height = "auto";
-      lastMeasuredValueLength = 0;
-      lastMeasuredScrollHeight = 0;
-      return;
-    }
-
-    // 移动端长文本快速删除优化 (Fast Path)：
-    // 当文本很长且已处于溢出滚动状态时，小幅度的字符删除绝不会让高度变矮，跳过 auto 布局颠簸
-    const len = val.length;
-    if (!immediate && lastMeasuredScrollHeight >= 200 && Math.abs(len - lastMeasuredValueLength) < 20) {
-      return;
-    }
-
-    const measureAndApply = () => {
-      composerHeightRafId = null;
-      if (!textarea.isConnected || textarea.style.display === "none") return;
-      if (card && card.classList.contains("pi-enh-composer-custom-height")) return;
-      const currentVal = textarea.value || "";
-      if (!currentVal) {
-        textarea.style.height = "auto";
-        lastMeasuredValueLength = 0;
-        lastMeasuredScrollHeight = 0;
-        return;
-      }
-      textarea.style.height = "auto";
-      const sh = textarea.scrollHeight || 0;
-      lastMeasuredValueLength = currentVal.length;
-      lastMeasuredScrollHeight = sh;
-      if (sh > 0) {
-        textarea.style.height = `${Math.min(sh, 200)}px`;
-      }
-    };
-
-    if (immediate) {
-      if (composerHeightRafId) {
-        cancelAnimationFrame(composerHeightRafId);
-        composerHeightRafId = null;
-      }
-      measureAndApply();
-    } else if (!composerHeightRafId) {
-      composerHeightRafId = requestAnimationFrame(measureAndApply);
-    }
-  }
-
   function setComposerTextareaValue(textarea, value, { focus = true } = {}) {
     if (!textarea) return false;
     try {
@@ -1073,7 +1008,6 @@
       textarea.value = value;
     }
     textarea.dispatchEvent(new Event("input", { bubbles: true }));
-    syncComposerTextareaAutoHeight(textarea);
     if (focus) {
       textarea.focus();
       if (typeof textarea.setSelectionRange === "function") {
@@ -1338,89 +1272,21 @@
   };
 
   // ==========================================
-  // 3.4 Composer Draft & Image Cache (输入框草稿与图片本地记忆)
+  // 3.4 Composer Draft & Image Cache (原生草稿持久层兼容桥)
   // ==========================================
-  // v1 and pre-fix v2 are intentionally quarantined: they can contain a
-  // submission-race snapshot with no trustworthy sent/unsent distinction.
-  // Never import them, and never share a fallback key between new sessions.
-  const DRAFT_STORAGE_PREFIX = "pi-enh-composer-draft-v3:";
-  const MAX_PERSISTED_DRAFTS = 10;
-  const EMPTY_DRAFT_SIGNATURE = JSON.stringify({ value: "", images: [] });
-  let nativeDraftContexts = new WeakMap();
-  let activeNativeDraft = null;
+  // ChatInput/draft-store owns composer state and v3 storage. These wrappers
+  // serve enhancement flows that recover an inactive queue owner.
   let draftListeners = [];
-  let draftRuntimeGeneration = 0;
   let draftSyncQueued = false;
-  // Recovery is allowed only when entering an owner, never as a recurring
-  // timer side effect after that owner's content was submitted.
-  let draftRestoreRequested = true;
-  let lastObservedNativeDraftKey = null;
-  const submittedDraftKeys = new Set();
-  const pendingDraftSubmissions = new Map();
-  const nativeDraftRestoreObserverRecords = new Set();
-  let restoringPersistedComposerDraft = false;
-  let draftSubmissionPollFrame = 0;
-  let clearingStaleDraftSurface = false;
-  const recentlySubmittedSignatures = new Map();
+  let draftRuntimeGeneration = 0;
 
-  function recordSubmittedDraftSignature(sig) {
-    if (!sig || typeof sig !== "string") return;
-    recentlySubmittedSignatures.set(sig, Date.now());
-    if (recentlySubmittedSignatures.size > 80) {
-      const now = Date.now();
-      for (const [s, ts] of recentlySubmittedSignatures) {
-        if (now - ts > 600000) recentlySubmittedSignatures.delete(s);
-      }
-    }
-  }
-
-  function isDraftAlreadySentInSession(ownerKey, draft) {
-    if (!draft || (!draft.value && (!draft.images || !draft.images.length))) return false;
-    const text = (draft.value || "").trim();
-    if (!text && !draft.images?.length) return false;
-
-    const sig = JSON.stringify({
-      value: draft.value || "",
-      images: (draft.images || []).map(({ data, mimeType }) => ({ data, mimeType }))
-    });
-    if (recentlySubmittedSignatures.has(sig)) return true;
-
+  function getNativeDraftStore() {
     try {
-      const sid = typeof getCurrentSessionId === "function" ? getCurrentSessionId() : null;
-      const targetSid = (sid && sid.length >= 20) ? sid : (typeof ownerKey === "string" && ownerKey.length >= 20 ? ownerKey : null);
-      if (targetSid && typeof sessionMemoryCache !== "undefined") {
-        const entry = sessionMemoryCache.get(targetSid);
-        if (entry && entry.detailRequests) {
-          for (const req of entry.detailRequests.values()) {
-            const msgs = req.data?.context?.messages;
-            if (Array.isArray(msgs)) {
-              for (const m of msgs) {
-                if (m.role === "user") {
-                  let userText = "";
-                  if (typeof m.content === "string") userText = m.content.trim();
-                  else if (Array.isArray(m.content)) {
-                    userText = m.content.filter(c => c.type === "text").map(c => c.text).join("\n").trim();
-                  }
-                  if (userText && (userText === text || (text.length >= 10 && userText.includes(text)))) return true;
-                }
-              }
-            }
-          }
-        }
-      }
-
-      if (text) {
-        const userNodes = document.querySelectorAll(".chat-content [data-entry-id], .chat-content .markdown-user-message");
-        for (const node of userNodes) {
-          const content = node.textContent?.trim() || "";
-          if (content && (content === text || (text.length >= 10 && content.includes(text.slice(0, Math.min(text.length, 50)))))) {
-            return true;
-          }
-        }
-      }
-    } catch (_) {}
-
-    return false;
+      const store = typeof window !== "undefined" ? window.__PI_NATIVE_DRAFT_STORE__ : null;
+      return store?.version === 1 ? store : null;
+    } catch {
+      return null;
+    }
   }
 
   function validDraftImages(images) {
@@ -1429,118 +1295,20 @@
       && typeof img.mimeType === "string" && img.mimeType.startsWith("image/"));
   }
 
-  function draftStorageKey(key) {
-    return DRAFT_STORAGE_PREFIX + encodeURIComponent(key);
-  }
-
   function getPersistedDraft(key) {
-    if (typeof key !== "string" || !key) return null;
-    try {
-      const item = JSON.parse(localStorage.getItem(draftStorageKey(key)) || "null");
-      return item?.version === 3 && item.ownerKey === key
-        && typeof item.value === "string" && validDraftImages(item.images) ? item : null;
-    } catch { return null; }
+    return getNativeDraftStore()?.get(key) || null;
   }
 
   function removePersistedDraft(key) {
-    if (typeof key !== "string" || !key) return false;
-    try { localStorage.removeItem(draftStorageKey(key)); return true; } catch { return false; }
+    return getNativeDraftStore()?.clear(key) ?? false;
   }
 
   function savePersistedDraft(key, draft) {
-    if (!isPluginEnabled("composer-draft-cache") || typeof key !== "string" || !key
+    if (!isPluginEnabled("composer-draft-cache") || !key
       || typeof draft?.value !== "string" || !validDraftImages(draft.images)) return false;
-    if (!draft.value && !draft.images.length) return removePersistedDraft(key);
-    if (isDraftAlreadySentInSession(key, draft)) {
-      removePersistedDraft(key);
-      return false;
-    }
-    try {
-      // Each owner has its own atomic entry. Never rewrite another session's
-      // draft on quota failure or a concurrent save from another browser tab.
-      localStorage.setItem(draftStorageKey(key), JSON.stringify({
-        version: 3, ownerKey: key, value: draft.value,
-        images: draft.images.map(({ data, mimeType }) => ({ data, mimeType })),
-        updatedAt: Date.now(),
-      }));
-      submittedDraftKeys.delete(key);
-      const keys = [];
-      for (let i = 0; i < localStorage.length; i++) {
-        const storageKey = localStorage.key(i);
-        if (storageKey?.startsWith(DRAFT_STORAGE_PREFIX)) keys.push(storageKey);
-      }
-      if (keys.length > MAX_PERSISTED_DRAFTS) {
-        keys.sort((a, b) => {
-          try { return JSON.parse(localStorage.getItem(a)).updatedAt - JSON.parse(localStorage.getItem(b)).updatedAt; }
-          catch { return 0; }
-        });
-        for (const old of keys.slice(0, keys.length - MAX_PERSISTED_DRAFTS)) {
-          if (old !== draftStorageKey(key)) localStorage.removeItem(old);
-        }
-      }
-      return true;
-    } catch { return false; } // Keep existing drafts intact if storage is full.
-  }
-
-  function installNativeDraftRestoreObserver(native) {
-    const handle = native?.handle;
-    if (!native || !handle) return;
-    for (const record of nativeDraftRestoreObserverRecords) {
-      if (record.handle === handle) continue;
-      if (record.handle.restoreSubmission === record.wrapper) {
-        try { record.handle.restoreSubmission = record.original; } catch {}
-      }
-      nativeDraftRestoreObserverRecords.delete(record);
-    }
-    const original = handle.restoreSubmission;
-    if (typeof original !== "function" || original.__piEnhDraftRestoreObserver) return;
-    const wrapper = function(text, images, targetDraftKey) {
-      const result = original.apply(this, arguments);
-      if (restoringPersistedComposerDraft || !isPluginEnabled("composer-draft-cache")) return result;
-      const owner = typeof targetDraftKey === "string" && targetDraftKey
-        ? targetDraftKey : (native.keyRef?.current || native.key);
-      if (!owner) return result;
-      pendingDraftSubmissions.delete(owner);
-      submittedDraftKeys.delete(owner);
-
-      const current = readNativeComposerDraft();
-      if (current?.key === owner && current.keyRef?.current === owner) {
-        const ctx = nativeDraftContexts.get(current.keyRef);
-        const snapshot = nativeDraftSnapshot(current);
-        if (ctx) {
-          ctx.initialized = true;
-          ctx.lastSaved = EMPTY_DRAFT_SIGNATURE;
-        }
-        if (snapshot && (snapshot.value || snapshot.images.length)
-          && savePersistedDraft(owner, snapshot) && ctx) {
-          ctx.lastSaved = JSON.stringify(snapshot);
-        }
-        return result;
-      }
-
-      // Rejection recovery can target a session that is no longer visible. Keep
-      // the native recovery and the enhancement's durable copy in sync.
-      const recoveredValue = typeof text === "string" ? text : "";
-      const recoveredImages = (Array.isArray(images) ? images : [])
-        .filter((image) => image && typeof image.data === "string" && image.data
-          && typeof image.mimeType === "string" && image.mimeType.startsWith("image/"))
-        .map(({ data, mimeType }) => ({ data, mimeType }));
-      const existing = getPersistedDraft(owner) || { value: "", images: [] };
-      const value = !recoveredValue.trim() ? existing.value
-        : (!existing.value.trim() ? recoveredValue : `${recoveredValue}\n\n${existing.value}`);
-      const mergedImages = [...recoveredImages, ...existing.images];
-      if (mergedImages.length <= 10 && validDraftImages(mergedImages)) {
-        savePersistedDraft(owner, { value, images: mergedImages });
-      }
-      return result;
-    };
-    Object.defineProperty(wrapper, "__piEnhDraftRestoreObserver", { value: true });
-    try {
-      handle.restoreSubmission = wrapper;
-      if (handle.restoreSubmission === wrapper) {
-        nativeDraftRestoreObserverRecords.add({ handle, original, wrapper });
-      }
-    } catch { /* Native imperative handles may be immutable; fail closed. */ }
+    const store = getNativeDraftStore();
+    if (!store) return false;
+    return store.set(key, draft);
   }
 
   function committedComposerFiber(fieldset) {
@@ -1591,7 +1359,6 @@
       const native = { key: props.draftKey, keyRef: hooks[i], valueRef: hooks[i + 1],
         imagesRef, pendingRef: hooks[i + 3], textarea, fieldset, handle,
         imageStateHook: imageStateHooks.length === 1 ? imageStateHooks[0] : null };
-      installNativeDraftRestoreObserver(native);
       return native;
     }
     return null;
@@ -1604,441 +1371,23 @@
   function nativeDraftSnapshot(ctx) {
     if (!ctx || ctx.keyRef.current !== ctx.key || typeof ctx.valueRef.current !== "string"
       || !validDraftImages(ctx.imagesRef.current)) return null;
-    return { value: ctx.valueRef.current,
-      images: ctx.imagesRef.current.map(({ data, mimeType }) => ({ data, mimeType })) };
-  }
-
-  function isDraftSubmissionAccepted(sub) {
-    return Boolean(sub && sub.keyRef?.current === sub.owner
-      && sub.valueRef?.current === ""
-      && Array.isArray(sub.imagesRef?.current)
-      && sub.imagesRef.current.length === 0);
-  }
-
-  function clearStaleRemountedNativeComposer(native, owner) {
-    if (!native || native.key !== owner || native.keyRef?.current !== owner) return false;
-    const prevClearing = clearingStaleDraftSurface;
-    clearingStaleDraftSurface = true;
-    try {
-      if (Array.isArray(native.imagesRef?.current) && native.imagesRef.current.length > 0) {
-        const prevImages = native.imagesRef.current;
-        native.imagesRef.current = [];
-        if (native.imageStateHook && typeof native.imageStateHook.queue?.dispatch === "function") {
-          try { native.imageStateHook.queue.dispatch([]); } catch {}
-        } else if (native.fieldset) {
-          for (const img of native.fieldset.querySelectorAll("img")) {
-            if (/^(blob:|data:image\/)/.test(img.getAttribute("src") || "")) {
-              (getComposerAttachmentRemoveButton(img) || (!isNativeImagePreviewTrigger(img.parentElement) ? img.parentElement?.querySelector?.("button") : null))?.click();
-            }
-          }
-        }
-        for (const img of prevImages) {
-          if (typeof img?.previewUrl === "string" && img.previewUrl.startsWith("blob:")
-            && typeof URL?.revokeObjectURL === "function") {
-            try { URL.revokeObjectURL(img.previewUrl); } catch {}
-          }
-        }
-      }
-      if (native.valueRef?.current !== "" || native.textarea?.value !== "") {
-        native.valueRef.current = "";
-        setComposerTextareaValue(native.textarea, "", { focus: false });
-      }
-      instantlyClearComposerSurface(native.textarea, owner);
-      removePersistedDraft(owner);
-      return true;
-    } finally {
-      clearingStaleDraftSurface = prevClearing;
-    }
-  }
-
-  function markDraftSubmissionAccepted(sub) {
-    if (!sub) return false;
-    const firstAccept = !sub.accepted;
-    sub.accepted = true;
-    submittedDraftKeys.add(sub.owner);
-    removePersistedDraft(sub.owner);
-    const oldCtx = nativeDraftContexts.get(sub.keyRef);
-    if (oldCtx && oldCtx.key === sub.owner) {
-      oldCtx.initialized = true;
-      oldCtx.lastSaved = EMPTY_DRAFT_SIGNATURE;
-    }
-    if (firstAccept) {
-      const generation = draftRuntimeGeneration;
-      queueMicrotask(() => {
-        if (generation !== draftRuntimeGeneration || !isPluginEnabled("composer-draft-cache")) return;
-        syncNativeComposerDraft(false);
-      });
-      if (typeof requestAnimationFrame === "function") {
-        requestAnimationFrame(() => {
-          if (generation !== draftRuntimeGeneration || !isPluginEnabled("composer-draft-cache")) return;
-          syncNativeComposerDraft(false);
-        });
-      }
-    }
-    return true;
-  }
-
-  function reconcilePendingDraftSubmission(native) {
-    if (activeNativeDraft && activeNativeDraft.lastSaved
-      && activeNativeDraft.lastSaved !== EMPTY_DRAFT_SIGNATURE
-      && isDraftSubmissionAccepted({
-        owner: activeNativeDraft.key,
-        keyRef: activeNativeDraft.keyRef,
-        valueRef: activeNativeDraft.valueRef,
-        imagesRef: activeNativeDraft.imagesRef,
-      })) {
-      let tracked = pendingDraftSubmissions.get(activeNativeDraft.key);
-      if (!tracked || tracked.keyRef !== activeNativeDraft.keyRef) {
-        tracked = {
-          owner: activeNativeDraft.key,
-          keyRef: activeNativeDraft.keyRef,
-          valueRef: activeNativeDraft.valueRef,
-          imagesRef: activeNativeDraft.imagesRef,
-          signature: activeNativeDraft.lastSaved,
-          accepted: false,
-        };
-        pendingDraftSubmissions.set(activeNativeDraft.key, tracked);
-      }
-      markDraftSubmissionAccepted(tracked);
-    }
-    for (const [, sub] of pendingDraftSubmissions) {
-      if (!sub.accepted && isDraftSubmissionAccepted(sub)) {
-        markDraftSubmissionAccepted(sub);
-      }
-    }
-    if (!native) return;
-    const sub = pendingDraftSubmissions.get(native.key);
-    if (!sub) return;
-    if (!sub.accepted && isDraftSubmissionAccepted(sub)) {
-      markDraftSubmissionAccepted(sub);
-    }
-  }
-
-  function scheduleDraftSubmissionObservation() {
-    if (draftSubmissionPollFrame || typeof requestAnimationFrame !== "function") return;
-    const generation = draftRuntimeGeneration;
-    let remainingFrames = 120;
-    const step = () => {
-      draftSubmissionPollFrame = 0;
-      if (generation !== draftRuntimeGeneration || !isPluginEnabled("composer-draft-cache")) return;
-      let hasUnresolved = false;
-      let newlyAccepted = false;
-      for (const [, sub] of pendingDraftSubmissions) {
-        if (!sub.accepted) {
-          if (isDraftSubmissionAccepted(sub)) {
-            markDraftSubmissionAccepted(sub);
-            newlyAccepted = true;
-          } else {
-            hasUnresolved = true;
-          }
-        }
-      }
-      if (newlyAccepted) {
-        syncNativeComposerDraft(false);
-      }
-      if (hasUnresolved && --remainingFrames > 0) {
-        draftSubmissionPollFrame = requestAnimationFrame(step);
-      }
+    return {
+      value: ctx.valueRef.current,
+      images: ctx.imagesRef.current.map(({ data, mimeType }) => ({ data, mimeType }))
     };
-    draftSubmissionPollFrame = requestAnimationFrame(step);
   }
 
-  function persistNativeDraft(ctx) {
-    // Before entry recovery is evaluated, an empty native composer is only an
-    // unknown transition state. It must never erase its owner's saved draft.
-    if (!ctx?.initialized) return;
-    const sub = pendingDraftSubmissions.get(ctx.key);
-    if (sub && !sub.accepted && isDraftSubmissionAccepted(sub)) {
-      markDraftSubmissionAccepted(sub);
-    }
+  function persistNativeDraft(ctx = readNativeComposerDraft()) {
+    if (!isPluginEnabled("composer-draft-cache") || !ctx) return false;
     const snapshot = nativeDraftSnapshot(ctx);
-    if (!snapshot) return;
-    const submission = composerSubmissionInFlight;
-    if (submission?.snapshot && submission.keyRef === ctx.keyRef && submission.owner === ctx.key
-      && snapshot.value === submission.text && !submission.accepted) snapshot.value = submission.body;
-    const isEmpty = !snapshot.value && !snapshot.images.length;
-    if (isEmpty) {
-      const hadSavedContent = typeof ctx.lastSaved === "string"
-        && ctx.lastSaved !== EMPTY_DRAFT_SIGNATURE;
-      // An empty native instance may not have hydrated its session draft yet.
-      // Only erase storage after an observed submission intent or a previously
-      // non-empty draft was explicitly cleared; empty refs alone prove nothing.
-      if (sub?.accepted || submittedDraftKeys.has(ctx.key) || hadSavedContent) {
-        removePersistedDraft(ctx.key);
-      }
-      ctx.lastSaved = EMPTY_DRAFT_SIGNATURE;
-      return;
-    }
-    // 已提交且已接受的会话：若当前内容与已提交载荷一致，或当前处于提交确认状态且无真实新打字输入，严禁重新写回草稿
-    if (sub?.accepted) {
-      if (JSON.stringify(snapshot) === sub.signature) return;
-      if (ctx.keyRef === sub.keyRef) {
-        pendingDraftSubmissions.delete(ctx.key);
-        submittedDraftKeys.delete(ctx.key);
-      }
-    }
-    if (submittedDraftKeys.has(ctx.key)) {
-      if (sub && JSON.stringify(snapshot) === sub.signature) return;
-    }
-    if (isDraftAlreadySentInSession(ctx.key, snapshot)) {
-      removePersistedDraft(ctx.key);
-      return;
-    }
-    const signature = JSON.stringify(snapshot);
-    if (signature === ctx.lastSaved && getPersistedDraft(ctx.key)) return;
-    if (savePersistedDraft(ctx.key, snapshot)) ctx.lastSaved = signature;
+    if (!snapshot) return false;
+    return !snapshot.value && !snapshot.images.length
+      ? removePersistedDraft(ctx.key)
+      : savePersistedDraft(ctx.key, snapshot);
   }
 
-  function requestComposerDraftRestore() {
-    draftRestoreRequested = true;
-  }
-
-  function hasPendingComposerDraftRestore() {
-    return draftRestoreRequested;
-  }
-
-  function getComposerSubmissionIntent(event) {
-    const native = readNativeComposerDraft();
-    const snapshot = nativeDraftSnapshot(native);
-    if (!native || !snapshot || (!snapshot.value && !snapshot.images.length)) return null;
-    if (native.fieldset?.disabled || native.pendingRef?.current > 0) return null;
-    const target = event?.target;
-    const button = target?.closest?.("button") || (target?.tagName === "BUTTON" ? target : null);
-    const className = String(button?.className || "");
-    if (button && /\bpi-enh-(?:quick-|attachment-remove|format-toggle)/.test(className)) return null;
-    const labels = button ? [button.textContent, button.getAttribute?.("aria-label"), button.getAttribute?.("title")]
-      .map((label) => String(label || "").trim()).filter(Boolean) : [];
-    const clickedSubmission = !!button && native.fieldset?.contains?.(button) && !button.disabled
-      && (button.classList?.contains("pi-enh-cursor-send")
-        || button.classList?.contains("pi-enh-cursor-followup")
-        || button.classList?.contains("pi-enh-cursor-steer")
-        || button.querySelector?.('polyline[points*="7.5 3 12 7 7.5 11"]')
-        || button.querySelector?.('path[d*="M5 1"]')
-        || button.querySelector?.('polyline[points*="2.5 3.5 5 1 7.5 3.5"]')
-        || labels.some((label) => /发送(?:消息)?|引导|后续消息|send(?:\s+message)?|steer|follow[\s-]?up/i.test(label)));
-    const isEditorTarget = target === native.textarea
-      || Boolean(activeFormattedComposer && activeFormattedComposer.__boundTextarea === native.textarea && activeFormattedComposer.contains(target));
-    const mobilePlainEnter = typeof isMobileEnvironment === "function" && isMobileEnvironment() && !event?.ctrlKey && !event?.metaKey;
-    const completionKey = typeof isComposerCompletionKey === "function" && isComposerCompletionKey(event, native.textarea);
-    const keyboardSubmission = event?.type === "keydown" && isEditorTarget
-      && event.key === "Enter" && !event.shiftKey && !event.altKey
-      && !event.isComposing && !isComposingInput && event.keyCode !== 229
-      && !mobilePlainEnter && !completionKey;
-    return clickedSubmission || keyboardSubmission ? { native, snapshot, signature: JSON.stringify(snapshot) } : null;
-  }
-
-  function trackDraftSubmissionIntent(intent) {
-    if (!intent?.native) return;
-    const { native, snapshot, signature } = intent;
-    let ctx = nativeDraftContexts.get(native.keyRef);
-    if (!ctx || ctx.key !== native.key) {
-      ctx = { ...native, initialized: true, lastSaved: null };
-      nativeDraftContexts.set(native.keyRef, ctx);
-    } else {
-      Object.assign(ctx, native);
-      ctx.initialized = true;
-    }
-    // Keep the unsent draft persisted while a delayed rAF or async builtin check
-    // is still in flight; only removePersistedDraft once clearInput is observed.
-    if (snapshot && (snapshot.value || snapshot.images.length) && !getPersistedDraft(native.key)) {
-      if (savePersistedDraft(native.key, snapshot)) ctx.lastSaved = signature;
-    }
-    recordSubmittedDraftSignature(signature);
-    const sub = {
-      owner: native.key,
-      keyRef: native.keyRef,
-      valueRef: native.valueRef,
-      imagesRef: native.imagesRef,
-      textarea: native.textarea,
-      snapshot,
-      signature,
-      accepted: false,
-    };
-    pendingDraftSubmissions.set(native.key, sub);
-    if (isDraftSubmissionAccepted(sub)) {
-      markDraftSubmissionAccepted(sub);
-    } else {
-      scheduleDraftSubmissionObservation();
-    }
-  }
-
-  function removeDraftRestoredBadge() {
-    for (const badge of document.querySelectorAll(".pi-enh-draft-badge")) badge.remove();
-  }
-
-  function getNativeComposerToolbarControls(ctx) {
-    const inputRow = ctx?.textarea?.parentElement;
-    const mainInputHost = inputRow?.parentElement;
-    const composerSurface = mainInputHost?.parentElement;
-    if (!composerSurface?.contains?.(mainInputHost)) return null;
-    const children = Array.from(composerSurface.children || []);
-    const inputIndex = children.indexOf(mainInputHost);
-    if (inputIndex < 0) return null;
-    // The native bottom toolbar is the first post-input flex row with controls.
-    // Match only this bounded composer subtree; never guess from page-wide DOM.
-    const toolbar = children.slice(inputIndex + 1).find((child) => {
-      const style = child.getAttribute?.("style") || "";
-      return /margin-top\s*:\s*8px/i.test(style) && !!child.querySelector?.("button");
-    });
-    const controls = toolbar?.firstElementChild || toolbar?.children?.[0];
-    return controls?.querySelector?.("button") ? controls : null;
-  }
-
-  function showDraftRestoredBadge(ctx, draft) {
-    removeDraftRestoredBadge();
-    const controls = getNativeComposerToolbarControls(ctx);
-    // Fail closed visually too: a missing native toolbar must never produce a
-    // detached row, floating banner, or input-overlay fallback.
-    if (!controls) return;
-    const badge = document.createElement("div");
-    badge.className = "pi-enh-draft-badge";
-    badge.setAttribute("data-draft-owner", ctx.key);
-    badge.style.cssText = "display:inline-flex;align-items:center;gap:6px;margin-left:8px;padding:3px 7px;border:1px solid color-mix(in srgb, var(--primary, #8ab4f8) 55%, transparent);border-radius:999px;background:color-mix(in srgb, var(--primary, #8ab4f8) 12%, transparent);color:var(--text, #1a1a1a);font-size:12px;line-height:18px;white-space:nowrap;";
-    const label = document.createElement("span");
-    label.textContent = `草稿已恢复${draft.images.length ? ` · ${draft.images.length} 张图片` : ""}`;
-    const discard = document.createElement("button");
-    discard.type = "button";
-    discard.textContent = "丢弃";
-    discard.style.cssText = "border:0;padding:0;background:transparent;color:inherit;font:inherit;cursor:pointer;text-decoration:underline;text-underline-offset:2px;";
-    discard.onclick = () => {
-      if (!isPluginEnabled("composer-draft-cache")) return;
-      const current = readNativeComposerDraft();
-      if (!current || current.keyRef !== ctx.keyRef || current.key !== ctx.key) return;
-      // DOM is used only for bounded user actions, never as a draft data source.
-      const prevClearing = clearingStaleDraftSurface;
-      clearingStaleDraftSurface = true;
-      try {
-        setComposerTextareaValue(ctx.textarea, "");
-        if (activeFormattedComposer) {
-          activeFormattedComposer.innerHTML = "";
-          activeFormattedComposer.__piEnhSyncedValue = "";
-        }
-        for (const img of ctx.fieldset.querySelectorAll("img")) {
-          if (/^(blob:|data:image\/)/.test(img.getAttribute("src") || "")) {
-            (getComposerAttachmentRemoveButton(img) || (!isNativeImagePreviewTrigger(img.parentElement) ? img.parentElement?.querySelector?.("button") : null))?.click();
-          }
-        }
-      } finally {
-        clearingStaleDraftSurface = prevClearing;
-      }
-      removePersistedDraft(ctx.key);
-      removeDraftRestoredBadge();
-      queueNativeDraftSync();
-    };
-    badge.append(label, discard);
-    controls.appendChild(badge);
-  }
-
-  function syncNativeComposerDraft(allowRestore = false) {
-    if (!isPluginEnabled("composer-draft-cache")) return false;
-    ensureDraftListeners();
-    const native = readNativeComposerDraft();
-    reconcilePendingDraftSubmission(native);
-    // Old refs retain their immutable owner even after the DOM is unmounted.
-    // Native clearInput updates them synchronously before send/remount.
-    if (activeNativeDraft) persistNativeDraft(activeNativeDraft);
-    if (!native) return false;
-    if (lastObservedNativeDraftKey !== native.key) {
-      // Do not infer submission from empty refs while changing owners. The old
-      // composer may still be waiting for native draft hydration or rejection recovery.
-      lastObservedNativeDraftKey = native.key;
-      requestComposerDraftRestore();
-    }
-    let ctx = nativeDraftContexts.get(native.keyRef);
-    if (!ctx || ctx.key !== native.key) {
-      ctx = { ...native, initialized: false, lastSaved: null };
-      nativeDraftContexts.set(native.keyRef, ctx);
-    } else Object.assign(ctx, native);
-    if (ctx !== activeNativeDraft) removeDraftRestoredBadge();
-    activeNativeDraft = ctx;
-
-    const sub = pendingDraftSubmissions.get(ctx.key);
-    if (sub?.accepted) {
-      if (ctx.keyRef !== sub.keyRef && !ctx.initialized) {
-        // Same-session remount immediately after an accepted send: native in-memory
-        // draft-store Map clearing is asynchronous (useEffect), so the remounted
-        // instance may initialize with stale already-sent text/images.
-        const staleSnapshot = nativeDraftSnapshot(ctx);
-        if (staleSnapshot && (staleSnapshot.value || staleSnapshot.images.length)
-          && JSON.stringify(staleSnapshot) !== sub.signature) {
-          // A different payload on the new instance is a fresh user draft, not
-          // stale native memory; never erase it while repairing the old send.
-          pendingDraftSubmissions.delete(ctx.key);
-          submittedDraftKeys.delete(ctx.key);
-          ctx.initialized = true;
-          draftRestoreRequested = false;
-          persistNativeDraft(ctx);
-          return false;
-        }
-        if (staleSnapshot && (staleSnapshot.value || staleSnapshot.images.length)) {
-          clearStaleRemountedNativeComposer(ctx, ctx.key);
-        } else {
-          removePersistedDraft(ctx.key);
-        }
-        ctx.initialized = true;
-        ctx.lastSaved = EMPTY_DRAFT_SIGNATURE;
-        sub.keyRef = ctx.keyRef;
-        draftRestoreRequested = false;
-        return false;
-      }
-      if (ctx.keyRef === sub.keyRef) {
-        const currentSnapshot = nativeDraftSnapshot(ctx);
-        if (currentSnapshot && !currentSnapshot.value && !currentSnapshot.images.length) {
-          removePersistedDraft(ctx.key);
-          ctx.initialized = true;
-          ctx.lastSaved = EMPTY_DRAFT_SIGNATURE;
-          return false;
-        }
-        if (currentSnapshot && (currentSnapshot.value || currentSnapshot.images.length)) {
-          // Subsequent user typing or restoreSubmission on the already-cleared instance.
-          pendingDraftSubmissions.delete(ctx.key);
-          submittedDraftKeys.delete(ctx.key);
-        }
-      }
-    }
-
-    let restored = false;
-    if (!ctx.initialized) {
-      const snapshot = nativeDraftSnapshot(ctx);
-      if (!snapshot || ctx.pendingRef.current > 0) return false;
-      if (allowRestore && draftRestoreRequested) {
-        ctx.initialized = true;
-        draftRestoreRequested = false;
-        const stored = getPersistedDraft(ctx.key);
-        const isStaleAlreadySent = stored && isDraftAlreadySentInSession(ctx.key, stored);
-        if (submittedDraftKeys.has(ctx.key) || isStaleAlreadySent) {
-          // 若本会话已知已完成提交或已包含该用户消息，必须安全清除残余持久化草稿，绝不复活
-          removePersistedDraft(ctx.key);
-        } else if (!snapshot.value && !snapshot.images.length && stored) {
-          // Native handle takes the explicit owner and restores Base64 directly;
-          // no FileReader, DataTransfer, pending merge, or delayed image injection.
-          try {
-            restoringPersistedComposerDraft = true;
-            try { ctx.handle.restoreSubmission(stored.value, stored.images, ctx.key); }
-            finally { restoringPersistedComposerDraft = false; }
-            showDraftRestoredBadge(ctx, stored);
-            restored = true;
-            if (typeof syncComposerMarkdownFormat === "function") {
-              syncComposerMarkdownFormat();
-            }
-          } catch {
-            ctx.lastSaved = JSON.stringify(snapshot); // Do not erase on adapter failure.
-            return false;
-          }
-        }
-      } else if (!draftRestoreRequested) {
-        ctx.initialized = true;
-      } else if ((snapshot.value || snapshot.images.length) && !getPersistedDraft(ctx.key)) {
-        ctx.initialized = true;
-        draftRestoreRequested = false;
-      }
-      if ((snapshot?.value || snapshot?.images?.length) && isDraftAlreadySentInSession(ctx.key, snapshot)) {
-        clearStaleRemountedNativeComposer(ctx, ctx.key);
-        removePersistedDraft(ctx.key);
-      }
-    }
-    persistNativeDraft(ctx);
-    return restored;
+  function saveCurrentComposerDraft() {
+    return persistNativeDraft();
   }
 
   function queueNativeDraftSync() {
@@ -2048,97 +1397,38 @@
     Promise.resolve().then(() => {
       if (generation !== draftRuntimeGeneration) return;
       draftSyncQueued = false;
-      syncNativeComposerDraft();
+      persistNativeDraft();
     });
   }
 
+  // Compatibility entry points remain for the session lifecycle module. Draft
+  // hydration is synchronous in native getDraft(); periodic DOM restore is gone.
+  function attemptComposerDraftRestore() { return false; }
+  function hasPendingComposerDraftRestore() { return false; }
+  function restoreComposerDraftIfNeeded() { return false; }
+  function syncComposerDraftOnInterval() {}
+  function syncComposerDraftSessionContext() { saveCurrentComposerDraft(); }
+  function notifySessionChangedForDraft() { saveCurrentComposerDraft(); }
+
   function ensureDraftListeners() {
     if (draftListeners.length) return;
-    const handler = (event) => {
-      if (clearingStaleDraftSurface) return;
-      const submissionIntent = getComposerSubmissionIntent(event);
-      if (submissionIntent) {
-        // Track submission intent without deleting persisted draft prematurely.
-        // Draft is cleared only when native clearInput consumes the refs.
-        trackDraftSubmissionIntent(submissionIntent);
-        removeDraftRestoredBadge();
-        queueNativeDraftSync();
-        return;
-      }
-      const current = activeNativeDraft;
-      const target = event?.target;
-      const changedText = (event?.type === "input" || event?.type === "change" || event?.type === "paste")
-        && (target === current?.textarea || Boolean(activeFormattedComposer && activeFormattedComposer.__boundTextarea === current?.textarea && activeFormattedComposer.contains(target)));
-      const changedImage = event?.type === "change" && target?.tagName === "INPUT"
-        && String(target.type || "").toLowerCase() === "file" && current?.fieldset?.contains?.(target);
-      if (changedText || changedImage) {
-        removeDraftRestoredBadge();
-        if (current?.key) {
-          const snap = nativeDraftSnapshot(current);
-          const hasContent = snap && (snap.value || snap.images.length);
-          const sub = pendingDraftSubmissions.get(current.key);
-          if (sub) {
-            if (sub.accepted) {
-              if (hasContent && JSON.stringify(snap) !== sub.signature) {
-                pendingDraftSubmissions.delete(current.key);
-                submittedDraftKeys.delete(current.key);
-              }
-            } else {
-              if (hasContent && JSON.stringify(snap) !== sub.signature) {
-                pendingDraftSubmissions.delete(current.key);
-                submittedDraftKeys.delete(current.key);
-              }
-            }
-          } else if (hasContent) {
-            // 用户在切回或已提交清空后重新进行了真实编辑（即使文字相同也是新草稿）
-            submittedDraftKeys.delete(current.key);
-          }
-        }
-      }
-      // Observe before React handles send, then again after it has committed.
-      // Enter/IME/mobile newline and rejected sends are NOT assumed to be sent.
-      syncNativeComposerDraft(false);
-      queueNativeDraftSync();
+    const flush = () => { saveCurrentComposerDraft(); getNativeDraftStore()?.flush?.(); };
+    window.addEventListener("beforeunload", flush, true);
+    draftListeners.push(() => window.removeEventListener("beforeunload", flush, true));
+    window.addEventListener("pagehide", flush, true);
+    draftListeners.push(() => window.removeEventListener("pagehide", flush, true));
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "hidden") flush();
     };
-    for (const type of ["input", "change", "paste", "click", "keydown"]) {
-      document.addEventListener(type, handler, true);
-      draftListeners.push(() => document.removeEventListener(type, handler, true));
-    }
+    document.addEventListener("visibilitychange", onVisibilityChange, true);
+    draftListeners.push(() => document.removeEventListener("visibilitychange", onVisibilityChange, true));
   }
 
   function stopComposerDraftCache() {
     draftRuntimeGeneration++;
     draftSyncQueued = false;
-    if (draftSubmissionPollFrame && typeof cancelAnimationFrame === "function") {
-      cancelAnimationFrame(draftSubmissionPollFrame);
-      draftSubmissionPollFrame = 0;
-    }
     for (const cleanup of draftListeners.splice(0)) cleanup();
-    for (const record of nativeDraftRestoreObserverRecords) {
-      if (record.handle.restoreSubmission === record.wrapper) {
-        try { record.handle.restoreSubmission = record.original; } catch {}
-      }
-    }
-    nativeDraftRestoreObserverRecords.clear();
-    restoringPersistedComposerDraft = false;
-    nativeDraftContexts = new WeakMap();
-    activeNativeDraft = null;
-    draftRestoreRequested = true;
-    lastObservedNativeDraftKey = null;
-    submittedDraftKeys.clear();
-    pendingDraftSubmissions.clear();
-    removeDraftRestoredBadge();
   }
-
-  function saveCurrentComposerDraft() { return syncNativeComposerDraft(false); }
-  function attemptComposerDraftRestore() { return syncNativeComposerDraft(true); }
-  function restoreComposerDraftIfNeeded() {
-    requestComposerDraftRestore();
-    return attemptComposerDraftRestore();
-  }
-  function syncComposerDraftOnInterval() { syncNativeComposerDraft(false); }
-  function syncComposerDraftSessionContext() { syncNativeComposerDraft(false); }
-  function notifySessionChangedForDraft() { syncNativeComposerDraft(false); }
 
   activeCleanups.push(stopComposerDraftCache);
   if (isPluginEnabled("composer-draft-cache")) ensureDraftListeners();
@@ -3319,7 +2609,7 @@
 
     if (pendingComposerAttachments.length === 0) {
       if (bar) bar.remove();
-      if (composerCard) updateCardContentState(composerCard, textarea);
+      if (composerCard) syncComposerAttachmentSendability(composerCard, textarea);
       if (typeof syncEmptySendContinue === "function") syncEmptySendContinue();
       return;
     }
@@ -3355,7 +2645,7 @@
     // 主同步循环每 800ms 执行一次；队列未变化时绝不能重建卡片，否则入场动画会造成闪动。
     const renderKey = pendingComposerAttachments.map((att) => [att.id, att.name, att.size, att.type, att.serverRelativePath || "", att.isText ? "text" : "file"].join("\u001f")).join("\u001e");
     if (bar.getAttribute("data-pi-enh-attachments-key") === renderKey) {
-      if (composerCard) updateCardContentState(composerCard, textarea);
+      if (composerCard) syncComposerAttachmentSendability(composerCard, textarea);
       if (typeof syncEmptySendContinue === "function") syncEmptySendContinue();
       return;
     }
@@ -3384,7 +2674,7 @@
       bar.appendChild(card);
     }
     bar.setAttribute("data-pi-enh-attachments-key", renderKey);
-    if (composerCard) updateCardContentState(composerCard, textarea);
+    if (composerCard) syncComposerAttachmentSendability(composerCard, textarea);
     if (typeof syncEmptySendContinue === "function") syncEmptySendContinue();
   }
 
@@ -5931,66 +5221,17 @@
   // ==========================================
   // Streaming Thinking Guard (流式思考聚合与防刷屏守卫)
   // ==========================================
-  function syncStreamingThinkingGuard(enabledOverride) {
-    const enabled = typeof enabledOverride === "boolean" ? enabledOverride : isPluginEnabled("streaming-thinking-guard");
-    if (typeof document === "undefined") return;
-
-    if (document.documentElement && document.documentElement.classList) {
-      document.documentElement.classList.toggle("pi-enh-streaming-thinking-guard-active", enabled);
+  function syncStreamingThinkingGuard() {
+    // Native MessageView owns empty-thinking filtering. Compatibility cleanup only.
+    const root = document.documentElement;
+    if (root.classList.contains("pi-enh-streaming-thinking-guard-active")) {
+      root.classList.remove("pi-enh-streaming-thinking-guard-active");
     }
-
-    if (!enabled) {
-      for (const el of document.querySelectorAll("[data-pi-enh-thinking-folded]")) {
-        el.removeAttribute("data-pi-enh-thinking-folded");
-      }
-      for (const badge of document.querySelectorAll(".pi-enh-thinking-aggregate-badge")) {
-        badge.remove();
-      }
-      return;
+    for (const el of document.querySelectorAll("[data-pi-enh-thinking-folded]")) {
+      el.removeAttribute("data-pi-enh-thinking-folded");
     }
-
-    const assistantMsgs = document.querySelectorAll('div[data-message-role="assistant"]');
-    for (const msg of assistantMsgs) {
-      const cards = Array.from(msg.querySelectorAll('div[style*="border-radius: 7px"], div.border, [data-pi-enh-tool-card]')).filter((el) => {
-        const text = (el.textContent || "").trim();
-        const hasBulbOrThinking = el.querySelector("svg") && (
-          text.includes("Thinking") || 
-          text.includes("思考") || 
-          text.includes("推导") || 
-          /^\d+(\.\d+)?\s*s$/.test(text) || 
-          text === "..." || 
-          text === ""
-        );
-        const isTool = el.querySelector('[data-tool-name], button[title*="bash" i], button[title*="read" i], button[title*="write" i], button[title*="edit" i]');
-        return hasBulbOrThinking && !isTool;
-      });
-
-      if (cards.length >= 2) {
-        const count = cards.length;
-        for (let i = 0; i < count - 1; i++) {
-          cards[i].setAttribute("data-pi-enh-thinking-folded", "true");
-        }
-        const activeCard = cards[count - 1];
-        activeCard.removeAttribute("data-pi-enh-thinking-folded");
-
-        const msgKey = msg.getAttribute("data-entry-id") || "active";
-        let badge = msg.querySelector(`.pi-enh-thinking-aggregate-badge[data-for-msg="${msgKey}"]`);
-        if (!badge && activeCard.parentElement) {
-          badge = document.createElement("div");
-          badge.className = "pi-enh-thinking-aggregate-badge";
-          badge.setAttribute("data-for-msg", msgKey);
-          activeCard.parentElement.insertBefore(badge, activeCard);
-        }
-        if (badge) {
-          badge.textContent = `🧠 深度分步推理中 (已聚合 ${count} 步思考)`;
-        }
-      } else if (cards.length < 2) {
-        for (const el of cards) {
-          el.removeAttribute("data-pi-enh-thinking-folded");
-        }
-        const badge = msg.querySelector(`.pi-enh-thinking-aggregate-badge`);
-        if (badge) badge.remove();
-      }
+    for (const badge of document.querySelectorAll(".pi-enh-thinking-aggregate-badge")) {
+      badge.remove();
     }
   }
 
@@ -7119,9 +6360,7 @@
     const entriesSignature = JSON.stringify([sessionId, entries]);
     const renderSignature = JSON.stringify([sessionId, entries, queueAttachmentRevision]);
 
-    const expectedNext = (composerGoalBarEl && composerGoalBarEl.isConnected && composerGoalBarEl.parentElement === card.parentElement)
-      ? composerGoalBarEl
-      : card;
+    const expectedNext = card;
 
     if (composerQueuePanel?.isConnected && composerQueuePanel.nextElementSibling === expectedNext && renderSignature === composerQueueSignature) return;
 
@@ -7392,2038 +6631,13 @@
   });
   window.__PI_ENH_SYNC_COMPOSER_QUEUE__ = syncComposerQueuePanel;
 
-  // ==========================================
-  // 3.55.2 Cursor Style Unified Composer Layout & Resizable Height
-  // ==========================================
-  const CODEX_COMPOSER_STYLE_ID = "pi-enh-codex-composer-style";
-  const COMPOSER_RESIZER_CLASS = "pi-enh-composer-resizer";
-  const COMPOSER_CUSTOM_HEIGHT_CLASS = "pi-enh-composer-custom-height";
-  const COMPOSER_HEIGHT_STORAGE_KEY = "pi-web:composer-custom-height";
-
-  function syncComposerPreloadHeightProperty(heightValue) {
-    if (typeof document === "undefined" || !document.documentElement) return;
-    const docEl = document.documentElement;
-    if (typeof heightValue === "number" && Number.isFinite(heightValue) && heightValue >= 44) {
-      const rounded = Math.round(heightValue);
-      docEl.style.setProperty("--pi-enh-preload-composer-height", `${rounded}px`);
-      docEl.setAttribute("data-pi-composer-custom-height", String(rounded));
-    } else {
-      docEl.style.removeProperty("--pi-enh-preload-composer-height");
-      docEl.removeAttribute("data-pi-composer-custom-height");
-    }
-  }
-
-  function applyComposerCustomHeight(card, textarea, height) {
-    if (!card) return;
-    const rounded = Math.round(height);
-    card.classList.add(COMPOSER_CUSTOM_HEIGHT_CLASS);
-    card.style.setProperty("--pi-composer-custom-height", `${rounded}px`);
-    if (textarea) {
-      textarea.style.height = `${rounded}px`;
-    }
-    const formatted = card.querySelector(".pi-enh-formatted-composer");
-    if (formatted) {
-      formatted.style.height = `${rounded}px`;
-    }
-  }
-  window.__PI_ENH_APPLY_COMPOSER_CUSTOM_HEIGHT__ = applyComposerCustomHeight;
-
-  function resetComposerCustomHeight(card, textarea) {
-    if (!card) return;
-    card.classList.remove(COMPOSER_CUSTOM_HEIGHT_CLASS);
-    card.style.removeProperty("--pi-composer-custom-height");
-    if (textarea) {
-      textarea.style.height = "auto";
-      syncComposerTextareaAutoHeight(textarea, { immediate: true });
-    }
-    const formatted = card.querySelector(".pi-enh-formatted-composer");
-    if (formatted) {
-      formatted.style.height = "auto";
-    }
-    try {
-      localStorage.removeItem(COMPOSER_HEIGHT_STORAGE_KEY);
-    } catch (err) {}
-    syncComposerPreloadHeightProperty(null);
-  }
-
-  function syncComposerResizableHeight(card, textarea) {
-    if (!card || !textarea) return;
-    let resizer = card.querySelector(`.${COMPOSER_RESIZER_CLASS}`);
-    if (!resizer) {
-      resizer = document.createElement("div");
-      resizer.className = COMPOSER_RESIZER_CLASS;
-      resizer.setAttribute("role", "separator");
-      resizer.setAttribute("aria-label", "调整输入框高度");
-      resizer.setAttribute("title", "按住拖动调整高度");
-
-      const line = document.createElement("div");
-      line.className = "pi-enh-composer-resizer-line";
-      resizer.appendChild(line);
-
-      card.insertBefore(resizer, card.firstChild);
-
-      let startY = 0;
-      let startHeight = 0;
-      let isDragging = false;
-
-      const onPointerMove = (ev) => {
-        if (!isDragging) return;
-        ev.preventDefault();
-        const deltaY = startY - ev.clientY; // 向上拖为正，输入框增高
-        let targetHeight = startHeight + deltaY;
-
-        const minHeight = 44;
-        const vpHeight = window.visualViewport ? window.visualViewport.height : window.innerHeight;
-        // 允许拉大至可视区域的 80%，给予最充分的阅读与编辑视野，且绝不在高处被吸走反弹
-        const maxHeight = Math.max(minHeight, Math.floor(vpHeight * 0.8));
-
-        targetHeight = Math.max(minHeight, Math.min(maxHeight, targetHeight));
-        applyComposerCustomHeight(card, textarea, targetHeight);
-      };
-
-      const onPointerUp = (ev) => {
-        if (!isDragging) return;
-        isDragging = false;
-        try {
-          if (ev && typeof ev.pointerId === "number") {
-            resizer.releasePointerCapture(ev.pointerId);
-          }
-        } catch (err) {}
-        window.removeEventListener("pointermove", onPointerMove);
-        window.removeEventListener("pointerup", onPointerUp);
-        window.removeEventListener("pointercancel", onPointerUp);
-        card.classList.remove("pi-enh-composer-resizing");
-        document.body.classList.remove("pi-enh-composer-resizing");
-
-        // 绝不自动反弹吸回：用户拖动松手停在哪个高度，就持久保留在哪个高度
-        const currentH = parseFloat(card.style.getPropertyValue("--pi-composer-custom-height") || "0");
-        if (currentH >= 44) {
-          const roundedH = Math.round(currentH);
-          try {
-            localStorage.setItem(COMPOSER_HEIGHT_STORAGE_KEY, String(roundedH));
-          } catch (err) {}
-          syncComposerPreloadHeightProperty(roundedH);
-        }
-      };
-
-      const onPointerDown = (e) => {
-        if (e.button !== 0 && e.pointerType === "mouse") return;
-        e.preventDefault();
-        e.stopPropagation();
-
-        startY = e.clientY;
-        const currentEditor = card.querySelector(".pi-enh-formatted-composer:not([style*='display: none'])") || textarea;
-        startHeight = currentEditor.getBoundingClientRect().height || 56;
-        isDragging = true;
-        try {
-          resizer.setPointerCapture(e.pointerId);
-        } catch (err) {}
-
-        card.classList.add("pi-enh-composer-resizing");
-        document.body.classList.add("pi-enh-composer-resizing");
-
-        // 全局 window 监听，彻底解决手机端手指滑入上方聊天可滚动区域时的手势中断与跳变反弹
-        window.addEventListener("pointermove", onPointerMove, { passive: false });
-        window.addEventListener("pointerup", onPointerUp);
-        window.addEventListener("pointercancel", onPointerUp);
-      };
-
-      resizer.addEventListener("pointerdown", onPointerDown);
-
-      // 若已有保存的高度偏好，自动应用并保持稳定
-      try {
-        const saved = localStorage.getItem(COMPOSER_HEIGHT_STORAGE_KEY);
-        if (saved) {
-          const num = parseFloat(saved);
-          if (Number.isFinite(num) && num >= 44) {
-            applyComposerCustomHeight(card, textarea, num);
-            syncComposerPreloadHeightProperty(num);
-          } else {
-            syncComposerPreloadHeightProperty(null);
-          }
-        } else {
-          syncComposerPreloadHeightProperty(null);
-        }
-      } catch (err) {}
-    }
-  }
-
-  function syncCodexComposerLayout() {
-    if (!isPluginEnabled("codex-composer-layout")) {
-      removeCodexComposerLayout();
-      return;
-    }
-
-    // 检查并同步预置高度 CSS 变量与标记（有效数值 >= 44）
-    try {
-      const saved = localStorage.getItem(COMPOSER_HEIGHT_STORAGE_KEY);
-      if (saved) {
-        const num = parseFloat(saved);
-        if (Number.isFinite(num) && num >= 44) {
-          syncComposerPreloadHeightProperty(num);
-        } else {
-          syncComposerPreloadHeightProperty(null);
-        }
-      } else {
-        syncComposerPreloadHeightProperty(null);
-      }
-    } catch (err) {}
-
-    // Preload the model/reasoning grid rules before React mounts a new composer.
-    // Waiting for a mutation observer to decorate the first DOM commit causes a visible height jump.
-    if (isPluginEnabled("composer-model-reasoning-pill")) {
-      ensureComposerModelPillStyle();
-    }
-    if (isPluginEnabled("composer-modes")) {
-      ensureComposerModesStyle();
-      ensureComposerModesStatusObserver();
-    }
-
-    let style = document.getElementById(CODEX_COMPOSER_STYLE_ID);
-    if (!style) {
-      style = document.createElement("style");
-      style.id = CODEX_COMPOSER_STYLE_ID;
-      style.textContent = `
-        /* The settings dialog is modal; keep the fixed composer from covering its content. */
-        body:has(.settings-dialog-backdrop, .settings-dialog-surface, [role="dialog"][aria-modal="true"]) .pi-enh-cursor-composer {
-          display: none !important;
-        }
-
-
-        /* One grid owns editor and toolbar. Native React nodes are never reparented. */
-        .pi-enh-cursor-composer,
-        fieldset > div[style*="max-width"]:has(textarea, .pi-enh-formatted-composer) {
-          display: grid !important;
-          position: relative;
-          grid-template-columns: 28px 28px auto minmax(0, 1fr) auto auto auto auto !important;
-          column-gap: 2px !important;
-          row-gap: 6px !important;
-          align-items: center;
-          padding: 10px 12px !important;
-          background: var(--bg-panel, #222) !important;
-          border: 1px solid var(--border, #3f3f46) !important;
-          border-radius: 16px !important;
-          box-shadow: 0 2px 8px #0000000a !important;
-          min-width: 0;
-        }
-        .pi-enh-cursor-composer:focus-within,
-        fieldset > div[style*="max-width"]:focus-within {
-          border-color: color-mix(in srgb, var(--text-muted) 60%, var(--border)) !important;
-        }
-        .pi-enh-cursor-composer .pi-enh-cursor-contents,
-        .pi-enh-cursor-composer .pi-enh-cursor-left,
-        .pi-enh-cursor-composer .pi-enh-cursor-right,
-        .pi-enh-cursor-composer .pi-enh-cursor-right > .pi-enh-cursor-right-inner:not([hidden]):not([style*="display: none"]):not([style*="display:none"]):not([style*="position: absolute"]):not([style*="position:absolute"]),
-        fieldset > div[style*="max-width"] > div:has(textarea),
-        fieldset > div[style*="max-width"] > div:has(textarea) > div:has(textarea, .pi-enh-formatted-composer),
-        fieldset > div[style*="max-width"] > div[data-pi-composer-toolbar],
-        fieldset > div[style*="max-width"] > div[style*="margin-top"],
-        fieldset > div[style*="max-width"] [data-pi-composer-left],
-        fieldset > div[style*="max-width"] .pi-enh-cursor-left,
-        fieldset > div[style*="max-width"] .pi-enh-cursor-right,
-        fieldset > div[style*="max-width"] .pi-enh-cursor-right > .pi-enh-cursor-right-inner:not([hidden]):not([style*="display: none"]):not([style*="display:none"]):not([style*="position: absolute"]):not([style*="position:absolute"]) {
-          display: contents !important;
-        }
-        .pi-enh-cursor-composer .pi-enh-cursor-right > .pi-enh-cursor-right-inner[hidden],
-        .pi-enh-cursor-composer .pi-enh-cursor-right > .pi-enh-cursor-right-inner[style*="display: none"],
-        .pi-enh-cursor-composer .pi-enh-cursor-right > .pi-enh-cursor-right-inner[style*="display:none"],
-        fieldset > div[style*="max-width"] .pi-enh-cursor-right > .pi-enh-cursor-right-inner[hidden],
-        fieldset > div[style*="max-width"] .pi-enh-cursor-right > .pi-enh-cursor-right-inner[style*="display: none"],
-        fieldset > div[style*="max-width"] .pi-enh-cursor-right > .pi-enh-cursor-right-inner[style*="display:none"] {
-          display: none !important;
-        }
-
-        /* Cursor 风格文件引用 (@mention) 紧凑浮层：原生 @ 菜单特有 max-height: min(48vh */
-        .pi-enh-cursor-composer div[style*="max-height: min(48vh"],
-        .pi-enh-cursor-composer div[style*="max-height:min(48vh"] {
-          width: min(430px, 100%) !important;
-          max-width: 100% !important;
-          left: 0 !important;
-          right: auto !important;
-          border-radius: 12px !important;
-          border: 1px solid var(--border, #3f3f46) !important;
-          background: var(--bg-panel, #1e1e20) !important;
-          box-shadow: 0 8px 24px rgba(0, 0, 0, 0.18), 0 2px 6px rgba(0, 0, 0, 0.08) !important;
-          box-sizing: border-box !important;
-          overflow: hidden !important;
-          z-index: 120 !important;
-        }
-
-        /* 文件引用浮层 Header 紧凑化 */
-        .pi-enh-cursor-composer div[style*="max-height: min(48vh"] > div:first-child,
-        .pi-enh-cursor-composer div[style*="max-height:min(48vh"] > div:first-child {
-          padding: 6px 10px !important;
-          font-size: 11px !important;
-          border-bottom: 1px solid var(--border, #3f3f46) !important;
-          align-items: center !important;
-          justify-content: space-between !important;
-          color: var(--text-dim, #71717a) !important;
-          background: transparent !important;
-          flex-shrink: 0 !important;
-        }
-
-        /* 文件引用浮层滚动容器：约 8 条行紧凑展示，超出平滑内部滚动 */
-        .pi-enh-cursor-composer div[style*="max-height: min(48vh"] > div:last-child,
-        .pi-enh-cursor-composer div[style*="max-height:min(48vh"] > div:last-child {
-          max-height: 256px !important;
-          overflow-y: auto !important;
-          padding: 4px !important;
-        }
-
-        /* 列表项紧凑行高 (30~32px) 与 Cursor 风格圆角交互 */
-        .pi-enh-cursor-composer div[style*="max-height: min(48vh"] > div:last-child button,
-        .pi-enh-cursor-composer div[style*="max-height:min(48vh"] > div:last-child button {
-          min-height: 31px !important;
-          height: 31px !important;
-          max-height: 31px !important;
-          padding: 0 8px !important;
-          font-size: 12px !important;
-          line-height: 31px !important;
-          border-radius: 6px !important;
-          align-items: center !important;
-          gap: 8px !important;
-          box-sizing: border-box !important;
-          white-space: nowrap !important;
-        }
-
-        /* 抹平原生内层容器在未打 class 前的边框与背景，0ms 秒级融合无跳变 */
-        fieldset > div[style*="max-width"] div[style*="border-radius: 14px"],
-        fieldset > div[style*="max-width"] div[style*="border-radius:14px"],
-        fieldset > div[style*="max-width"] div[style*="borderRadius: 14"] {
-          border: none !important;
-          background: transparent !important;
-          box-shadow: none !important;
-          padding: 0 !important;
-        }
-
-        fieldset > div[style*="max-width"] button:has(svg line[x1="2"][y1="7"]),
-        fieldset > div[style*="max-width"] button[style*="align-self: flex-end"],
-        fieldset > div[style*="max-width"] button[style*="alignSelf: flex-end"],
-        fieldset > div[style*="max-width"] button[style*="align-self:flex-end"] {
-          grid-column: -2 !important;
-          grid-row: 3 !important;
-          justify-self: end !important;
-          align-self: center !important;
-        }
-
-        /* 当模型选择器尚未就绪时，隐藏单独裸露的思考深度按钮，防止底栏首帧只剩一个孤立的 auto 图标 */
-        .pi-enh-cursor-composer:not(:has(.model-selector)) [data-pi-thinking-control],
-        fieldset > div[style*="max-width"]:not(:has(.model-selector)) [data-pi-thinking-control] {
-          visibility: hidden !important;
-          opacity: 0 !important;
-        }
-
-        /* Keep the native fallback out of the toolbar's narrow auto-placement cells. */
-        .pi-enh-cursor-composer > div[style*="padding: 5px 0"],
-        .pi-enh-cursor-composer > div[style*="padding:5px 0"] {
-          grid-column: 1 / -1 !important;
-          min-width: 0 !important;
-          max-width: 100% !important;
-          box-sizing: border-box !important;
-        }
-
-        /* Queue visibility belongs to composer-queue-panel, not this layout plugin. */
-        .pi-enh-native-queue-hidden {
-          display: none !important;
-          width: 0 !important;
-          height: 0 !important;
-          overflow: hidden !important;
-          pointer-events: none !important;
-          visibility: hidden !important;
-          opacity: 0 !important;
-          margin: 0 !important;
-          padding: 0 !important;
-          border: none !important;
-        }
-
-        /* 警告、重试与提示横幅全宽跨列显示，不挤占工具栏或输入网格单元 */
-        .pi-enh-cursor-composer > div[role="alert"],
-        .pi-enh-cursor-composer > div[style*="rgba(234, 179, 8"],
-        .pi-enh-cursor-composer > div[style*="rgba(234,179,8"],
-        .pi-enh-cursor-composer > div[style*="rgba(239, 68, 68"],
-        .pi-enh-cursor-composer > div[style*="rgba(239,68,68"] {
-          grid-column: 1 / -1 !important;
-          width: 100% !important;
-          box-sizing: border-box !important;
-        }
-
-        .pi-enh-cursor-composer .pi-enh-cursor-editor,
-        .pi-enh-cursor-composer textarea.chat-input-textarea,
-        .pi-enh-cursor-composer .pi-enh-formatted-composer,
-        fieldset > div[style*="max-width"] textarea.chat-input-textarea,
-        fieldset > div[style*="max-width"] .pi-enh-formatted-composer {
-          grid-area: 2 / 1 / 3 / -1;
-          width: 100% !important;
-          padding: 0 2px 4px !important;
-          min-height: 28px !important;
-          max-height: clamp(68px, 22vh, 160px) !important;
-          overflow-y: auto !important;
-          overscroll-behavior: contain !important;
-          box-sizing: border-box !important;
-        }
-        .pi-enh-cursor-composer:has(.pi-enh-cursor-attachments, div[style*="flex-wrap"]:has(img), .pi-enh-attachments-bar, .pi-enh-attachment-card) .pi-enh-cursor-editor,
-        .pi-enh-cursor-composer:has(.pi-enh-cursor-attachments, div[style*="flex-wrap"]:has(img), .pi-enh-attachments-bar, .pi-enh-attachment-card) textarea.chat-input-textarea,
-        .pi-enh-cursor-composer:has(.pi-enh-cursor-attachments, div[style*="flex-wrap"]:has(img), .pi-enh-attachments-bar, .pi-enh-attachment-card) .pi-enh-formatted-composer,
-        fieldset > div[style*="max-width"]:has(div[style*="flex-wrap"]:has(img), .pi-enh-attachments-bar, .pi-enh-attachment-card) textarea.chat-input-textarea,
-        fieldset > div[style*="max-width"]:has(div[style*="flex-wrap"]:has(img), .pi-enh-attachments-bar, .pi-enh-attachment-card) .pi-enh-formatted-composer {
-          max-height: clamp(52px, calc(18vh - 12px), 124px) !important;
-        }
-        .pi-enh-cursor-composer .pi-enh-cursor-attachments,
-        fieldset > div[style*="max-width"] > div[style*="flex-wrap"]:has(img),
-        .pi-enh-cursor-composer > .pi-enh-attachments-bar,
-        fieldset > div[style*="max-width"] > .pi-enh-attachments-bar {
-          grid-area: 1 / 1 / 2 / -1 !important;
-          display: flex !important;
-          flex-wrap: nowrap !important;
-          align-items: center !important;
-          gap: 6px !important;
-          margin: -2px 0 0 0 !important;
-          padding: 4px 6px 2px 2px !important;
-          max-height: 54px !important;
-          overflow-x: auto !important;
-          overflow-y: hidden !important;
-          box-sizing: border-box !important;
-          min-width: 0 !important;
-        }
-        /* 当 attachment-bar 挂在原生图片预览容器内部时，使用 display: contents 让 pill 卡片直接无缝复用原生同一 flex 行 */
-        fieldset > div[style*="max-width"] > div[style*="flex-wrap"]:has(img) > .pi-enh-attachments-bar,
-        .pi-enh-cursor-composer .pi-enh-cursor-attachments > .pi-enh-attachments-bar {
-          display: contents !important;
-        }
-        .pi-enh-cursor-composer .pi-enh-cursor-attachments img,
-        fieldset > div[style*="max-width"] > div[style*="flex-wrap"]:has(img) img {
-          width: 44px !important;
-          height: 44px !important;
-          border-radius: 6px !important;
-          object-fit: cover !important;
-          display: block !important;
-        }
-        /* 1. 加号按钮槽位 */
-        .pi-enh-cursor-composer .pi-enh-composer-add-btn,
-        fieldset > div[style*="max-width"] .pi-enh-composer-add-btn {
-          grid-column: 1 !important;
-          grid-row: 3 !important;
-          justify-self: start !important;
-          align-self: center !important;
-          width: 28px !important;
-          min-width: 28px !important;
-          height: 28px !important;
-          padding: 0 !important;
-          margin: 0 !important;
-          flex-shrink: 0 !important;
-        }
-
-        /* 2. 图片按钮槽位 */
-        .pi-enh-cursor-composer button[data-pi-attach-image],
-        fieldset > div[style*="max-width"] button[data-pi-attach-image] {
-          grid-column: 2 !important;
-          grid-row: 3 !important;
-          justify-self: start !important;
-          align-self: center !important;
-          width: 28px !important;
-          min-width: 28px !important;
-          height: 28px !important;
-          padding: 0 !important;
-          margin: 0 !important;
-          margin-left: -1px !important;
-          border-radius: 8px !important;
-          flex-shrink: 0 !important;
-        }
-
-        /* 3. 模式指示器槽位 */
-        .pi-enh-cursor-composer .pi-enh-composer-mode-indicator,
-        fieldset > div[style*="max-width"] .pi-enh-composer-mode-indicator {
-          grid-column: 3 !important;
-          grid-row: 3 !important;
-          justify-self: start !important;
-          align-self: center !important;
-          flex-shrink: 0 !important;
-        }
-
-        /* A text toggle must not auto-place in the 28px icon columns above the editor. */
-        .pi-enh-cursor-composer .pi-enh-format-toggle-btn,
-        fieldset > div[style*="max-width"] .pi-enh-format-toggle-btn {
-          grid-column: 4 !important;
-          grid-row: 3 !important;
-          justify-self: start !important;
-          align-self: center !important;
-        }
-
-        /* 4. 模型选择器槽位：永远固定在倒数第4列，靠右对齐，绝不重叠 */
-        .pi-enh-cursor-composer .model-selector,
-        fieldset > div[style*="max-width"] .model-selector {
-          grid-column: -4 !important;
-          grid-row: 3 !important;
-          justify-self: end !important;
-          align-self: center !important;
-          z-index: 2 !important;
-          min-width: 0 !important;
-          width: auto !important;
-          flex: 0 0 auto !important;
-          max-width: none !important;
-          display: inline-flex !important;
-          margin: 0 !important;
-        }
-
-        /* 5. 思考深度控件槽位：永远固定在倒数第3列，靠左紧贴模型选择器，绝不重叠 */
-        .pi-enh-cursor-composer [data-pi-thinking-control],
-        fieldset > div[style*="max-width"] [data-pi-thinking-control] {
-          grid-column: -3 !important;
-          grid-row: 3 !important;
-          justify-self: start !important;
-          align-self: center !important;
-          z-index: 2 !important;
-          min-width: 0 !important;
-          width: auto !important;
-          flex: 0 0 auto !important;
-          display: inline-flex !important;
-          padding: 0 !important;
-          margin: 0 !important;
-        }
-
-        /* 6. 发送与操作区槽位：永远固定在倒数第2列，靠右对齐 */
-        .pi-enh-cursor-composer .pi-enh-cursor-actions,
-        .pi-enh-cursor-composer .pi-enh-cursor-send,
-        fieldset > div[style*="max-width"] .pi-enh-cursor-actions,
-        fieldset > div[style*="max-width"] .pi-enh-cursor-send,
-        fieldset > div[style*="max-width"] div[style*="align-self: flex-end"]:not(:has(textarea, [contenteditable])) {
-          grid-column: -2 !important;
-          grid-row: 3 !important;
-          justify-self: end !important;
-          align-self: center !important;
-          display: flex !important;
-          align-items: center !important;
-          gap: 4px !important;
-          flex-shrink: 0 !important;
-        }
-        .pi-enh-cursor-composer .pi-enh-cursor-spacer { display: none !important; }
-
-        /* 无用户输入时：只隐藏真实运行态按钮组，严禁误伤包含输入框/编辑器的任何容器 */
-        .pi-enh-cursor-composer:not(.has-user-content) div[style*="align-self: flex-end"]:not(:has(textarea, [contenteditable])),
-        .pi-enh-cursor-composer:not(.has-user-content) div[style*="alignSelf: flex-end"]:not(:has(textarea, [contenteditable])),
-        .pi-enh-cursor-composer:not(.has-user-content) div[style*="align-self:flex-end"]:not(:has(textarea, [contenteditable])),
-        .pi-enh-cursor-composer:not(.has-user-content) .native-steer-group:not(:has(textarea, [contenteditable])),
-        .pi-enh-cursor-composer:not(.has-user-content) .pi-enh-cursor-actions:not(:has(textarea, [contenteditable])) {
-          display: none !important;
-          visibility: hidden !important;
-          width: 0 !important;
-          height: 0 !important;
-          opacity: 0 !important;
-          pointer-events: none !important;
-        }
-
-        /* 当存在运行态控制组且卡片无用户内容时，屏蔽非运行态单发按钮 */
-        .pi-enh-cursor-composer.pi-enh-has-running-controls:not(.has-user-content) > .pi-enh-cursor-send,
-        .pi-enh-cursor-composer.pi-enh-has-running-controls:not(.has-user-content) button.pi-enh-cursor-send:not(.pi-enh-cursor-followup):not(.pi-enh-running-group button) {
-          display: none !important;
-        }
-
-        /* 核心互斥规则：当输入框有内容需要发送时，停止按钮严格隐藏，绝对不与发送按钮重叠挤占 */
-        .pi-enh-cursor-composer.has-user-content button.pi-enh-cursor-stop,
-        .pi-enh-cursor-composer.has-user-content button[title*="停止"],
-        .pi-enh-cursor-composer.has-user-content button[title*="Stop" i],
-        .pi-enh-cursor-composer.has-user-content button:has(svg rect[x="1.5"]),
-        fieldset > div[style*="max-width"].has-user-content button.pi-enh-cursor-stop,
-        fieldset > div[style*="max-width"].has-user-content button[title*="停止"],
-        fieldset > div[style*="max-width"].has-user-content button[title*="Stop" i],
-        fieldset > div[style*="max-width"].has-user-content button:has(svg rect[x="1.5"]) {
-          display: none !important;
-          visibility: hidden !important;
-          width: 0 !important;
-          height: 0 !important;
-          opacity: 0 !important;
-          pointer-events: none !important;
-        }
-
-        /* 运行态操作组整体布局 */
-        .pi-enh-cursor-composer .pi-enh-cursor-actions,
-        .pi-enh-cursor-composer div[style*="align-self: flex-end"],
-        .pi-enh-cursor-composer div[style*="alignSelf: flex-end"],
-        .pi-enh-cursor-composer div[style*="align-self:flex-end"] {
-          grid-column: -2 !important;
-          grid-row: 3 !important;
-          justify-self: end !important;
-          display: flex !important;
-          align-items: center !important;
-          align-self: center !important;
-          gap: 4px !important;
-          flex-shrink: 0 !important;
-        }
-
-        /* 运行态：引导 (Steer) 按钮 */
-        .pi-enh-cursor-composer .pi-enh-cursor-steer {
-          position: static !important;
-          height: 28px !important;
-          min-width: 28px !important;
-          margin: 0 !important;
-          padding: 0 8px !important;
-          border-radius: 8px !important;
-          font-size: 12px !important;
-          font-weight: 500 !important;
-          white-space: nowrap !important;
-          display: inline-flex !important;
-          align-items: center !important;
-          justify-content: center !important;
-          gap: 4px !important;
-          align-self: center !important;
-          border: 1px solid rgba(234, 179, 8, 0.35) !important;
-          color: rgb(180, 130, 0) !important;
-          background: rgba(234, 179, 8, 0.08) !important;
-          cursor: pointer !important;
-          transition: all 0.12s ease !important;
-          flex-shrink: 0 !important;
-        }
-        html[data-theme="dark"] .pi-enh-cursor-composer .pi-enh-cursor-steer,
-        [data-theme="dark"] .pi-enh-cursor-composer .pi-enh-cursor-steer {
-          color: #facc15 !important;
-          background: rgba(234, 179, 8, 0.12) !important;
-        }
-        .pi-enh-cursor-composer .pi-enh-cursor-steer:hover {
-          color: #eab308 !important;
-          border-color: rgba(234, 179, 8, 0.55) !important;
-          background: rgba(234, 179, 8, 0.16) !important;
-        }
-        .pi-enh-cursor-composer .pi-enh-cursor-steer:disabled {
-          opacity: 0.5 !important;
-          cursor: not-allowed !important;
-          border-color: transparent !important;
-        }
-
-        /* 左右宽度紧凑自适应：视口 <= 860px 或卡片 tight 状态下，隐藏“引导”文字，只保留紧凑箭头图标 */
-        @media (max-width: 860px) {
-          .pi-enh-cursor-composer .pi-enh-cursor-steer .pi-enh-steer-label {
-            display: none !important;
-          }
-          .pi-enh-cursor-composer .pi-enh-cursor-steer {
-            padding: 0 6px !important;
-            min-width: 28px !important;
-            width: 28px !important;
-            gap: 0 !important;
-          }
-        }
-        .pi-enh-cursor-composer.pi-enh-composer-tight .pi-enh-cursor-steer .pi-enh-steer-label {
-          display: none !important;
-        }
-        .pi-enh-cursor-composer.pi-enh-composer-tight .pi-enh-cursor-steer {
-          padding: 0 6px !important;
-          min-width: 28px !important;
-          width: 28px !important;
-          gap: 0 !important;
-        }
-
-        /* ----------------------------------------------------
-           Cursor 风格圆形向上发送按键 (Circle Arrow-Up Send Button)
-           外径 24px，图标 14px，position: relative 配合 absolute 保证绝对水平与垂直居中
-           ---------------------------------------------------- */
-        .pi-enh-cursor-composer button.pi-enh-cursor-send,
-        .pi-enh-cursor-composer button.pi-enh-cursor-followup,
-        button.pi-enh-cursor-send,
-        button.pi-enh-cursor-followup {
-          gap: 0 !important;
-          letter-spacing: 0 !important;
-          text-indent: 0 !important;
-          transform: none !important;
-          box-shadow: none !important;
-          position: relative !important;
-          width: 24px !important;
-          height: 24px !important;
-          min-width: 24px !important;
-          max-width: 24px !important;
-          padding: 0 !important;
-          margin: 0 !important;
-          border-radius: 50% !important;
-          font-size: 0 !important;
-          line-height: 0 !important;
-          display: inline-flex !important;
-          align-items: center !important;
-          justify-content: center !important;
-          align-self: center !important;
-          border: none !important;
-          outline: none !important;
-          transition: background 0.15s ease, color 0.15s ease, transform 0.1s ease, box-shadow 0.15s ease !important;
-          flex-shrink: 0 !important;
-          box-sizing: border-box !important;
-          overflow: hidden !important;
-        }
-
-        /* 绝对几何居中：top: 50%; left: 50%; translate(-50%, -50%)，彻底杜绝任何水平与垂直方向偏心 */
-        .pi-enh-cursor-composer .pi-enh-cursor-send::before,
-        .pi-enh-cursor-composer .pi-enh-cursor-followup::before,
-        button.pi-enh-cursor-send::before,
-        button.pi-enh-cursor-followup::before {
-          content: "" !important;
-          position: absolute !important;
-          top: 50% !important;
-          left: 50% !important;
-          transform: translate(-50%, -50%) !important;
-          display: block !important;
-          width: 14px !important;
-          height: 14px !important;
-          margin: 0 !important;
-          padding: 0 !important;
-          pointer-events: none !important;
-          background-color: currentColor !important;
-          -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M12 19V5m-7 7 7-7 7 7' fill='none' stroke='black' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") no-repeat center / contain !important;
-          mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M12 19V5m-7 7 7-7 7 7' fill='none' stroke='black' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") no-repeat center / contain !important;
-        }
-
-        /* 仅隐藏发送/后续的原生图标，保留节点和事件供 React 管理。 */
-        .pi-enh-cursor-composer .pi-enh-cursor-send svg,
-        .pi-enh-cursor-composer .pi-enh-cursor-followup svg {
-          display: none !important;
-        }
-        .pi-enh-cursor-composer button.pi-enh-cursor-send:focus-visible {
-          outline: 2px solid var(--accent) !important;
-          outline-offset: 3px !important;
-        }
-
-        /* 禁用态 (Disabled / Empty) - 弱灰暗圈与淡灰箭头 */
-        .pi-enh-cursor-composer .pi-enh-cursor-send:disabled,
-        button.pi-enh-cursor-send:disabled {
-          background: rgba(128, 128, 128, 0.14) !important;
-          color: var(--text-dim, #71717a) !important;
-          cursor: not-allowed !important;
-          box-shadow: none !important;
-          opacity: 0.55 !important;
-        }
-
-        /* 截图中的柔白圆底、深灰线条；浅色主题沿用反色适配。 */
-        .pi-enh-cursor-composer .pi-enh-cursor-send:not(:disabled),
-        .pi-enh-cursor-composer .pi-enh-cursor-send[data-pi-enh-empty-send-continue="true"],
-        .pi-enh-cursor-composer .pi-enh-cursor-send[data-pi-enh-annotation-enabled="true"],
-        .pi-enh-cursor-composer .pi-enh-cursor-send[data-pi-enh-attachment-send="true"],
-        button.pi-enh-cursor-send:not(:disabled),
-        button.pi-enh-cursor-send[data-pi-enh-empty-send-continue="true"],
-        button.pi-enh-cursor-send[data-pi-enh-annotation-enabled="true"],
-        button.pi-enh-cursor-send[data-pi-enh-attachment-send="true"] {
-          background: #efefef !important;
-          color: #262626 !important;
-          cursor: pointer !important;
-          opacity: 1 !important;
-          box-shadow: none !important;
-        }
-
-        .pi-enh-cursor-composer .pi-enh-cursor-send:not(:disabled):hover,
-        .pi-enh-cursor-composer .pi-enh-cursor-send[data-pi-enh-empty-send-continue="true"]:hover,
-        button.pi-enh-cursor-send:not(:disabled):hover,
-        button.pi-enh-cursor-send[data-pi-enh-empty-send-continue="true"]:hover {
-          background: #ffffff !important;
-        }
-        .pi-enh-cursor-composer .pi-enh-cursor-send:not(:disabled):active,
-        .pi-enh-cursor-composer .pi-enh-cursor-send[data-pi-enh-empty-send-continue="true"]:active,
-        button.pi-enh-cursor-send:not(:disabled):active,
-        button.pi-enh-cursor-send[data-pi-enh-empty-send-continue="true"]:active {
-          filter: brightness(0.94);
-        }
-
-        /* 浅色主题适配 (Light Theme)：反色纯黑背景与纯白向上箭头 (Cursor 浅色模式) */
-        html[data-theme="light"] .pi-enh-cursor-composer .pi-enh-cursor-send:not(:disabled),
-        html[data-theme="light"] .pi-enh-cursor-composer .pi-enh-cursor-send[data-pi-enh-empty-send-continue="true"],
-        html[data-theme="light"] .pi-enh-cursor-composer .pi-enh-cursor-send[data-pi-enh-annotation-enabled="true"],
-        html[data-theme="light"] .pi-enh-cursor-composer .pi-enh-cursor-send[data-pi-enh-attachment-send="true"],
-        html[data-theme="light"] button.pi-enh-cursor-send:not(:disabled),
-        html[data-theme="light"] button.pi-enh-cursor-send[data-pi-enh-empty-send-continue="true"],
-        html[data-theme="light"] button.pi-enh-cursor-send[data-pi-enh-annotation-enabled="true"],
-        html[data-theme="light"] button.pi-enh-cursor-send[data-pi-enh-attachment-send="true"],
-        [data-theme="light"] .pi-enh-cursor-composer .pi-enh-cursor-send:not(:disabled),
-        [data-theme="light"] button.pi-enh-cursor-send:not(:disabled) {
-          background: #0e0e11 !important;
-          color: #ffffff !important;
-        }
-        html[data-theme="light"] .pi-enh-cursor-composer .pi-enh-cursor-send:not(:disabled):hover,
-        html[data-theme="light"] button.pi-enh-cursor-send:not(:disabled):hover {
-          background: #27272a !important;
-        }
-        html[data-theme="light"] .pi-enh-cursor-composer .pi-enh-cursor-send:disabled,
-        html[data-theme="light"] button.pi-enh-cursor-send:disabled {
-          background: rgba(0, 0, 0, 0.06) !important;
-          color: var(--text-dim, #a1a1aa) !important;
-        }
-        /* 0ms 物理级死锁停止按钮：首帧挂载即锁定在倒数第 5 列，绝对不许在左上方露头或发生滑动 */
-        .pi-enh-cursor-composer button.pi-enh-cursor-stop,
-        .pi-enh-cursor-composer button:has(svg rect[x="1.5"]),
-        .pi-enh-cursor-composer button[title*="停止"],
-        .pi-enh-cursor-composer button[title*="Stop" i],
-        .pi-enh-cursor-composer button[style*="rgba(239, 68, 68"],
-        .pi-enh-cursor-composer button[style*="rgba(239,68,68"],
-        fieldset > div[style*="max-width"] button.pi-enh-cursor-stop,
-        fieldset > div[style*="max-width"] button:has(svg rect[x="1.5"]),
-        fieldset > div[style*="max-width"] button[title*="停止"],
-        fieldset > div[style*="max-width"] button[title*="Stop" i],
-        fieldset > div[style*="max-width"] button[style*="rgba(239, 68, 68"],
-        fieldset > div[style*="max-width"] button[style*="rgba(239,68,68"] {
-          grid-column: -2 !important;
-          grid-row: 3 !important;
-          justify-self: end !important;
-          align-self: center !important;
-          position: static !important;
-          width: 28px !important;
-          min-width: 28px !important;
-          height: 28px !important;
-          max-height: 28px !important;
-          padding: 0 !important;
-          margin: 0 !important;
-          border-radius: 8px !important;
-          display: inline-flex !important;
-          align-items: center !important;
-          justify-content: center !important;
-          font-size: 0 !important;
-          gap: 0 !important;
-          border: 1px solid rgba(239, 68, 68, 0.3) !important;
-          color: #ef4444 !important;
-          background: rgba(239, 68, 68, 0.08) !important;
-          cursor: pointer !important;
-          flex-shrink: 0 !important;
-          transition: background 0.12s ease !important;
-        }
-        .pi-enh-cursor-composer button.pi-enh-cursor-stop:hover,
-        fieldset > div[style*="max-width"] button:has(svg rect[x="1.5"]):hover {
-          color: #ef4444 !important;
-          background: rgba(239, 68, 68, 0.16) !important;
-        }
-        .pi-enh-cursor-composer .pi-enh-cursor-secondary {
-          width: 28px !important; height: 30px !important;
-          padding: 0 !important; font-size: 0 !important; gap: 0 !important;
-        }
-        .pi-enh-cursor-composer .pi-enh-cursor-secondary > span { display: none !important; }
-        .pi-enh-cursor-composer .pi-enh-quick-fallback-trigger {
-          grid-area: 3 / 3;
-          position: static !important;
-          height: 30px !important; width: 28px !important;
-          padding: 0 !important; margin: 0 !important;
-          border-color: transparent !important;
-          color: var(--text-muted) !important;
-          background: transparent !important;
-        }
-        .pi-enh-cursor-composer .pi-enh-md-bold,
-        .pi-enh-cursor-composer .pi-enh-md-heading { color: var(--text) !important; }
-
-        /* 防御性隐藏：严格限定在 composer 内，绝无全局污染，杜绝非法伪类与重复选择器 */
-        .pi-enh-cursor-composer button[title*="提示音"],
-        .pi-enh-cursor-composer button[aria-label*="提示音"],
-        .pi-enh-cursor-composer button[title*="Sound" i],
-        .pi-enh-cursor-composer button[aria-label*="Sound" i],
-        .pi-enh-cursor-composer button[title*="完成提示音"],
-        .pi-enh-cursor-composer button[aria-label*="完成提示音"],
-        .pi-enh-cursor-composer button[title*="语音" i],
-        .pi-enh-cursor-composer button[aria-label*="语音" i],
-        .pi-enh-cursor-composer button:has(svg polygon[points*="11 5 6 9 2 9"]),
-        .pi-enh-cursor-composer button:has(svg path[d*="M15.54 8.46"]),
-        .pi-enh-cursor-composer button:has(svg line[x1="23"][y1="9"]),
-
-        .pi-enh-cursor-composer button[title*="更多控件"],
-        .pi-enh-cursor-composer button[aria-label*="更多控件"],
-        .pi-enh-cursor-composer button[title*="收起控件"],
-        .pi-enh-cursor-composer button[aria-label*="收起控件"],
-        .pi-enh-cursor-composer button[title*="More controls" i],
-        .pi-enh-cursor-composer button[aria-label*="More controls" i],
-        .pi-enh-cursor-composer button[title*="Collapse controls" i],
-        .pi-enh-cursor-composer button[aria-label*="Collapse controls" i],
-
-        /* 强力隐藏工具预设（default）与压缩会话按钮 (折叠屏与手机彻底不显示) */
-        .pi-enh-cursor-composer button[title*="工具预设"],
-        .pi-enh-cursor-composer button[aria-label*="工具预设"],
-        .pi-enh-cursor-composer button[title*="tool preset" i],
-        .pi-enh-cursor-composer button[aria-label*="tool preset" i],
-        .pi-enh-cursor-composer button:has(svg path[d*="M14.7 6.3"]),
-        .pi-enh-cursor-composer div:has(> button[title*="工具预设"]),
-        .pi-enh-cursor-composer div:has(> button[aria-label*="工具预设"]),
-        .pi-enh-cursor-composer div:has(> button[title*="tool preset" i]),
-        .pi-enh-cursor-composer div:has(> button[aria-label*="tool preset" i]),
-        .pi-enh-cursor-composer div:has(> button svg path[d*="M14.7 6.3"]),
-
-        .pi-enh-cursor-composer button[title*="压缩上下文"],
-        .pi-enh-cursor-composer button[aria-label*="压缩上下文"],
-        .pi-enh-cursor-composer button[title*="compact context" i],
-        .pi-enh-cursor-composer button[aria-label*="compact context" i],
-        .pi-enh-cursor-composer button[title*="压缩会话"],
-        .pi-enh-cursor-composer button[aria-label*="压缩会话"],
-        .pi-enh-cursor-composer button:has(svg polyline[points*="4 14 10 14"]),
-        .pi-enh-cursor-composer div:has(> button[title*="压缩上下文"]),
-        .pi-enh-cursor-composer div:has(> button[aria-label*="压缩上下文"]),
-        .pi-enh-cursor-composer div:has(> button[title*="compact context" i]),
-        .pi-enh-cursor-composer div:has(> button[aria-label*="compact context" i]),
-        .pi-enh-cursor-composer div:has(> button svg polyline[points*="4 14 10 14"]) {
-          display: none !important;
-          width: 0 !important;
-          height: 0 !important;
-          overflow: hidden !important;
-          visibility: hidden !important;
-          pointer-events: none !important;
-          margin: 0 !important;
-          padding: 0 !important;
-          border: none !important;
-        }
-
-        /* 模型选择器与思考深度：保持全名且完整显示，绝不被压缩截断 */
-        .pi-enh-cursor-composer .model-selector {
-          min-width: 0 !important;
-          width: auto !important;
-          flex: 0 0 auto !important;
-          max-width: none !important;
-        }
-        .pi-enh-cursor-composer [data-pi-thinking-control] {
-          flex-shrink: 0 !important;
-          display: inline-flex !important;
-          align-items: center !important;
-        }
-        .pi-enh-cursor-composer [data-pi-thinking-control][hidden],
-        .pi-enh-cursor-composer [data-pi-thinking-control][style*="display: none"],
-        .pi-enh-cursor-composer [data-pi-thinking-control][style*="display:none"] {
-          display: none !important;
-        }
-        .pi-enh-cursor-composer [data-pi-thinking-control] > button,
-        .pi-enh-cursor-composer [data-pi-thinking-button],
-        .pi-enh-cursor-composer .pi-enh-cursor-left div:has(> button[title*="推理"], > button[aria-label*="推理"], > button[title*="Reasoning" i], > button[title*="thinking" i]) > button {
-          flex-shrink: 0 !important;
-          white-space: nowrap !important;
-          display: inline-flex !important;
-          align-items: center !important;
-          gap: 4px !important;
-          height: 32px !important;
-          padding: 0 8px !important;
-          font-size: 12px !important;
-        }
-        .pi-enh-cursor-composer [data-pi-thinking-control] > button span,
-        .pi-enh-cursor-composer [data-pi-thinking-button] span,
-        .pi-enh-cursor-composer .pi-enh-cursor-left div:has(> button[title*="推理"], > button[aria-label*="推理"], > button[title*="Reasoning" i], > button[title*="thinking" i]) > button span {
-          white-space: nowrap !important;
-          overflow: visible !important;
-          display: inline !important;
-        }
-
-        /* 思考深度下拉菜单弹窗：严格隔离保护，垂直列表排布，杜绝任何外部样式导致横向截断 */
-        .pi-enh-cursor-composer [data-pi-thinking-control] div[style*="position: absolute"]:not([hidden]):not([style*="display: none"]):not([style*="display:none"]),
-        .pi-enh-cursor-composer [data-pi-thinking-control] div[style*="position:absolute"]:not([hidden]):not([style*="display: none"]):not([style*="display:none"]),
-        [data-pi-thinking-control] div[style*="position: absolute"]:not([hidden]):not([style*="display: none"]):not([style*="display:none"]),
-        [data-pi-thinking-control] div[style*="position:absolute"]:not([hidden]):not([style*="display: none"]):not([style*="display:none"]) {
-          display: flex !important;
-          flex-direction: column !important;
-          height: auto !important;
-          min-height: auto !important;
-          max-height: min(52vh, 380px) !important;
-          overflow-y: auto !important;
-          overflow-x: hidden !important;
-          min-width: 200px !important;
-          box-sizing: border-box !important;
-          box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35), 0 2px 8px rgba(0, 0, 0, 0.15) !important;
-        }
-        .pi-enh-cursor-composer [data-pi-thinking-control] div[style*="position: absolute"][hidden],
-        .pi-enh-cursor-composer [data-pi-thinking-control] div[style*="position:absolute"][hidden],
-        .pi-enh-cursor-composer [data-pi-thinking-control] div[style*="position: absolute"][style*="display: none"],
-        .pi-enh-cursor-composer [data-pi-thinking-control] div[style*="position: absolute"][style*="display:none"],
-        .pi-enh-cursor-composer [data-pi-thinking-control] div[style*="position:absolute"][style*="display: none"],
-        .pi-enh-cursor-composer [data-pi-thinking-control] div[style*="position:absolute"][style*="display:none"],
-        [data-pi-thinking-control] div[style*="position: absolute"][hidden],
-        [data-pi-thinking-control] div[style*="position:absolute"][hidden],
-        [data-pi-thinking-control] div[style*="position: absolute"][style*="display: none"],
-        [data-pi-thinking-control] div[style*="position: absolute"][style*="display:none"],
-        [data-pi-thinking-control] div[style*="position:absolute"][style*="display: none"],
-        [data-pi-thinking-control] div[style*="position:absolute"][style*="display:none"] {
-          display: none !important;
-        }
-        .pi-enh-cursor-composer [data-pi-thinking-control] div[style*="position: absolute"] button,
-        .pi-enh-cursor-composer [data-pi-thinking-control] div[style*="position:absolute"] button,
-        [data-pi-thinking-control] div[style*="position: absolute"] button,
-        [data-pi-thinking-control] div[style*="position:absolute"] button {
-          display: flex !important;
-          flex-direction: row !important;
-          align-items: center !important;
-          justify-content: flex-start !important;
-          width: 100% !important;
-          height: auto !important;
-          min-height: 38px !important;
-          padding: 8px 12px !important;
-          white-space: nowrap !important;
-          box-sizing: border-box !important;
-          flex-shrink: 0 !important;
-          font-size: 12px !important;
-          text-align: left !important;
-          border-radius: 0 !important;
-        }
-        .pi-enh-cursor-composer [data-pi-thinking-control] div[style*="position: absolute"] button span,
-        .pi-enh-cursor-composer [data-pi-thinking-control] div[style*="position:absolute"] button span,
-        [data-pi-thinking-control] div[style*="position: absolute"] button span,
-        [data-pi-thinking-control] div[style*="position:absolute"] button span {
-          white-space: nowrap !important;
-        }
-
-        /* 隐藏无用的“使用 pi 默认设置 / auto”选项，直接展示实际思考深度档位 */
-        .pi-enh-cursor-composer [data-pi-thinking-control] div[style*="position: absolute"] button[data-thinking-level="auto"],
-        .pi-enh-cursor-composer [data-pi-thinking-control] div[style*="position:absolute"] button[data-thinking-level="auto"],
-        [data-pi-thinking-control] div[style*="position: absolute"] button[data-thinking-level="auto"],
-        [data-pi-thinking-control] div[style*="position:absolute"] button[data-thinking-level="auto"],
-        .pi-enh-cursor-composer [data-pi-thinking-control] div[style*="position: absolute"] button.pi-enh-thinking-auto-option,
-        .pi-enh-cursor-composer [data-pi-thinking-control] div[style*="position:absolute"] button.pi-enh-thinking-auto-option,
-        [data-pi-thinking-control] div[style*="position: absolute"] button.pi-enh-thinking-auto-option,
-        [data-pi-thinking-control] div[style*="position:absolute"] button.pi-enh-thinking-auto-option {
-          display: none !important;
-        }
-
-        .pi-enh-cursor-composer .pi-enh-cursor-right:empty,
-        .pi-enh-cursor-composer .pi-enh-cursor-right:not(:has(button:not([style*="display: none"]))) {
-          display: none !important;
-          width: 0 !important;
-          margin: 0 !important;
-          padding: 0 !important;
-        }
-
-        /* ----------------------------------------------------
-           1. 电脑端 (Desktop: fine pointer 或 >=1101px)
-           桌面规则不压缩控件，保持宽裕舒适的桌面间距与内边距
-           ---------------------------------------------------- */
-        @media (min-width: 1101px), (min-width: 641px) and (pointer: fine) {
-          .pi-enh-cursor-composer {
-            padding: 12px !important;
-            gap: 8px 6px !important;
-          }
-          .pi-enh-cursor-composer .pi-enh-cursor-left {
-            gap: 4px !important;
-            flex-wrap: nowrap !important;
-          }
-          .pi-enh-cursor-composer .pi-enh-cursor-right {
-            gap: 4px !important;
-          }
-          .pi-enh-cursor-composer .pi-enh-cursor-actions > button.pi-enh-cursor-steer {
-            padding: 0 10px !important;
-            font-size: 12px !important;
-            height: 30px !important;
-          }
-          .pi-enh-cursor-composer .model-selector > button {
-            padding: 0 8px !important;
-            font-size: 12px !important;
-            height: 30px !important;
-          }
-          .pi-enh-cursor-composer [data-pi-thinking-control] > button,
-          .pi-enh-cursor-composer [data-pi-thinking-button],
-          .pi-enh-cursor-composer .pi-enh-cursor-left div:has(> button[title*="推理"], > button[aria-label*="推理"], > button[title*="Reasoning" i], > button[title*="thinking" i]) > button {
-            padding: 0 8px !important;
-            font-size: 12px !important;
-            height: 32px !important;
-          }
-        }
-
-        /* ----------------------------------------------------
-           2. 折叠屏展开态 (Foldable Unfolded: 641px~1100px 且 coarse/touch)
-           严格限定粗指针触屏设备，绝对不污染 884px 桌面鼠标窗口
-           ---------------------------------------------------- */
-        @media (min-width: 641px) and (max-width: 1100px) and (pointer: coarse) {
-          .pi-enh-cursor-composer {
-            padding: 10px 12px !important;
-            gap: 6px 6px !important;
-          }
-          .pi-enh-cursor-composer .pi-enh-cursor-left {
-            flex-wrap: nowrap !important;
-            gap: 6px !important;
-            min-width: 0 !important;
-            flex: 1 1 auto !important;
-          }
-          .pi-enh-cursor-composer .pi-enh-cursor-right {
-            grid-area: 3 / 2 !important;
-            justify-self: end !important;
-            margin: 0 !important;
-            gap: 4px !important;
-          }
-          .pi-enh-cursor-composer .pi-enh-cursor-actions {
-            grid-area: 3 / 3 !important;
-            justify-self: end !important;
-          }
-          .pi-enh-cursor-composer .pi-enh-cursor-actions > button.pi-enh-cursor-steer {
-            padding: 0 8px !important;
-            font-size: 12px !important;
-            height: 30px !important;
-          }
-          .pi-enh-cursor-composer .model-selector {
-            min-width: 0 !important;
-            width: auto !important;
-            flex: 0 0 auto !important;
-            max-width: none !important;
-          }
-          .pi-enh-cursor-composer .model-selector > button {
-            max-width: none !important;
-            font-size: 12px !important;
-            padding: 0 8px !important;
-            white-space: nowrap !important;
-            flex-shrink: 0 !important;
-          }
-          .pi-enh-cursor-composer .model-selector > button > span {
-            overflow: visible !important;
-            text-overflow: clip !important;
-            white-space: nowrap !important;
-          }
-          .pi-enh-cursor-composer [data-pi-thinking-control],
-          .pi-enh-cursor-composer [data-pi-thinking-control] > button,
-          .pi-enh-cursor-composer [data-pi-thinking-button] {
-            flex-shrink: 0 !important;
-            white-space: nowrap !important;
-            padding: 0 8px !important;
-            font-size: 12px !important;
-          }
-          .pi-enh-cursor-composer [data-pi-thinking-control] > button span,
-          .pi-enh-cursor-composer [data-pi-thinking-button] span {
-            white-space: nowrap !important;
-            overflow: visible !important;
-            display: inline !important;
-          }
-          .pi-enh-cursor-composer .pi-enh-cursor-left div:has(> button[title*="推理"], > button[aria-label*="推理"], > button[title*="Reasoning" i], > button[title*="thinking" i]) > button {
-            padding: 0 8px !important;
-            font-size: 12px !important;
-            white-space: nowrap !important;
-            flex-shrink: 0 !important;
-          }
-          .pi-enh-cursor-composer button.pi-enh-cursor-send,
-          .pi-enh-cursor-composer button.pi-enh-cursor-followup {
-            touch-action: manipulation !important;
-          }
-        }
-
-        /* ----------------------------------------------------
-           3. 手机直屏 (Phone Portrait: <= 640px)
-           适配窄屏手机直屏，内部紧凑内边距与间距，保持控件完整
-           ---------------------------------------------------- */
-        @media (max-width: 640px) {
-          .pi-enh-cursor-composer {
-            padding: 8px 10px !important;
-            gap: 6px 3px !important;
-          }
-          .pi-enh-cursor-composer .pi-enh-cursor-left,
-          .pi-enh-cursor-composer .pi-enh-cursor-right,
-          .pi-enh-cursor-composer .pi-enh-cursor-right > .pi-enh-cursor-right-inner:not([hidden]):not([style*="display: none"]):not([style*="display:none"]):not([style*="position: absolute"]):not([style*="position:absolute"]) {
-            display: contents !important;
-          }
-          .pi-enh-cursor-composer button.pi-enh-cursor-stop,
-          fieldset > div[style*="max-width"] button.pi-enh-cursor-stop,
-          .pi-enh-cursor-composer .pi-enh-cursor-actions,
-          fieldset > div[style*="max-width"] .pi-enh-cursor-actions {
-            grid-column: -2 !important;
-            grid-row: 3 !important;
-            justify-self: end !important;
-            align-self: center !important;
-          }
-          .pi-enh-cursor-composer .pi-enh-cursor-actions > button.pi-enh-cursor-steer { padding: 0 6px !important; font-size: 11px !important; }
-          .pi-enh-cursor-composer .model-selector {
-            min-width: 0 !important;
-            width: auto !important;
-            flex: 0 0 auto !important;
-            max-width: none !important;
-          }
-          .pi-enh-cursor-composer .model-selector > button {
-            max-width: none !important;
-            font-size: 12px !important;
-            padding: 0 6px !important;
-            white-space: nowrap !important;
-            flex-shrink: 0 !important;
-          }
-          .pi-enh-cursor-composer .model-selector > button > span {
-            overflow: visible !important;
-            text-overflow: clip !important;
-            white-space: nowrap !important;
-          }
-          .pi-enh-cursor-composer [data-pi-thinking-control],
-          .pi-enh-cursor-composer [data-pi-thinking-control] > button,
-          .pi-enh-cursor-composer [data-pi-thinking-button] {
-            flex-shrink: 0 !important;
-            white-space: nowrap !important;
-            padding: 0 6px !important;
-            font-size: 12px !important;
-          }
-          .pi-enh-cursor-composer [data-pi-thinking-control] > button span,
-          .pi-enh-cursor-composer [data-pi-thinking-button] span {
-            white-space: nowrap !important;
-            overflow: visible !important;
-            display: inline !important;
-          }
-          .pi-enh-cursor-composer .pi-enh-cursor-left div:has(> button[title*="推理"], > button[aria-label*="推理"], > button[title*="Reasoning" i], > button[title*="thinking" i]) > button {
-            padding: 0 6px !important;
-            font-size: 12px !important;
-            white-space: nowrap !important;
-            flex-shrink: 0 !important;
-          }
-          .pi-enh-cursor-composer button.pi-enh-cursor-send,
-          .pi-enh-cursor-composer button.pi-enh-cursor-followup {
-            touch-action: manipulation !important;
-          }
-          .pi-enh-cursor-composer div[style*="max-height: min(48vh"],
-          .pi-enh-cursor-composer div[style*="max-height:min(48vh"] {
-            width: 100% !important;
-            max-width: 100% !important;
-            left: 0 !important;
-            right: 0 !important;
-          }
-          .pi-enh-cursor-composer .pi-enh-cursor-editor,
-          .pi-enh-cursor-composer textarea.chat-input-textarea,
-          .pi-enh-cursor-composer .pi-enh-formatted-composer,
-          fieldset > div[style*="max-width"] textarea.chat-input-textarea,
-          fieldset > div[style*="max-width"] .pi-enh-formatted-composer {
-            max-height: clamp(70px, 28vh, 200px) !important;
-          }
-          .pi-enh-cursor-composer:has(.pi-enh-cursor-attachments, div[style*="flex-wrap"]:has(img), .pi-enh-attachments-bar, .pi-enh-attachment-card) .pi-enh-cursor-editor,
-          .pi-enh-cursor-composer:has(.pi-enh-cursor-attachments, div[style*="flex-wrap"]:has(img), .pi-enh-attachments-bar, .pi-enh-attachment-card) textarea.chat-input-textarea,
-          .pi-enh-cursor-composer:has(.pi-enh-cursor-attachments, div[style*="flex-wrap"]:has(img), .pi-enh-attachments-bar, .pi-enh-attachment-card) .pi-enh-formatted-composer,
-          fieldset > div[style*="max-width"]:has(div[style*="flex-wrap"]:has(img), .pi-enh-attachments-bar, .pi-enh-attachment-card) textarea.chat-input-textarea,
-          fieldset > div[style*="max-width"]:has(div[style*="flex-wrap"]:has(img), .pi-enh-attachments-bar, .pi-enh-attachment-card) .pi-enh-formatted-composer {
-            max-height: clamp(48px, calc(16vh - 10px), 104px) !important;
-          }
-        }
-
-        /* 低高度横屏（如手机横屏/分屏）：收紧卡片、附件条与编辑区最大高度，内部平滑滚动并保留图片条与工具栏 */
-        @media (max-height: 500px) {
-          .pi-enh-cursor-composer,
-          fieldset > div[style*="max-width"]:has(textarea, .pi-enh-formatted-composer) {
-            padding: 6px 10px !important;
-            row-gap: 4px !important;
-          }
-          .pi-enh-cursor-composer .pi-enh-cursor-attachments,
-          fieldset > div[style*="max-width"] > div[style*="flex-wrap"]:has(img) {
-            max-height: 44px !important;
-            padding: 4px 6px 1px 2px !important;
-          }
-          .pi-enh-cursor-composer .pi-enh-cursor-attachments img,
-          fieldset > div[style*="max-width"] > div[style*="flex-wrap"]:has(img) img {
-            width: 36px !important;
-            height: 36px !important;
-          }
-          .pi-enh-cursor-composer .pi-enh-cursor-editor,
-          .pi-enh-cursor-composer textarea.chat-input-textarea,
-          .pi-enh-cursor-composer .pi-enh-formatted-composer,
-          fieldset > div[style*="max-width"] textarea.chat-input-textarea,
-          fieldset > div[style*="max-width"] .pi-enh-formatted-composer {
-            padding: 0 2px 2px !important;
-            min-height: 24px !important;
-            max-height: clamp(42px, calc(28vh - 16px), 84px) !important;
-          }
-          .pi-enh-cursor-composer:has(.pi-enh-cursor-attachments, div[style*="flex-wrap"] img) .pi-enh-cursor-editor,
-          .pi-enh-cursor-composer:has(.pi-enh-cursor-attachments, div[style*="flex-wrap"] img) textarea.chat-input-textarea,
-          .pi-enh-cursor-composer:has(.pi-enh-cursor-attachments, div[style*="flex-wrap"] img) .pi-enh-formatted-composer,
-          fieldset > div[style*="max-width"]:has(div[style*="flex-wrap"] img) textarea.chat-input-textarea,
-          fieldset > div[style*="max-width"]:has(div[style*="flex-wrap"] img) .pi-enh-formatted-composer {
-            max-height: clamp(36px, calc(22vh - 16px), 64px) !important;
-          }
-        }
-
-        /* 调整输入框高度手柄 (Resize Handle Bar) - 极细隐蔽设计与零悬停粘连 */
-        .pi-enh-composer-resizer {
-          position: absolute !important;
-          top: -2px !important;
-          left: 0 !important;
-          right: 0 !important;
-          height: 14px !important;
-          display: flex !important;
-          align-items: center !important;
-          justify-content: center !important;
-          cursor: ns-resize !important;
-          touch-action: none !important;
-          user-select: none !important;
-          -webkit-user-select: none !important;
-          -webkit-tap-highlight-color: transparent !important;
-          outline: none !important;
-          z-index: 20 !important;
-        }
-        .pi-enh-composer-resizer-line {
-          width: 32px !important;
-          height: 2px !important;
-          border-radius: 1px !important;
-          background: color-mix(in srgb, var(--border, #71717a) 70%, transparent) !important;
-          transition: background 0.15s ease, width 0.15s ease, height 0.15s ease, opacity 0.15s ease !important;
-          opacity: 0.55 !important;
-          pointer-events: none !important;
-        }
-        /* 仅在支持鼠标 hover 的桌面设备上轻微提高不透明度，依然保持优雅纯灰色，绝无淡蓝色 */
-        @media (hover: hover) and (pointer: fine) {
-          .pi-enh-composer-resizer:hover .pi-enh-composer-resizer-line {
-            opacity: 0.85 !important;
-            width: 36px !important;
-            background: color-mix(in srgb, var(--text-dim, #71717a) 80%, transparent) !important;
-          }
-        }
-        /* 仅在用户实际按住正在拖拽时才显示高亮，松手瞬间恢复中性灰，物理级根除手机触屏粘连 */
-        .pi-enh-composer-resizing .pi-enh-composer-resizer-line {
-          background: var(--accent, #3b82f6) !important;
-          width: 40px !important;
-          height: 2.5px !important;
-          opacity: 0.95 !important;
-        }
-        @media (max-width: 768px) {
-          .pi-enh-composer-resizer {
-            top: -3px !important;
-            height: 18px !important;
-          }
-          .pi-enh-composer-resizer-line {
-            width: 32px !important;
-            height: 2px !important;
-            opacity: 0.5 !important;
-          }
-        }
-
-        /* 预留状态栏 36px 占位槽：仅既有会话、无 shelf 时生效，新会话(:has(.mb-3))不预留 */
-        .chat-content > .relative.shrink-0:has(> fieldset):not(:has(> .mb-3)):not(:has(> .extension-status-shelf))::after {
-          content: "";
-          display: block;
-          height: 36px;
-          flex-shrink: 0;
-        }
-
-        /* 用户拉大/拉小高度首帧预置规则：仅在有用户自定义高度偏好时预置生效，无高度偏好时不污染默认 min-height */
-        html[data-pi-composer-custom-height] .chat-content > .relative.shrink-0 fieldset > div[style*="max-width"]:not(.pi-enh-composer-custom-height) textarea.chat-input-textarea,
-        html[data-pi-composer-custom-height] .chat-content > .relative.shrink-0 fieldset > div[style*="max-width"]:not(.pi-enh-composer-custom-height) .pi-enh-formatted-composer {
-          height: var(--pi-enh-preload-composer-height) !important;
-          max-height: var(--pi-enh-preload-composer-height) !important;
-          min-height: 56px !important;
-          overflow-y: auto !important;
-          overscroll-behavior: contain !important;
-        }
-
-        /* 用户拉大/拉小高度生效规则：最高特异性覆盖默认与媒体查询限制 */
-        .pi-enh-cursor-composer.pi-enh-composer-custom-height .pi-enh-cursor-editor,
-        .pi-enh-cursor-composer.pi-enh-composer-custom-height textarea.chat-input-textarea,
-        .pi-enh-cursor-composer.pi-enh-composer-custom-height .pi-enh-formatted-composer,
-        fieldset > div[style*="max-width"].pi-enh-composer-custom-height textarea.chat-input-textarea,
-        fieldset > div[style*="max-width"].pi-enh-composer-custom-height .pi-enh-formatted-composer {
-          height: var(--pi-composer-custom-height) !important;
-          max-height: var(--pi-composer-custom-height) !important;
-          min-height: 56px !important;
-          overflow-y: auto !important;
-          overscroll-behavior: contain !important;
-        }
-
-        /* 拖拽调整高度时全局防选中文本与光标跳动 */
-        .pi-enh-composer-resizing,
-        .pi-enh-composer-resizing * {
-          user-select: none !important;
-          -webkit-user-select: none !important;
-          cursor: ns-resize !important;
-        }
-      `;
-      document.head.appendChild(style);
-    }
-    const textarea = findComposerTextarea();
-    const card = textarea?.closest('fieldset > div[style*="max-width"]');
-    if (!card) return;
-    card.classList.add("pi-enh-cursor-composer");
-    textarea.classList.add("pi-enh-cursor-editor");
-    syncComposerResizableHeight(card, textarea);
-    syncComposerTextareaAutoHeight(textarea);
-    const editor = textarea.parentElement;
-    editor.classList.add("pi-enh-cursor-contents");
-    if (editor.parentElement !== card) editor.parentElement.classList.add("pi-enh-cursor-contents");
-    const toolbar = Array.from(card.children).find((node) => node.style.marginTop || node.hasAttribute?.("data-pi-composer-toolbar"));
-    if (toolbar) {
-      toolbar.classList.add("pi-enh-cursor-contents");
-      const leftContainer = toolbar.firstElementChild;
-      const rightContainer = toolbar.lastElementChild;
-      leftContainer?.classList.add("pi-enh-cursor-left");
-      rightContainer?.classList.add("pi-enh-cursor-right");
-      if (toolbar.children.length > 2) toolbar.children[1].classList.add("pi-enh-cursor-spacer");
-
-      // 1. 30142 unpatched React 兼容：补齐原生图片按钮 data-pi-attach-image（已带标记的 30141 不做改动）
-      if (!toolbar.querySelector('button[data-pi-attach-image]')) {
-        const candidateButtons = Array.from((leftContainer || toolbar).querySelectorAll("button"));
-        const attachBtn = candidateButtons.find((btn) => {
-          if (
-            btn.classList.contains("pi-enh-composer-add-btn") ||
-            btn.hasAttribute("data-pi-composer-add") ||
-            btn.closest(".model-selector, [data-pi-thinking-control], .pi-enh-cursor-right")
-          ) {
-            return false;
-          }
-          const label = `${btn.getAttribute("title") || ""} ${btn.getAttribute("aria-label") || ""}`;
-          return Boolean(
-            btn.querySelector('svg circle[cx="8.5"][cy="8.5"], svg polyline[points*="21 15 16 10 5 21"]') ||
-            /添加图片|上传图片|添加图片或视频|attach\s*image|upload\s*image/i.test(label)
-          );
-        });
-        if (attachBtn && !attachBtn.hasAttribute("data-pi-attach-image")) {
-          attachBtn.setAttribute("data-pi-attach-image", "true");
-          attachBtn.setAttribute("data-pi-enh-tagged-attach", "true");
-        }
-      }
-
-      // 2. 30142 unpatched React 兼容：补齐原生思考控件 data-pi-thinking-control 与 data-pi-thinking-button
-      let thinkingControl = toolbar.querySelector("[data-pi-thinking-control]");
-      if (!thinkingControl) {
-        const rightButtons = Array.from((rightContainer || toolbar).querySelectorAll("button"));
-        const thinkingBtn = rightButtons.find((btn) => {
-          if (btn.closest('div[style*="position: absolute"], div[style*="position:absolute"], [role="listbox"], [role="menu"]')) {
-            return false;
-          }
-          const label = `${btn.getAttribute("title") || ""} ${btn.getAttribute("aria-label") || ""}`;
-          return Boolean(
-            btn.querySelector('svg path[d*="M9.5 2A5.5 5.5"]') ||
-            /推理|思考|reasoning|thinking/i.test(label)
-          );
-        });
-        if (thinkingBtn) {
-          if (!thinkingBtn.hasAttribute("data-pi-thinking-button")) {
-            thinkingBtn.setAttribute("data-pi-thinking-button", "true");
-            thinkingBtn.setAttribute("data-pi-enh-tagged-thinking-button", "true");
-          }
-          const parent = thinkingBtn.parentElement;
-          if (parent && parent.tagName === "DIV" && parent !== toolbar && parent !== card && parent !== rightContainer) {
-            thinkingControl = parent;
-            if (!thinkingControl.hasAttribute("data-pi-thinking-control")) {
-              thinkingControl.setAttribute("data-pi-thinking-control", "true");
-              thinkingControl.setAttribute("data-pi-enh-tagged-thinking-control", "true");
-            }
-          }
-        }
-      } else {
-        const directBtn = Array.from(thinkingControl.children).find((c) => c.tagName === "BUTTON");
-        if (directBtn && !directBtn.hasAttribute("data-pi-thinking-button")) {
-          directBtn.setAttribute("data-pi-thinking-button", "true");
-          directBtn.setAttribute("data-pi-enh-tagged-thinking-button", "true");
-        }
-      }
-
-      // 3. 精确扁平化 30142 controlsMenuRef 下多出的一层直接原生包装层，绝不触碰 30141 已打标直出层或隐藏移动菜单
-      if (rightContainer) {
-        for (const child of Array.from(rightContainer.children)) {
-          if (child.tagName !== "DIV" || child.hasAttribute("data-pi-thinking-control")) {
-            child.classList.remove("pi-enh-cursor-right-inner");
-            continue;
-          }
-          const rawStyle = child.getAttribute("style") || "";
-          const isHiddenOrFloating =
-            child.hidden ||
-            child.getAttribute("aria-hidden") === "true" ||
-            child.style?.display === "none" ||
-            /display\s*:\s*none/i.test(rawStyle) ||
-            child.style?.position === "absolute" ||
-            child.style?.position === "fixed" ||
-            /position\s*:\s*(absolute|fixed)/i.test(rawStyle) ||
-            child.getAttribute("role") === "listbox" ||
-            child.getAttribute("role") === "menu";
-          if (!isHiddenOrFloating && child.querySelector?.("[data-pi-thinking-control], button")) {
-            child.classList.add("pi-enh-cursor-right-inner");
-          } else {
-            child.classList.remove("pi-enh-cursor-right-inner");
-          }
-        }
-      }
-    }
-    for (const node of Array.from(editor.children)) {
-      if (node.tagName === "BUTTON" && !node.classList.contains("pi-enh-quick-fallback-trigger")) {
-        node.classList.add("pi-enh-cursor-send");
-        if (!node.getAttribute("title")) node.setAttribute("title", "发送 (Enter)");
-        if (!node.getAttribute("aria-label")) node.setAttribute("aria-label", "发送");
-      }
-      else if (node.style.alignSelf === "flex-end" && !node.querySelector?.("textarea, [contenteditable]")) node.classList.add("pi-enh-cursor-actions");
-    }
-    const sendBtn = card.querySelector("button.pi-enh-cursor-send") || Array.from(card.querySelectorAll("button")).find(b => !b.closest(".model-selector, .pi-enh-cursor-left, .pi-enh-cursor-right, .native-steer-group") && (b.textContent.includes("发送") || b.querySelector('polyline[points*="7.5 3 12 7 7.5 11"]')));
-    if (sendBtn) {
-      sendBtn.classList.add("pi-enh-cursor-send");
-      if (!sendBtn.getAttribute("title")) sendBtn.setAttribute("title", "发送 (Enter)");
-      if (!sendBtn.getAttribute("aria-label")) sendBtn.setAttribute("aria-label", "发送");
-    }
-    for (const group of card.querySelectorAll('div[style*="align-self: flex-end"], div[style*="alignSelf: flex-end"], div[style*="align-self:flex-end"], .native-steer-group')) {
-      if (!group.querySelector("textarea, [contenteditable]") && !group.contains(textarea)) {
-        group.classList.add("pi-enh-cursor-actions");
-      }
-    }
-
-    const cardWidth = card.clientWidth || 0;
-    const isTight = cardWidth > 0 && cardWidth < 680;
-    card.classList.toggle("pi-enh-composer-tight", isTight);
-
-    syncRunningActionButtons(card);
-    for (const strip of card.querySelectorAll('div[style*="flex-wrap"]')) {
-      if (strip.querySelector("img")) strip.classList.add("pi-enh-cursor-attachments");
-    }
-    for (const button of toolbar?.querySelectorAll("button") || []) {
-      if (isAgentStopButton(button)) button.classList.add("pi-enh-cursor-stop");
-      if (/提示音|通知声音|压缩|notification sound|compact/i.test(button.title)) button.classList.add("pi-enh-cursor-secondary");
-    }
-    updateCardContentState(card, textarea);
-    if (typeof pendingComposerAttachments !== "undefined" && pendingComposerAttachments.length > 0) {
-      const nativeImg = card.querySelector?.('div[style*="flex-wrap"]:has(img), .pi-enh-cursor-attachments');
-      const currentBar = findComposerAttachmentBar(textarea);
-      if (!currentBar || !currentBar.isConnected || (nativeImg && currentBar.parentElement !== nativeImg) || (!nativeImg && currentBar.parentElement !== card)) {
-        syncComposerAttachmentBar(textarea);
-      }
-    }
-    syncComposerModelPill();
-  }
-
-  function syncRunningActionButtons(card) {
-    if (!card) return;
-    const isMac = typeof navigator !== "undefined" && (/mac/i.test(navigator.userAgent || navigator.platform));
-    const steerTip = `引导 (${isMac ? "Cmd+Enter" : "Ctrl+Enter"})`;
-    const followupTip = "后续消息 (Enter)";
-
-    const runningButtons = card.querySelectorAll(
-      '.pi-enh-cursor-actions button, .native-steer-group button, div[style*="align-self: flex-end"] button, div[style*="alignSelf: flex-end"] button, div[style*="align-self:flex-end"] button'
-    );
-
-    for (const btn of runningButtons) {
-      const txt = (btn.textContent || "").trim();
-      const t = btn.getAttribute("title") || "";
-      const isSteer = txt.includes("引导") || t.includes("引导") ||
-        txt.toLowerCase().includes("steer") || t.toLowerCase().includes("steer") ||
-        Boolean(btn.querySelector('svg path[d*="M5 1"]'));
-
-      if (isSteer) {
-        btn.classList.add("pi-enh-cursor-steer");
-        if (btn.getAttribute("title") !== steerTip) btn.setAttribute("title", steerTip);
-        if (btn.getAttribute("aria-label") !== steerTip) btn.setAttribute("aria-label", steerTip);
-
-        let labelSpan = btn.querySelector(".pi-enh-steer-label");
-        if (!labelSpan) {
-          for (const child of Array.from(btn.childNodes)) {
-            if (child.nodeType === Node.TEXT_NODE && child.textContent.trim()) {
-              labelSpan = document.createElement("span");
-              labelSpan.className = "pi-enh-steer-label";
-              labelSpan.textContent = child.textContent.trim();
-              btn.replaceChild(labelSpan, child);
-              break;
-            } else if (child.nodeType === Node.ELEMENT_NODE && (child.tagName === "SPAN" || child.tagName === "DIV") && !child.querySelector("svg")) {
-              child.classList.add("pi-enh-steer-label");
-              labelSpan = child;
-              break;
-            }
-          }
-        }
-      } else if (txt.includes("后续消息") || t.includes("后续消息") || t.includes("Alt+Enter") || t.includes("Option+Enter") || btn.querySelector('polyline[points*="2.5 3.5 5 1 7.5 3.5"]')) {
-        btn.classList.add("pi-enh-cursor-send", "pi-enh-cursor-followup");
-        if (btn.getAttribute("title") !== followupTip) btn.setAttribute("title", followupTip);
-        if (btn.getAttribute("aria-label") !== followupTip) btn.setAttribute("aria-label", followupTip);
-      }
-    }
-  }
-
-  function removeCodexComposerLayout() {
-    const style = document.getElementById(CODEX_COMPOSER_STYLE_ID);
-    if (style) style.remove();
-    if (typeof pendingComposerAttachments !== "undefined" && pendingComposerAttachments.length > 0) {
-      const ta = findComposerTextarea();
-      if (ta) syncComposerAttachmentBar(ta);
-    }
-
-    // 仅定位已标记 composer 卡片的编辑器祖先修复旧 !important
-    for (const card of document.querySelectorAll(".pi-enh-cursor-composer")) {
-      const textarea = card.querySelector("textarea");
-      let p = textarea?.parentElement;
-      while (p && card.contains(p)) {
-        if (
-          p.style &&
-          p.style.getPropertyValue("display") === "none" &&
-          p.style.getPropertyPriority("display") === "important"
-        ) {
-          p.style.removeProperty("display");
-        }
-        p = p.parentElement;
-      }
-    }
-
-    // 受管 pi-enh-running-group 单独恢复
-    for (const group of document.querySelectorAll(".pi-enh-running-group")) {
-      if (group.style && group.style.display === "none") {
-        group.style.removeProperty("display");
-      }
-      group.classList.remove("pi-enh-running-group");
-    }
-
-    // 其它 cursor class 只移除 class 不碰 display
-    for (const node of document.querySelectorAll('[class*="pi-enh-cursor-"]')) {
-      for (const name of Array.from(node.classList)) {
-        if (name.startsWith("pi-enh-cursor-")) node.classList.remove(name);
-      }
-    }
-
-    // 清理本插件在 30142 未打标 DOM 上动态补齐的 data-pi-* 属性，严禁改动 30141 原生已有标记
-    for (const node of document.querySelectorAll('[data-pi-enh-tagged-attach="true"]')) {
-      node.removeAttribute("data-pi-attach-image");
-      node.removeAttribute("data-pi-enh-tagged-attach");
-    }
-    for (const node of document.querySelectorAll('[data-pi-enh-tagged-thinking-control="true"]')) {
-      node.removeAttribute("data-pi-thinking-control");
-      node.removeAttribute("data-pi-enh-tagged-thinking-control");
-    }
-    for (const node of document.querySelectorAll('[data-pi-enh-tagged-thinking-button="true"]')) {
-      node.removeAttribute("data-pi-thinking-button");
-      node.removeAttribute("data-pi-enh-tagged-thinking-button");
-    }
-
-    for (const resizer of document.querySelectorAll(".pi-enh-composer-resizer")) {
-      resizer.remove();
-    }
-    for (const card of document.querySelectorAll(".pi-enh-composer-custom-height")) {
-      card.classList.remove("pi-enh-composer-custom-height");
-      card.style.removeProperty("--pi-composer-custom-height");
-    }
-
-    for (const card of document.querySelectorAll(".has-user-content, .pi-enh-has-running-controls")) {
-      card.classList.remove("has-user-content", "pi-enh-has-running-controls");
-    }
-    removeComposerModelPill();
-    syncComposerPreloadHeightProperty(null);
-  }
-
-  window.__PI_ENH_SYNC_CODEX_COMPOSER_LAYOUT__ = syncCodexComposerLayout;
-  window.__PI_ENH_REMOVE_CODEX_COMPOSER_LAYOUT__ = removeCodexComposerLayout;
-
-  // ==========================================
-  // 3.55.3 Cursor/Codex Style Unified Model & Reasoning Pill (模型与思考一体胶囊)
-  // ==========================================
-  const COMPOSER_MODEL_PILL_STYLE_ID = "pi-enh-composer-model-pill-style";
-
-  function ensureComposerModelPillStyle() {
-    let style = document.getElementById(COMPOSER_MODEL_PILL_STYLE_ID);
-    if (!style) {
-      style = document.createElement("style");
-      style.id = COMPOSER_MODEL_PILL_STYLE_ID;
-      style.textContent = `
-        /* Outrank the native fieldset/:has editor grid without moving React nodes. */
-        .pi-enh-cursor-composer.pi-enh-composer-model-pill:has(.model-selector) {
-          grid-template-columns: auto auto auto minmax(0, 1fr) auto auto auto auto;
-          grid-template-columns: 28px 28px auto minmax(0, 1fr) auto auto auto auto !important;
-          column-gap: 2px !important;
-        }
-
-        .pi-enh-cursor-composer.pi-enh-composer-model-pill .pi-enh-cursor-left,
-        .pi-enh-cursor-composer.pi-enh-composer-model-pill .pi-enh-cursor-right,
-        .pi-enh-cursor-composer.pi-enh-composer-model-pill .pi-enh-cursor-right > .pi-enh-cursor-right-inner:not([hidden]):not([style*="display: none"]):not([style*="display:none"]):not([style*="position: absolute"]):not([style*="position:absolute"]) {
-          display: contents !important;
-        }
-
-        /* The outer margin-top toolbar is already contents in the base layout.
-           Flatten its visible, untagged native side wrappers on the first React commit. */
-        .pi-enh-cursor-composer.pi-enh-composer-model-pill > div[style*="margin-top"] > div:first-child:not([hidden]):not([aria-hidden="true"]):not([style*="display: none"]):not([style*="display:none"]),
-        .pi-enh-cursor-composer.pi-enh-composer-model-pill > div[style*="margin-top"] > div:last-child:not([hidden]):not([aria-hidden="true"]):not([style*="display: none"]):not([style*="display:none"]) {
-          display: contents !important;
-        }
-        /* Paired hidden-state rules outrank the native inline display and synced contents classes. */
-        .pi-enh-cursor-composer.pi-enh-composer-model-pill > div[style*="margin-top"] > div:first-child[hidden],
-        .pi-enh-cursor-composer.pi-enh-composer-model-pill > div[style*="margin-top"] > div:first-child[style*="display: none"],
-        .pi-enh-cursor-composer.pi-enh-composer-model-pill > div[style*="margin-top"] > div:first-child[style*="display:none"],
-        .pi-enh-cursor-composer.pi-enh-composer-model-pill > div[style*="margin-top"] > div:last-child[hidden],
-        .pi-enh-cursor-composer.pi-enh-composer-model-pill > div[style*="margin-top"] > div:last-child[style*="display: none"],
-        .pi-enh-cursor-composer.pi-enh-composer-model-pill > div[style*="margin-top"] > div:last-child[style*="display:none"],
-        .pi-enh-cursor-composer.pi-enh-composer-model-pill > div[style*="margin-top"] > div:last-child > div[hidden],
-        .pi-enh-cursor-composer.pi-enh-composer-model-pill > div[style*="margin-top"] > div:last-child > div[style*="display: none"],
-        .pi-enh-cursor-composer.pi-enh-composer-model-pill > div[style*="margin-top"] > div:last-child > div[style*="display:none"],
-        .pi-enh-cursor-composer.pi-enh-composer-model-pill > div[style*="margin-top"] > div:last-child > div > div[hidden]:has(> button svg path[d*="M9.5 2A5.5 5.5"]),
-        .pi-enh-cursor-composer.pi-enh-composer-model-pill > div[style*="margin-top"] > div:last-child > div > div[style*="display: none"]:has(> button svg path[d*="M9.5 2A5.5 5.5"]),
-        .pi-enh-cursor-composer.pi-enh-composer-model-pill > div[style*="margin-top"] > div:last-child > div > div[style*="display:none"]:has(> button svg path[d*="M9.5 2A5.5 5.5"]),
-        .pi-enh-cursor-composer.pi-enh-composer-model-pill .pi-enh-cursor-left[hidden],
-        .pi-enh-cursor-composer.pi-enh-composer-model-pill .pi-enh-cursor-left[style*="display: none"],
-        .pi-enh-cursor-composer.pi-enh-composer-model-pill .pi-enh-cursor-left[style*="display:none"],
-        .pi-enh-cursor-composer.pi-enh-composer-model-pill .pi-enh-cursor-right[hidden],
-        .pi-enh-cursor-composer.pi-enh-composer-model-pill .pi-enh-cursor-right[style*="display: none"],
-        .pi-enh-cursor-composer.pi-enh-composer-model-pill .pi-enh-cursor-right[style*="display:none"] {
-          display: none !important;
-        }
-        /* Mirror the later .pi-enh-cursor-right-inner tag only for the visible inline controls row. */
-        .pi-enh-cursor-composer.pi-enh-composer-model-pill > div[style*="margin-top"] > div:last-child > div:not([hidden]):not([aria-hidden="true"]):not([style*="display: none"]):not([style*="display:none"]):not([style*="position: absolute"]):not([style*="position:absolute"]):not([style*="position: fixed"]):not([style*="position:fixed"]):not([role="listbox"]):not([role="menu"]):has(> div > button svg path[d*="M9.5 2A5.5 5.5"]) {
-          display: contents !important;
-        }
-        /* Hide an orphan pre-model label without changing grid/display participation. */
-        .pi-enh-cursor-composer.pi-enh-composer-model-pill:not(:has(.model-selector)) > div[style*="margin-top"] > div:last-child > div:not([hidden]):not([style*="display: none"]):not([style*="display:none"]):has(> div > button svg path[d*="M9.5 2A5.5 5.5"]) > div:not([hidden]):not([style*="display: none"]):not([style*="display:none"]):has(> button svg path[d*="M9.5 2A5.5 5.5"]) > button > span {
-          visibility: hidden;
-        }
-
-        /* 加号与图片按钮位置收紧 */
-        .pi-enh-cursor-composer.pi-enh-composer-model-pill .pi-enh-composer-add-btn {
-          grid-column: 1 !important;
-          grid-row: 3 !important;
-          justify-self: start !important;
-          align-self: center !important;
-          width: 28px !important;
-          min-width: 28px !important;
-          height: 28px !important;
-          padding: 0 !important;
-          margin: 0 !important;
-        }
-        /* Restore notices span the toolbar grid instead of widening the first icon track. */
-        .pi-enh-cursor-composer.pi-enh-composer-model-pill .pi-enh-draft-badge {
-          grid-column: 1 / -1 !important;
-          justify-self: start !important;
-        }
-        .pi-enh-cursor-composer.pi-enh-composer-model-pill .pi-enh-composer-mode-indicator {
-          grid-column: 3 !important;
-          grid-row: 3 !important;
-          align-self: center !important;
-        }
-        .pi-enh-cursor-composer.pi-enh-composer-model-pill button[data-pi-attach-image],
-        .pi-enh-cursor-composer.pi-enh-composer-model-pill > div[style*="margin-top"] > div:first-child > button:has(svg circle[cx="8.5"][cy="8.5"], svg polyline[points*="21 15 16 10 5 21"]) {
-          grid-column: 2 !important;
-          grid-row: 3 !important;
-          justify-self: start !important;
-          align-self: center !important;
-          width: 28px !important;
-          min-width: 28px !important;
-          height: 28px !important;
-          padding: 0 !important;
-          margin: 0 !important;
-          margin-left: -1px !important;
-          border-radius: 8px !important;
-        }
-
-        .pi-enh-cursor-composer.pi-enh-composer-model-pill button.pi-enh-cursor-stop,
-        .pi-enh-cursor-composer.pi-enh-composer-model-pill .pi-enh-cursor-right > button.pi-enh-cursor-stop,
-        .pi-enh-cursor-composer.pi-enh-composer-model-pill .pi-enh-cursor-right > .pi-enh-cursor-right-inner > button.pi-enh-cursor-stop {
-          grid-column: -2 !important;
-          grid-row: 3 !important;
-          justify-self: end !important;
-          align-self: center !important;
-          margin: 0 !important;
-        }
-
-        .pi-enh-cursor-composer.pi-enh-composer-model-pill .model-selector {
-          grid-column: -4 !important;
-          grid-row: 3 !important;
-          justify-self: end !important;
-          align-self: center !important;
-          z-index: 2 !important;
-          min-width: 0 !important;
-          width: auto !important;
-          flex: 0 0 auto !important;
-          max-width: none !important;
-          display: inline-flex !important;
-        }
-
-        .pi-enh-cursor-composer.pi-enh-composer-model-pill [data-pi-thinking-control],
-        .pi-enh-cursor-composer.pi-enh-composer-model-pill .pi-enh-cursor-right > div[data-pi-thinking-control],
-        .pi-enh-cursor-composer.pi-enh-composer-model-pill .pi-enh-cursor-right > .pi-enh-cursor-right-inner > div[data-pi-thinking-control],
-        .pi-enh-cursor-composer.pi-enh-composer-model-pill .pi-enh-cursor-right > .pi-enh-cursor-right-inner > div:not([data-pi-thinking-control]):has(> button svg path[d*="M9.5 2A5.5 5.5"]),
-        .pi-enh-cursor-composer.pi-enh-composer-model-pill > div[style*="margin-top"] > div:last-child > div:not([hidden]):not([aria-hidden="true"]):not([style*="display: none"]):not([style*="display:none"]):not([style*="position: absolute"]):not([style*="position:absolute"]):not([style*="position: fixed"]):not([style*="position:fixed"]):not([role="listbox"]):not([role="menu"]) > div:not([data-pi-thinking-control]):not([hidden]):not([aria-hidden="true"]):not([style*="display: none"]):not([style*="display:none"]):has(> button svg path[d*="M9.5 2A5.5 5.5"]) {
-          grid-column: -3 !important;
-          grid-row: 3 !important;
-          padding: 0 !important;
-          margin: 0 !important;
-          justify-self: start !important;
-          align-self: center !important;
-          z-index: 2 !important;
-          min-width: 0 !important;
-          width: auto !important;
-          flex: 0 0 auto !important;
-          display: inline-flex !important;
-        }
-
-        .pi-enh-cursor-composer.pi-enh-composer-model-pill [data-pi-thinking-control][hidden],
-        .pi-enh-cursor-composer.pi-enh-composer-model-pill [data-pi-thinking-control][style*="display: none"],
-        .pi-enh-cursor-composer.pi-enh-composer-model-pill [data-pi-thinking-control][style*="display:none"],
-        .pi-enh-cursor-composer.pi-enh-composer-model-pill .pi-enh-cursor-right > div[data-pi-thinking-control][hidden],
-        .pi-enh-cursor-composer.pi-enh-composer-model-pill .pi-enh-cursor-right > div[data-pi-thinking-control][style*="display: none"],
-        .pi-enh-cursor-composer.pi-enh-composer-model-pill .pi-enh-cursor-right > div[data-pi-thinking-control][style*="display:none"],
-        .pi-enh-cursor-composer.pi-enh-composer-model-pill .pi-enh-cursor-right > .pi-enh-cursor-right-inner > div[data-pi-thinking-control][hidden],
-        .pi-enh-cursor-composer.pi-enh-composer-model-pill .pi-enh-cursor-right > .pi-enh-cursor-right-inner > div[data-pi-thinking-control][style*="display: none"],
-        .pi-enh-cursor-composer.pi-enh-composer-model-pill .pi-enh-cursor-right > .pi-enh-cursor-right-inner > div[data-pi-thinking-control][style*="display:none"] {
-          display: none !important;
-        }
-
-        .pi-enh-cursor-composer.pi-enh-composer-model-pill .pi-enh-cursor-send,
-        .pi-enh-cursor-composer.pi-enh-composer-model-pill .pi-enh-cursor-actions,
-        .pi-enh-cursor-composer.pi-enh-composer-model-pill div[style*="align-self: flex-end"]:not(:has(textarea, [contenteditable])) {
-          grid-column: -2 !important;
-          grid-row: 3 !important;
-          justify-self: end !important;
-          align-self: center !important;
-        }
-
-        /* Style the native send button before the observer adds its enhancement class. */
-        .pi-enh-cursor-composer.pi-enh-composer-model-pill button:has(> svg polyline[points*="7.5 3 12 7 7.5 11"]):not(.pi-enh-cursor-send) {
-          position: relative !important;
-          grid-column: -2 !important;
-          grid-row: 3 !important;
-          justify-self: end !important;
-          align-self: center !important;
-          width: 24px !important;
-          height: 24px !important;
-          min-width: 24px !important;
-          max-width: 24px !important;
-          gap: 0 !important;
-          padding: 0 !important;
-          margin: 0 !important;
-          border: none !important;
-          border-radius: 50% !important;
-          box-shadow: none !important;
-          font-size: 0 !important;
-          line-height: 0 !important;
-          display: inline-flex !important;
-          align-items: center !important;
-          justify-content: center !important;
-          box-sizing: border-box !important;
-          overflow: hidden !important;
-          transition: background 0.15s ease, color 0.15s ease, transform 0.1s ease, box-shadow 0.15s ease !important;
-        }
-        .pi-enh-cursor-composer.pi-enh-composer-model-pill button:has(> svg polyline[points*="7.5 3 12 7 7.5 11"]):not(.pi-enh-cursor-send)::before {
-          content: "" !important;
-          position: absolute !important;
-          top: 50% !important;
-          left: 50% !important;
-          transform: translate(-50%, -50%) !important;
-          display: block !important;
-          width: 14px !important;
-          height: 14px !important;
-          margin: 0 !important;
-          padding: 0 !important;
-          pointer-events: none !important;
-          background-color: currentColor !important;
-          -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M12 19V5m-7 7 7-7 7 7' fill='none' stroke='black' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") no-repeat center / contain !important;
-          mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M12 19V5m-7 7 7-7 7 7' fill='none' stroke='black' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") no-repeat center / contain !important;
-        }
-        .pi-enh-cursor-composer.pi-enh-composer-model-pill button:has(> svg polyline[points*="7.5 3 12 7 7.5 11"]):not(.pi-enh-cursor-send) > svg {
-          display: none !important;
-        }
-        .pi-enh-cursor-composer.pi-enh-composer-model-pill button:has(> svg polyline[points*="7.5 3 12 7 7.5 11"]):not(.pi-enh-cursor-send):disabled {
-          background: rgba(128, 128, 128, 0.14) !important;
-          color: var(--text-dim, #71717a) !important;
-          cursor: not-allowed !important;
-          opacity: 0.55 !important;
-        }
-        .pi-enh-cursor-composer.pi-enh-composer-model-pill button:has(> svg polyline[points*="7.5 3 12 7 7.5 11"]):not(.pi-enh-cursor-send):not(:disabled) {
-          background: #efefef !important;
-          color: #262626 !important;
-          cursor: pointer !important;
-          opacity: 1 !important;
-        }
-        .pi-enh-cursor-composer.pi-enh-composer-model-pill button:has(> svg polyline[points*="7.5 3 12 7 7.5 11"]):not(.pi-enh-cursor-send):not(:disabled):hover {
-          background: #ffffff !important;
-        }
-        .pi-enh-cursor-composer.pi-enh-composer-model-pill button:has(> svg polyline[points*="7.5 3 12 7 7.5 11"]):not(.pi-enh-cursor-send):not(:disabled):active {
-          transform: scale(0.94) !important;
-        }
-
-        /* 当模型选择器或思考控件展开下拉菜单时，外层与控件层叠上下文提升至最前，确保绝不被任何浮动按钮遮挡 */
-        .pi-enh-cursor-composer:has(div[role="listbox"]),
-        .pi-enh-cursor-composer:has([data-pi-thinking-control] div[style*="position"]),
-        .pi-enh-cursor-composer.pi-enh-composer-model-pill:has(div[role="listbox"]),
-        .pi-enh-cursor-composer.pi-enh-composer-model-pill:has([data-pi-thinking-control] div[style*="position"]),
-        .pi-enh-cursor-composer.pi-enh-composer-model-pill .model-selector:has(div[role="listbox"]),
-        .pi-enh-cursor-composer.pi-enh-composer-model-pill [data-pi-thinking-control]:has(div[style*="position"]),
-        .model-selector:has(div[role="listbox"]) {
-          z-index: 1200 !important;
-        }
-
-        div[role="listbox"] {
-          z-index: 1200 !important;
-        }
-
-        /* 胶囊背景跨越 model 与 thinking：平时完全透明不显示边框，仅悬停/聚焦时显现 */
-        .pi-enh-cursor-composer.pi-enh-composer-model-pill::after {
-          content: "" !important;
-          display: block !important;
-          grid-column: -4 / -2 !important;
-          grid-row: 3 !important;
-          height: 32px !important;
-          border-radius: 9999px !important;
-          pointer-events: none !important;
-          z-index: 1 !important;
-          align-self: center !important;
-          box-sizing: border-box !important;
-          background: transparent !important;
-          border: 1px solid transparent !important;
-          box-shadow: none !important;
-          transition: background-color 0.15s ease, border-color 0.15s ease !important;
-        }
-
-        .pi-enh-cursor-composer.pi-enh-composer-model-pill:not(:has([data-pi-thinking-control], .pi-enh-cursor-right-inner > div > button > svg > path[d*="M9.5 2A5.5 5.5"]))::after {
-          grid-column: -4 / -3 !important;
-        }
-
-        html[data-theme="light"] .pi-enh-cursor-composer.pi-enh-composer-model-pill::after,
-        [data-theme="light"] .pi-enh-cursor-composer.pi-enh-composer-model-pill::after {
-          background: transparent !important;
-          border: 1px solid transparent !important;
-          box-shadow: none !important;
-        }
-
-        /* 仅在鼠标悬停或键盘聚焦时展示边框与微高亮 */
-        .pi-enh-cursor-composer.pi-enh-composer-model-pill:has(.model-selector button:hover)::after,
-        .pi-enh-cursor-composer.pi-enh-composer-model-pill:has([data-pi-thinking-control] button:hover)::after,
-        .pi-enh-cursor-composer.pi-enh-composer-model-pill:has(.model-selector button:focus-visible)::after,
-        .pi-enh-cursor-composer.pi-enh-composer-model-pill:has([data-pi-thinking-control] button:focus-visible)::after {
-          background: var(--bg-hover, rgba(255, 255, 255, 0.05)) !important;
-          border: 1px solid var(--border, rgba(255, 255, 255, 0.15)) !important;
-          box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12), inset 0 1px 0 rgba(255, 255, 255, 0.08) !important;
-        }
-
-        html[data-theme="light"] .pi-enh-cursor-composer.pi-enh-composer-model-pill:has(.model-selector button:hover)::after,
-        html[data-theme="light"] .pi-enh-cursor-composer.pi-enh-composer-model-pill:has([data-pi-thinking-control] button:hover)::after,
-        html[data-theme="light"] .pi-enh-cursor-composer.pi-enh-composer-model-pill:has(.model-selector button:focus-visible)::after,
-        html[data-theme="light"] .pi-enh-cursor-composer.pi-enh-composer-model-pill:has([data-pi-thinking-control] button:focus-visible)::after,
-        [data-theme="light"] .pi-enh-cursor-composer.pi-enh-composer-model-pill:has(.model-selector button:hover)::after,
-        [data-theme="light"] .pi-enh-cursor-composer.pi-enh-composer-model-pill:has([data-pi-thinking-control] button:hover)::after,
-        [data-theme="light"] .pi-enh-cursor-composer.pi-enh-composer-model-pill:has(.model-selector button:focus-visible)::after,
-        [data-theme="light"] .pi-enh-cursor-composer.pi-enh-composer-model-pill:has([data-pi-thinking-control] button:focus-visible)::after {
-          background: rgba(0, 0, 0, 0.04) !important;
-          border: 1px solid rgba(0, 0, 0, 0.12) !important;
-          box-shadow: 0 1px 2px rgba(0, 0, 0, 0.05), inset 0 1px 0 rgba(255, 255, 255, 0.8) !important;
-        }
-
-        .pi-enh-cursor-composer.pi-enh-composer-model-pill:has(.model-selector button:focus-visible)::after,
-        .pi-enh-cursor-composer.pi-enh-composer-model-pill:has([data-pi-thinking-control] button:focus-visible)::after {
-          border-color: var(--accent, #6366f1) !important;
-          box-shadow: 0 0 0 1.5px var(--accent, #6366f1), inset 0 1px 0 rgba(255, 255, 255, 0.1) !important;
-        }
-
-        .pi-enh-cursor-composer.pi-enh-composer-model-pill .model-selector > button {
-          height: 32px !important;
-          min-height: 32px !important;
-          max-height: 32px !important;
-          background: transparent !important;
-          border: none !important;
-          box-shadow: none !important;
-          outline: none !important;
-          color: var(--text, #ececec) !important;
-          font-weight: 500 !important;
-          font-size: 12px !important;
-          padding: 0 6px 0 12px !important;
-          margin: 0 !important;
-          border-radius: 9999px 0 0 9999px !important;
-          cursor: pointer !important;
-          display: inline-flex !important;
-          align-items: center !important;
-          gap: 4px !important;
-          white-space: nowrap !important;
-          box-sizing: border-box !important;
-          max-width: min(240px, 45vw) !important;
-        }
-
-        .pi-enh-cursor-composer.pi-enh-composer-model-pill .model-selector > button > span {
-          display: inline-block !important;
-          max-width: 100% !important;
-          overflow: hidden !important;
-          text-overflow: ellipsis !important;
-          white-space: nowrap !important;
-        }
-
-        .pi-enh-cursor-composer.pi-enh-composer-model-pill:not(:has([data-pi-thinking-control], .pi-enh-cursor-right-inner > div > button > svg > path[d*="M9.5 2A5.5 5.5"])) .model-selector > button {
-          border-radius: 9999px !important;
-          padding: 0 10px 0 12px !important;
-        }
-
-        .pi-enh-cursor-composer.pi-enh-composer-model-pill .model-selector > button svg {
-          display: none !important;
-        }
-
-        .pi-enh-cursor-composer.pi-enh-composer-model-pill [data-pi-thinking-control] > button,
-        .pi-enh-cursor-composer.pi-enh-composer-model-pill [data-pi-thinking-button] {
-          height: 32px !important;
-          min-height: 32px !important;
-          max-height: 32px !important;
-          background: transparent !important;
-          border: none !important;
-          box-shadow: none !important;
-          outline: none !important;
-          color: var(--text-muted, #a1a1aa) !important;
-          font-weight: 400 !important;
-          font-size: 12px !important;
-          padding: 0 10px 0 2px !important;
-          margin: 0 !important;
-          border-radius: 0 9999px 9999px 0 !important;
-          cursor: pointer !important;
-          display: inline-flex !important;
-          align-items: center !important;
-          gap: 3px !important;
-          white-space: nowrap !important;
-          box-sizing: border-box !important;
-        }
-
-        .pi-enh-cursor-composer.pi-enh-composer-model-pill [data-pi-thinking-control] > button > span {
-          display: inline !important;
-          white-space: nowrap !important;
-          color: var(--text-muted, #a1a1aa) !important;
-        }
-
-        .pi-enh-cursor-composer.pi-enh-composer-model-pill [data-pi-thinking-control] > button > svg {
-          display: none !important;
-        }
-
-        .pi-enh-cursor-composer.pi-enh-composer-model-pill [data-pi-thinking-control] > button::after {
-          content: "" !important;
-          display: inline-block !important;
-          width: 10px !important;
-          height: 10px !important;
-          flex: 0 0 10px !important;
-          background-color: currentColor !important;
-          opacity: 0.65 !important;
-          pointer-events: none !important;
-          -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M6 9l6 6 6-6' fill='none' stroke='black' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") no-repeat center / contain !important;
-          mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M6 9l6 6 6-6' fill='none' stroke='black' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") no-repeat center / contain !important;
-          transition: transform 0.15s ease, opacity 0.15s ease !important;
-          margin-left: 1px !important;
-        }
-
-        .pi-enh-cursor-composer.pi-enh-composer-model-pill:not(:has([data-pi-thinking-control], .pi-enh-cursor-right-inner > div > button > svg > path[d*="M9.5 2A5.5 5.5"])) .model-selector > button::after {
-          content: "" !important;
-          display: inline-block !important;
-          width: 10px !important;
-          height: 10px !important;
-          flex: 0 0 10px !important;
-          background-color: currentColor !important;
-          opacity: 0.65 !important;
-          pointer-events: none !important;
-          -webkit-mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M6 9l6 6 6-6' fill='none' stroke='black' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") no-repeat center / contain !important;
-          mask: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M6 9l6 6 6-6' fill='none' stroke='black' stroke-width='2.2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E") no-repeat center / contain !important;
-          transition: transform 0.15s ease, opacity 0.15s ease !important;
-          margin-left: 4px !important;
-        }
-
-        @media (max-width: 640px) {
-          .pi-enh-cursor-composer.pi-enh-composer-model-pill .pi-enh-composer-mode-indicator {
-            grid-column: 3 !important;
-            grid-row: 3 !important;
-            align-self: center !important;
-          }
-          .pi-enh-cursor-composer.pi-enh-composer-model-pill button.pi-enh-cursor-stop,
-          .pi-enh-cursor-composer.pi-enh-composer-model-pill.pi-enh-has-running-controls button.pi-enh-cursor-stop,
-          .pi-enh-cursor-composer.pi-enh-composer-model-pill .pi-enh-cursor-right > button.pi-enh-cursor-stop,
-          fieldset .pi-enh-cursor-composer.pi-enh-composer-model-pill.pi-enh-has-running-controls button.pi-enh-cursor-stop {
-            grid-row: 3 !important;
-            grid-column: -2 !important;
-            justify-self: end !important;
-            align-self: center !important;
-            margin: 0 !important;
-          }
-          fieldset .pi-enh-cursor-composer.pi-enh-composer-model-pill .pi-enh-cursor-actions,
-          fieldset .pi-enh-cursor-composer.pi-enh-composer-model-pill.pi-enh-has-running-controls .pi-enh-cursor-actions {
-            grid-row: 3 !important;
-            grid-column: -2 !important;
-            justify-self: end !important;
-            align-self: center !important;
-          }
-          .pi-enh-cursor-composer.pi-enh-composer-model-pill .model-selector > button {
-            max-width: min(170px, 44vw) !important;
-            padding: 0 4px 0 10px !important;
-          }
-          .pi-enh-cursor-composer.pi-enh-composer-model-pill [data-pi-thinking-control] > button {
-            padding: 0 8px 0 2px !important;
-          }
-        }
-      `;
-      document.head.appendChild(style);
-    }
-  }
-
-  function syncComposerModelPill() {
-    if (!isPluginEnabled("codex-composer-layout") || !isPluginEnabled("composer-model-reasoning-pill")) {
-      removeComposerModelPill();
-      return;
-    }
-    ensureComposerModelPillStyle();
-    const textarea = findComposerTextarea();
-    const card = textarea?.closest('fieldset > div[style*="max-width"]');
-    if (card) {
-      card.classList.add("pi-enh-composer-model-pill");
-    }
-  }
-
-  function removeComposerModelPill() {
-    const style = document.getElementById(COMPOSER_MODEL_PILL_STYLE_ID);
-    if (style) style.remove();
-    for (const card of document.querySelectorAll(".pi-enh-composer-model-pill")) {
-      card.classList.remove("pi-enh-composer-model-pill");
-    }
-  }
-
-  activeCleanups.push(removeComposerModelPill);
-  window.__PI_ENH_SYNC_COMPOSER_MODEL_PILL__ = syncComposerModelPill;
-  window.__PI_ENH_REMOVE_COMPOSER_MODEL_PILL__ = removeComposerModelPill;
+  // Foundation composer layout, pill and resize belong to native React/static CSS.
 
   // ==========================================
   // 3.54.5 Composer Model / Thinking Switch Auto Focus (切换模型或思考深度后光标自动对焦输入框)
   // ==========================================
   function isModelOrThinkingSelectorTarget(target) {
+    if (target?.closest?.("[data-pi-native-thinking-selector]")) return false;
     if (!target) return false;
     const el = target.nodeType === 1 ? target : target.parentElement;
     if (!el || typeof el.closest !== "function") return false;
@@ -9526,13 +6740,14 @@
   let touchIsMoved = false;
 
   function handleModelSelectorTouchStart(e) {
+    if (e?.target?.closest?.("[data-pi-native-thinking-selector]")) return;
     if (!isPluginEnabled("mobile-model-keyboard-guard")) return;
     const target = e?.target;
     if (!target) return;
     const el = target.nodeType === 1 ? target : target.parentElement;
     if (!el || typeof el.closest !== "function") return;
 
-    if (el.closest('textarea, [contenteditable], .pi-enh-formatted-composer, .pi-enh-cursor-editor, input')) {
+    if (el.closest('textarea, [contenteditable], .pi-enh-cursor-editor, input')) {
       return;
     }
     if (el.closest('dialog, .settings-modal, [data-modal]')) return;
@@ -9548,8 +6763,7 @@
     const isEditing = active && (
       active.tagName === "TEXTAREA" ||
       active.tagName === "INPUT" ||
-      active.isContentEditable ||
-      active.classList?.contains("pi-enh-formatted-composer")
+      active.isContentEditable
     );
 
     // 核心物理保护：若处于键盘展开状态，在 touchstart 阻止默认失焦行为，保证键盘绝对不被收起！
@@ -9597,10 +6811,11 @@
   }
 
   function handleModelSelectorPointerDown(e) {
+    if (e?.target?.closest?.("[data-pi-native-thinking-selector]")) return;
     // 桌面端鼠标点击拦截失焦：若当前正在打字，阻止 mousedown 默认失焦，保持输入框焦点且不影响 click 派发
     if (e.pointerType === "mouse") {
       const active = document.activeElement;
-      if (active && (active.tagName === "TEXTAREA" || active.tagName === "INPUT" || active.isContentEditable || active.classList?.contains("pi-enh-formatted-composer"))) {
+      if (active && (active.tagName === "TEXTAREA" || active.tagName === "INPUT" || active.isContentEditable)) {
         const isTrigger = e.target?.closest?.('.model-selector button, .model-selector [role="button"], [data-pi-thinking-control] > button, [data-pi-thinking-button]');
         if (isTrigger && !e.target.closest('div[role="listbox"], [role="option"]')) {
           if (typeof e.preventDefault === "function") e.preventDefault();
@@ -9610,6 +6825,7 @@
   }
 
   function handleModelSelectorClick(e) {
+    if (e?.target?.closest?.("[data-pi-native-thinking-selector]")) return;
     if (!isPluginEnabled("mobile-model-keyboard-guard")) return;
     const target = e?.target;
     if (!target) return;
@@ -9617,7 +6833,7 @@
     if (!el || typeof el.closest !== "function") return;
 
     // 绝对防御铁律：如果点击的是输入框本身或任何可编辑容器，绝不拦截，坚决退出！
-    if (el.closest('textarea, [contenteditable], .pi-enh-formatted-composer, .pi-enh-cursor-editor, input')) {
+    if (el.closest('textarea, [contenteditable], .pi-enh-cursor-editor, input')) {
       return;
     }
     if (el.closest('dialog, .settings-modal, [data-modal]')) return;
@@ -9636,8 +6852,7 @@
     const wasEditing = prevActive && (
       prevActive.tagName === "TEXTAREA" ||
       prevActive.tagName === "INPUT" ||
-      prevActive.isContentEditable ||
-      prevActive.classList?.contains("pi-enh-formatted-composer")
+      prevActive.isContentEditable
     );
 
     // 遵从用户指令：点击模型选择按钮绝不收起软键盘，严禁调用 active.blur()！
@@ -9856,57 +7071,6 @@
   window.__PI_ENH_HANDLE_MODEL_TOUCHEND__ = handleModelSelectorTouchEnd;
 
   // ==========================================
-  // 3.55.0 Composer Thinking Options Refinement (思考深度选项垂直排布与排除“默认”)
-  // ==========================================
-  function syncComposerThinkingOptions() {
-    const controls = document.querySelectorAll("[data-pi-thinking-control]");
-    if (!controls.length) return;
-
-    for (const control of controls) {
-      const dropdown = control.querySelector('div[style*="position: absolute"], div[style*="position:absolute"]');
-      if (!dropdown) continue;
-
-      const buttons = Array.from(dropdown.querySelectorAll("button"));
-      if (!buttons.length) continue;
-
-      let hiddenCount = 0;
-      let visibleButtons = [];
-
-      for (const btn of buttons) {
-        const text = (btn.innerText || "").trim().toLowerCase();
-        const isAuto = text.startsWith("auto") ||
-          text.includes("使用 pi 默认设置") ||
-          text.includes("use pi default") ||
-          text === "auto" ||
-          btn.getAttribute("data-thinking-level") === "auto";
-
-        if (isAuto) {
-          btn.setAttribute("data-thinking-level", "auto");
-          btn.classList.add("pi-enh-thinking-auto-option");
-          btn.style.setProperty("display", "none", "important");
-          hiddenCount++;
-        } else {
-          const match = text.match(/\b(off|minimal|low|medium|high|xhigh|max)\b/i);
-          if (match) {
-            btn.setAttribute("data-thinking-level", match[1].toLowerCase());
-          }
-          btn.classList.remove("pi-enh-thinking-auto-option");
-          visibleButtons.push(btn);
-        }
-      }
-
-      if (visibleButtons.length === 0 && buttons.length > 0) {
-        buttons.forEach((b) => {
-          b.style.removeProperty("display");
-          b.classList.remove("pi-enh-thinking-auto-option");
-        });
-      }
-    }
-  }
-
-  window.__PI_ENH_SYNC_COMPOSER_THINKING_OPTIONS__ = syncComposerThinkingOptions;
-
-  // ==========================================
   // 3.55.1 Composer Tool Buttons Visibility (压缩上下文与工具预设按钮显隐控制)
   // ==========================================
   function syncComposerToolButtons() {
@@ -9954,25 +7118,7 @@
   // ==========================================
   // 3.55.2 Codex Style Markdown Formatting & Smart Paste (输入框粘贴保持格式与 Markdown 渲染)
   // ==========================================
-  const COMPOSER_MARKDOWN_STYLE_ID = "pi-enh-composer-markdown-format-style";
-  const FORMATTED_VIEW_STORAGE_KEY = "pi-enh-formatted-view-mode";
-  function getPersistedFormattedViewMode() {
-    try {
-      const val = localStorage.getItem(FORMATTED_VIEW_STORAGE_KEY);
-      return val === null ? true : val === "true";
-    } catch (e) {
-      return true;
-    }
-  }
-  function setPersistedFormattedViewMode(val) {
-    try {
-      localStorage.setItem(FORMATTED_VIEW_STORAGE_KEY, String(val));
-    } catch (e) {}
-  }
   let activeComposerFormatTextarea = null;
-  activeFormattedComposer = null;
-  let activeFormatToggleBtn = null;
-  let isFormattedViewMode = getPersistedFormattedViewMode();
   isComposingInput = false;
   let composerCompositionEndedAt = 0;
   let lastCompositionKeyReleased = false;
@@ -9993,97 +7139,59 @@
       || (Date.now() - composerCompositionEndedAt < 100 && !lastCompositionKeyReleased);
     if (!composing) return false;
     if (event.key === "Enter") {
-      // Keep IME confirmation native, but never let its Enter become a send.
       if (!isComposingInput && !event.isComposing) event.preventDefault();
       event.stopPropagation();
     }
     return true;
   }
 
-  // 历史撤销/重做栈管理 (支持 Ctrl+Z 撤销，深度 100 步)
   const composerUndoStack = [];
   const composerRedoStack = [];
   const MAX_COMPOSER_UNDO = 100;
   let undoDebounceTimer = null;
   let lastUndoCharsCount = 0;
 
-  function pushComposerUndo(val) {
-    if (typeof val !== "string") return;
-    if (composerUndoStack.length > 0 && composerUndoStack[composerUndoStack.length - 1] === val) return;
-    composerUndoStack.push(val);
+  function pushComposerUndo(value) {
+    if (typeof value !== "string") return;
+    if (composerUndoStack[composerUndoStack.length - 1] === value) return;
+    composerUndoStack.push(value);
     if (composerUndoStack.length > MAX_COMPOSER_UNDO) composerUndoStack.shift();
     composerRedoStack.length = 0;
   }
 
-  function shouldTriggerInstantUndo(newVal, oldVal) {
-    if (!newVal || !oldVal) return true;
-    if (newVal.length < oldVal.length) return true; // 删除文字
-    if (Math.abs(newVal.length - lastUndoCharsCount) >= 10) return true; // 连续输入 10 字符
-    const lastChar = newVal.slice(-1);
-    if (/[\s\n，。！？；：、,.!?;:]/.test(lastChar)) return true; // 语义标点/换行/空格
-    return false;
-  }
-
-  function performComposerUndo() {
-    if (undoDebounceTimer) {
-      clearTimeout(undoDebounceTimer);
-      undoDebounceTimer = null;
-    }
-    if (composerUndoStack.length <= 1) {
-      if (composerUndoStack.length === 1 && composerUndoStack[0] !== "") {
-        const current = composerUndoStack.pop();
-        composerRedoStack.push(current);
-        composerUndoStack.push("");
-        applyComposerSnapshot("");
-      }
-      return;
-    }
-    const current = composerUndoStack.pop();
-    composerRedoStack.push(current);
-    const previous = composerUndoStack[composerUndoStack.length - 1];
-    applyComposerSnapshot(previous);
-  }
-
-  function performComposerRedo() {
-    if (undoDebounceTimer) {
-      clearTimeout(undoDebounceTimer);
-      undoDebounceTimer = null;
-    }
-    if (composerRedoStack.length === 0) return;
-    const next = composerRedoStack.pop();
-    composerUndoStack.push(next);
-    applyComposerSnapshot(next);
+  function shouldTriggerInstantUndo(newValue, oldValue) {
+    if (!newValue || !oldValue) return true;
+    if (newValue.length < oldValue.length) return true;
+    if (Math.abs(newValue.length - lastUndoCharsCount) >= 10) return true;
+    return /[\s\n，。！？；：、,.!?;:]$/.test(newValue);
   }
 
   function applyComposerSnapshot(text) {
     const textarea = activeComposerFormatTextarea || findComposerTextarea();
     if (!textarea) return;
-    setComposerTextareaValue(textarea, text);
-    if (activeFormattedComposer) {
-      activeFormattedComposer.innerHTML = markdownToFormattedHtml(text);
-      activeFormattedComposer.__piEnhSyncedValue = text;
-      if (text.trim().length === 0 && isFormattedViewMode) {
-        textarea.style.display = "block";
-        activeFormattedComposer.style.display = "none";
-        textarea.focus();
-      } else if (isFormattedViewMode) {
-        textarea.style.display = "none";
-        activeFormattedComposer.style.display = "block";
-        activeFormattedComposer.focus();
-        try {
-          const selection = window.getSelection();
-          const range = document.createRange();
-          range.selectNodeContents(activeFormattedComposer);
-          range.collapse(false);
-          selection.removeAllRanges();
-          selection.addRange(range);
-        } catch (e) {}
-      }
-    }
+    setComposerTextareaValue(textarea, text, { focus: false });
+    const cursor = String(text || "").length;
+    try { textarea.setSelectionRange(cursor, cursor); } catch (_) {}
+    textarea.focus();
   }
 
-  const SPARKLE_SVG = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m12 3-1.912 5.813a2 2 0 0 1-1.275 1.275L3 12l5.813 1.912a2 2 0 0 1 1.275 1.275L12 21l1.912-5.813a2 2 0 0 1 1.275-1.275L21 12l-5.813-1.912a2 2 0 0 1-1.275-1.275L12 3Z"/></svg>`;
-  const CODE_SVG = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 18 22 12 16 6"/><polyline points="8 6 2 12 8 18"/></svg>`;
+  function performComposerUndo() {
+    if (undoDebounceTimer) clearTimeout(undoDebounceTimer);
+    undoDebounceTimer = null;
+    if (composerUndoStack.length <= 1) return;
+    const current = composerUndoStack.pop();
+    composerRedoStack.push(current);
+    applyComposerSnapshot(composerUndoStack[composerUndoStack.length - 1] || "");
+  }
+
+  function performComposerRedo() {
+    if (undoDebounceTimer) clearTimeout(undoDebounceTimer);
+    undoDebounceTimer = null;
+    const next = composerRedoStack.pop();
+    if (typeof next !== "string") return;
+    composerUndoStack.push(next);
+    applyComposerSnapshot(next);
+  }
 
   function cleanMarkdownText(md) {
     if (!md || typeof md !== "string") return "";
@@ -10225,386 +7333,53 @@
       /style\s*=\s*["'][^"']*(?:font-weight\s*:\s*(?:bold|[6-9]00)|font-style\s*:\s*italic|font-family\s*:\s*monospace)/i.test(html);
   }
 
-  function escapeHtmlChars(str) {
-    return String(str || "")
-      .replace(/&/g, "&amp;")
-      .replace(/</g, "&lt;")
-      .replace(/>/g, "&gt;")
-      .replace(/"/g, "&quot;");
-  }
-
-  // 彻底“翻译”Markdown 语法为富文本 DOM：去除 ##、去除 **、去除反引号、紧凑无多余空行
-  function markdownToFormattedHtml(md) {
-    if (!md || typeof md !== "string") return "";
-    const cleanMd = cleanMarkdownText(md);
-
-    // 保护代码块：使用无保留字符的 Unicode PUA 唯一占位符，支持语言标签带空格、\r?\n 换行及行首/行内前后粘连自动拆分
-    const codeBlocks = [];
-    const textWithoutCode = cleanMd.replace(/(^|[^\n`])?[ \t]*```([a-zA-Z0-9_.-]*)[^\S\r\n]*(?:\r?\n)([\s\S]*?)(?:\r?\n[ \t]*```[^\S\r\n]*|$)/g, (match, prefix, lang, code) => {
-      const idx = codeBlocks.length;
-      codeBlocks.push({ lang: lang ? lang.trim() : "", code: (code || "").replace(/\r\n/g, "\n") });
-      const pre = prefix ? `${prefix}\n\n` : "\n\n";
-      return `${pre}\uE100PIMDCB${idx}\uE101\n\n`;
-    });
-
-    const lines = textWithoutCode.split("\n");
-    const outputHtml = [];
-
-    // 行内解析 helper: 彻底翻译行内语法
-    function parseInline(content) {
-      let res = escapeHtmlChars(content);
-      // 行内代码 `code` -> 渲染为代码药丸，彻底去除反引号
-      res = res.replace(/`([^`\n]+)`/g, (m, code) => `<code class="pi-enh-md-inline-code">${code}</code>`);
-      // 粗体 **bold** 或 __bold__ -> 渲染为粗体，彻底去除 ** 和 __
-      res = res.replace(/\*\*([^*\n]+)\*\*/g, (m, bold) => `<strong class="pi-enh-md-bold">${bold}</strong>`);
-      res = res.replace(/__([^_\n]+)__/g, (m, bold) => `<strong class="pi-enh-md-bold">${bold}</strong>`);
-      // 斜体 *italic* 或 _italic_ -> 渲染为斜体，彻底去除 * 和 _
-      res = res.replace(/\*([^*\n]+)\*/g, (m, italic) => `<em class="pi-enh-md-italic">${italic}</em>`);
-      res = res.replace(/_([^_\n]+)_/g, (m, italic) => `<em class="pi-enh-md-italic">${italic}</em>`);
-      // 超链接 [text](url)
-      res = res.replace(/\[([^\]\n]+)\]\(([^)\n]+)\)/g, (m, text, url) => `<a class="pi-enh-md-link" href="${url}" target="_blank" rel="noreferrer">${text}</a>`);
-      return res;
-    }
-
-    for (let i = 0; i < lines.length; i++) {
-      const rawLine = lines[i];
-      const trimmed = rawLine.trim();
-
-      // 代码块还原：支持独占一行以及任何意外混入行内的占位符，100% 优先还原为代码块卡片
-      if (rawLine.includes("\uE100PIMDCB")) {
-        const parts = rawLine.split(/(\uE100PIMDCB\d+\uE101)/g);
-        for (const part of parts) {
-          const cbMatch = part.match(/\uE100PIMDCB(\d+)\uE101/);
-          if (cbMatch) {
-            const idx = parseInt(cbMatch[1], 10);
-            const b = codeBlocks[idx];
-            if (b) {
-              const langLabel = escapeHtmlChars(b.lang || "code");
-              outputHtml.push(
-                `<div class="pi-enh-md-code-card"><div class="pi-enh-md-code-header"><span class="pi-enh-md-code-lang">${langLabel}</span></div><pre class="pi-enh-md-code-body"><code>${escapeHtmlChars(b.code)}</code></pre></div>`
-              );
-            }
-          } else if (part.trim()) {
-            outputHtml.push(`<div class="pi-enh-md-p">${parseInline(part)}</div>`);
-          }
-        }
-        continue;
-      }
-
-      // 空行：折叠为紧凑的单个微间隙，绝不产生巨大的连续空白！
-      if (trimmed === "") {
-        if (outputHtml.length > 0 && !outputHtml[outputHtml.length - 1].includes("pi-enh-md-spacer")) {
-          outputHtml.push('<div class="pi-enh-md-spacer"></div>');
-        }
-        continue;
-      }
-
-      // 1. 标题 (#, ##, ###) -> 彻底去除 # 符号，直接显示为加大加粗纯白大标题！
-      const headingMatch = rawLine.match(/^\s*(#{1,6})\s+(.+)$/);
-      if (headingMatch) {
-        const level = headingMatch[1].length;
-        const titleContent = parseInline(headingMatch[2].trim());
-        outputHtml.push(`<div class="pi-enh-md-heading pi-enh-md-h${level}">${titleContent}</div>`);
-        continue;
-      }
-
-      // 2. 无序列表 (- , * , + , • , ◦ , ▪ , ▫) -> 彻底去除符号，统一呈现天蓝色圆点和层级缩进
-      const ulMatch = rawLine.match(/^(\s*)([-*+•◦▪▫–—])\s+(.+)$/);
-      if (ulMatch) {
-        const spaces = ulMatch[1].length;
-        const indentLevel = Math.min(Math.floor(spaces / 2), 6);
-        const itemContent = parseInline(ulMatch[3].trim());
-        outputHtml.push(
-          `<div class="pi-enh-md-list-item pi-enh-md-ul" style="padding-left: ${indentLevel * 16}px"><span class="pi-enh-md-bullet">•</span><span class="pi-enh-md-content">${itemContent}</span></div>`
-        );
-        continue;
-      }
-
-      // 3. 有序列表 (1. , 2. ) -> 彻底去除原生字符，呈现醒目数字标号
-      const olMatch = rawLine.match(/^(\s*)(\d+)\.\s+(.+)$/);
-      if (olMatch) {
-        const spaces = olMatch[1].length;
-        const indentLevel = Math.min(Math.floor(spaces / 2), 6);
-        const num = olMatch[2];
-        const itemContent = parseInline(olMatch[3].trim());
-        outputHtml.push(
-          `<div class="pi-enh-md-list-item pi-enh-md-ol" style="padding-left: ${indentLevel * 16}px"><span class="pi-enh-md-num">${num}.</span><span class="pi-enh-md-content">${itemContent}</span></div>`
-        );
-        continue;
-      }
-
-      // 4. 引用 (>) -> 彻底去除 >，呈现左侧竖条边框
-      const quoteMatch = rawLine.match(/^\s*>\s*(.+)$/);
-      if (quoteMatch) {
-        const quoteContent = parseInline(quoteMatch[1].trim());
-        outputHtml.push(`<blockquote class="pi-enh-md-quote">${quoteContent}</blockquote>`);
-        continue;
-      }
-
-      // 5. 普通文本行
-      outputHtml.push(`<div class="pi-enh-md-p">${parseInline(rawLine)}</div>`);
-    }
-
-    return outputHtml.join("");
-  }
-
-  function extractMarkdownFromFormattedComposer(el) {
-    if (!el) return "";
-    return htmlToMarkdown(el.innerHTML);
-  }
-
-  function restoreFormattedSelectionFromTextarea(formattedComposer, markdown, textarea) {
-    if (!formattedComposer || !textarea) return false;
-
-    const sourceStart = Number.isFinite(textarea.selectionStart) ? textarea.selectionStart : markdown.length;
-    const sourceEnd = Number.isFinite(textarea.selectionEnd) ? textarea.selectionEnd : sourceStart;
-    const getRenderedOffset = (sourceOffset) => {
-      const prefix = document.createElement("div");
-      const boundedOffset = Math.max(0, Math.min(markdown.length, sourceOffset));
-      prefix.innerHTML = markdownToFormattedHtml(markdown.slice(0, boundedOffset));
-      return (prefix.textContent || "").length;
-    };
-    const locateTextPoint = (renderedOffset) => {
-      const walker = document.createTreeWalker(formattedComposer, NodeFilter.SHOW_TEXT);
-      let remaining = Math.max(0, renderedOffset);
-      let node = null;
-      let lastTextNode = null;
-      while ((node = walker.nextNode())) {
-        const length = (node.nodeValue || "").length;
-        lastTextNode = node;
-        if (remaining <= length) return { node, offset: remaining };
-        remaining -= length;
-      }
-      if (lastTextNode) {
-        return { node: lastTextNode, offset: (lastTextNode.nodeValue || "").length };
-      }
-      return { node: formattedComposer, offset: formattedComposer.childNodes.length };
-    };
-
-    try {
-      const range = document.createRange();
-      const start = locateTextPoint(getRenderedOffset(sourceStart));
-      const end = locateTextPoint(getRenderedOffset(sourceEnd));
-      range.setStart(start.node, start.offset);
-      range.setEnd(end.node, end.offset);
-      const selection = window.getSelection();
-      if (!selection) return false;
-      selection.removeAllRanges();
-      selection.addRange(range);
-      return true;
-    } catch (_) {
-      return false;
-    }
-  }
-
-  function updateFormattedViewMode(targetFormatted) {
-    isFormattedViewMode = targetFormatted;
-    setPersistedFormattedViewMode(isFormattedViewMode);
-    if (!activeComposerFormatTextarea) return;
-
-    if (activeFormatToggleBtn) {
-      if (isFormattedViewMode) {
-        activeFormatToggleBtn.classList.remove("is-raw");
-        activeFormatToggleBtn.innerHTML = `${SPARKLE_SVG}<span>格式化</span>`;
-        activeFormatToggleBtn.title = "当前为格式化视图 (点击切换为纯文本源码，快捷键 Ctrl+M)";
-      } else {
-        activeFormatToggleBtn.classList.add("is-raw");
-        activeFormatToggleBtn.innerHTML = `${CODE_SVG}<span>纯文本</span>`;
-        activeFormatToggleBtn.title = "当前为纯文本源码视图 (点击切换为格式化视图，快捷键 Ctrl+M)";
-      }
-    }
-
-    if (!activeFormattedComposer) return;
-
-    if (isFormattedViewMode) {
-      const currentMd = activeComposerFormatTextarea.value || "";
-      activeFormattedComposer.innerHTML = markdownToFormattedHtml(currentMd);
-      if (currentMd.trim().length > 0) {
-        activeComposerFormatTextarea.style.display = "none";
-        activeFormattedComposer.style.display = "block";
-        activeFormattedComposer.focus();
-        if (!restoreFormattedSelectionFromTextarea(activeFormattedComposer, currentMd, activeComposerFormatTextarea)) {
-          const selection = window.getSelection();
-          selection?.selectAllChildren(activeFormattedComposer);
-          selection?.collapseToEnd();
-        }
-      } else {
-        activeComposerFormatTextarea.style.display = "block";
-        activeFormattedComposer.style.display = "none";
-        activeComposerFormatTextarea.focus();
-      }
-    } else {
-      // textarea remains authoritative while the formatted editor is hidden.
-      if (activeFormattedComposer.style.display !== "none") {
-        const currentMd = extractMarkdownFromFormattedComposer(activeFormattedComposer);
-        setComposerTextareaValue(activeComposerFormatTextarea, currentMd, { focus: false });
-      }
-      activeFormattedComposer.style.display = "none";
-      activeComposerFormatTextarea.style.display = "block";
-      activeComposerFormatTextarea.focus();
-    }
-  }
-
   function insertMarkdownIntoComposer(md, targetTextarea = null) {
-    const textarea = targetTextarea || (document.activeElement instanceof HTMLTextAreaElement ? document.activeElement : (activeComposerFormatTextarea || findComposerTextarea()));
-    if (!textarea) return;
+    const textarea = targetTextarea || (document.activeElement instanceof HTMLTextAreaElement
+      ? document.activeElement : (activeComposerFormatTextarea || findComposerTextarea()));
+    if (!textarea || textarea.tagName !== "TEXTAREA") return;
 
     if (undoDebounceTimer) {
       clearTimeout(undoDebounceTimer);
       undoDebounceTimer = null;
     }
-
-    // 记录 Undo 快照，支持 Ctrl+Z 撤销
-    pushComposerUndo(textarea.value || "");
-
-    const isFormattedActive = Boolean(
-      isFormattedViewMode &&
-      activeFormattedComposer &&
-      activeFormattedComposer.style.display !== "none" &&
-      (!activeFormattedComposer.__boundTextarea || activeFormattedComposer.__boundTextarea === textarea)
-    );
-
-    const sel = window.getSelection();
-    let range = null;
-    if (isFormattedActive && sel && sel.rangeCount > 0) {
-      try {
-        const r = sel.getRangeAt(0);
-        const containerEl = r.commonAncestorContainer?.nodeType === Node.ELEMENT_NODE
-          ? r.commonAncestorContainer
-          : r.commonAncestorContainer?.parentElement;
-        if (containerEl && activeFormattedComposer.contains(containerEl)) {
-          range = r;
-        }
-      } catch (_) {
-        range = null;
-      }
+    const oldValue = textarea.value || "";
+    const start = Number.isFinite(textarea.selectionStart) ? textarea.selectionStart : oldValue.length;
+    const end = Number.isFinite(textarea.selectionEnd) ? textarea.selectionEnd : start;
+    const beforeText = oldValue.slice(0, start);
+    const afterText = oldValue.slice(end);
+    let insertion = String(md || "");
+    if (beforeText && !beforeText.endsWith("\n")
+      && /^(\s*(?:#{1,6}\s|[-*+•◦▪▫–—]\s|\d+\.\s|>\s*|```|~~~))/.test(insertion)) {
+      insertion = "\n" + insertion;
     }
-
-    if (isFormattedActive && range) {
-      // 1. 活动 contenteditable 真实 Range 是粘贴选区唯一来源
-      const renderedHtml = markdownToFormattedHtml(md);
-      const tempDoc = new DOMParser().parseFromString(renderedHtml, "text/html");
-      const childElements = Array.from(tempDoc.body.children);
-      const frag = document.createDocumentFragment();
-
-      // 单一段落保护：拆掉外层 div 避免括号中插入被换行
-      const isSingleParagraph = (
-        childElements.length === 1 &&
-        childElements[0].classList.contains("pi-enh-md-p") &&
-        !/\n/.test(md.trim())
-      );
-
-      if (isSingleParagraph) {
-        frag.appendChild(document.createTextNode(md.match(/^[ \t]+/)?.[0] || ""));
-        while (childElements[0].firstChild) {
-          frag.appendChild(childElements[0].firstChild);
-        }
-        frag.appendChild(document.createTextNode(md.match(/[ \t]+$/)?.[0] || ""));
-      } else {
-        while (tempDoc.body.firstChild) {
-          frag.appendChild(tempDoc.body.firstChild);
-        }
-      }
-
-      // 选区替换：若选区未折叠，先删除选中内容
-      if (!range.collapsed) {
-        range.deleteContents();
-      }
-
-      const lastChild = frag.lastChild;
-      let afterSplitNode = null;
-      if (range.startContainer && range.startContainer.nodeType === Node.TEXT_NODE) {
-        const textNode = range.startContainer;
-        afterSplitNode = textNode.splitText(range.startOffset);
-        textNode.parentNode.insertBefore(frag, afterSplitNode);
-      } else {
-        range.insertNode(frag);
-      }
-
-      if (afterSplitNode) {
-        const nextRange = document.createRange();
-        nextRange.setStart(afterSplitNode, 0);
-        nextRange.collapse(true);
-        sel.removeAllRanges();
-        sel.addRange(nextRange);
-      } else if (lastChild) {
-        const nextRange = document.createRange();
-        if (lastChild.nodeType === Node.TEXT_NODE) {
-          nextRange.setStart(lastChild, lastChild.textContent.length);
-          nextRange.setEnd(lastChild, lastChild.textContent.length);
-        } else {
-          nextRange.setStartAfter(lastChild);
-          nextRange.setEndAfter(lastChild);
-        }
-        nextRange.collapse(true);
-        sel.removeAllRanges();
-        sel.addRange(nextRange);
-      }
-
-      const currentMd = extractMarkdownFromFormattedComposer(activeFormattedComposer);
-      setComposerTextareaValue(textarea, currentMd, { focus: false });
-      pushComposerUndo(currentMd);
-      activeFormattedComposer.__piEnhSyncedValue = currentMd;
-
-      const card = textarea.closest?.('.pi-enh-cursor-composer, fieldset > div[style*="max-width"]');
-      if (card) updateCardContentState(card, textarea);
-      return;
-    }
-
-    // 纯 textarea 路径（源码模式或未激活格式化视图）
-    const start = textarea.selectionStart ?? (textarea.value || "").length;
-    const end = textarea.selectionEnd ?? (textarea.value || "").length;
-    const beforeText = (textarea.value || "").slice(0, start);
-    const afterText = (textarea.value || "").slice(end);
-
-    let normalizedMd = md;
-    if (beforeText && !beforeText.endsWith("\n") && /^(\s*(?:#{1,6}\s|[-*+•◦▪▫–—]\s|\d+\.\s|>\s*|```|~~~))/.test(normalizedMd)) {
-      normalizedMd = "\n" + normalizedMd;
-    }
-    const newVal = beforeText + normalizedMd + afterText;
-    const nextCursor = start + normalizedMd.length;
-
-    setComposerTextareaValue(textarea, newVal);
-    pushComposerUndo(newVal);
-
-    if (activeFormattedComposer) {
-      activeFormattedComposer.innerHTML = markdownToFormattedHtml(newVal);
-      activeFormattedComposer.__piEnhSyncedValue = newVal;
-      if (isFormattedViewMode) {
-        textarea.style.display = "none";
-        activeFormattedComposer.style.display = "block";
-        activeFormattedComposer.focus();
-        const selection = window.getSelection();
-        selection?.selectAllChildren(activeFormattedComposer);
-        selection?.collapseToEnd();
-      }
-    }
-
-    if (!isFormattedViewMode || !activeFormattedComposer) {
-      try {
-        textarea.setSelectionRange(nextCursor, nextCursor);
-      } catch (_) {}
-      textarea.focus();
-    }
+    const nextValue = beforeText + insertion + afterText;
+    const nextCursor = start + insertion.length;
+    pushComposerUndo(oldValue);
+    setComposerTextareaValue(textarea, nextValue, { focus: false });
+    try { textarea.setSelectionRange(nextCursor, nextCursor); } catch (_) {}
+    textarea.focus();
+    pushComposerUndo(nextValue);
+    lastUndoCharsCount = nextValue.length;
+    const card = textarea.closest?.('.pi-enh-cursor-composer, fieldset > div[style*="max-width"]');
+    if (card) syncComposerAttachmentSendability(card, textarea);
   }
 
   function handleComposerMarkdownPaste(event) {
     if (!isPluginEnabled("composer-markdown-format")) return;
-    const textarea = (event.target instanceof HTMLTextAreaElement ? event.target : (activeComposerFormatTextarea || findComposerTextarea()));
-    if (!textarea) return;
+    const textarea = event.target instanceof HTMLTextAreaElement ? event.target : null;
+    if (!textarea || textarea !== findComposerTextarea()) return;
 
     const html = event.clipboardData?.getData("text/html") || "";
     const plain = event.clipboardData?.getData("text/plain") || "";
-
-    // 检查剪贴板中是否有文件或图片项
     const files = Array.from(event.clipboardData?.files || []);
     const items = Array.from(event.clipboardData?.items || []);
     const itemFiles = items
-      .filter((it) => it && it.kind === "file" && typeof it.getAsFile === "function")
-      .map((it) => it.getAsFile())
+      .filter((item) => item && item.kind === "file" && typeof item.getAsFile === "function")
+      .map((item) => item.getAsFile())
       .filter(Boolean);
     const allClipboardFiles = files.length > 0 ? files : itemFiles;
-    const nonImageFiles = allClipboardFiles.filter((f) => !(f.type && f.type.startsWith("image/")) || isVideoFile(f.name, f.type));
+    const nonImageFiles = allClipboardFiles.filter((file) =>
+      !(file.type && file.type.startsWith("image/")) || isVideoFile(file.name, file.type));
 
     if (nonImageFiles.length > 0 && isPluginEnabled("composer-file-paste")) {
       event.preventDefault();
@@ -10613,102 +7388,53 @@
       return;
     }
 
-    const imageFiles = allClipboardFiles.filter((file) => file.type?.startsWith("image/") && !isVideoFile(file.name, file.type));
-
+    const imageFiles = allClipboardFiles.filter((file) =>
+      file.type?.startsWith("image/") && !isVideoFile(file.name, file.type));
     if (imageFiles.length > 0) {
-      // 阻止图片或 base64 文本进入输入框内部
       event.preventDefault();
       event.stopPropagation();
-
-      // 将图片注入原生上传 input[accept*="image"]，触发原生将图片作为附件挂在输入框上方！
-      const imageInput = document.querySelector('fieldset input[type="file"][accept*="image"]') ||
-        document.querySelector('input[type="file"][accept*="image"]');
+      const imageInput = textarea.closest("fieldset")?.querySelector('input[type="file"][accept*="image"]')
+        || document.querySelector('input[type="file"][accept*="image"]');
       if (imageInput) {
         try {
-          const dt = new DataTransfer();
-          for (const imageFile of imageFiles) dt.items.add(imageFile);
+          const transfer = new DataTransfer();
+          for (const imageFile of imageFiles) transfer.items.add(imageFile);
           const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement?.prototype || {}, "files")?.set;
-          if (setter) setter.call(imageInput, dt.files);
-          else imageInput.files = dt.files;
+          if (setter) setter.call(imageInput, transfer.files);
+          else imageInput.files = transfer.files;
           imageInput.dispatchEvent(new Event("change", { bubbles: true }));
-        } catch (e) {}
+        } catch (_) {}
       }
       return;
     }
 
-    // 1. 如果剪贴板包含 HTML 且有实质富文本排版标签
     if (html && hasSubstantialRichFormatting(html)) {
-      const convertedMd = htmlToMarkdown(html);
-      if (convertedMd) {
+      const markdown = htmlToMarkdown(html);
+      if (markdown) {
         event.preventDefault();
         event.stopPropagation();
-        insertMarkdownIntoComposer(convertedMd, textarea);
+        insertMarkdownIntoComposer(markdown, textarea);
         return;
       }
     }
 
-    // Ordinary text (including dictation via clipboard) keeps the browser's native insertion path.
-    // Only explicit Markdown text is parsed; rich HTML is handled above.
-    if (plain && plain.trim().length > 0) {
-      const hasMarkdown = /(^|\n)\s*(?:#{1,6}\s|[-*+]\s|\d+\.\s|>\s|```)|\*\*[^*]+\*\*|__[^_]+__|`[^`\n]+`|\[[^\]]+\]\([^)]+\)/.test(plain);
-      if (!hasMarkdown) {
-        if (event.target === textarea) return; // Native paste preserves caret/IME/undo.
-        event.preventDefault();
-        event.stopPropagation();
-        if (undoDebounceTimer) {
-          clearTimeout(undoDebounceTimer);
-          undoDebounceTimer = null;
-        }
-        pushComposerUndo(textarea.value || "");
-        const inserted = document.execCommand("insertText", false, plain);
-        if (inserted) {
-          if (undoDebounceTimer) {
-            clearTimeout(undoDebounceTimer);
-            undoDebounceTimer = null;
-          }
-          const currentMd = activeFormattedComposer && activeFormattedComposer.style.display !== "none"
-            ? extractMarkdownFromFormattedComposer(activeFormattedComposer)
-            : textarea.value || "";
-          pushComposerUndo(currentMd);
-          lastUndoCharsCount = currentMd.length;
-        }
-        return;
-      }
-      event.preventDefault();
-      event.stopPropagation();
-      insertMarkdownIntoComposer(plain, textarea);
-    }
+    if (!plain || !plain.trim()) return;
+    const hasMarkdown = /(^|\n)\s*(?:#{1,6}\s|[-*+•◦▪▫–—]\s|\d+\.\s|>\s|```)|\*\*[^*]+\*\*|__[^_]+__|`[^`\n]+`|\[[^\]]+\]\([^)]+\)/.test(plain);
+    if (!hasMarkdown) return; // Let the native textarea preserve ordinary paste, caret, IME and undo.
+    event.preventDefault();
+    event.stopPropagation();
+    insertMarkdownIntoComposer(plain, textarea);
   }
 
-  function updateCardContentState(card, textarea) {
+  function syncComposerAttachmentSendability(card, textarea) {
     if (!card || !textarea) return;
-
-    // 安全恢复编辑器祖先遗留的旧 bug 特征 (card 内 display:none!important)，绝不触碰 textarea/formatted 本体
-    let editorAncestor = textarea.parentElement;
-    while (editorAncestor && editorAncestor !== card.parentElement && card.contains(editorAncestor)) {
-      if (
-        editorAncestor.style &&
-        editorAncestor.style.getPropertyValue("display") === "none" &&
-        editorAncestor.style.getPropertyPriority("display") === "important"
-      ) {
-        editorAncestor.style.removeProperty("display");
-      }
-      editorAncestor = editorAncestor.parentElement;
-    }
-
+    // Existing attachment-only send routing, not layout ownership. This bounded
+    // compatibility path must retire when references are exposed by the native
+    // submission API; it must never style, relocate or tag editor/action nodes.
     const hasImageAttachments = Boolean(card.querySelector('img[src*="blob:"], div[style*="flex-wrap"] img, fieldset img'));
     const hasFileAttachments = pendingComposerAttachments.length > 0 || Boolean(card.querySelector(".pi-enh-attachment-card"));
-    const val = textarea.value || "";
-    // One content predicate for both the CSS class and native running-group
-    // visibility. Quotes and pending file/video cards are sendable content.
-    const hasContent = val.trim().length > 0 || hasImageAttachments || hasFileAttachments
+    const hasContent = (textarea.value || "").trim().length > 0 || hasImageAttachments || hasFileAttachments
       || (isPluginEnabled("quick-quote") && listAnnotations().length > 0);
-    if (hasContent) {
-      card.classList.add("has-user-content");
-    } else {
-      card.classList.remove("has-user-content");
-    }
-
     const sendBtns = card.querySelectorAll('.pi-enh-cursor-send, button[title*="发送"], button[aria-label*="发送"]');
     for (const sendBtn of sendBtns) {
       if (hasFileAttachments) {
@@ -10727,84 +7453,6 @@
       }
     }
 
-    const isEditorContainer = (el) => {
-      if (!el || typeof el.querySelector !== "function") return false;
-      return Boolean(el === textarea || el.contains(textarea) || el.querySelector("textarea, [contenteditable]"));
-    };
-
-    // 检查是否存在真实运行态控制。注意：快捷回复按钮（如 text="后续消息", title='快捷回复“后续消息”'）不是运行态控制
-    const isQuickReply = (b) => Boolean(
-      b?.hasAttribute?.("data-pi-enh-quick-reply") ||
-      b?.getAttribute?.("title")?.includes("快捷回复") ||
-      b?.getAttribute?.("aria-label")?.includes("快捷回复")
-    );
-    const hasStopButton = Boolean(card.querySelector('button[title*="停止"], button:has(svg rect[x="1.5"])'));
-
-    const runningButton = Array.from(card.querySelectorAll("button")).find((button) => {
-      if (isQuickReply(button)) return false;
-      const label = `${button.textContent || ""} ${button.getAttribute("title") || ""}`;
-      return label.includes("引导") || label.includes("后续消息");
-    });
-
-    // 只真实运行态分组(结构alignSelf flex-end或native-steer-group且不含编辑器)能隐藏
-    const findRealRunningGroup = () => {
-      const candidates = card.querySelectorAll(
-        '.pi-enh-cursor-actions, .native-steer-group, div[style*="align-self: flex-end"], div[style*="alignSelf: flex-end"], div[style*="align-self:flex-end"]'
-      );
-      for (const group of candidates) {
-        if (!isEditorContainer(group) && group.querySelector("button")) {
-          return group;
-        }
-      }
-      if (runningButton) {
-        const closestGroup = runningButton.closest('div[style*="align-self: flex-end"], div[style*="alignSelf: flex-end"], div[style*="align-self:flex-end"], .native-steer-group, .pi-enh-cursor-actions');
-        if (closestGroup && card.contains(closestGroup) && !isEditorContainer(closestGroup)) {
-          return closestGroup;
-        }
-      }
-      return null;
-    };
-
-    const runningGroup = findRealRunningGroup();
-    const hasRunningButtons = Boolean(hasStopButton || runningButton || runningGroup);
-    const layoutEnabled = isPluginEnabled("codex-composer-layout");
-
-    if (hasRunningButtons) {
-      card.classList.add("pi-enh-has-running-controls");
-      syncRunningActionButtons(card);
-      if (runningGroup) {
-        runningGroup.classList.add("pi-enh-running-group");
-        if (layoutEnabled && !hasContent) {
-          runningGroup.style.setProperty("display", "none", "important");
-        } else {
-          runningGroup.style.removeProperty("display");
-        }
-      }
-    } else {
-      card.classList.remove("pi-enh-has-running-controls");
-      for (const group of card.querySelectorAll(".pi-enh-running-group")) {
-        group.style.removeProperty("display");
-        group.classList.remove("pi-enh-running-group");
-      }
-    }
-  }
-
-  function showSentPulseTransition(textarea) {
-    if (!textarea) textarea = findComposerTextarea();
-    if (!textarea) return;
-    const card = textarea.closest('.pi-enh-cursor-composer, fieldset > div[style*="max-width"]');
-    if (!card) return;
-
-    const oldIndicator = card.querySelector(".pi-enh-sent-indicator");
-    if (oldIndicator) oldIndicator.remove();
-
-    const indicator = document.createElement("div");
-    indicator.className = "pi-enh-sent-indicator";
-    card.appendChild(indicator);
-
-    setTimeout(() => {
-      indicator.remove();
-    }, 480);
   }
 
   function instantlyClearComposerSurface(textarea, expectedOwner) {
@@ -10824,34 +7472,12 @@
       return false;
     }
 
-    // 保守方案：仅在 native refs 空且 textarea DOM 提交为空时清显示/布局
-    if (textarea.value !== "") {
-      return false;
-    }
-
+    // Native refs own consumption; a delayed controlled DOM commit is not a second authority.
     const card = textarea.closest('fieldset > div[style*="max-width"]');
 
-    // Clear only the surface bound to this native editor; never another owner.
-    if (activeFormattedComposer?.__boundTextarea === textarea) {
-      activeFormattedComposer.innerHTML = "";
-      activeFormattedComposer.__piEnhSyncedValue = "";
-    }
+    // Native React refs own content and layout; no DOM value or height writes here.
 
-    // DOM 提交也已确认为空；不写受控 textarea.value，不派发空 input 冒充接收。
-    textarea.style.height = "auto";
-    if (card && card.classList.contains("pi-enh-composer-custom-height")) {
-      card.classList.remove("pi-enh-composer-custom-height");
-      card.style.removeProperty("--pi-composer-custom-height");
-    }
-
-    // 原生已消费输入的轻提示；不代表服务端接收或网络投递成功。
-    showSentPulseTransition(textarea);
-
-    // 4. 立即重置卡片状态
-    if (card) {
-      card.classList.remove("has-user-content");
-      updateCardContentState(card, textarea);
-    }
+    if (card) syncComposerAttachmentSendability(card, textarea);
     return true;
   }
 
@@ -10860,12 +7486,17 @@
   function cancelComposerNativeSubmission() {
     const intent = composerSubmissionInFlight;
     if (!intent) return;
-    // A dispatched native handler owns its recovery. Only an unstarted intent
-    // can be cancelled/rolled back by a plugin lifecycle transition.
-    if (intent.phase === "prepared") {
-      cancelAnimationFrame(intent.frame);
+    // A dispatched native handler owns its recovery. Prepared or staging intent
+    // must be cancelled and rolled back safely on plugin lifecycle transitions.
+    if (intent.phase === "prepared" || intent.phase === "staging") {
+      if (intent.frame) {
+        cancelAnimationFrame(intent.frame);
+        intent.frame = 0;
+      }
       rollbackAnnotationSubmission(intent);
-      composerSubmissionInFlight = null;
+      if (composerSubmissionInFlight === intent) {
+        composerSubmissionInFlight = null;
+      }
     }
   }
   activeCleanups.push(cancelComposerNativeSubmission);
@@ -10933,18 +7564,15 @@
     if (!intent.snapshot || intent.accepted) return;
     const current = readNativeComposerDraft();
     if (!current || current.keyRef !== intent.keyRef || current.key !== intent.owner
-      || current.textarea !== intent.textarea || getCurrentSessionId() !== intent.route
-      || current.valueRef.current !== intent.text || current.textarea.value !== intent.text) return;
-    // Undo only this exact prepared payload. A newer user edit or native
-    // network-recovery draft is authoritative and must never be overwritten.
-    setComposerTextareaValue(current.textarea, intent.body, { focus: false });
-    if (activeFormattedComposer?.__boundTextarea === current.textarea) {
-      if (extractMarkdownFromFormattedComposer(activeFormattedComposer) !== intent.body) {
-        activeFormattedComposer.innerHTML = markdownToFormattedHtml(intent.body);
-      }
-      activeFormattedComposer.__piEnhSyncedValue = intent.body;
+      || current.keyRef.current !== intent.owner || current.textarea !== intent.textarea) return;
+    const bodyText = intent.body || "";
+    // Never overwrite a newer real edit, even while React still holds the
+    // staged payload in its ref. Only undo our exact DOM/input revision.
+    if ((composerRecentInput.get(current.textarea)?.revision ?? null) === intent.inputRevision
+      && current.textarea.value === intent.text) {
+      setComposerTextareaValue(current.textarea, bodyText, { focus: false });
+      queueNativeDraftSync();
     }
-    queueNativeDraftSync();
   }
 
   function dispatchComposerNativeSubmission({ kind, textarea, expectedOwner, expectedText,
@@ -10953,20 +7581,19 @@
     const native = readNativeComposerDraft();
     if (!native || native.textarea !== textarea || native.key !== expectedOwner
       || native.keyRef.current !== expectedOwner || native.fieldset.disabled || native.pendingRef.current > 0) return false;
+    const currentRev = composerRecentInput.get(textarea)?.revision ?? null;
     const intent = {
       frame: 0, phase: "prepared", accepted: false,
-      owner: expectedOwner, textarea, text: expectedText, body: annotationBody,
+      owner: expectedOwner, textarea, text: expectedText, body: annotationBody ?? "",
       keyRef: native.keyRef, route: getCurrentSessionId(),
       images: JSON.stringify(native.imagesRef.current),
       snapshot: annotationSnapshot || null, annotationSession,
-      inputRevision: composerRecentInput.get(textarea)?.revision ?? null,
+      inputRevision: currentRev,
       sourceMarkdownEnabled: isPluginEnabled("composer-markdown-format"),
       startedAt: performance.now(),
     };
     composerSubmissionInFlight = intent;
 
-    // Keep the user's body untouched while waiting. Stage the outbound quote
-    // payload only in the dispatch turn, not in a draft that navigation can save.
     const attemptNativeSubmission = async () => {
       let deferred = false;
       const deferUntilNativeCommit = () => {
@@ -10979,60 +7606,70 @@
       };
       try {
         let current = readNativeComposerDraft();
-        const originalText = intent.snapshot ? intent.body : expectedText;
         const pluginActive = intent.snapshot ? isPluginEnabled("quick-quote")
           : (!intent.sourceMarkdownEnabled || isPluginEnabled("composer-markdown-format"));
-        const currentRev = composerRecentInput.get(textarea)?.revision ?? null;
+        const latestRev = composerRecentInput.get(textarea)?.revision ?? null;
         if (composerSubmissionInFlight !== intent || !pluginActive
           || !current || current.key !== expectedOwner || current.textarea !== textarea
           || current.keyRef !== intent.keyRef || current.keyRef.current !== expectedOwner
           || current.fieldset.disabled || current.pendingRef.current > 0
           || getCurrentSessionId() !== intent.route || isComposingInput
-          || currentRev !== intent.inputRevision
+          || latestRev !== intent.inputRevision
           || JSON.stringify(current.imagesRef.current) !== intent.images) return;
         if (!expectedText.trim() && !current.imagesRef.current.length) return;
-        // React can render a stale controlled value between a fast input and
-        // Enter. Wait only for the exact, unchanged draft to commit; never send
-        // a newer edit or a different session's draft.
-        if (current.valueRef.current !== originalText || textarea.value !== originalText) {
-          if (intent.snapshot || (textarea.value && textarea.value !== originalText)) return;
-          deferUntilNativeCommit();
-          return;
-        }
-        if (intent.snapshot) {
-          const items = listAnnotations();
-          if (!intent.snapshot.every(saved => items.some(item => item.id === saved.id
-            && item.quote === saved.quote && item.comment === saved.comment))) return;
-          intent.phase = "staging";
-          setComposerTextareaValue(textarea, expectedText, { focus: false });
-          // Finish the discrete React input commit without another user-event
-          // turn or arbitrary sleep between payload staging and native dispatch.
-          await Promise.resolve();
-          current = readNativeComposerDraft();
-          if (!current || current.keyRef !== intent.keyRef || current.key !== intent.owner
-            || current.textarea !== textarea || getCurrentSessionId() !== intent.route
-            || !isPluginEnabled("quick-quote") || current.fieldset.disabled || current.pendingRef.current > 0
-            || current.valueRef.current !== expectedText || textarea.value !== expectedText
-            || JSON.stringify(current.imagesRef.current) !== intent.images) {
+
+        // Phase 1: prepared - 仅认原 body
+        if (intent.phase === "prepared") {
+          const originalText = intent.snapshot ? (intent.body || "") : expectedText;
+          if (textarea.value !== originalText) {
+            // Preserve the existing plain-Enter stale controlled-empty retry;
+            // a quote intent must never stage over a changed original body.
+            if (intent.snapshot || textarea.value) return;
+            deferUntilNativeCommit();
+            return;
+          }
+          if (current.valueRef.current !== originalText) {
+            deferUntilNativeCommit();
+            return;
+          }
+          if (intent.snapshot) {
+            const items = listAnnotations();
+            if (!intent.snapshot.every(saved => items.some(item => item.id === saved.id
+              && item.quote === saved.quote && item.comment === saved.comment))) return;
+            intent.phase = "staging";
+            setComposerTextareaValue(textarea, expectedText, { focus: false });
+            intent.inputRevision = composerRecentInput.get(textarea)?.revision ?? intent.inputRevision;
             deferUntilNativeCommit();
             return;
           }
         }
+
+        // Phase 2: staging - 跨 RAF 只等待确切 payload 的 React commit
+        if (intent.phase === "staging") {
+          if (textarea.value !== expectedText) return;
+          const taProps = getReactProps(textarea);
+          const taCommitted = current.valueRef.current === expectedText
+            && taProps && taProps.value === expectedText;
+          if (!taCommitted) {
+            deferUntilNativeCommit();
+            return;
+          }
+          const items = listAnnotations();
+          if (!intent.snapshot.every(saved => items.some(item => item.id === saved.id
+            && item.quote === saved.quote && item.comment === saved.comment))) return;
+        }
+
         const button = getAnnotationSendButtons(textarea).find((b) => determineSendKindFromButton(b) === kind);
-        if (!button) return;
-        if (button.disabled) {
+        if (!button || button.disabled) {
           deferUntilNativeCommit();
           return;
         }
-        const preDispatchSnapshot = nativeDraftSnapshot(current);
-        if (preDispatchSnapshot) {
-          const outboundSnap = intent.snapshot ? { ...preDispatchSnapshot, value: intent.body || "" } : preDispatchSnapshot;
-          trackDraftSubmissionIntent({
-            native: current,
-            snapshot: outboundSnap,
-            signature: JSON.stringify(outboundSnap),
-          });
+        const btnProps = getReactProps(button);
+        if (!btnProps || btnProps.disabled || typeof btnProps.onClick !== "function") {
+          deferUntilNativeCommit();
+          return;
         }
+
         intent.phase = "dispatched";
         intent.accepted = await invokeNativeComposerButton(button, current);
         if (!intent.accepted) return;
@@ -11044,18 +7681,7 @@
           }
         }
         if (intent.snapshot) consumeAnnotationSnapshot(intent.snapshot, intent.annotationSession);
-        submittedDraftKeys.add(intent.owner);
-        removePersistedDraft(intent.owner);
-        const sub = pendingDraftSubmissions.get(intent.owner);
-        if (sub) {
-          sub.accepted = true;
-        }
-        const oldCtx = nativeDraftContexts.get(intent.keyRef);
-        if (oldCtx && oldCtx.key === intent.owner) {
-          oldCtx.initialized = true;
-          oldCtx.lastSaved = EMPTY_DRAFT_SIGNATURE;
-        }
-        syncNativeComposerDraft(false);
+        saveCurrentComposerDraft();
         const committed = readNativeComposerDraft();
         if (committed && committed.key === intent.owner && getCurrentSessionId() === intent.route
           && committed.valueRef.current === "" && committed.imagesRef.current.length === 0) {
@@ -11108,10 +7734,6 @@
     if (!isSend) return;
     const textarea = findComposerTextarea();
     if (!textarea) return;
-    if (activeFormattedComposer && activeFormattedComposer.__boundTextarea === textarea && activeFormattedComposer.style.display !== "none") {
-      const md = extractMarkdownFromFormattedComposer(activeFormattedComposer);
-      setComposerTextareaValue(textarea, md, { focus: false });
-    }
     recordActiveTurnStart(getCurrentSessionId(), Date.now(), null, false);
     assembleComposerAttachments(textarea);
     const reactProps = getReactProps(btn);
@@ -11149,7 +7771,7 @@
             && capturedValueRef?.current === ""
             && Array.isArray(capturedImagesRef?.current) && capturedImagesRef.current.length === 0;
           if (capturedAccepted) {
-            syncNativeComposerDraft(false);
+            saveCurrentComposerDraft();
           }
           const currentNative = readNativeComposerDraft();
           // document click 的微任务必须校验捕获的 owner 未切换，若未确认原实例已消费则还需校验 keyRef/textarea
@@ -11218,11 +7840,6 @@
       const currentOwner = native?.key;
 
       let rawText = textarea.value || "";
-      if (activeFormattedComposer?.contains(event.target)) {
-        const md = extractMarkdownFromFormattedComposer(activeFormattedComposer);
-        rawText = md;
-        setComposerTextareaValue(textarea, md, { focus: false });
-      }
       if (pendingComposerAttachments.length > 0) {
         assembleComposerAttachments(textarea);
         rawText = textarea.value || "";
@@ -11248,530 +7865,14 @@
     return false;
   }
 
-  function findClosestBlockStructureElement(node, stopRoot) {
-    if (!node) return null;
-    let cur = node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement;
-    while (cur && cur !== stopRoot && cur !== document.body) {
-      const cls = cur.className || "";
-      const tag = (cur.tagName || "").toLowerCase();
-      if (
-        tag === "blockquote" ||
-        (typeof cls === "string" && (
-          cls.includes("pi-enh-md-list-item") ||
-          cls.includes("pi-enh-md-quote") ||
-          cls.includes("pi-enh-md-code-card") ||
-          cls.includes("pi-enh-md-heading")
-        ))
-      ) {
-        return cur;
-      }
-      cur = cur.parentElement;
-    }
-    return null;
-  }
-
-  // 仅对行内代码胶囊（code, .pi-enh-md-inline-code）等独立药丸格式执行跳出；加粗/斜体属于常规正文修饰，绝不粗暴截断！
-  function findClosestCodePillElement(node, stopRoot) {
-    if (!node) return null;
-    let cur = node.nodeType === Node.ELEMENT_NODE ? node : node.parentElement;
-    while (cur && cur !== stopRoot && cur !== document.body) {
-      const tag = (cur.tagName || "").toLowerCase();
-      const cls = typeof cur.className === "string" ? cur.className : "";
-      if (
-        tag === "code" ||
-        tag === "kbd" ||
-        cls.includes("pi-enh-md-inline-code")
-      ) {
-        return cur;
-      }
-      cur = cur.parentElement;
-    }
-    return null;
-  }
-
-  function findClosestFormattingElement(node, stopRoot) {
-    return findClosestCodePillElement(node, stopRoot);
-  }
-
-  function isCaretAtEndOfElement(element, range) {
-    if (!element || !range) return false;
-    try {
-      const clone = range.cloneRange();
-      clone.selectNodeContents(element);
-      clone.collapse(false);
-      return range.compareBoundaryPoints(Range.END_TO_END, clone) === 0;
-    } catch (e) {
-      return false;
-    }
-  }
-
-  function setCursorToNode(node, offset, selection) {
-    try {
-      const range = document.createRange();
-      const len = node.nodeType === Node.TEXT_NODE ? (node.textContent || "").length : (node.childNodes?.length || 0);
-      const safeOffset = Math.min(Math.max(0, offset), len);
-      range.setStart(node, safeOffset);
-      range.collapse(true);
-      selection.removeAllRanges();
-      selection.addRange(range);
-    } catch (e) {}
-  }
-
-  function syncFormattedComposerChange(formattedComposer, textarea) {
-    const md = extractMarkdownFromFormattedComposer(formattedComposer);
-    setComposerTextareaValue(textarea, md, { focus: false });
-    const card = textarea.closest('fieldset > div[style*="max-width"]');
-    updateCardContentState(card, textarea);
-  }
-
-  function handleComposerFormatShiftEnter(event, formattedComposer, textarea) {
-    if (isComposingInput || event.isComposing) return false;
-    const sel = window.getSelection();
-    if (!sel || !sel.rangeCount) return false;
-    const range = sel.getRangeAt(0);
-
-    // 1. 优先检查行内代码胶囊（code, .pi-enh-md-inline-code）：带封闭边框背景，必须跳出到外部换行
-    const codePill = findClosestCodePillElement(range.startContainer, formattedComposer);
-    if (codePill) {
-      event.preventDefault();
-      event.stopPropagation();
-
-      const rawText = (codePill.textContent || "").replace(/[\u200B\s]/g, "");
-      const parent = codePill.parentElement || formattedComposer;
-
-      if (!rawText) {
-        const br = document.createElement("br");
-        const textNode = document.createTextNode("\u200B");
-        parent.insertBefore(br, codePill);
-        parent.insertBefore(textNode, codePill);
-        codePill.remove();
-        setCursorToNode(textNode, 1, sel);
-        syncFormattedComposerChange(formattedComposer, textarea);
-        return true;
-      }
-
-      const isAtEnd = isCaretAtEndOfElement(codePill, range);
-      const br = document.createElement("br");
-      const textNode = document.createTextNode("\u200B");
-
-      if (isAtEnd) {
-        if (codePill.nextSibling) {
-          parent.insertBefore(br, codePill.nextSibling);
-          parent.insertBefore(textNode, br.nextSibling);
-        } else {
-          parent.appendChild(br);
-          parent.appendChild(textNode);
-        }
-      } else {
-        if (codePill.nextSibling) {
-          parent.insertBefore(br, codePill.nextSibling);
-          parent.insertBefore(textNode, br.nextSibling);
-        } else {
-          parent.appendChild(br);
-          parent.appendChild(textNode);
-        }
-      }
-
-      setCursorToNode(textNode, 1, sel);
-      syncFormattedComposerChange(formattedComposer, textarea);
-      return true;
-    }
-
-    // 2. 检查块级格式（列表项 pi-enh-md-list-item、引用块 pi-enh-md-quote 等）
-    const blockEl = findClosestBlockStructureElement(range.startContainer, formattedComposer);
-    if (blockEl) {
-      let contentEl = blockEl.querySelector(".pi-enh-md-content") || blockEl;
-      let rawText = (contentEl.textContent || "").replace(/[\u200B\s]/g, "");
-
-      if (blockEl.tagName.toLowerCase() === "blockquote" || blockEl.classList.contains("pi-enh-md-heading")) {
-        rawText = (blockEl.textContent || "").replace(/[\u200B\s]/g, "");
-      }
-
-      event.preventDefault();
-      event.stopPropagation();
-
-      // 【核心用户逻辑】：如果当前行没有任何文字输入（内容为空，即第二次连续按 Shift+回车），直接跳出上面的格式约束！
-      if (!rawText) {
-        const parent = blockEl.parentElement || formattedComposer;
-
-        // 如果带有较深缩进（如 padding-left >= 32px，二级或更深列表），先缩退一层缩进
-        const currentPadding = parseInt(blockEl.style.paddingLeft || "0", 10);
-        if (currentPadding >= 32) {
-          blockEl.style.paddingLeft = `${currentPadding - 16}px`;
-          return true;
-        }
-
-        // 彻底跳出格式约束：将当前空的列表项转为完全顶格的普通段落（清除圆点、数字与缩进）
-        const p = document.createElement("div");
-        p.className = "pi-enh-md-p";
-        const textNode = document.createTextNode("\u200B");
-        p.appendChild(textNode);
-        parent.insertBefore(p, blockEl);
-        blockEl.remove();
-
-        setCursorToNode(textNode, 1, sel);
-        syncFormattedComposerChange(formattedComposer, textarea);
-        return true;
-      }
-
-      // 场景 A：当前列表行有文字内容，用户按第一个 Shift+回车 -> 正常新建下一个同级列表项！
-      const parent = blockEl.parentElement || formattedComposer;
-      const isList = blockEl.classList.contains("pi-enh-md-list-item");
-      const isOrdered = blockEl.classList.contains("pi-enh-md-ol");
-
-      if (isList) {
-        const newItem = document.createElement("div");
-        newItem.className = blockEl.className;
-        newItem.style.cssText = blockEl.style.cssText;
-
-        if (isOrdered) {
-          const oldNumEl = blockEl.querySelector(".pi-enh-md-num");
-          const oldNum = parseInt(oldNumEl?.textContent || "1", 10);
-          const nextNum = isNaN(oldNum) ? 1 : oldNum + 1;
-          newItem.innerHTML = `<span class="pi-enh-md-num">${nextNum}.</span><span class="pi-enh-md-content"><br></span>`;
-        } else {
-          newItem.innerHTML = `<span class="pi-enh-md-bullet">•</span><span class="pi-enh-md-content"><br></span>`;
-        }
-
-        if (blockEl.nextSibling) {
-          parent.insertBefore(newItem, blockEl.nextSibling);
-        } else {
-          parent.appendChild(newItem);
-        }
-
-        const contentSpan = newItem.querySelector(".pi-enh-md-content");
-        const textNode = document.createTextNode("\u200B");
-        contentSpan.innerHTML = "";
-        contentSpan.appendChild(textNode);
-
-        setCursorToNode(textNode, 1, sel);
-        syncFormattedComposerChange(formattedComposer, textarea);
-        return true;
-      }
-    }
-
-    // 3. 常规普通段落（包含加粗、斜体等自然行内修饰）：
-    // 绝不撕裂节点！直接在光标当前所处的确切位置就地插入自然换行，确保上下文完整连贯
-    event.preventDefault();
-    event.stopPropagation();
-
-    const br = document.createElement("br");
-    const textNode = document.createTextNode("\u200B");
-    range.deleteContents();
-    range.insertNode(br);
-    range.setStartAfter(br);
-    range.insertNode(textNode);
-    setCursorToNode(textNode, 1, sel);
-    syncFormattedComposerChange(formattedComposer, textarea);
-    return true;
-  }
-
-  function handleComposerFormatArrowRight(event, formattedComposer) {
-    if (isComposingInput || event.isComposing || event.shiftKey || event.ctrlKey || event.metaKey || event.altKey) return false;
-    const sel = window.getSelection();
-    if (!sel || !sel.rangeCount || !sel.isCollapsed) return false;
-    const range = sel.getRangeAt(0);
-
-    const formatEl = findClosestFormattingElement(range.startContainer, formattedComposer);
-    if (!formatEl) return false;
-
-    if (isCaretAtEndOfElement(formatEl, range)) {
-      event.preventDefault();
-      let nextNode = formatEl.nextSibling;
-      if (!nextNode || nextNode.nodeType !== Node.TEXT_NODE) {
-        nextNode = document.createTextNode("\u200B");
-        if (formatEl.nextSibling) {
-          formatEl.parentElement.insertBefore(nextNode, formatEl.nextSibling);
-        } else {
-          formatEl.parentElement.appendChild(nextNode);
-        }
-      }
-      setCursorToNode(nextNode, 0, sel);
-      return true;
-    }
-    return false;
-  }
-
-  function handleComposerFormatBackspace(event, formattedComposer, textarea) {
-    if (isComposingInput || event.isComposing) return false;
-    const sel = window.getSelection();
-    if (!sel || !sel.rangeCount || !sel.isCollapsed) return false;
-    const range = sel.getRangeAt(0);
-
-    // 1. 行内格式空块清理
-    const formatEl = findClosestFormattingElement(range.startContainer, formattedComposer);
-    if (formatEl) {
-      const rawText = (formatEl.textContent || "").replace(/[\u200B\s]/g, "");
-      if (!rawText) {
-        event.preventDefault();
-        const prev = formatEl.previousSibling;
-        formatEl.remove();
-        if (prev) {
-          if (prev.nodeType === Node.TEXT_NODE) {
-            setCursorToNode(prev, (prev.textContent || "").length, sel);
-          } else {
-            setCursorToNode(prev, 0, sel);
-          }
-        } else {
-          formattedComposer.focus();
-        }
-        syncFormattedComposerChange(formattedComposer, textarea);
-        return true;
-      }
-    }
-
-    // 2. 块级列表项在空行按 Backspace 时的缩退与退出列表
-    const blockEl = findClosestBlockStructureElement(range.startContainer, formattedComposer);
-    if (blockEl && blockEl.classList.contains("pi-enh-md-list-item")) {
-      const contentEl = blockEl.querySelector(".pi-enh-md-content") || blockEl;
-      const rawText = (contentEl.textContent || "").replace(/[\u200B\s]/g, "");
-      if (!rawText) {
-        event.preventDefault();
-        const parent = blockEl.parentElement || formattedComposer;
-        const currentPadding = parseInt(blockEl.style.paddingLeft || "0", 10);
-        if (currentPadding >= 32) {
-          // 二级列表：退回到一级列表
-          blockEl.style.paddingLeft = `${currentPadding - 16}px`;
-          return true;
-        }
-
-        // 一级列表：彻底转为普通无缩进段落
-        const p = document.createElement("div");
-        p.className = "pi-enh-md-p";
-        const textNode = document.createTextNode("\u200B");
-        p.appendChild(textNode);
-        parent.insertBefore(p, blockEl);
-        blockEl.remove();
-
-        setCursorToNode(textNode, 1, sel);
-        syncFormattedComposerChange(formattedComposer, textarea);
-        return true;
-      }
-    }
-
-    return false;
-  }
-
   function syncComposerMarkdownFormat() {
     if (!isPluginEnabled("composer-markdown-format")) {
       removeComposerMarkdownFormat();
       return;
     }
 
-    let style = document.getElementById(COMPOSER_MARKDOWN_STYLE_ID);
-    if (!style) {
-      style = document.createElement("style");
-      style.id = COMPOSER_MARKDOWN_STYLE_ID;
-      style.textContent = `
-        /* 格式化输入容器 */
-        .pi-enh-formatted-composer {
-          width: 100% !important;
-          min-height: 28px !important;
-          max-height: clamp(68px, 22vh, 160px) !important;
-          overflow-y: auto !important;
-          overscroll-behavior: contain !important;
-          box-sizing: border-box !important;
-          padding: 2px 0 !important;
-          outline: none !important;
-          color: var(--text, #f4f4f5) !important;
-          font-size: var(--chat-content-font-size, 14px) !important;
-          line-height: 1.55 !important;
-          font-family: inherit !important;
-          word-break: break-word !important;
-          cursor: text !important;
-          user-select: text !important;
-          white-space: pre-wrap !important;
-        }
-        fieldset > div[style*="max-width"]:has(div[style*="flex-wrap"] img) .pi-enh-formatted-composer {
-          max-height: clamp(52px, calc(18vh - 12px), 124px) !important;
-        }
-        @media (max-width: 640px) {
-          .pi-enh-formatted-composer {
-            max-height: clamp(60px, 19vh, 136px) !important;
-          }
-          fieldset > div[style*="max-width"]:has(div[style*="flex-wrap"] img) .pi-enh-formatted-composer {
-            max-height: clamp(48px, calc(16vh - 10px), 104px) !important;
-          }
-        }
-        @media (max-height: 500px) {
-          .pi-enh-formatted-composer {
-            min-height: 24px !important;
-            max-height: clamp(42px, calc(28vh - 16px), 84px) !important;
-          }
-          fieldset > div[style*="max-width"]:has(div[style*="flex-wrap"] img) .pi-enh-formatted-composer {
-            max-height: clamp(36px, calc(22vh - 16px), 64px) !important;
-          }
-        }
-
-        .pi-enh-formatted-composer:empty::before {
-          content: attr(data-placeholder);
-          color: var(--text-dim);
-          pointer-events: none;
-        }
-
-        /* 严禁图片进入输入框内部，图片一律显示在上方附件条 */
-        .pi-enh-formatted-composer img {
-          display: none !important;
-        }
-
-        .pi-enh-formatted-composer strong,
-        .pi-enh-md-bold {
-          font-weight: 700 !important;
-          color: #ffffff !important;
-        }
-
-        .pi-enh-formatted-composer em,
-        .pi-enh-md-italic {
-          font-style: italic !important;
-          color: color-mix(in srgb, var(--text) 90%, var(--accent, #38bdf8)) !important;
-        }
-
-        .pi-enh-formatted-composer code,
-        .pi-enh-md-inline-code {
-          background: rgba(255, 255, 255, 0.08) !important;
-          border: 1px solid rgba(255, 255, 255, 0.12) !important;
-          border-radius: 4px !important;
-          padding: 1.5px 5px !important;
-          margin: 0 1px !important;
-          font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace !important;
-          font-size: 0.9em !important;
-          color: var(--accent, #38bdf8) !important;
-          box-decoration-break: clone !important;
-          -webkit-box-decoration-break: clone !important;
-        }
-
-        /* 空格式标签绝对隐藏背景与边框，杜绝多余空灰框 */
-        .pi-enh-formatted-composer code:empty,
-        .pi-enh-formatted-composer .pi-enh-md-inline-code:empty {
-          background: transparent !important;
-          border: none !important;
-          padding: 0 !important;
-          margin: 0 !important;
-          display: inline !important;
-        }
-
-        .pi-enh-formatted-composer .pi-enh-md-heading {
-          font-weight: 700 !important;
-          color: #ffffff !important;
-          margin: 6px 0 2px 0 !important;
-          display: block !important;
-          line-height: 1.4 !important;
-        }
-        .pi-enh-formatted-composer .pi-enh-md-h1 { font-size: 1.28em !important; }
-        .pi-enh-formatted-composer .pi-enh-md-h2 { font-size: 1.18em !important; }
-        .pi-enh-formatted-composer .pi-enh-md-h3 { font-size: 1.08em !important; }
-
-        .pi-enh-formatted-composer .pi-enh-md-list-item {
-          display: flex !important;
-          align-items: baseline !important;
-          margin: 1.5px 0 !important;
-          line-height: 1.5 !important;
-        }
-        .pi-enh-formatted-composer .pi-enh-md-bullet {
-          color: var(--accent, #38bdf8) !important;
-          font-weight: bold !important;
-          display: inline-block !important;
-          width: 14px !important;
-          flex-shrink: 0 !important;
-          user-select: none !important;
-        }
-        .pi-enh-formatted-composer .pi-enh-md-num {
-          color: var(--accent, #38bdf8) !important;
-          font-weight: 600 !important;
-          display: inline-block !important;
-          min-width: 18px !important;
-          margin-right: 4px !important;
-          flex-shrink: 0 !important;
-          user-select: none !important;
-        }
-        .pi-enh-formatted-composer .pi-enh-md-content {
-          flex: 1 1 auto !important;
-        }
-
-        .pi-enh-formatted-composer .pi-enh-md-p {
-          margin: 1.5px 0 !important;
-          line-height: 1.55 !important;
-        }
-
-        .pi-enh-formatted-composer .pi-enh-md-spacer {
-          height: 6px !important;
-          margin: 0 !important;
-          display: block !important;
-        }
-
-        .pi-enh-formatted-composer .pi-enh-md-quote {
-          border-left: 3px solid var(--accent, #38bdf8) !important;
-          padding-left: 10px !important;
-          margin: 4px 0 !important;
-          color: color-mix(in srgb, var(--text) 85%, transparent) !important;
-          font-style: italic !important;
-        }
-
-        .pi-enh-formatted-composer .pi-enh-md-code-card {
-          background: rgba(0, 0, 0, 0.28) !important;
-          border: 1px solid color-mix(in srgb, var(--border) 60%, transparent) !important;
-          border-radius: 8px !important;
-          margin: 6px 0 !important;
-          overflow: hidden !important;
-        }
-        .pi-enh-formatted-composer .pi-enh-md-code-header {
-          background: rgba(255, 255, 255, 0.04) !important;
-          padding: 3px 8px !important;
-          font-size: 11px !important;
-          color: var(--text-muted, #a1a1aa) !important;
-          border-bottom: 1px solid rgba(255, 255, 255, 0.06) !important;
-          display: flex !important;
-          justify-content: flex-end !important;
-        }
-        .pi-enh-formatted-composer .pi-enh-md-code-body {
-          padding: 8px 10px !important;
-          margin: 0 !important;
-          font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace !important;
-          font-size: 12.5px !important;
-          line-height: 1.45 !important;
-          overflow-x: auto !important;
-        }
-
-        /* 格式化切换小药丸 (✨ 格式化 / 📝 纯文本) - 优雅融入底栏工具条 */
-        .pi-enh-format-toggle-btn {
-          width: max-content !important;
-          white-space: nowrap !important;
-          height: 28px !important;
-          padding: 0 9px !important;
-          border-radius: 7px !important;
-          background: rgba(56, 189, 248, 0.1) !important;
-          border: 1px solid rgba(56, 189, 248, 0.25) !important;
-          color: var(--accent, #38bdf8) !important;
-          font-size: 11.5px !important;
-          font-weight: 500 !important;
-          display: inline-flex !important;
-          align-items: center !important;
-          gap: 4px !important;
-          cursor: pointer !important;
-          margin-left: 4px !important;
-          transition: all 0.15s ease !important;
-          user-select: none !important;
-          flex-shrink: 0 !important;
-        }
-        .pi-enh-format-toggle-btn:hover {
-          background: rgba(56, 189, 248, 0.18) !important;
-          border-color: rgba(56, 189, 248, 0.45) !important;
-        }
-        .pi-enh-format-toggle-btn.is-raw {
-          background: rgba(255, 255, 255, 0.05) !important;
-          border-color: color-mix(in srgb, var(--border) 65%, transparent) !important;
-          color: var(--text-muted, #a1a1aa) !important;
-        }
-        .pi-enh-format-toggle-btn.is-raw:hover {
-          background: rgba(255, 255, 255, 0.09) !important;
-          color: var(--text, #f4f4f5) !important;
-        }
-      `;
-      document.head.appendChild(style);
-    }
-
     const textarea = findComposerTextarea();
-    if (!textarea) {
+    if (!textarea || textarea.tagName !== "TEXTAREA") {
       removeComposerMarkdownFormat();
       return;
     }
@@ -11781,295 +7882,70 @@
       composerFormatTextareaCleanup = null;
       isComposingInput = false;
       composerCompositionEndedAt = 0;
+      composerUndoStack.length = 0;
+      composerRedoStack.length = 0;
+      pushComposerUndo(textarea.value || "");
+      lastUndoCharsCount = (textarea.value || "").length;
+      activeComposerFormatTextarea = textarea;
     }
-    activeComposerFormatTextarea = textarea;
-    const container = textarea.parentElement;
-    if (!container) return;
+    if (composerFormatTextareaCleanup) return;
 
-    // 当 textarea 替换但 parent 复用时重建旧编辑器/解绑
-    let formattedComposer = container.querySelector(".pi-enh-formatted-composer");
-    if (formattedComposer && formattedComposer.__boundTextarea !== textarea) {
-      if (activeFormattedComposer === formattedComposer) activeFormattedComposer = null;
-      formattedComposer.remove();
-      formattedComposer = null;
-    }
-    if (!formattedComposer) {
-      formattedComposer = document.createElement("div");
-      formattedComposer.__boundTextarea = textarea;
-      formattedComposer.className = "pi-enh-formatted-composer";
-      formattedComposer.contentEditable = "true";
-      formattedComposer.style.display = "none";
-      formattedComposer.spellcheck = false;
-      formattedComposer.role = "textbox";
-      const isClean = isPluginEnabled("composer-clean-placeholder");
-      const placeholderText = isClean ? "" : (textarea.placeholder || "消息…输入 / 使用命令，输入 @ 查找文件");
-      if (formattedComposer.dataset) {
-        formattedComposer.dataset.placeholder = placeholderText;
-      } else {
-        formattedComposer.setAttribute("data-placeholder", placeholderText);
-      }
-      container.insertBefore(formattedComposer, textarea);
-
-      formattedComposer.addEventListener("compositionstart", onComposerFormatCompositionStart);
-      formattedComposer.addEventListener("compositionend", () => {
-        onComposerFormatCompositionEnd();
-        const md = extractMarkdownFromFormattedComposer(formattedComposer);
-        setComposerTextareaValue(textarea, md, { focus: false });
-        pushComposerUndo(md);
-        lastUndoCharsCount = md.length;
-        const card = textarea.closest('fieldset > div[style*="max-width"]');
-        updateCardContentState(card, textarea);
-      });
-
-      formattedComposer.addEventListener("input", () => {
-        if (isComposingInput) return;
-        const md = extractMarkdownFromFormattedComposer(formattedComposer);
-        setComposerTextareaValue(textarea, md, { focus: false });
-        const card = textarea.closest('fieldset > div[style*="max-width"]');
-        updateCardContentState(card, textarea);
-
-        const topVal = composerUndoStack[composerUndoStack.length - 1] || "";
-        if (shouldTriggerInstantUndo(md, topVal)) {
-          pushComposerUndo(md);
-          lastUndoCharsCount = md.length;
-          if (undoDebounceTimer) clearTimeout(undoDebounceTimer);
-        } else {
-          if (undoDebounceTimer) clearTimeout(undoDebounceTimer);
-          undoDebounceTimer = setTimeout(() => {
-            pushComposerUndo(md);
-            lastUndoCharsCount = md.length;
-          }, 350);
-        }
-      });
-
-      formattedComposer.addEventListener("keydown", (event) => {
-        if (blockComposerCompositionShortcut(event)) return;
-        if (isComposerCompletionKey(event, textarea)) {
+    const onKeyDown = (event) => {
+      if (blockComposerCompositionShortcut(event)) return;
+      if (handleComposerSmartKeyDown(event, textarea)) return;
+      if ((event.ctrlKey || event.metaKey) && (event.key === "z" || event.key === "Z")) {
+        if (event.shiftKey && composerRedoStack.length) {
           event.preventDefault();
-          event.stopPropagation();
-          textarea.dispatchEvent(new KeyboardEvent("keydown", {
-            key: event.key, code: event.code, bubbles: true, cancelable: true
-          }));
-          requestAnimationFrame(() => {
-            if (!formattedComposer.isConnected || formattedComposer.__boundTextarea !== textarea) return;
-            syncComposerMarkdownFormat();
-            formattedComposer.focus();
-            // Native completion updates the hidden textarea selection and text.
-            if (event.key === "Enter" || event.key === "Tab") {
-              const selection = window.getSelection();
-              selection?.selectAllChildren(formattedComposer);
-              selection?.collapseToEnd();
-            }
-          });
-          return;
-        }
-        // 撤销/重做：支持自定义历史栈与快照回滚，确保粘贴富文本/代码块后按 Ctrl+Z 100% 能够撤销
-        if ((event.ctrlKey || event.metaKey) && (event.key === "z" || event.key === "Z")) {
-          event.preventDefault();
-          event.stopPropagation();
-          if (event.shiftKey) {
-            performComposerRedo();
-          } else {
-            performComposerUndo();
-          }
-          return;
-        }
-        if ((event.ctrlKey || event.metaKey) && (event.key === "y" || event.key === "Y")) {
-          event.preventDefault();
-          event.stopPropagation();
           performComposerRedo();
-          return;
-        }
-
-        // 运行态 Enter/Ctrl+Enter 智能拦截
-        if (handleComposerSmartKeyDown(event, textarea)) {
-          return;
-        }
-
-        // Shift + Enter：智能跳出当前格式块到普通正文并换行
-        if (event.key === "Enter" && event.shiftKey) {
-          if (handleComposerFormatShiftEnter(event, formattedComposer, textarea)) {
-            return;
-          }
-        }
-
-        // 退格键 Backspace：若当前处于空格式块（如空的小代码框），直接消除该格式块
-        if (event.key === "Backspace" && !event.shiftKey && !event.ctrlKey && !event.metaKey) {
-          if (handleComposerFormatBackspace(event, formattedComposer, textarea)) {
-            return;
-          }
-        }
-
-        // 向右箭头 ArrowRight：若光标处于行内格式末尾，平滑跳出格式标签
-        if (event.key === "ArrowRight" && !event.shiftKey && !event.ctrlKey && !event.metaKey) {
-          if (handleComposerFormatArrowRight(event, formattedComposer)) {
-            return;
-          }
-        }
-
-        if (event.key === "Enter" && !event.shiftKey && !isComposingInput && !event.isComposing) {
-          // 移动端安全守卫：手机软键盘普通换行绝不发送消息！
-          if (isMobileEnvironment() && !event.ctrlKey && !event.metaKey) {
-            event.preventDefault();
-            event.stopPropagation();
-            if (typeof event.stopImmediatePropagation === "function") {
-              event.stopImmediatePropagation();
-            }
-            insertMobileNewlineAtTarget(formattedComposer);
-            return;
-          }
-
+        } else if (!event.shiftKey && composerUndoStack.length > 1) {
           event.preventDefault();
-          event.stopPropagation();
-          if (typeof event.stopImmediatePropagation === "function") {
-            event.stopImmediatePropagation();
+          performComposerUndo();
+        }
+      } else if ((event.ctrlKey || event.metaKey) && (event.key === "y" || event.key === "Y")
+        && composerRedoStack.length) {
+        event.preventDefault();
+        performComposerRedo();
+      }
+    };
+    const onInput = () => {
+      const value = textarea.value || "";
+      const previous = composerUndoStack[composerUndoStack.length - 1] || "";
+      if (shouldTriggerInstantUndo(value, previous)) {
+        pushComposerUndo(value);
+        lastUndoCharsCount = value.length;
+        if (undoDebounceTimer) clearTimeout(undoDebounceTimer);
+        undoDebounceTimer = null;
+      } else {
+        if (undoDebounceTimer) clearTimeout(undoDebounceTimer);
+        undoDebounceTimer = setTimeout(() => {
+          undoDebounceTimer = null;
+          if (textarea.isConnected && activeComposerFormatTextarea === textarea) {
+            pushComposerUndo(textarea.value || "");
+            lastUndoCharsCount = (textarea.value || "").length;
           }
-          triggerDesktopComposerSend(formattedComposer);
-        } else if ((event.ctrlKey || event.metaKey) && (event.key === "m" || event.key === "M")) {
-          event.preventDefault();
-          updateFormattedViewMode(!isFormattedViewMode);
-        }
-      });
-
-      formattedComposer.addEventListener("paste", handleComposerMarkdownPaste, true);
-    }
-    activeFormattedComposer = formattedComposer;
-
-    // 绑定 textarea 的 paste 和 keydown 快捷键与 Undo 栈
-    if (!composerFormatTextareaCleanup) {
-      const onKeyDown = (event) => {
-        if (blockComposerCompositionShortcut(event)) return;
-        if (handleComposerSmartKeyDown(event, textarea)) {
-          return;
-        }
-        if ((event.ctrlKey || event.metaKey) && (event.key === "z" || event.key === "Z") && !event.shiftKey) {
-          if (composerUndoStack.length > 1) {
-            event.preventDefault();
-            performComposerUndo();
-          }
-        } else if ((event.ctrlKey || event.metaKey) && (event.key === "m" || event.key === "M")) {
-          event.preventDefault();
-          updateFormattedViewMode(!isFormattedViewMode);
-        }
-      };
-      let contentStateRaf = null;
-      let lastHasContent = false;
-      const onInput = () => {
-        syncComposerTextareaAutoHeight(textarea);
+        }, 350);
+      }
+      if (pendingComposerAttachments.length > 0) {
         const card = textarea.closest('fieldset > div[style*="max-width"]');
-        if (!card) return;
-        const val = textarea.value || "";
-        const nowHasContent = val.trim().length > 0;
-        if (nowHasContent !== lastHasContent) {
-          lastHasContent = nowHasContent;
-          if (contentStateRaf) {
-            cancelAnimationFrame(contentStateRaf);
-            contentStateRaf = null;
-          }
-          updateCardContentState(card, textarea);
-        } else if (!contentStateRaf) {
-          contentStateRaf = requestAnimationFrame(() => {
-            contentStateRaf = null;
-            updateCardContentState(card, textarea);
-          });
-        }
-      };
-      textarea.addEventListener("paste", handleComposerMarkdownPaste, true);
-      textarea.addEventListener("keydown", onKeyDown);
-      textarea.addEventListener("input", onInput);
-      textarea.addEventListener("compositionstart", onComposerFormatCompositionStart);
-      textarea.addEventListener("compositionend", onComposerFormatCompositionEnd);
-      composerFormatTextareaCleanup = () => {
-        textarea.removeEventListener("paste", handleComposerMarkdownPaste, true);
-        textarea.removeEventListener("keydown", onKeyDown);
-        textarea.removeEventListener("input", onInput);
-        textarea.removeEventListener("compositionstart", onComposerFormatCompositionStart);
-        textarea.removeEventListener("compositionend", onComposerFormatCompositionEnd);
-      };
-    }
-
-    // 可选低频工具，默认隐藏；关闭按钮不关闭 Markdown 功能。
-    const card = textarea.closest('fieldset > div[style*="max-width"]');
-    if (card && isPluginEnabled("composer-format-toggle")) {
-      let toggleBtn = card.querySelector(".pi-enh-format-toggle-btn");
-      if (!toggleBtn) {
-        toggleBtn = document.createElement("button");
-        toggleBtn.type = "button";
-        toggleBtn.className = "pi-enh-format-toggle-btn";
-        toggleBtn.innerHTML = `${SPARKLE_SVG}<span>格式化</span>`;
-        toggleBtn.title = "当前为格式化视图 (点击切换为纯文本源码，快捷键 Ctrl+M)";
-        toggleBtn.addEventListener("click", (e) => {
-          e.preventDefault();
-          e.stopPropagation();
-          updateFormattedViewMode(!isFormattedViewMode);
-        });
+        if (card) syncComposerAttachmentSendability(card, textarea);
       }
-      const toolbarLeft = card.querySelector('div[style*="margin-top"] > div:first-child');
-      if (toolbarLeft && toggleBtn.parentElement !== toolbarLeft) {
-        toolbarLeft.appendChild(toggleBtn);
-      } else if (!toggleBtn.parentElement) {
-        card.appendChild(toggleBtn);
-      }
-      activeFormatToggleBtn = toggleBtn;
-    } else {
-      card?.querySelector(".pi-enh-format-toggle-btn")?.remove();
-      activeFormatToggleBtn = null;
-    }
+    };
 
-    // Background scans must never replace the active input surface. Dictation,
-    // IME and selection ranges are tied to that exact DOM node, even between chunks.
-    const currentVal = textarea.value || "";
-    updateCardContentState(card, textarea);
-
-    const currentOwner = readNativeComposerDraft()?.key;
-    const ownerChanged = Boolean(currentOwner && formattedComposer.__piEnhOwner && formattedComposer.__piEnhOwner !== currentOwner);
-
-    if (isFormattedViewMode) {
-      // 只要处于格式化视图模式：优先展示 formattedComposer 富文本，隐藏底层纯文本 textarea
-      textarea.style.display = "none";
-      formattedComposer.style.display = "block";
-
-      // 如果外部数据变更（如页面刷新、草稿恢复、会话切换填充了 markdown）：
-      // 会话 owner 变更即使编辑器焦点仍在也必须更新为该 owner 文本，禁止 A 残留覆盖 B！
-      const stagedQuote = composerSubmissionInFlight?.snapshot
-        && composerSubmissionInFlight.textarea === textarea
-        && composerSubmissionInFlight.text === currentVal && !ownerChanged;
-      if (!stagedQuote && !isComposingInput && (formattedComposer.__piEnhSyncedValue !== currentVal || ownerChanged)) {
-        if (currentVal === "") {
-          formattedComposer.innerHTML = "";
-          formattedComposer.__piEnhSyncedValue = "";
-          if (currentOwner) {
-            formattedComposer.__piEnhOwner = currentOwner;
-          }
-        } else {
-          const nativeValue = readNativeComposerDraft()?.valueRef.current;
-          const externalNativeChange = nativeValue === currentVal
-            && extractMarkdownFromFormattedComposer(formattedComposer) !== currentVal;
-          if (ownerChanged || externalNativeChange || !formattedComposer.contains(document.activeElement)
-            || !formattedComposer.innerHTML.trim()) {
-            formattedComposer.innerHTML = markdownToFormattedHtml(currentVal);
-          }
-          formattedComposer.__piEnhSyncedValue = currentVal;
-          if (currentOwner) {
-            formattedComposer.__piEnhOwner = currentOwner;
-          }
-        }
-      }
-    } else {
-      // 用户显式切换为了纯文本源码视图
-      if (formattedComposer.style.display !== "none") {
-        const currentMd = extractMarkdownFromFormattedComposer(formattedComposer);
-        setComposerTextareaValue(textarea, currentMd, { focus: false });
-      }
-      textarea.style.display = "block";
-      formattedComposer.style.display = "none";
-      syncComposerTextareaAutoHeight(textarea);
-    }
+    textarea.addEventListener("paste", handleComposerMarkdownPaste, true);
+    textarea.addEventListener("keydown", onKeyDown);
+    textarea.addEventListener("input", onInput);
+    textarea.addEventListener("compositionstart", onComposerFormatCompositionStart);
+    textarea.addEventListener("compositionend", onComposerFormatCompositionEnd);
+    composerFormatTextareaCleanup = () => {
+      textarea.removeEventListener("paste", handleComposerMarkdownPaste, true);
+      textarea.removeEventListener("keydown", onKeyDown);
+      textarea.removeEventListener("input", onInput);
+      textarea.removeEventListener("compositionstart", onComposerFormatCompositionStart);
+      textarea.removeEventListener("compositionend", onComposerFormatCompositionEnd);
+    };
   }
 
   function removeComposerMarkdownFormat() {
-    // Routine cleanup while Markdown is disabled must not cancel an ordinary
-    // textarea Enter submission; only an intent begun in this editor is ours.
     if (composerSubmissionInFlight?.sourceMarkdownEnabled && !composerSubmissionInFlight.snapshot) {
       cancelComposerNativeSubmission();
     }
@@ -12079,204 +7955,23 @@
     composerCompositionEndedAt = 0;
     if (undoDebounceTimer) clearTimeout(undoDebounceTimer);
     undoDebounceTimer = null;
-    const restoreFocus = activeFormattedComposer?.contains(document.activeElement);
-    const style = document.getElementById(COMPOSER_MARKDOWN_STYLE_ID);
-    if (style) style.remove();
-
-    if (activeFormattedComposer) {
-      activeFormattedComposer.__boundTextarea = null;
-      activeFormattedComposer.remove();
-      activeFormattedComposer = null;
-    }
-    if (activeFormatToggleBtn) {
-      activeFormatToggleBtn.remove();
-      activeFormatToggleBtn = null;
-    }
-    if (activeComposerFormatTextarea) {
-      activeComposerFormatTextarea.style.display = "";
-      if (restoreFocus) activeComposerFormatTextarea.focus();
-      activeComposerFormatTextarea = null;
-    }
+    activeComposerFormatTextarea = null;
   }
+
+  window.__PI_ENH_SYNC_COMPOSER_MARKDOWN_FORMAT__ = syncComposerMarkdownFormat;
+  window.__PI_ENH_REMOVE_COMPOSER_MARKDOWN_FORMAT__ = removeComposerMarkdownFormat;
+  window.__PI_ENH_HTML_TO_MARKDOWN__ = htmlToMarkdown;
 
   activeCleanups.push(removeComposerMarkdownFormat);
   window.__PI_ENH_SYNC_COMPOSER_MARKDOWN_FORMAT__ = syncComposerMarkdownFormat;
   window.__PI_ENH_REMOVE_COMPOSER_MARKDOWN_FORMAT__ = removeComposerMarkdownFormat;
   window.__PI_ENH_HTML_TO_MARKDOWN__ = htmlToMarkdown;
-  window.__PI_ENH_MARKDOWN_TO_FORMATTED_HTML__ = markdownToFormattedHtml;
 
   // ==========================================
   // 3.55.25 Composer Clean Placeholder (清空主输入框提示词与字体优化)
   // ==========================================
-  const CLEAN_PLACEHOLDER_STYLE_ID = "pi-enh-composer-clean-placeholder-style";
-  let origTextareaPlaceholderDesc = null;
-
-  function ensureComposerCleanPlaceholderPrototype() {
-    if (typeof HTMLTextAreaElement === "undefined" || !HTMLTextAreaElement.prototype) return;
-    if (HTMLTextAreaElement.prototype.__piPatchedCleanPlaceholder) return;
-    try {
-      origTextareaPlaceholderDesc = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "placeholder");
-      if (origTextareaPlaceholderDesc && origTextareaPlaceholderDesc.configurable) {
-        HTMLTextAreaElement.prototype.__piPatchedCleanPlaceholder = true;
-        Object.defineProperty(HTMLTextAreaElement.prototype, "placeholder", {
-          get() {
-            if (
-              typeof isPluginEnabled === "function" &&
-              isPluginEnabled("composer-clean-placeholder") &&
-              (this.classList?.contains("chat-input-textarea") || this.closest?.("fieldset, .pi-enh-cursor-composer"))
-            ) {
-              return "";
-            }
-            return origTextareaPlaceholderDesc.get ? origTextareaPlaceholderDesc.get.call(this) : "";
-          },
-          set(val) {
-            if (typeof val === "string") {
-              this.setAttribute("data-pi-orig-placeholder", val);
-            }
-            if (
-              typeof isPluginEnabled === "function" &&
-              isPluginEnabled("composer-clean-placeholder") &&
-              (this.classList?.contains("chat-input-textarea") || this.closest?.("fieldset, .pi-enh-cursor-composer"))
-            ) {
-              if (origTextareaPlaceholderDesc.set) {
-                origTextareaPlaceholderDesc.set.call(this, "");
-              }
-              return;
-            }
-            if (origTextareaPlaceholderDesc.set) {
-              origTextareaPlaceholderDesc.set.call(this, val);
-            }
-          },
-          configurable: true,
-          enumerable: true,
-        });
-      }
-    } catch (e) {}
-  }
-
-  function ensureComposerCleanPlaceholderStyle() {
-    ensureComposerCleanPlaceholderPrototype();
-    let style = document.getElementById(CLEAN_PLACEHOLDER_STYLE_ID);
-    if (!style) {
-      style = document.createElement("style");
-      style.id = CLEAN_PLACEHOLDER_STYLE_ID;
-      style.textContent = `
-        /* 纯净极简输入框：清空主输入框冗长提示词，消除折行干扰 */
-        html.pi-enh-clean-placeholder textarea.chat-input-textarea::placeholder,
-        html.pi-enh-clean-placeholder .chat-input-textarea::placeholder,
-        textarea.chat-input-textarea.pi-enh-clean-placeholder::placeholder {
-          color: transparent !important;
-          opacity: 0 !important;
-          -webkit-text-fill-color: transparent !important;
-        }
-
-        html.pi-enh-clean-placeholder .pi-enh-formatted-composer:empty::before,
-        .pi-enh-formatted-composer.pi-enh-clean-placeholder:empty::before {
-          content: "" !important;
-          display: none !important;
-        }
-
-        /* 统一输入框优质中文字体栈 */
-        .chat-input-textarea,
-        .pi-enh-formatted-composer {
-          font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif !important;
-          letter-spacing: normal !important;
-        }
-      `;
-      document.head.appendChild(style);
-    }
-  }
-
-  function syncComposerCleanPlaceholder() {
-    ensureComposerCleanPlaceholderStyle();
-    const enabled = isPluginEnabled("composer-clean-placeholder");
-    document.documentElement?.classList?.toggle("pi-enh-clean-placeholder", enabled);
-
-    const textarea = findComposerTextarea();
-    if (textarea) {
-      if (enabled) {
-        const raw = textarea.getAttribute("placeholder") || "";
-        if (raw || !textarea.hasAttribute("data-pi-orig-placeholder")) {
-          if (raw) textarea.setAttribute("data-pi-orig-placeholder", raw);
-        }
-        try {
-          if (origTextareaPlaceholderDesc?.set) {
-            origTextareaPlaceholderDesc.set.call(textarea, "");
-          } else {
-            textarea.placeholder = "";
-          }
-          textarea.setAttribute("placeholder", "");
-        } catch (e) {}
-        textarea.classList.add("pi-enh-clean-placeholder");
-      } else {
-        const orig = textarea.getAttribute("data-pi-orig-placeholder");
-        if (orig !== null) {
-          try {
-            if (origTextareaPlaceholderDesc?.set) {
-              origTextareaPlaceholderDesc.set.call(textarea, orig);
-            } else {
-              textarea.placeholder = orig;
-            }
-            textarea.setAttribute("placeholder", orig);
-          } catch (e) {}
-        }
-        textarea.classList.remove("pi-enh-clean-placeholder");
-      }
-    }
-
-    const formatted = document.querySelector(".pi-enh-formatted-composer");
-    if (formatted) {
-      if (enabled) {
-        const rawFmt = formatted.getAttribute("data-placeholder") || "";
-        if (rawFmt || !formatted.hasAttribute("data-pi-orig-placeholder")) {
-          formatted.setAttribute("data-pi-orig-placeholder", rawFmt);
-        }
-        formatted.setAttribute("data-placeholder", "");
-        if (formatted.dataset) formatted.dataset.placeholder = "";
-        formatted.classList.add("pi-enh-clean-placeholder");
-      } else {
-        const orig = formatted.getAttribute("data-pi-orig-placeholder");
-        if (orig !== null) {
-          formatted.setAttribute("data-placeholder", orig);
-          if (formatted.dataset) formatted.dataset.placeholder = orig;
-        }
-        formatted.classList.remove("pi-enh-clean-placeholder");
-      }
-    }
-  }
-
-  function removeComposerCleanPlaceholder() {
-    const style = document.getElementById(CLEAN_PLACEHOLDER_STYLE_ID);
-    if (style) style.remove();
-    document.documentElement?.classList?.remove("pi-enh-clean-placeholder");
-    const textarea = findComposerTextarea();
-    if (textarea) {
-      const orig = textarea.getAttribute("data-pi-orig-placeholder");
-      if (orig !== null) {
-        try {
-          if (origTextareaPlaceholderDesc?.set) {
-            origTextareaPlaceholderDesc.set.call(textarea, orig);
-          } else {
-            textarea.placeholder = orig;
-          }
-          textarea.setAttribute("placeholder", orig);
-        } catch (e) {}
-      }
-      textarea.classList.remove("pi-enh-clean-placeholder");
-    }
-    const formatted = document.querySelector(".pi-enh-formatted-composer");
-    if (formatted) {
-      const orig = formatted.getAttribute("data-pi-orig-placeholder");
-      if (orig !== null) {
-        formatted.setAttribute("data-placeholder", orig);
-        if (formatted.dataset) formatted.dataset.placeholder = orig;
-      }
-      formatted.classList.remove("pi-enh-clean-placeholder");
-    }
-  }
-
-  syncComposerCleanPlaceholder();
-  activeCleanups.push(removeComposerCleanPlaceholder);
+  function syncComposerCleanPlaceholder() {}
+  function removeComposerCleanPlaceholder() {}
   window.__PI_ENH_SYNC_COMPOSER_CLEAN_PLACEHOLDER__ = syncComposerCleanPlaceholder;
   window.__PI_ENH_REMOVE_COMPOSER_CLEAN_PLACEHOLDER__ = removeComposerCleanPlaceholder;
 
@@ -12286,7 +7981,6 @@
   const COMPOSER_MODES_STYLE_ID = "pi-enh-composer-modes-style";
   composerModesStateMap = new Map(); // sessionId -> { mode: "normal"|"plan"|"goal", goal?: string, pausePending?: boolean, paused?: boolean }
   let composerModeSwitching = false;
-  let composerGoalBarEl = null;
   let isGoalActionRunning = false;
   pendingNewComposerMode = null; // {mode, project, sessionId?}; never a server success claim
   let composerAddMenuEl = null;
@@ -12296,17 +7990,12 @@
   let composerModeFetchToken = 0;
   let lastComposerGoalMismatchKey = null;
 
-  const SVG_ADD_ICON = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"></line><line x1="5" y1="12" x2="19" y2="12"></line></svg>`;
   // SVG 目标：同心圆右上缺口 + 向右上箭头的截图形态
   const SVG_GOAL_ICON = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a9 9 0 1 0 9 9"></path><path d="M12 7a5 5 0 1 0 5 5"></path><line x1="12" y1="12" x2="21" y2="3"></line><polyline points="16 3 21 3 21 8"></polyline></svg>`;
   // SVG 计划：完整灯泡含底座与 5 短射线
   const SVG_PLAN_ICON = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="2" y1="11" x2="4.5" y2="11"></line><line x1="4.93" y1="4.93" x2="6.7" y2="6.7"></line><line x1="12" y1="1.5" x2="12" y2="4"></line><line x1="19.07" y1="4.93" x2="17.3" y2="6.7"></line><line x1="22" y1="11" x2="19.5" y2="11"></line><path d="M9 17h6M10 20h4M12 6a5.5 5.5 0 0 0-4.8 8.2c.9 1.4 1.8 2.3 1.8 2.8h6c0-.5.9-1.4 1.8-2.8A5.5 5.5 0 0 0 12 6z"></path></svg>`;
   const SVG_ATTACH_ICON = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"></path></svg>`;
   const SVG_CHECK_ICON = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#22c55e" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>`;
-  const SVG_CLOSE_CIRCLE_ICON = `<svg width="14" height="14" viewBox="0 0 14 14" fill="none" class="pi-enh-composer-mode-close-icon"><circle cx="7" cy="7" r="7" fill="rgba(255,255,255,0.28)"></circle><line x1="4.75" y1="4.75" x2="9.25" y2="9.25" stroke="#ffffff" stroke-width="1.5" stroke-linecap="round"></line><line x1="9.25" y1="4.75" x2="4.75" y2="9.25" stroke="#ffffff" stroke-width="1.5" stroke-linecap="round"></line></svg>`;
-
-  const PLACEHOLDER_PLAN = "描述你的任务以生成方案…";
-  const PLACEHOLDER_GOAL = "描述你的目标，定义可衡量的成果，以获得最佳效果…";
 
   function parseExtensionStatus(data, key) {
     const statuses = data?.extensionStatuses || data?.data?.extensionStatuses;
@@ -12438,645 +8127,46 @@
   }
 
   function ensureComposerModesStyle() {
-    if (typeof document !== "undefined" && document.documentElement) {
-      document.documentElement.setAttribute("data-pi-composer-modes-active", "true");
-    }
+    if (typeof document === "undefined" || !document.documentElement) return;
+    document.documentElement.setAttribute("data-pi-composer-modes-active", "true");
     let style = document.getElementById(COMPOSER_MODES_STYLE_ID);
-    if (!style) {
-      style = document.createElement("style");
-      style.id = COMPOSER_MODES_STYLE_ID;
-      style.textContent = `
-        /* 加号按钮 */
-        .pi-enh-composer-add-btn {
-          display: inline-flex !important;
-          align-items: center !important;
-          justify-content: center !important;
-          width: 28px !important;
-          height: 28px !important;
-          min-width: 28px !important;
-          padding: 0 !important;
-          margin: 0 !important;
-          border-radius: 8px !important;
-          border: 1px solid transparent !important;
-          background: transparent !important;
-          color: var(--text-muted, #a1a1aa) !important;
-          cursor: pointer !important;
-          transition: all 0.15s ease !important;
-          flex-shrink: 0 !important;
-        }
-        .pi-enh-composer-add-btn:hover,
-        .pi-enh-composer-add-btn.active {
-          color: var(--text, #f4f4f5) !important;
-          background: color-mix(in srgb, var(--border, #3f3f46) 35%, transparent) !important;
-          border-color: var(--border, #3f3f46) !important;
-        }
-
-        /* 加号弹出菜单 */
-        .pi-enh-composer-add-menu {
-          position: fixed !important;
-          left: 0;
-          width: 340px;
-          box-sizing: border-box;
-          max-width: 90vw !important;
-          background: var(--bg-panel, #1e1e20) !important;
-          border: 1px solid var(--border, #3f3f46) !important;
-          border-radius: 12px !important;
-          box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4), 0 2px 8px rgba(0, 0, 0, 0.2) !important;
-          padding: 6px !important;
-          display: flex !important;
-          flex-direction: column !important;
-          gap: 3px !important;
-          z-index: 10040 !important;
-          user-select: none !important;
-          animation: pi-enh-composer-menu-in 0.12s ease-out !important;
-        }
-        @keyframes pi-enh-composer-menu-in {
-          from { opacity: 0; transform: translateY(4px); }
-          to { opacity: 1; transform: translateY(0); }
-        }
-        html[data-theme="light"] .pi-enh-composer-add-menu,
-        [data-theme="light"] .pi-enh-composer-add-menu {
-          background: var(--bg-panel, #ffffff) !important;
-          border-color: var(--border, #e4e4e7) !important;
-          box-shadow: 0 8px 24px rgba(0, 0, 0, 0.08), 0 2px 6px rgba(0, 0, 0, 0.04) !important;
-        }
-        .pi-enh-composer-menu-item {
-          display: flex !important;
-          align-items: center !important;
-          gap: 10px !important;
-          padding: 8px 10px !important;
-          border-radius: 8px !important;
-          background: transparent !important;
-          border: none !important;
-          color: var(--text, #f4f4f5) !important;
-          cursor: pointer !important;
-          text-align: left !important;
-          width: 100% !important;
-          font-size: 13px !important;
-          font-weight: 500 !important;
-          transition: background 0.12s ease !important;
-          box-sizing: border-box !important;
-        }
-        .pi-enh-composer-menu-item:hover {
-          background: color-mix(in srgb, var(--text, #fff) 8%, transparent) !important;
-        }
-        .pi-enh-composer-menu-item.active {
-          background: color-mix(in srgb, var(--text, #fff) 12%, transparent) !important;
-        }
-        html[data-theme="light"] .pi-enh-composer-menu-item:hover,
-        [data-theme="light"] .pi-enh-composer-menu-item:hover {
-          background: rgba(0, 0, 0, 0.05) !important;
-        }
-        html[data-theme="light"] .pi-enh-composer-menu-item.active,
-        [data-theme="light"] .pi-enh-composer-menu-item.active {
-          background: rgba(0, 0, 0, 0.08) !important;
-        }
-        .pi-enh-composer-menu-icon {
-          display: flex !important;
-          align-items: center !important;
-          justify-content: center !important;
-          width: 20px !important;
-          height: 20px !important;
-          flex-shrink: 0 !important;
-          color: var(--text, #f4f4f5) !important;
-        }
-        .pi-enh-composer-menu-label {
-          display: flex !important;
-          align-items: center !important;
-          flex: 1 1 auto !important;
-          min-width: 0 !important;
-        }
-        .pi-enh-composer-menu-title {
-          white-space: nowrap !important;
-          color: var(--text, #f4f4f5) !important;
-          font-size: 13px !important;
-        }
-        .pi-enh-composer-menu-desc {
-          font-size: 12px !important;
-          color: var(--text-dim, #71717a) !important;
-          margin-left: 8px !important;
-          white-space: nowrap !important;
-          overflow: hidden !important;
-          text-overflow: ellipsis !important;
-        }
-        .pi-enh-composer-menu-kbd {
-          margin-left: auto !important;
-          font-size: 11px !important;
-          color: var(--text-dim, #71717a) !important;
-          background: color-mix(in srgb, var(--border, #3f3f46) 40%, transparent) !important;
-          padding: 2px 5px !important;
-          border-radius: 4px !important;
-          border: 1px solid var(--border, #3f3f46) !important;
-          line-height: 1 !important;
-          flex-shrink: 0 !important;
-        }
-        .pi-enh-composer-menu-check {
-          margin-left: 6px !important;
-          display: flex !important;
-          align-items: center !important;
-          color: #22c55e !important;
-          flex-shrink: 0 !important;
-        }
-
-        /* 底栏指示器（Codex 灰色圆角可关闭胶囊，高度约26px，999px圆角） */
-        .pi-enh-composer-mode-indicator {
-          display: inline-flex !important;
-          align-items: center !important;
-          height: 28px !important;
-          flex-shrink: 0 !important;
-          user-select: none !important;
-        }
-        .pi-enh-composer-mode-sep {
-          display: inline-block !important;
-          width: 1px !important;
-          height: 14px !important;
-          background: var(--border, #3f3f46) !important;
-          margin: 0 4px !important;
-          flex-shrink: 0 !important;
-        }
-        .pi-enh-composer-mode-badge {
-          display: inline-flex !important;
-          align-items: center !important;
-          gap: 5px !important;
-          height: 26px !important;
-          min-height: 26px !important;
-          max-height: 26px !important;
-          padding: 0 8px 0 6px !important;
-          border-radius: 9999px !important;
-          border: 1px solid color-mix(in srgb, var(--border, #3f3f46) 65%, transparent) !important;
-          font-size: 12px !important;
-          font-weight: 500 !important;
-          line-height: 24px !important;
-          color: var(--text-muted, #a1a1aa) !important;
-          background: color-mix(in srgb, var(--border, #3f3f46) 35%, transparent) !important;
-          cursor: pointer !important;
-          transition: all 0.15s ease !important;
-          white-space: nowrap !important;
-          outline: none !important;
-          box-sizing: border-box !important;
-          flex-shrink: 0 !important;
-        }
-        .pi-enh-composer-mode-badge:hover,
-        .pi-enh-composer-mode-badge:focus-visible {
-          background: color-mix(in srgb, var(--border, #3f3f46) 60%, transparent) !important;
-          border-color: color-mix(in srgb, var(--border, #3f3f46) 90%, transparent) !important;
-          color: var(--text, #ffffff) !important;
-        }
-        html[data-theme="light"] .pi-enh-composer-mode-badge,
-        [data-theme="light"] .pi-enh-composer-mode-badge {
-          background: rgba(0, 0, 0, 0.05) !important;
-          border-color: rgba(0, 0, 0, 0.12) !important;
-          color: var(--text, #27272a) !important;
-        }
-        html[data-theme="light"] .pi-enh-composer-mode-badge:hover,
-        html[data-theme="light"] .pi-enh-composer-mode-badge:focus-visible,
-        [data-theme="light"] .pi-enh-composer-mode-badge:hover,
-        [data-theme="light"] .pi-enh-composer-mode-badge:focus-visible {
-          background: rgba(0, 0, 0, 0.09) !important;
-          border-color: rgba(0, 0, 0, 0.22) !important;
-          color: #000000 !important;
-        }
-        .pi-enh-composer-mode-badge .pi-enh-composer-mode-default-icon {
-          display: inline-flex !important;
-          align-items: center !important;
-          justify-content: center !important;
-          width: 14px !important;
-          height: 14px !important;
-          flex-shrink: 0 !important;
-        }
-        .pi-enh-composer-mode-badge .pi-enh-composer-mode-default-icon svg {
-          display: block !important;
-          width: 14px !important;
-          height: 14px !important;
-          stroke: currentColor !important;
-          opacity: 0.8 !important;
-          flex-shrink: 0 !important;
-          transition: opacity 0.12s ease !important;
-        }
-        .pi-enh-composer-mode-badge .pi-enh-composer-mode-close-icon {
-          display: none !important;
-          width: 14px !important;
-          height: 14px !important;
-          flex-shrink: 0 !important;
-        }
-        .pi-enh-composer-mode-badge:hover .pi-enh-composer-mode-default-icon,
-        .pi-enh-composer-mode-badge:focus-visible .pi-enh-composer-mode-default-icon {
-          display: none !important;
-        }
-        .pi-enh-composer-mode-badge:hover .pi-enh-composer-mode-close-icon,
-        .pi-enh-composer-mode-badge:focus-visible .pi-enh-composer-mode-close-icon {
-          display: block !important;
-        }
-        .pi-enh-composer-mode-badge .pi-enh-composer-mode-close-icon circle {
-          stroke: none !important;
-          fill: rgba(255, 255, 255, 0.28) !important;
-          transition: fill 0.12s ease !important;
-        }
-        .pi-enh-composer-mode-badge:hover .pi-enh-composer-mode-close-icon circle,
-        .pi-enh-composer-mode-badge:focus-visible .pi-enh-composer-mode-close-icon circle {
-          fill: rgba(255, 255, 255, 0.38) !important;
-        }
-        html[data-theme="light"] .pi-enh-composer-mode-badge .pi-enh-composer-mode-close-icon circle,
-        [data-theme="light"] .pi-enh-composer-mode-badge .pi-enh-composer-mode-close-icon circle {
-          fill: rgba(0, 0, 0, 0.28) !important;
-        }
-        html[data-theme="light"] .pi-enh-composer-mode-badge:hover .pi-enh-composer-mode-close-icon circle,
-        html[data-theme="light"] .pi-enh-composer-mode-badge:focus-visible .pi-enh-composer-mode-close-icon circle,
-        [data-theme="light"] .pi-enh-composer-mode-badge:hover .pi-enh-composer-mode-close-icon circle,
-        [data-theme="light"] .pi-enh-composer-mode-badge:focus-visible .pi-enh-composer-mode-close-icon circle {
-          fill: rgba(0, 0, 0, 0.38) !important;
-        }
-        .pi-enh-composer-mode-badge .pi-enh-composer-mode-close-icon line {
-          stroke: #ffffff !important;
-          stroke-width: 1.5 !important;
-          stroke-linecap: round !important;
-        }
-
-        /* 插件禁用但后台仍在 plan/goal 模式时的简明提醒条 */
-        .pi-enh-composer-modes-disabled-notice {
-          display: inline-flex !important;
-          align-items: center !important;
-          gap: 8px !important;
-          padding: 4px 10px !important;
-          margin: 4px 0 !important;
-          border-radius: 6px !important;
-          background: color-mix(in srgb, var(--warning, #f59e0b) 15%, transparent) !important;
-          border: 1px solid color-mix(in srgb, var(--warning, #f59e0b) 40%, transparent) !important;
-          color: var(--text, #f4f4f5) !important;
-          font-size: 12px !important;
-          user-select: none !important;
-        }
-        .pi-enh-composer-modes-disabled-notice button {
-          background: color-mix(in srgb, var(--warning, #f59e0b) 30%, transparent) !important;
-          border: 1px solid color-mix(in srgb, var(--warning, #f59e0b) 60%, transparent) !important;
-          color: var(--text, #f4f4f5) !important;
-          border-radius: 4px !important;
-          padding: 2px 8px !important;
-          font-size: 11px !important;
-          cursor: pointer !important;
-          transition: background 0.15s ease !important;
-        }
-        .pi-enh-composer-modes-disabled-notice button:hover {
-          background: color-mix(in srgb, var(--warning, #f59e0b) 50%, transparent) !important;
-        }
-
-        /* 阻断原生底栏 raw composer-modes JSON 首次闪现：仅在插件激活时隐藏未清洗 raw，清洗后或插件停用时立即还原可见 */
-        html[data-pi-composer-modes-active="true"] .extension-status-line[aria-label*='"version":1'] .extension-status-text,
-        html[data-pi-composer-modes-active="true"] .extension-status-line[title*='"version":1'] .extension-status-text {
-          visibility: hidden !important;
-        }
-
-        /* 底栏 Flex 左右分流与紧凑高度保护（方案 A：左侧紧凑胶囊，右侧系统状态常驻） */
-        html[data-pi-composer-modes-active="true"] .extension-status-line {
-          display: flex !important;
-          align-items: center !important;
-          justify-content: space-between !important;
-          gap: 12px !important;
-          min-height: 28px !important;
-          max-height: 36px !important;
-          padding: 4px 12px !important;
-          box-sizing: border-box !important;
-          overflow: visible !important;
-        }
-        html[data-pi-composer-modes-active="true"] .extension-status-text {
-          margin-left: auto !important;
-          white-space: nowrap !important;
-          overflow: hidden !important;
-          text-overflow: ellipsis !important;
-          flex-shrink: 1 !important;
-          text-align: right !important;
-          line-height: 1.4 !important;
-          font-size: 11px !important;
-        }
-
-        /* fieldset 的浏览器默认 min-inline-size:min-content 不得被长目标文本撑宽 */
-        fieldset:has(> .pi-enh-composer-goal-bar) {
-          min-width: 0 !important;
-          width: 100% !important;
-          max-width: 100% !important;
-          box-sizing: border-box !important;
-        }
-        /* 输入框正上方独立目标管理横条（与下方居中输入卡片严格同宽同左对齐） */
-        .pi-enh-composer-goal-bar {
-          display: flex !important;
-          align-items: center !important;
-          justify-content: flex-start !important;
-          gap: 8px !important;
-          width: 100% !important;
-          max-width: var(--chat-content-max-width, 820px) !important;
-          box-sizing: border-box !important;
-          margin: 0 auto 6px auto !important;
-          padding: 0 2px !important;
-          min-height: 28px !important;
-          user-select: none !important;
-          transition: opacity 0.15s ease !important;
-        }
-
-        /* 目标紧凑胶囊（位于输入卡片正上方同列，嵌入播放/暂停图标按钮） */
-        .pi-enh-composer-goal-pill {
-          display: inline-flex !important;
-          align-items: center !important;
-          gap: 6px !important;
-          flex: 0 1 auto !important;
-          min-width: 0 !important;
-          max-width: 100% !important;
-          height: 24px !important;
-          padding: 0 4px 0 10px !important;
-          border-radius: 12px !important;
-          background: color-mix(in srgb, var(--accent, #a4c2f4) 14%, transparent) !important;
-          border: 1px solid color-mix(in srgb, var(--accent, #a4c2f4) 30%, transparent) !important;
-          color: var(--text, #e8e8e8) !important;
-          font-size: 11.5px !important;
-          font-family: var(--font-mono, monospace) !important;
-          line-height: 1 !important;
-          cursor: pointer !important;
-          box-sizing: border-box !important;
-          transition: background 0.15s ease, border-color 0.15s ease !important;
-        }
-        .pi-enh-composer-goal-pill:hover {
-          background: color-mix(in srgb, var(--accent, #a4c2f4) 22%, transparent) !important;
-          border-color: color-mix(in srgb, var(--accent, #a4c2f4) 50%, transparent) !important;
-        }
-        .pi-enh-composer-goal-pill[data-status="paused"] {
-          background: color-mix(in srgb, var(--border, #666666) 20%, transparent) !important;
-          border-color: color-mix(in srgb, var(--border, #666666) 45%, transparent) !important;
-          opacity: 0.88 !important;
-        }
-        .pi-enh-composer-goal-pill[data-status="pending"] {
-          background: color-mix(in srgb, #f59e0b 16%, transparent) !important;
-          border-color: color-mix(in srgb, #f59e0b 42%, transparent) !important;
-        }
-
-        .pi-enh-goal-pill-icon {
-          flex-shrink: 0 !important;
-          display: inline-flex !important;
-          align-items: center !important;
-        }
-        .pi-enh-goal-pill-status {
-          flex-shrink: 0 !important;
-          font-weight: 600 !important;
-          color: var(--accent, #a4c2f4) !important;
-        }
-        .pi-enh-composer-goal-pill[data-status="paused"] .pi-enh-goal-pill-status {
-          color: var(--text-dim, #999999) !important;
-        }
-        .pi-enh-composer-goal-pill[data-status="pending"] .pi-enh-goal-pill-status {
-          color: #f59e0b !important;
-        }
-
-        .pi-enh-goal-pill-text {
-          white-space: nowrap !important;
-          overflow: hidden !important;
-          text-overflow: ellipsis !important;
-          min-width: 0 !important;
-          flex: 0 1 auto !important;
-          color: var(--text, #e8e8e8) !important;
-          opacity: 0.95 !important;
-        }
-
-        /* 目标累计运行计时器（显示在播放/暂停按钮左侧） */
-        .pi-enh-goal-pill-timer {
-          display: inline-flex !important;
-          align-items: center !important;
-          flex-shrink: 0 !important;
-          white-space: nowrap !important;
-          font-size: 10.5px !important;
-          line-height: 1 !important;
-          font-variant-numeric: tabular-nums !important;
-          font-family: var(--font-mono, monospace) !important;
-          opacity: 0.82 !important;
-          color: var(--text-muted, #a0a0a0) !important;
-          margin: 0 1px 0 2px !important;
-          letter-spacing: -0.2px !important;
-        }
-        .pi-enh-composer-goal-pill[data-status="paused"] .pi-enh-goal-pill-timer {
-          opacity: 0.65 !important;
-          color: var(--text-dim, #888888) !important;
-        }
-        .pi-enh-composer-goal-pill[data-status="pending"] .pi-enh-goal-pill-timer {
-          color: #f59e0b !important;
-          opacity: 0.9 !important;
-        }
-
-        /* 胶囊内物理嵌入的类似音乐播放器暂停/播放图标按钮 */
-        .pi-enh-composer-goal-btn {
-          display: inline-flex !important;
-          align-items: center !important;
-          justify-content: center !important;
-          width: 18px !important;
-          height: 18px !important;
-          min-width: 18px !important;
-          padding: 0 !important;
-          margin: 0 0 0 2px !important;
-          border-radius: 9px !important;
-          border: 1px solid transparent !important;
-          background: color-mix(in srgb, var(--accent, #a4c2f4) 18%, transparent) !important;
-          color: var(--accent, #a4c2f4) !important;
-          cursor: pointer !important;
-          box-sizing: border-box !important;
-          flex-shrink: 0 !important;
-          line-height: 1 !important;
-          transition: all 0.15s ease !important;
-        }
-        .pi-enh-composer-goal-btn:hover {
-          background: color-mix(in srgb, var(--accent, #a4c2f4) 36%, transparent) !important;
-          border-color: color-mix(in srgb, var(--accent, #a4c2f4) 55%, transparent) !important;
-          color: var(--text, #ffffff) !important;
-        }
-        .pi-enh-composer-goal-btn:focus-visible {
-          outline: 2px solid var(--accent, #a4c2f4) !important;
-          outline-offset: 1px !important;
-        }
-        .pi-enh-composer-goal-btn:disabled {
-          opacity: 0.45 !important;
-          cursor: not-allowed !important;
-        }
-        .pi-enh-composer-goal-btn[aria-busy="true"] {
-          opacity: 0.65 !important;
-          cursor: wait !important;
-        }
-        .pi-enh-composer-goal-btn.pi-enh-goal-btn-resume {
-          background: color-mix(in srgb, var(--accent, #a4c2f4) 22%, transparent) !important;
-          border-color: color-mix(in srgb, var(--accent, #a4c2f4) 50%, transparent) !important;
-          color: var(--accent, #a4c2f4) !important;
-        }
-        .pi-enh-composer-goal-btn.pi-enh-goal-btn-resume:hover {
-          background: color-mix(in srgb, var(--accent, #a4c2f4) 38%, transparent) !important;
-        }
-        .pi-enh-composer-goal-btn.pi-enh-goal-btn-cancel {
-          background: color-mix(in srgb, #f59e0b 22%, transparent) !important;
-          border-color: color-mix(in srgb, #f59e0b 50%, transparent) !important;
-          color: #f59e0b !important;
-        }
-        .pi-enh-composer-goal-btn.pi-enh-goal-btn-cancel:hover {
-          background: color-mix(in srgb, #f59e0b 38%, transparent) !important;
-          border-color: color-mix(in srgb, #f59e0b 70%, transparent) !important;
-        }
-
-        /* 浅色主题自适应 */
-        html[data-theme="light"] .pi-enh-composer-goal-pill {
-          background: color-mix(in srgb, var(--accent, #1d4ed8) 10%, transparent) !important;
-          border-color: color-mix(in srgb, var(--accent, #1d4ed8) 25%, transparent) !important;
-          color: var(--text, #1e293b) !important;
-        }
-        html[data-theme="light"] .pi-enh-composer-goal-pill:hover {
-          background: color-mix(in srgb, var(--accent, #1d4ed8) 18%, transparent) !important;
-        }
-        html[data-theme="light"] .pi-enh-composer-goal-pill[data-status="paused"] {
-          background: color-mix(in srgb, #64748b 12%, transparent) !important;
-          border-color: color-mix(in srgb, #64748b 30%, transparent) !important;
-        }
-        html[data-theme="light"] .pi-enh-composer-goal-pill[data-status="pending"] {
-          background: color-mix(in srgb, #d97706 12%, transparent) !important;
-          border-color: color-mix(in srgb, #d97706 35%, transparent) !important;
-        }
-        html[data-theme="light"] .pi-enh-goal-pill-timer {
-          color: var(--text-muted, #64748b) !important;
-        }
-        html[data-theme="light"] .pi-enh-composer-goal-pill[data-status="paused"] .pi-enh-goal-pill-timer {
-          color: var(--text-dim, #94a3b8) !important;
-        }
-        html[data-theme="light"] .pi-enh-composer-goal-pill[data-status="pending"] .pi-enh-goal-pill-timer {
-          color: #d97706 !important;
-        }
-        html[data-theme="light"] .pi-enh-composer-goal-btn {
-          background: color-mix(in srgb, var(--accent, #1d4ed8) 14%, transparent) !important;
-          color: var(--accent, #1d4ed8) !important;
-        }
-        html[data-theme="light"] .pi-enh-composer-goal-btn:hover {
-          background: color-mix(in srgb, var(--accent, #1d4ed8) 26%, transparent) !important;
-          border-color: color-mix(in srgb, var(--accent, #1d4ed8) 50%, transparent) !important;
-        }
-        html[data-theme="light"] .pi-enh-composer-goal-btn.pi-enh-goal-btn-cancel {
-          background: color-mix(in srgb, #d97706 16%, transparent) !important;
-          border-color: color-mix(in srgb, #d97706 45%, transparent) !important;
-          color: #d97706 !important;
-        }
-
-        /* 左侧目标/计划胶囊徽章（Badge） */
-        .pi-enh-status-goal-badge {
-          display: inline-flex !important;
-          align-items: center !important;
-          gap: 5px !important;
-          max-width: min(65%, 520px) !important;
-          height: 22px !important;
-          padding: 0 8px !important;
-          border-radius: 11px !important;
-          background: color-mix(in srgb, var(--accent, #a4c2f4) 14%, transparent) !important;
-          border: 1px solid color-mix(in srgb, var(--accent, #a4c2f4) 32%, transparent) !important;
-          color: var(--text, #e8e8e8) !important;
-          font-size: 11px !important;
-          font-family: var(--font-mono, monospace) !important;
-          line-height: 1 !important;
-          cursor: pointer !important;
-          user-select: none !important;
-          flex-shrink: 0 !important;
-          box-sizing: border-box !important;
-          transition: background 0.15s ease, border-color 0.15s ease, transform 0.12s ease !important;
-        }
-        .pi-enh-status-goal-badge:hover {
-          background: color-mix(in srgb, var(--accent, #a4c2f4) 22%, transparent) !important;
-          border-color: color-mix(in srgb, var(--accent, #a4c2f4) 52%, transparent) !important;
-          transform: translateY(-1px) !important;
-        }
-        .pi-enh-goal-badge-icon {
-          flex-shrink: 0 !important;
-          font-size: 11px !important;
-          line-height: 1 !important;
-        }
-        .pi-enh-goal-badge-label {
-          flex-shrink: 0 !important;
-          font-weight: 600 !important;
-          color: var(--accent, #a4c2f4) !important;
-        }
-        .pi-enh-goal-badge-text {
-          white-space: nowrap !important;
-          overflow: hidden !important;
-          text-overflow: ellipsis !important;
-          min-width: 0 !important;
-          color: var(--text, #e8e8e8) !important;
-          opacity: 0.92 !important;
-        }
-
-        /* 悬停富文本 Tooltip 卡片（方案 A 浮层） */
-        .pi-enh-goal-tooltip-card {
-          position: fixed !important;
-          z-index: 10000 !important;
-          max-width: min(520px, 86vw) !important;
-          max-height: min(340px, 45dvh) !important;
-          background: color-mix(in srgb, var(--bg-panel, #242424) 94%, var(--bg, #1a1a1a)) !important;
-          backdrop-filter: blur(16px) !important;
-          -webkit-backdrop-filter: blur(16px) !important;
-          border: 1px solid color-mix(in srgb, var(--border, #454545) 80%, var(--accent, #a4c2f4)) !important;
-          border-radius: 8px !important;
-          box-shadow: 0 16px 36px rgba(0, 0, 0, 0.4), 0 2px 8px rgba(0, 0, 0, 0.2) !important;
-          color: var(--text, #e8e8e8) !important;
-          font-size: 12px !important;
-          line-height: 1.55 !important;
-          padding: 10px 14px !important;
-          box-sizing: border-box !important;
-          overflow-y: auto !important;
-          pointer-events: auto !important;
-          opacity: 0;
-          transform: translateY(4px);
-          transition: opacity 0.15s ease-out, transform 0.15s ease-out !important;
-        }
-        .pi-enh-goal-tooltip-card.is-visible {
-          opacity: 1 !important;
-          transform: translateY(0) !important;
-        }
-        .pi-enh-goal-tooltip-header {
-          display: flex !important;
-          align-items: center !important;
-          justify-content: space-between !important;
-          gap: 8px !important;
-          padding-bottom: 6px !important;
-          margin-bottom: 8px !important;
-          border-bottom: 1px solid color-mix(in srgb, var(--border, #454545) 60%, transparent) !important;
-        }
-        .pi-enh-goal-tooltip-title {
-          font-weight: 600 !important;
-          color: var(--accent, #a4c2f4) !important;
-          font-size: 12px !important;
-          display: flex !important;
-          align-items: center !important;
-          gap: 6px !important;
-        }
-        .pi-enh-goal-tooltip-hint {
-          font-size: 10px !important;
-          color: var(--text-dim, #a4a4a4) !important;
-        }
-        .pi-enh-goal-tooltip-body {
-          color: var(--text, #e8e8e8) !important;
-          font-size: 12px !important;
-          line-height: 1.6 !important;
-        }
-        .pi-enh-goal-tooltip-body blockquote {
-          margin: 6px 0 !important;
-          padding: 4px 10px !important;
-          border-left: 3px solid var(--accent, #a4c2f4) !important;
-          background: color-mix(in srgb, var(--accent, #a4c2f4) 8%, transparent) !important;
-          border-radius: 0 4px 4px 0 !important;
-          color: var(--text, #e8e8e8) !important;
-          font-size: 11.5px !important;
-        }
-        .pi-enh-goal-tooltip-body strong {
-          font-weight: 700 !important;
-          color: var(--text, #ffffff) !important;
-        }
-        .pi-enh-goal-tooltip-body code {
-          font-family: var(--font-mono, monospace) !important;
-          font-size: 11px !important;
-          padding: 1px 4px !important;
-          border-radius: 3px !important;
-          background: color-mix(in srgb, var(--text, #fff) 10%, transparent) !important;
-        }
-        .pi-enh-goal-tooltip-body p {
-          margin: 4px 0 !important;
-        }
-      `;
-      document.head.appendChild(style);
-    }
+    if (style) return;
+    style = document.createElement("style");
+    style.id = COMPOSER_MODES_STYLE_ID;
+    style.textContent = `
+      .pi-enh-composer-add-menu {
+        position: fixed !important; left: 0; width: 340px; box-sizing: border-box;
+        max-width: 90vw !important; background: var(--bg-panel, #1e1e20) !important;
+        border: 1px solid var(--border, #3f3f46) !important; border-radius: 12px !important;
+        box-shadow: 0 10px 30px rgba(0,0,0,.4), 0 2px 8px rgba(0,0,0,.2) !important;
+        padding: 6px !important; display: flex !important; flex-direction: column !important;
+        gap: 3px !important; z-index: 10040 !important; user-select: none !important;
+      }
+      html[data-theme="light"] .pi-enh-composer-add-menu,
+      [data-theme="light"] .pi-enh-composer-add-menu {
+        background: var(--bg-panel, #fff) !important; border-color: var(--border, #e4e4e7) !important;
+      }
+      .pi-enh-composer-menu-item {
+        display: flex !important; align-items: center !important; gap: 10px !important;
+        padding: 8px 10px !important; border-radius: 8px !important; background: transparent !important;
+        border: none !important; color: var(--text, #f4f4f5) !important; cursor: pointer !important;
+        text-align: left !important; width: 100% !important; font-size: 13px !important;
+        font-weight: 500 !important; box-sizing: border-box !important;
+      }
+      .pi-enh-composer-menu-item:hover { background: color-mix(in srgb, var(--text, #fff) 8%, transparent) !important; }
+      .pi-enh-composer-menu-item.active { background: color-mix(in srgb, var(--text, #fff) 12%, transparent) !important; }
+      .pi-enh-composer-menu-icon { display: inline-flex !important; align-items: center !important; justify-content: center !important; width: 20px !important; height: 20px !important; flex-shrink: 0 !important; }
+      .pi-enh-composer-menu-label { display: flex !important; align-items: center !important; flex: 1 1 auto !important; min-width: 0 !important; }
+      .pi-enh-composer-menu-title { white-space: nowrap !important; font-size: 13px !important; }
+      .pi-enh-composer-menu-desc { font-size: 12px !important; color: var(--text-dim, #71717a) !important; margin-left: 8px !important; white-space: nowrap !important; overflow: hidden !important; text-overflow: ellipsis !important; }
+      .pi-enh-composer-menu-kbd { margin-left: auto !important; font-size: 11px !important; color: var(--text-dim, #71717a) !important; padding: 2px 5px !important; border-radius: 4px !important; border: 1px solid var(--border, #3f3f46) !important; line-height: 1 !important; flex-shrink: 0 !important; }
+      .pi-enh-composer-menu-check { margin-left: 6px !important; display: flex !important; align-items: center !important; color: #22c55e !important; flex-shrink: 0 !important; }
+      .pi-enh-composer-modes-disabled-notice { display: inline-flex !important; align-items: center !important; gap: 8px !important; padding: 4px 10px !important; margin: 4px 0 !important; border-radius: 6px !important; background: color-mix(in srgb, var(--warning, #f59e0b) 15%, transparent) !important; border: 1px solid color-mix(in srgb, var(--warning, #f59e0b) 40%, transparent) !important; color: var(--text, #f4f4f5) !important; font-size: 12px !important; }
+      .pi-enh-composer-modes-disabled-notice button { background: color-mix(in srgb, var(--warning, #f59e0b) 30%, transparent) !important; border: 1px solid color-mix(in srgb, var(--warning, #f59e0b) 60%, transparent) !important; color: var(--text, #f4f4f5) !important; border-radius: 4px !important; padding: 2px 8px !important; font-size: 11px !important; cursor: pointer !important; }
+      html[data-pi-composer-modes-active="true"] .extension-status-line[aria-label*='"version":1'] .extension-status-text,
+      html[data-pi-composer-modes-active="true"] .extension-status-line[title*='"version":1'] .extension-status-text { visibility: hidden !important; }
+    `;
+    document.head.appendChild(style);
   }
 
   function getSessionComposerMode(sessionId) {
@@ -13084,24 +8174,66 @@
     return composerModesStateMap.get(sessionId)?.mode || "normal";
   }
 
+  function getComposerGoalState(sessionId = getEffectiveComposerSessionId()) {
+    const state = sessionId ? composerModesStateMap.get(sessionId) : null;
+    const goal = state?.mode === "goal" ? String(state.goal || "").trim() : "";
+    if (!sessionId || !goal) return null;
+    const paused = Boolean(state.paused);
+    const pausePending = Boolean(state.pausePending);
+    return {
+      sessionId,
+      mode: "goal",
+      goal: String(state.goal),
+      paused,
+      pausePending,
+      goalElapsedMs: typeof state.goalElapsedMs === "number" ? state.goalElapsedMs : null,
+      goalActiveSinceMs: typeof state.goalActiveSinceMs === "number" ? state.goalActiveSinceMs : null,
+      statusKey: pausePending ? "pending" : paused ? "paused" : "active",
+      action: paused || pausePending ? "resume" : "pause",
+    };
+  }
+
+  function dispatchComposerModeChange(sessionId = getEffectiveComposerSessionId()) {
+    const mode = getSessionComposerMode(sessionId);
+    const stored = sessionId ? composerModesStateMap.get(sessionId) : null;
+    const state = stored ? { ...stored } : null;
+    try {
+      window.dispatchEvent(new CustomEvent("pi-enh-composer-mode-change", {
+        detail: { sessionId: sessionId || null, mode, state, goalState: getComposerGoalState(sessionId) },
+      }));
+    } catch (_) {}
+  }
+
+  window.__PI_ENH_GET_COMPOSER_GOAL_STATE__ = getComposerGoalState;
+
+  function emitComposerAddMenuChange(open) {
+    try {
+      window.dispatchEvent(new CustomEvent("pi-enh-composer-add-menu-change", { detail: { open: Boolean(open) } }));
+    } catch (_) {}
+  }
+
   function closeComposerAddMenu() {
+    const wasOpen = Boolean(composerAddMenuEl);
     if (composerAddMenuEl) {
-      try { composerAddMenuEl.remove(); } catch (e) {}
+      try { composerAddMenuEl.remove(); } catch (_) {}
       composerAddMenuEl = null;
     }
-    if (composerAddMenuContext?.addBtn) {
-      try {
-        composerAddMenuContext.addBtn.classList.remove("active");
-        composerAddMenuContext.addBtn.setAttribute("aria-expanded", "false");
-      } catch (e) {}
-    }
     composerAddMenuContext = null;
-    const addBtns = document.querySelectorAll(".pi-enh-composer-add-btn");
-    addBtns.forEach((btn) => {
-      btn.classList.remove("active");
-      btn.setAttribute("aria-expanded", "false");
-    });
+    if (wasOpen) emitComposerAddMenuChange(false);
   }
+
+  window.__PI_ENH_OPEN_COMPOSER_ADD_MENU__ = (anchor) => {
+    if (!isPluginEnabled("composer-modes") || !anchor || typeof anchor.closest !== "function") return false;
+    if (composerAddMenuEl && composerAddMenuContext?.addBtn === anchor) {
+      closeComposerAddMenu();
+      return false;
+    }
+    const host = anchor.closest("[data-pi-composer-mode-host]");
+    const card = anchor.closest(".pi-enh-cursor-composer") || anchor.closest("fieldset") || host?.closest(".pi-enh-cursor-composer, fieldset");
+    if (!card) return false;
+    openComposerAddMenu(card, anchor);
+    return Boolean(composerAddMenuEl);
+  };
 
   function positionComposerAddMenu() {
     if (!composerAddMenuEl || !composerAddMenuContext) return;
@@ -13200,42 +8332,7 @@
     composerAddMenuEl = menu;
     composerAddMenuContext = { card, addBtn, openWidth: window.innerWidth };
     positionComposerAddMenu();
-    addBtn.classList.add("active");
-    addBtn.setAttribute("aria-expanded", "true");
-  }
-
-  function updateComposerPlaceholder(textarea, mode) {
-    if (textarea) {
-      if (mode === "plan" || mode === "goal") {
-        if (!textarea.hasAttribute("data-original-placeholder")) {
-          const currentPh = typeof getComposerEffectivePlaceholder === "function"
-            ? getComposerEffectivePlaceholder(textarea)
-            : (textarea.placeholder || "");
-          textarea.setAttribute("data-original-placeholder", currentPh);
-        }
-        textarea.placeholder = mode === "plan" ? PLACEHOLDER_PLAN : PLACEHOLDER_GOAL;
-      } else if (textarea.hasAttribute("data-original-placeholder")) {
-        const orig = textarea.getAttribute("data-original-placeholder") || "";
-        textarea.removeAttribute("data-original-placeholder");
-        textarea.placeholder = orig;
-      }
-    }
-
-    // 同时同步富文本编辑器 contenteditable 的 placeholder
-    const formatted = document.querySelector(".pi-enh-formatted-composer");
-    if (formatted) {
-      if (mode === "plan" || mode === "goal") {
-        if (!formatted.hasAttribute("data-original-placeholder")) {
-          const origFmt = formatted.getAttribute("data-placeholder") || formatted.getAttribute("placeholder") || formatted.getAttribute("data-pi-orig-placeholder") || "";
-          formatted.setAttribute("data-original-placeholder", origFmt);
-        }
-        formatted.setAttribute("data-placeholder", mode === "plan" ? PLACEHOLDER_PLAN : PLACEHOLDER_GOAL);
-      } else if (formatted.hasAttribute("data-original-placeholder")) {
-        const orig = formatted.getAttribute("data-original-placeholder") || "";
-        formatted.removeAttribute("data-original-placeholder");
-        formatted.setAttribute("data-placeholder", orig);
-      }
-    }
+    emitComposerAddMenuChange(true);
   }
 
   async function requestSwitchComposerMode(targetMode, targetSessionId) {
@@ -13244,7 +8341,7 @@
     if (!sessionId) {
       pendingNewComposerMode = targetMode === "normal" ? null : {mode: targetMode, project: getCurrentProjectStatusKey()};
       syncComposerModes();
-      findComposerTextarea()?.closest("fieldset")?.querySelector(".pi-enh-formatted-composer")?.focus();
+      findComposerTextarea()?.focus();
       return true;
     }
 
@@ -13381,13 +8478,7 @@
       }
 
       const textarea = findComposerTextarea();
-      const formatted = document.querySelector(".pi-enh-formatted-composer");
-
-      // 仅在当前焦点确为编辑器（textarea 或 contenteditable 格式化编辑器）时生效
-      const isEditorFocused = Boolean(
-        (textarea && (activeEl === textarea || textarea.contains(activeEl))) ||
-        (formatted && (activeEl === formatted || formatted.contains(activeEl)))
-      );
+      const isEditorFocused = Boolean(textarea && (activeEl === textarea || textarea.contains(activeEl)));
 
       if (isEditorFocused) {
         // 先消费事件，防止默认焦点跳动
@@ -13514,11 +8605,6 @@
     return blocks;
   }
 
-  const SVG_STATUS_GOAL_ICON = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;"><circle cx="12" cy="12" r="10"></circle><circle cx="12" cy="12" r="6"></circle><circle cx="12" cy="12" r="2"></circle></svg>`;
-  const SVG_STATUS_PLAN_ICON = `<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="flex-shrink:0;"><path d="M16 4h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2"></path><rect x="8" y="2" width="8" height="4" rx="1" ry="1"></rect></svg>`;
-  const SVG_GOAL_PAUSE_ICON = `<svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor" class="pi-enh-goal-icon-pause" aria-hidden="true"><rect x="3" y="2.5" width="3.5" height="11" rx="1.2"></rect><rect x="9.5" y="2.5" width="3.5" height="11" rx="1.2"></rect></svg>`;
-  const SVG_GOAL_PLAY_ICON = `<svg width="10" height="10" viewBox="0 0 16 16" fill="currentColor" class="pi-enh-goal-icon-play" aria-hidden="true"><path d="M4.5 2.8c0-.6.7-1 1.2-.7l8 4.7c.5.3.5 1.1 0 1.4l-8 4.7c-.5.3-1.2-.1-1.2-.7V2.8z"></path></svg>`;
-
   function sanitizeGoalInlineText(text) {
     if (!text || typeof text !== "string") return "";
     let s = text.trim();
@@ -13544,129 +8630,6 @@
     // 7. 合并多余空白
     s = s.replace(/\s{2,}/g, " ");
     return s.trim();
-  }
-
-  function escapeGoalHtml(str) {
-    if (!str || typeof str !== "string") return "";
-    return str
-      .replace(/&/g, "&amp;")
-      .replace(/</g, "&lt;")
-      .replace(/>/g, "&gt;")
-      .replace(/"/g, "&quot;")
-      .replace(/'/g, "&#39;");
-  }
-
-  function renderGoalMarkdownHtml(rawText) {
-    if (!rawText || typeof rawText !== "string") return "";
-    const normalized = rawText.replace(/\\n/g, "\n");
-    const lines = normalized.split(/\r?\n/);
-    const htmlBlocks = [];
-    let currentQuoteLines = [];
-
-    function flushQuote() {
-      if (!currentQuoteLines.length) return;
-      const quoteContent = currentQuoteLines.map(line => formatInlineMd(line)).join("<br>");
-      htmlBlocks.push(`<blockquote>${quoteContent}</blockquote>`);
-      currentQuoteLines = [];
-    }
-
-    function formatInlineMd(line) {
-      let escaped = escapeGoalHtml(line);
-      escaped = escaped.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
-      escaped = escaped.replace(/`([^`]+)`/g, "<code>$1</code>");
-      return escaped;
-    }
-
-    for (let i = 0; i < lines.length; i++) {
-      const line = lines[i];
-      const trimmed = line.trim();
-      if (!trimmed) {
-        flushQuote();
-        continue;
-      }
-      if (/^[ \t]*&gt;|^[ \t]*>/.test(line)) {
-        const quoteText = line.replace(/^[ \t]*&gt;[ \t]?|^[ \t]*>[ \t]?/, "");
-        currentQuoteLines.push(quoteText);
-      } else {
-        flushQuote();
-        htmlBlocks.push(`<p>${formatInlineMd(line)}</p>`);
-      }
-    }
-    flushQuote();
-    return htmlBlocks.join("");
-  }
-
-  let activeGoalTooltipEl = null;
-  let goalTooltipHideTimer = null;
-
-  function showGoalTooltip(anchorEl, goalRawText, title = "当前目标 (Goal)") {
-    if (goalTooltipHideTimer) {
-      clearTimeout(goalTooltipHideTimer);
-      goalTooltipHideTimer = null;
-    }
-    if (!anchorEl || !anchorEl.isConnected || !goalRawText) return;
-
-    if (!activeGoalTooltipEl) {
-      activeGoalTooltipEl = document.createElement("div");
-      activeGoalTooltipEl.className = "pi-enh-goal-tooltip-card";
-      activeGoalTooltipEl.addEventListener("mouseenter", () => {
-        if (goalTooltipHideTimer) {
-          clearTimeout(goalTooltipHideTimer);
-          goalTooltipHideTimer = null;
-        }
-      });
-      activeGoalTooltipEl.addEventListener("mouseleave", () => {
-        scheduleHideGoalTooltip();
-      });
-      document.body.appendChild(activeGoalTooltipEl);
-    }
-
-    const renderedHtml = renderGoalMarkdownHtml(goalRawText);
-    activeGoalTooltipEl.innerHTML = `
-      <div class="pi-enh-goal-tooltip-header">
-        <span class="pi-enh-goal-tooltip-title">${SVG_STATUS_GOAL_ICON} ${escapeGoalHtml(title)}</span>
-        <span class="pi-enh-goal-tooltip-hint">悬停查看详情</span>
-      </div>
-      <div class="pi-enh-goal-tooltip-body">
-        ${renderedHtml}
-      </div>
-    `;
-
-    const rect = anchorEl.getBoundingClientRect();
-    const tooltipWidth = Math.min(520, window.innerWidth - 24);
-    let left = rect.left;
-    if (left + tooltipWidth > window.innerWidth - 12) {
-      left = Math.max(12, window.innerWidth - 12 - tooltipWidth);
-    }
-    left = Math.max(12, left);
-
-    activeGoalTooltipEl.style.width = `${tooltipWidth}px`;
-    activeGoalTooltipEl.style.left = `${left}px`;
-    const tooltipHeight = activeGoalTooltipEl.offsetHeight || 160;
-    let top = rect.top - tooltipHeight - 6;
-    if (top < 10) {
-      top = rect.bottom + 6;
-    }
-    activeGoalTooltipEl.style.top = `${top}px`;
-    activeGoalTooltipEl.classList.add("is-visible");
-  }
-
-  function scheduleHideGoalTooltip(delayMs = 180) {
-    if (goalTooltipHideTimer) clearTimeout(goalTooltipHideTimer);
-    goalTooltipHideTimer = setTimeout(() => {
-      hideGoalTooltip();
-    }, delayMs);
-  }
-
-  function hideGoalTooltip() {
-    if (goalTooltipHideTimer) {
-      clearTimeout(goalTooltipHideTimer);
-      goalTooltipHideTimer = null;
-    }
-    if (activeGoalTooltipEl) {
-      try { activeGoalTooltipEl.remove(); } catch (e) {}
-      activeGoalTooltipEl = null;
-    }
   }
 
   function cleanupStatusText(text) {
@@ -13741,44 +8704,10 @@
     return cleanupStatusText(result);
   }
 
-  // ==========================================
-  // 3.55.3.1.5 输入框正上方独立目标管理横条与暂停/继续控制
-  // ==========================================
-  let goalTimerInterval = null;
-  let goalTimerAnchor = null; // { baseMs: number, startPerf: number, sessionId: string }
-
-  function formatGoalDuration(totalMs) {
-    const totalSeconds = Math.max(0, Math.floor(totalMs / 1000));
-    const hours = Math.floor(totalSeconds / 3600);
-    const minutes = Math.floor((totalSeconds % 3600) / 60);
-    const seconds = totalSeconds % 60;
-    const pad = (n) => (n < 10 ? "0" + n : String(n));
-    if (hours > 0) {
-      return `${hours}:${pad(minutes)}:${pad(seconds)}`;
-    }
-    return `${pad(minutes)}:${pad(seconds)}`;
-  }
-
-  function clearGoalTimer() {
-    if (goalTimerInterval) {
-      clearInterval(goalTimerInterval);
-      goalTimerInterval = null;
-    }
-    goalTimerAnchor = null;
-  }
+  function clearGoalTimer() {}
 
   function removeComposerGoalBar() {
-    clearGoalTimer();
-    hideGoalTooltip();
-    if (composerGoalBarEl) {
-      try { composerGoalBarEl.remove(); } catch (e) {}
-      composerGoalBarEl = null;
-    }
-    if (typeof document !== "undefined" && typeof document.querySelectorAll === "function") {
-      document.querySelectorAll(".pi-enh-composer-goal-bar").forEach((el) => {
-        try { el.remove(); } catch (e) {}
-      });
-    }
+    dispatchComposerModeChange();
   }
 
   async function handleComposerGoalAction(action, targetSessionId, btnEl) {
@@ -13787,10 +8716,6 @@
     if (!sid) return;
 
     isGoalActionRunning = true;
-    if (btnEl) {
-      btnEl.disabled = true;
-      btnEl.setAttribute("aria-busy", "true");
-    }
 
     try {
       // 0. 检查后端扩展命令是否已注册，防止旧会话尚未加载扩展时将 /composer-goal 当作普通用户消息发给模型
@@ -13894,196 +8819,11 @@
       return false;
     } finally {
       isGoalActionRunning = false;
-      if (btnEl && btnEl.isConnected) {
-        btnEl.disabled = false;
-        btnEl.removeAttribute("aria-busy");
-      }
     }
   }
 
   function syncComposerGoalBar() {
-    if (!isPluginEnabled("composer-modes")) {
-      clearGoalTimer();
-      removeComposerGoalBar();
-      return;
-    }
-
-    const sessionId = typeof getEffectiveComposerSessionId === "function" ? getEffectiveComposerSessionId() : getCurrentSessionId();
-    const sessionState = sessionId ? composerModesStateMap.get(sessionId) : null;
-    const isGoalMode = sessionState?.mode === "goal";
-    const rawGoal = (isGoalMode && sessionState?.goal) ? String(sessionState.goal).trim() : "";
-
-    if (!isGoalMode || !rawGoal) {
-      clearGoalTimer();
-      removeComposerGoalBar();
-      return;
-    }
-
-    const textarea = findComposerTextarea();
-    const card = textarea?.closest('fieldset > div[style*="max-width"]');
-    if (!card || !card.parentElement) {
-      clearGoalTimer();
-      removeComposerGoalBar();
-      return;
-    }
-
-    const isPaused = Boolean(sessionState?.paused);
-    const isPending = Boolean(sessionState?.pausePending);
-    const statusKey = isPaused ? "paused" : (isPending ? "pending" : "active");
-    const cleanGoal = sanitizeGoalInlineText(rawGoal);
-
-    let bar = composerGoalBarEl;
-    const isConnectedAtCorrectPos = Boolean(
-      bar?.isConnected && bar.parentElement === card.parentElement && bar.nextElementSibling === card
-    );
-    if (!isConnectedAtCorrectPos) {
-      clearGoalTimer();
-      removeComposerGoalBar();
-      bar = document.createElement("div");
-      bar.className = "pi-enh-composer-goal-bar";
-      bar.setAttribute("role", "region");
-      bar.setAttribute("aria-label", "当前目标管理");
-      card.parentElement.insertBefore(bar, card);
-      composerGoalBarEl = bar;
-    }
-
-    const hasTiming = typeof sessionState?.goalElapsedMs === "number";
-    const elapsedBase = hasTiming ? sessionState.goalElapsedMs : 0;
-    const activeSince = typeof sessionState?.goalActiveSinceMs === "number" ? sessionState.goalActiveSinceMs : null;
-
-    // 签名包含关键静态状态字段，不包含每秒累加的瞬时秒数，防止每秒重建 DOM 导致焦点跳动
-    const barSignature = `${sessionId}|${rawGoal}|${statusKey}|${hasTiming ? 1 : 0}|${elapsedBase}|${activeSince ?? ""}`;
-    const signatureChanged = bar.dataset.renderSignature !== barSignature;
-
-    if (signatureChanged) {
-      bar.dataset.renderSignature = barSignature;
-      bar.dataset.sessionId = sessionId;
-
-      let statusLabel = "目标:";
-      let tooltipTitle = "当前目标 (推进中)";
-      let actionType = "pause";
-      let actionBtnClass = "pi-enh-goal-btn-pause";
-      let actionIconSvg = SVG_GOAL_PAUSE_ICON;
-      let actionBtnTitle = "当前任务完成后暂停目标";
-      let actionBtnLabel = "当前任务完成后暂停目标";
-
-      if (isPaused) {
-        statusLabel = "目标 (已暂停):";
-        tooltipTitle = "当前目标 (已暂停)";
-        actionType = "resume";
-        actionBtnClass = "pi-enh-goal-btn-resume";
-        actionIconSvg = SVG_GOAL_PLAY_ICON;
-        actionBtnTitle = "继续目标";
-        actionBtnLabel = "继续目标";
-      } else if (isPending) {
-        statusLabel = "目标 (等待暂停):";
-        tooltipTitle = "当前目标 (等待当前任务完成后暂停)";
-        actionType = "resume";
-        actionBtnClass = "pi-enh-goal-btn-cancel";
-        actionIconSvg = SVG_GOAL_PLAY_ICON;
-        actionBtnTitle = "取消待暂停";
-        actionBtnLabel = "取消待暂停";
-      }
-
-      let initialDurationMs = elapsedBase;
-      if (hasTiming && !isPaused && activeSince !== null) {
-        initialDurationMs += Math.max(0, Date.now() - activeSince);
-      }
-
-      const timerHtml = hasTiming
-        ? `<span class="pi-enh-goal-pill-timer" aria-label="目标累计运行时间" title="目标累计运行时间">${formatGoalDuration(initialDurationMs)}</span>`
-        : "";
-
-      bar.innerHTML = `
-        <div class="pi-enh-composer-goal-pill" data-status="${statusKey}" tabindex="0" role="status" aria-label="${escapeGoalHtml(tooltipTitle)}: ${escapeGoalHtml(cleanGoal)}">
-          <span class="pi-enh-goal-pill-icon">${SVG_STATUS_GOAL_ICON}</span>
-          <span class="pi-enh-goal-pill-status">${escapeGoalHtml(statusLabel)}</span>
-          <span class="pi-enh-goal-pill-text">${escapeGoalHtml(cleanGoal)}</span>
-          ${timerHtml}
-          <button type="button" class="pi-enh-composer-goal-btn ${actionBtnClass}" aria-label="${escapeGoalHtml(actionBtnLabel)}" title="${escapeGoalHtml(actionBtnTitle)}">
-            ${actionIconSvg}
-          </button>
-        </div>
-      `;
-
-      const pillEl = bar.querySelector(".pi-enh-composer-goal-pill");
-      if (pillEl) {
-        pillEl.onmouseenter = () => {
-          showGoalTooltip(pillEl, rawGoal, tooltipTitle);
-        };
-        pillEl.onmouseleave = () => {
-          scheduleHideGoalTooltip();
-        };
-        pillEl.onclick = (e) => {
-          if (e.target && e.target.closest(".pi-enh-composer-goal-btn")) return;
-          showGoalTooltip(pillEl, rawGoal, tooltipTitle);
-        };
-      }
-
-      const btnEl = bar.querySelector(".pi-enh-composer-goal-btn");
-      if (btnEl) {
-        btnEl.addEventListener("click", (e) => {
-          e.preventDefault();
-          e.stopPropagation();
-          void handleComposerGoalAction(actionType, sessionId, btnEl);
-        });
-      }
-
-      // 状态变动时重新锚定单调计时器基线
-      if (hasTiming && !isPaused && activeSince !== null) {
-        const startPerf = typeof performance !== "undefined" && typeof performance.now === "function" ? performance.now() : Date.now();
-        goalTimerAnchor = {
-          baseMs: initialDurationMs,
-          startPerf,
-          sessionId,
-        };
-      }
-    }
-
-    // 维持/刷新单调计时器
-    const isTimerRunning = hasTiming && !isPaused && activeSince !== null;
-    if (isTimerRunning) {
-      if (!goalTimerAnchor || goalTimerAnchor.sessionId !== sessionId) {
-        const initialDurationMs = elapsedBase + Math.max(0, Date.now() - activeSince);
-        const startPerf = typeof performance !== "undefined" && typeof performance.now === "function" ? performance.now() : Date.now();
-        goalTimerAnchor = {
-          baseMs: initialDurationMs,
-          startPerf,
-          sessionId,
-        };
-      }
-
-      if (!goalTimerInterval) {
-        goalTimerInterval = setInterval(() => {
-          if (!goalTimerAnchor) {
-            clearGoalTimer();
-            return;
-          }
-          const currentEffectiveSid = typeof getEffectiveComposerSessionId === "function" ? getEffectiveComposerSessionId() : getCurrentSessionId();
-          if (!currentEffectiveSid || currentEffectiveSid !== goalTimerAnchor.sessionId) {
-            clearGoalTimer();
-            removeComposerGoalBar();
-            return;
-          }
-          const timerSpan = composerGoalBarEl?.querySelector(".pi-enh-goal-pill-timer");
-          if (!timerSpan || !timerSpan.isConnected) {
-            clearGoalTimer();
-            return;
-          }
-          const curPerf = typeof performance !== "undefined" && typeof performance.now === "function" ? performance.now() : Date.now();
-          const deltaMs = Math.max(0, curPerf - goalTimerAnchor.startPerf);
-          timerSpan.textContent = formatGoalDuration(goalTimerAnchor.baseMs + deltaMs);
-        }, 1000);
-      }
-    } else {
-      clearGoalTimer();
-      if (hasTiming) {
-        const timerSpan = bar.querySelector(".pi-enh-goal-pill-timer");
-        if (timerSpan) {
-          timerSpan.textContent = formatGoalDuration(elapsedBase);
-        }
-      }
-    }
+    dispatchComposerModeChange();
   }
 
   let isCleaningComposerModesStatus = false;
@@ -14304,7 +9044,6 @@
   }
 
   function restoreComposerModesBottomStatus() {
-    hideGoalTooltip();
     if (typeof document !== "undefined" && typeof document.querySelectorAll === "function") {
       document.querySelectorAll(".pi-enh-status-goal-badge").forEach(el => {
         try { el.remove(); } catch (e) {}
@@ -14507,17 +9246,9 @@
       }
     }
 
-    const addBtn = e.target.closest?.(".pi-enh-composer-add-btn");
-    if (addBtn && isPluginEnabled("composer-modes")) {
-      const card = addBtn.closest(".pi-enh-cursor-composer") || addBtn.closest("fieldset > div");
-      if (!card) return;
-      e.preventDefault();
-      e.stopPropagation();
-      if (composerAddMenuEl) closeComposerAddMenu();
-      else openComposerAddMenu(card, addBtn);
-      return;
-    }
-    if (composerAddMenuEl && !composerAddMenuEl.contains(e.target) && !e.target.closest(".pi-enh-composer-add-btn")) {
+    const anchor = composerAddMenuContext?.addBtn;
+    const targetInsideAnchor = Boolean(anchor && (anchor === e.target || anchor.contains?.(e.target)));
+    if (composerAddMenuEl && !composerAddMenuEl.contains(e.target) && !targetInsideAnchor) {
       closeComposerAddMenu();
     }
   }
@@ -14565,126 +9296,30 @@
 
   function syncComposerModes() {
     const observedId = getEffectiveComposerSessionId();
-    if (observedId !== lastObservedModesSessionId) {
+    const sessionChanged = observedId !== lastObservedModesSessionId;
+    if (sessionChanged) {
       lastObservedModesSessionId = observedId;
       closeComposerAddMenu();
       if (pendingNewComposerMode?.sessionId && pendingNewComposerMode.sessionId !== observedId) pendingNewComposerMode = null;
-      syncComposerGoalBar();
       if (observedId) void querySessionModeState(observedId);
     }
+
     if (!isPluginEnabled("composer-modes")) {
       removeComposerModes();
+      dispatchComposerModeChange(observedId);
       return;
     }
 
     ensureComposerModesStyle();
     ensureComposerModesStatusObserver();
     bindComposerModesEvents();
-    document.querySelectorAll(".pi-enh-composer-modes-disabled-notice").forEach(el => el.remove());
-
-    const textarea = findComposerTextarea();
-    if (!textarea) {
-      syncComposerGoalBar();
-      return;
-    }
-    const card = textarea.closest(".pi-enh-cursor-composer") || textarea.closest("fieldset > div") || textarea.parentElement?.parentElement;
-    if (!card) {
-      syncComposerGoalBar();
-      return;
-    }
-
-    if (card.style && getComputedStyle(card).position === "static") {
-      card.style.position = "relative";
-    }
-
-    let leftContainer = card.querySelector(".pi-enh-cursor-left");
-    if (!leftContainer) {
-      const toolbar = Array.from(card.children).find((n) => n.style?.marginTop || n.classList?.contains("pi-enh-cursor-contents"));
-      leftContainer = toolbar?.firstElementChild || card.querySelector("div[style*='margin-top'] > div:first-child");
-    }
-    if (!leftContainer) return;
-
-    const sessionId = getEffectiveComposerSessionId();
+    document.querySelectorAll(".pi-enh-composer-modes-disabled-notice").forEach((el) => el.remove());
     if (pendingNewComposerMode && pendingNewComposerMode.project !== getCurrentProjectStatusKey()) pendingNewComposerMode = null;
-
-    const currentMode = getSessionComposerMode(sessionId);
-
-    // 1. 加号按钮挂载（复用已有加号按钮，绝不出现两个加号）
-    let addBtn = leftContainer.querySelector(".pi-enh-composer-add-btn");
-    if (!addBtn) {
-      // Own only our button; do not attach duplicate listeners to React-owned upload buttons.
-      {
-        addBtn = document.createElement("button");
-        addBtn.type = "button";
-        addBtn.className = "pi-enh-composer-add-btn";
-        addBtn.dataset.piEnhModeOwned = "true";
-        addBtn.title = "添加或切换模式";
-        addBtn.setAttribute("aria-label", "添加或切换模式");
-        addBtn.innerHTML = SVG_ADD_ICON;
-        leftContainer.insertBefore(addBtn, leftContainer.firstChild);
-      }
-      // Click delegation also covers the native React-owned + button and remounts.
-    }
-
-    // 2. 底栏模式指示器挂载（避免每次 sync 重写 innerHTML 造成 MutationObserver 忙循环）
-    let indicator = leftContainer.querySelector(".pi-enh-composer-mode-indicator");
-    if (currentMode === "plan" || currentMode === "goal") {
-      if (!indicator) {
-        indicator = document.createElement("div");
-        indicator.className = "pi-enh-composer-mode-indicator";
-        if (addBtn && addBtn.nextSibling) {
-          leftContainer.insertBefore(indicator, addBtn.nextSibling);
-        } else {
-          leftContainer.appendChild(indicator);
-        }
-      }
-      // 只有模式改变时才重写 innerHTML 与绑定事件，避免 DOM 忙循环
-      if (indicator.dataset.activeMode !== currentMode) {
-        indicator.dataset.activeMode = currentMode;
-        const text = currentMode === "plan" ? "计划" : "目标";
-        const icon = currentMode === "plan" ? SVG_PLAN_ICON : SVG_GOAL_ICON;
-        indicator.innerHTML = `
-          <span class="pi-enh-composer-mode-sep"></span>
-          <button type="button" class="pi-enh-composer-mode-badge" tabindex="0" title="点击退出当前${text}模式" aria-label="当前处于${text}模式，点击或按回车退出模式">
-            <span class="pi-enh-composer-mode-default-icon">${icon}</span>
-            ${SVG_CLOSE_CIRCLE_ICON}
-            <span class="pi-enh-composer-mode-text">${text}</span>
-          </button>
-        `;
-        const badgeBtn = indicator.querySelector(".pi-enh-composer-mode-badge");
-        if (badgeBtn) {
-          badgeBtn.addEventListener("click", (e) => {
-            e.stopPropagation();
-            void requestSwitchComposerMode("normal");
-          });
-          badgeBtn.addEventListener("keydown", (e) => {
-            if (e.key === "Enter" || e.key === " ") {
-              e.preventDefault();
-              e.stopPropagation();
-              void requestSwitchComposerMode("normal");
-            }
-          });
-        }
-      }
-      indicator.style.display = "inline-flex";
-    } else {
-      if (indicator) {
-        indicator.remove();
-      }
-    }
-
-    // 3. 更新 Placeholder（同步 textarea 与 formatted contenteditable）
-    updateComposerPlaceholder(textarea, currentMode);
-
-    // 4. 绑定托管键盘与点击事件
-    bindComposerModesEvents();
-
-    // 5. 原生底栏状态清洗（隐藏或人性化本模式 JSON，保留其他扩展状态）
     syncComposerModesBottomStatus();
-
-    // 6. 输入框上方独立目标管理胶囊横条同步
-    syncComposerGoalBar();
+    dispatchComposerModeChange(observedId);
   }
+
+  addManagedListener(window, "pi-native-composer-preferences-change", syncComposerModes);
 
   async function requestExitModeWithVerification(sessionId) {
     if (!sessionId) return false;
@@ -14707,6 +9342,7 @@
     const realMode = parsed?.mode;
     if (stateRes?.ok && postData?.success !== false && parsed?.version === 1 && realMode === "normal") {
       composerModesStateMap.set(sessionId, { mode: "normal" });
+      dispatchComposerModeChange(sessionId);
       document.querySelectorAll(".pi-enh-composer-modes-disabled-notice").forEach((el) => {
         try { el.remove(); } catch (e) {}
       });
@@ -14723,16 +9359,7 @@
       document.documentElement.removeAttribute("data-pi-composer-modes-active");
     }
     closeComposerAddMenu();
-    document.querySelectorAll('.pi-enh-composer-add-btn[data-pi-enh-mode-owned="true"]').forEach((el) => {
-      try { el.remove(); } catch (e) {}
-    });
-    document.querySelectorAll(".pi-enh-composer-mode-indicator").forEach((el) => {
-      try { el.remove(); } catch (e) {}
-    });
     const textarea = findComposerTextarea();
-    if (textarea) {
-      updateComposerPlaceholder(textarea, "normal");
-    }
     unbindComposerModesEvents();
     restoreComposerModesBottomStatus();
     removeComposerGoalBar();
@@ -14771,6 +9398,7 @@
         try { style.remove(); } catch (e) {}
       }
     }
+    dispatchComposerModeChange(currentSessionId);
   }
 
   function handleComposerModesDisabled() {
@@ -14889,7 +9517,7 @@
       categoryLabel: "🧩 插件与技能",
       title: "synology-docker-ops",
       badge: "NAS",
-      subtitle: "群晖 127.0.0.1 NAS 容器与存储安全运维",
+      subtitle: "群晖 10.0.0.2 NAS 容器与存储安全运维",
       insertText: "@synology-docker-ops ",
       icon: '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#2dd4bf" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 13h-4a2 2 0 0 0-2 2v4a2 2 0 0 0 2 2h4"></path><path d="M2 13h4a2 2 0 0 1 2 2v4a2 2 0 0 1-2 2H2"></path><path d="M20 21a8 8 0 0 0-16 0"></path><rect x="9" y="3" width="6" height="6" rx="1"></rect></svg>',
       keywords: ["synology-docker-ops", "synology", "nas", "群晖", "docker", "容器"],
@@ -15222,15 +9850,8 @@
 
     requestAnimationFrame(() => {
       try {
-        const formatted = document.querySelector(".pi-enh-formatted-composer");
-        if (formatted && formatted.offsetParent !== null && window.getComputedStyle(formatted).display !== "none") {
-          formatted.focus();
-        } else {
-          textarea.focus();
-          textarea.setSelectionRange(newCursor, newCursor);
-          textarea.style.height = "auto";
-          textarea.style.height = `${Math.min(textarea.scrollHeight, 200)}px`;
-        }
+        textarea.focus();
+        textarea.setSelectionRange(newCursor, newCursor);
       } catch (e) {}
     });
   }
@@ -15488,33 +10109,6 @@
       }, 200);
     });
 
-    // 支持同容器下的 formattedComposer
-    const container = textarea.parentElement;
-    const formatted = container?.querySelector?.(".pi-enh-formatted-composer");
-    if (formatted && !formatted.__piAtMentionBound) {
-      formatted.__piAtMentionBound = true;
-      formatted.addEventListener("input", () => {
-        checkAndHandleTextareaInput(textarea);
-      });
-      formatted.addEventListener("keydown", (e) => {
-        handleAtMentionKeyDown(e);
-      }, true);
-      formatted.addEventListener("click", () => {
-        checkAndHandleTextareaInput(textarea);
-      });
-      formatted.addEventListener("keyup", (e) => {
-        if (e.key === "ArrowLeft" || e.key === "ArrowRight" || e.key === "Home" || e.key === "End") {
-          checkAndHandleTextareaInput(textarea);
-        }
-      });
-      formatted.addEventListener("blur", () => {
-        setTimeout(() => {
-          if (atMentionMenuEl && !atMentionMenuEl.contains(document.activeElement)) {
-            closeAtMentionMenu();
-          }
-        }, 200);
-      });
-    }
   }
 
   function syncAtMentionPluginsFeature() {
@@ -15853,18 +10447,12 @@
   }
 
   function isFilePanelOpen() {
-    const panel = document.getElementById("file-panel");
-    if (panel) {
-      if (panel.classList.contains("right-panel-open")) return true;
-      if (panel.classList.contains("right-panel-closed")) return false;
-    }
-    const toggleBtn = document.querySelector('button[aria-controls="file-panel"]');
-    if (toggleBtn) {
-      const expanded = toggleBtn.getAttribute("aria-expanded");
-      if (expanded === "true") return true;
-      if (expanded === "false") return false;
-    }
-    return false;
+    const panel = getFilePanelElement();
+    if (!panel) return false;
+    if (panel.classList.contains("right-panel-open")) return true;
+    if (panel.classList.contains("right-panel-closed")) return false;
+    const rect = typeof panel.getBoundingClientRect === "function" ? panel.getBoundingClientRect() : null;
+    return Boolean(rect && rect.width > 0 && rect.right > 0);
   }
 
   function openFilePanel() {
@@ -15882,21 +10470,12 @@
 
   function closeFilePanel() {
     if (!isFilePanelOpen()) return true;
-    const closeBtn = document.querySelector('#file-panel button[aria-controls="file-panel"]')
-      || document.querySelector('button[aria-controls="file-panel"][aria-expanded="true"]')
-      || document.querySelector('button[aria-controls="file-panel"]');
-    if (closeBtn) {
-      try {
-        closeBtn.click();
-        return true;
-      } catch (e) {}
-    }
-    const backdrop = document.querySelector('.right-panel-overlay-backdrop.is-open');
-    if (backdrop) {
-      try {
-        backdrop.click();
-        return true;
-      } catch (e) {}
+    const hideBtn = document.querySelector('button[title="隐藏文件面板"], button[aria-label="隐藏文件面板"], button[aria-controls="file-panel"][title*="隐藏"], button[aria-controls="file-panel"][aria-label*="隐藏"]') ||
+                    document.querySelector('#file-panel button[aria-controls="file-panel"]') ||
+                    document.querySelector('button[aria-controls="file-panel"]');
+    if (hideBtn && typeof hideBtn.click === "function") {
+      hideBtn.click();
+      return true;
     }
     return false;
   }
@@ -16292,51 +10871,13 @@
   }
 
   function isChatComposerTextarea(el) {
-    if (!el) return false;
-    if (el.classList?.contains("agents-system-prompt")) return false;
-    if (el.tagName === "TEXTAREA" || el.classList?.contains("chat-input-textarea") || el.classList?.contains("pi-enh-cursor-editor")) return true;
-    if (el.classList?.contains("pi-enh-formatted-composer") || el.getAttribute("contenteditable") === "true") return true;
-    if (el.closest?.(".pi-enh-cursor-composer, fieldset, .chat-input-container, [data-chat-input-wrap]")) {
-      const tag = (el.tagName || "").toUpperCase();
-      if (tag === "TEXTAREA" || el.isContentEditable || el.getAttribute("contenteditable") === "true") {
-        return true;
-      }
-    }
-    return false;
+    if (!el || el.classList?.contains("agents-system-prompt")) return false;
+    const nativeTextarea = findComposerTextarea();
+    return Boolean(nativeTextarea && el === nativeTextarea && el.tagName === "TEXTAREA");
   }
 
   function insertMobileNewlineAtTarget(target) {
-    if (!target) return;
-    const isFormatted = target.classList?.contains("pi-enh-formatted-composer") || target.getAttribute("contenteditable") === "true";
-    if (isFormatted) {
-      const textarea = findComposerTextarea();
-      const fakeEvent = { preventDefault() {}, stopPropagation() {}, isComposing: false };
-      const handled = handleComposerFormatShiftEnter(fakeEvent, target, textarea);
-      if (!handled) {
-        const sel = window.getSelection();
-        if (sel && sel.rangeCount) {
-          const range = sel.getRangeAt(0);
-          const br = document.createElement("br");
-          const textNode = document.createTextNode("\u200B");
-          range.deleteContents();
-          range.insertNode(br);
-          if (br.nextSibling) {
-            br.parentElement?.insertBefore(textNode, br.nextSibling);
-          } else {
-            br.parentElement?.appendChild(textNode);
-          }
-          setCursorToNode(textNode, 1, sel);
-          if (textarea) syncFormattedComposerChange(target, textarea);
-        }
-      }
-      try {
-        if (target.scrollHeight > target.clientHeight) {
-          target.scrollTop = target.scrollHeight;
-        }
-      } catch (e) {}
-      return;
-    }
-
+    if (!isChatComposerTextarea(target)) return;
     insertMobileNewlineAtCursor(target);
   }
 
@@ -16391,15 +10932,7 @@
       }
     }
 
-    // 及时调整输入框高度与滚动
-    try {
-      textarea.style.height = "auto";
-      const nextHeight = Math.min(Math.max(textarea.scrollHeight || 0, 40), 200);
-      textarea.style.height = `${nextHeight}px`;
-      if (textarea.scrollHeight > textarea.clientHeight) {
-        textarea.scrollTop = textarea.scrollHeight;
-      }
-    } catch (e) {}
+    // Native React owns textarea height and scroll layout.
   }
 
   function triggerDesktopComposerSend(target) {
@@ -16407,10 +10940,6 @@
     if (!textarea) return false;
 
     // 如果处于富文本模式，先同步内容到底层 textarea
-    if (activeFormattedComposer && activeFormattedComposer.__boundTextarea === textarea && activeFormattedComposer.style.display !== "none") {
-      const md = extractMarkdownFromFormattedComposer(activeFormattedComposer);
-      setComposerTextareaValue(textarea, md, { focus: false });
-    }
 
     const assembledAttachments = pendingComposerAttachments.length > 0
       ? assembleComposerAttachments(textarea)
@@ -16617,15 +11146,6 @@
     return false;
   }
 
-  function isFilePanelOpen() {
-    const panel = getFilePanelElement();
-    if (!panel) return false;
-    if (panel.classList.contains("right-panel-open")) return true;
-    if (panel.classList.contains("right-panel-closed")) return false;
-    const rect = typeof panel.getBoundingClientRect === "function" ? panel.getBoundingClientRect() : null;
-    return Boolean(rect && rect.width > 0 && rect.right > 0);
-  }
-
   function getSidebarToggleButton() {
     if (typeof document === "undefined") return null;
     const exactBtn = document.querySelector(
@@ -16678,18 +11198,6 @@
     }
     if (btn && typeof btn.click === "function") {
       btn.click();
-      return true;
-    }
-    return false;
-  }
-
-  function closeFilePanel() {
-    if (!isFilePanelOpen()) return true;
-    const hideBtn = document.querySelector('button[title="隐藏文件面板"], button[aria-label="隐藏文件面板"], button[aria-controls="file-panel"][title*="隐藏"], button[aria-controls="file-panel"][aria-label*="隐藏"]') ||
-                    document.querySelector('#file-panel button[aria-controls="file-panel"]') ||
-                    document.querySelector('button[aria-controls="file-panel"]');
-    if (hideBtn && typeof hideBtn.click === "function") {
-      hideBtn.click();
       return true;
     }
     return false;
@@ -17371,7 +11879,7 @@
       if (activeEl && (activeEl.id === "session-search-input" || activeEl.closest?.("#session-search-input"))) {
         try { activeEl.blur(); } catch (e) {}
       }
-      const composer = Array.from(document.querySelectorAll(".pi-enh-formatted-composer, .chat-input-textarea, textarea.chat-input, textarea")).find((el) => el.offsetWidth > 0 && el.offsetHeight > 0 && getComputedStyle(el).visibility !== "hidden");
+      const composer = Array.from(document.querySelectorAll(".chat-input-textarea, textarea.chat-input, textarea")).find((el) => el.offsetWidth > 0 && el.offsetHeight > 0 && getComputedStyle(el).visibility !== "hidden");
       if (composer) {
         try { composer.focus(); } catch (e) {}
       }
@@ -18298,20 +12806,14 @@
   // 新建会话光标自动聚焦输入框 (New Session Autofocus - 根本级架构支持双态编辑器与防失焦)
   // ==========================================
   function findActiveComposerEditable() {
-    // 1. 优先查找当前可见的格式化富文本编辑器 (.pi-enh-formatted-composer)
-    const formatted = document.querySelector(".pi-enh-formatted-composer");
-    if (formatted && formatted.isConnected && window.getComputedStyle(formatted).display !== "none") {
-      return formatted;
-    }
-    // 2. 其次查找原生可见的 textarea 输入框
-    const ta = findComposerTextarea();
-    if (ta && ta.isConnected && window.getComputedStyle(ta).display !== "none") {
-      return ta;
-    }
-    return formatted || ta || null;
+    const textarea = findComposerTextarea();
+    return textarea && textarea.isConnected ? textarea : null;
   }
 
   function focusComposerEditable({ force = false } = {}) {
+    const native = readNativeComposerDraft();
+    if (typeof native?.handle?.focusEditable === "function") return native.handle.focusEditable();
+    if (isMobileEnvironment()) return false;
     const el = findActiveComposerEditable();
     if (!el || !el.isConnected) return false;
     if (window.getComputedStyle(el).display === "none") return false;
@@ -18319,22 +12821,14 @@
     const active = document.activeElement;
     if (!force && active && active !== document.body && active !== el) {
       const isOther = (active.tagName === "INPUT" || active.tagName === "TEXTAREA" || active.isContentEditable) &&
-                      !active.closest("fieldset, form, .chat-input-textarea, .pi-enh-formatted-composer, .pi-enh-cursor-composer");
+                      !active.closest("fieldset, form, .chat-input-textarea, .pi-enh-cursor-composer");
       if (isOther) return false;
     }
 
     try {
       el.focus({ preventScroll: true });
-      if (el.tagName === "TEXTAREA") {
-        const len = el.value ? el.value.length : 0;
-        el.setSelectionRange(len, len);
-      } else if (el.isContentEditable && window.getSelection) {
-        const sel = window.getSelection();
-        if (sel) {
-          sel.selectAllChildren(el);
-          sel.collapseToEnd();
-        }
-      }
+      const len = el.value ? el.value.length : 0;
+      el.setSelectionRange(len, len);
       return document.activeElement === el;
     } catch (e) {
       return false;
@@ -18344,6 +12838,7 @@
   let newSessionFocusGuardUntil = 0;
 
   function triggerNewSessionComposerFocus() {
+    if (isMobileEnvironment()) return;
     newSessionFocusGuardUntil = performance.now() + 650;
     let frameCount = 0;
     const maxFrames = 15;
@@ -18382,21 +12877,57 @@
     }
   }, true);
 
-  // 防 React 重渲染/路由切换瞬态导致的失焦丢失
-  addManagedListener(document, "focusout", () => {
-    if (performance.now() < newSessionFocusGuardUntil) {
-      queueMicrotask(() => {
-        if (document.activeElement === document.body) {
-          focusComposerEditable({ force: true });
-        }
-      });
+  let lastComposerInteractionTime = 0;
+  let userExplicitExitedComposer = false;
+
+  const recordComposerActive = () => {
+    lastComposerInteractionTime = Date.now();
+    userExplicitExitedComposer = false;
+  };
+
+  addManagedListener(document, "focusin", (e) => {
+    const target = e.target;
+    if (target && (target.matches?.("textarea.chat-input-textarea") || target.closest?.("fieldset, .pi-enh-cursor-composer"))) {
+      recordComposerActive();
+    } else if (target && target !== document.body) {
+      userExplicitExitedComposer = true;
     }
   }, true);
 
-  // 用户打字时立即解除守卫，不干扰日常输入
-  addManagedListener(document, "input", () => {
-    newSessionFocusGuardUntil = 0;
+  addManagedListener(document, "pointerdown", (e) => {
+    const target = e.target;
+    if (target && (target.matches?.("textarea.chat-input-textarea") || target.closest?.("fieldset, .pi-enh-cursor-composer"))) {
+      recordComposerActive();
+    } else if (target && target.closest?.("button, a, input, select, [role='button'], .sidebar-container, [role='dialog']")) {
+      userExplicitExitedComposer = true;
+    }
+  }, true);
+
+  addManagedListener(document, "input", (e) => {
+    const target = e.target;
+    if (target && (target.matches?.("textarea.chat-input-textarea") || target.closest?.("fieldset, .pi-enh-cursor-composer"))) {
+      recordComposerActive();
+    }
+  }, true);
+
+  // 全生命周期防失焦守护：当焦点非预期坠落到 document.body 时进行自愈恢复
+  addManagedListener(document, "focusout", (e) => {
+    if (isMobileEnvironment()) return;
+    const related = e.relatedTarget;
+    if (related && related !== document.body) {
+      return;
+    }
+
+    queueMicrotask(() => {
+      if (document.activeElement === document.body || document.activeElement === null) {
+        const inNewSessionWindow = performance.now() < newSessionFocusGuardUntil;
+        const inActiveEditWindow = !userExplicitExitedComposer && (Date.now() - lastComposerInteractionTime < 3500);
+
+        if (inNewSessionWindow || inActiveEditWindow) {
+          focusComposerEditable({ force: true });
+        }
+      }
+    });
   }, true);
 
   window.__PI_ENH_FOCUS_COMPOSER__ = focusComposerEditable;
-

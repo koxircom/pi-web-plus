@@ -34,6 +34,8 @@ import {
   reconcileSyncResponse,
   viewMatchesBaseline,
 } from "@/lib/session-sync-client";
+import { fetchHistoryPageContext } from "@/lib/session-history-page-client";
+import { isSessionResidentFresh, markSessionResidentFresh, waitForSessionPreload } from "@/lib/session-preload";
 import { readSessionWireDisk } from "@/lib/session-sync-storage";
 import { clearDraft, rekeyDraft, restoreDraftSubmission } from "@/lib/draft-store";
 import { getPreferredToolPreset, setPreferredToolPreset } from "@/lib/tool-preset-preference";
@@ -329,6 +331,33 @@ type SlashCommandsResponse = {
   commands?: SlashCommandInfo[];
 };
 
+function getResidentSessionData(sessionId: string): SessionData | null {
+  if (!isSessionMemoryCacheEnabled()) return null;
+  const cached = getSessionViewSnapshot(sessionId);
+  if (!cached) return null;
+  const exact = cached.livePreview ? cached.data : getSessionWireBaseline(sessionId)?.data ?? cached.data;
+        const preview: SessionData = {
+          ...exact,
+          sessionId: sessionId,
+          filePath: exact?.filePath ?? "",
+          snapshotRevision: cached.revision,
+          treeFormat: "summary",
+          totalActiveMs: cached.totalActiveMs ?? 0,
+          tree: cached.summaryTree as SessionData["tree"],
+          leafId: cached.leafId,
+          context: {
+            messages: cached.messages,
+            entryIds: cached.entryIds,
+            oldestEntryId: cached.oldestEntryId,
+            hasMore: cached.hasMore,
+            thinkingLevel: cached.thinkingLevel,
+            model: cached.model,
+          },
+          stats: cached.stats as SessionData["stats"],
+        };
+  return preview;
+}
+
 export function useAgentSession(opts: UseAgentSessionOptions) {
   const {
     session, newSessionCwd, newSessionDraftKey, onAgentEnd, onAttentionNeeded, onSessionCreated, onSessionForked,
@@ -337,15 +366,15 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
   const isNew = session === null && newSessionCwd !== null;
 
-  const [data, setData] = useState<SessionData | null>(null);
-  const [loading, setLoading] = useState(!isNew);
+  const [data, setData] = useState<SessionData | null>(() => session ? getResidentSessionData(session.id) : null);
+  const [loading, setLoading] = useState(!isNew && !data);
   const [error, setError] = useState<string | null>(null);
-  const [activeLeafId, setActiveLeafId] = useState<string | null>(null);
-  const [messages, setMessages] = useState<AgentMessage[]>([]);
+  const [activeLeafId, setActiveLeafId] = useState<string | null>(data?.leafId ?? null);
+  const [messages, setMessages] = useState<AgentMessage[]>(data?.context.messages ?? []);
   const [activeToolResults, setActiveToolResults] = useState<Map<string, ToolResultMessage>>(new Map());
-  const [entryIds, setEntryIds] = useState<string[]>([]);
-  const [historyCursor, setHistoryCursor] = useState<string | null>(null);
-  const [hasEarlierMessages, setHasEarlierMessages] = useState(false);
+  const [entryIds, setEntryIds] = useState<string[]>(data?.context.entryIds ?? []);
+  const [historyCursor, setHistoryCursor] = useState<string | null>(data?.context.oldestEntryId ?? null);
+  const [hasEarlierMessages, setHasEarlierMessages] = useState(data?.context.hasMore ?? false);
   const [streamState, dispatch] = useReducer(streamReducer, INITIAL_STREAMING_STATE);
   const [agentRunning, setAgentRunning] = useState(false);
   const [bashRunning, setBashRunning] = useState(false);
@@ -562,11 +591,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } satisfies SessionStatsInfo;
   }, [messages, sessionStatsOverride, contextUsage, data?.context.messages, data?.filePath, data?.totalActiveMs, data?.stats, session?.id, session?.name]);
 
-  const loadSession = useCallback(async (sid: string, showLoading = false, includeState = false, options?: { force?: boolean; streamRetry?: boolean; abortRetry?: boolean; signal?: AbortSignal }): Promise<unknown> => {
+  const loadSession = useCallback(async (sid: string, showLoading = false, includeState = false, options?: { force?: boolean; streamRetry?: boolean; abortRetry?: boolean; signal?: AbortSignal; resident?: boolean }): Promise<unknown> => {
     // Single-flight: concurrent reads for the same session (mount + SSE settle +
     // reconcile) share one request unless the caller forces a fresh read.
     const syncEnabled = isSessionMemoryCacheEnabled();
     // Every new request supersedes earlier reads; only same-epoch reads may share a flight.
+    if (options?.resident && syncEnabled) await waitForSessionPreload(sid);
+    if (options?.resident && (!sessionHookMountedRef.current || sessionIdRef.current !== sid)) return null;
+    const reuseResident = Boolean(options?.resident && !options.force && syncEnabled && isSessionResidentFresh(sid) && getSessionWireBaseline(sid, false)?.data && !getSessionViewSnapshot(sid, false)?.livePreview);
     const previousEpoch = getSessionEpoch(sid);
     const inflight = !options?.force ? loadFlightsRef.current.get(`${sid}:${previousEpoch}:${syncEnabled}`) : undefined;
     if (inflight) return await inflight;
@@ -604,8 +636,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       }
       let reconciled: ReturnType<typeof reconcileSyncResponse> | undefined;
       // Exactly one baseline-free repair attempt; never recurse with the same invalid base.
-      for (let attempt = 0; attempt < 2; attempt++) {
-        const url = buildSessionSyncUrl({ sessionId: sid, baseRevision, force: options?.force, syncEnabled, treeFormat: "summary" });
+      if (reuseResident && wireBaseline?.data) reconciled = { action: "unchanged", revision: wireBaseline.revision, preserveCurrentMessages: true };
+      for (let attempt = 0; !reconciled && attempt < 2; attempt++) {
+        const url = buildSessionSyncUrl({ sessionId: sid, baseRevision, force: options?.force || Boolean(options?.resident && !reuseResident), syncEnabled, treeFormat: "summary" });
         const res = await fetch(url, options?.signal ? { signal: options.signal } : undefined);
         if (!isCurrentRead()) return null;
         if (res.status === 404 || res.status === 401 || res.status === 403) {
@@ -624,7 +657,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           currentMessages: messagesRef.current, currentEntryIds: entryIdsRef.current });
         if (reconciled.action !== "invalid_delta") break;
         if (attempt === 1) throw new Error(`Session sync rejected: ${reconciled.reason}`);
-        deleteSessionWireBaseline(sid); wireBaseline = null; baseRevision = null;
+        deleteSessionWireBaseline(sid); wireBaseline = null; baseRevision = null; reconciled = undefined;
       }
       let d: SessionData;
       if (reconciled?.action === "unchanged" && wireBaseline?.data) {
@@ -637,7 +670,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       } else if (reconciled?.action === "delta" || reconciled?.action === "reset" || reconciled?.action === "legacy") {
         d = reconciled.data;
         if (syncEnabled && reconciled.newWireBaseline) setSessionWireBaseline(reconciled.newWireBaseline);
-        else deleteSessionViewSnapshot(sid); // Unstable/legacy reads cannot retain an old certified baseline.
+        else deleteSessionViewSnapshot(sid, { preserveHistoryPages: true }); // Drop an uncertified tail, not independently validated ancestor pages.
       } else {
         throw new Error(reconciled?.action === "error" ? reconciled.message : "Invalid session sync response");
       }
@@ -649,12 +682,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       setToolPresetState(d.toolNames !== undefined ? getPresetFromToolNames(d.toolNames) : CONFIGURED_TOOL_PRESET);
       setCurrentModelOverride((current) => modelSwitchPendingRef.current ? current : null);
       setCurrentThinkingOverride(null); setError(null);
-      if (syncEnabled && d.treeFormat === "summary" && d.snapshotRevision) {
-        setSessionViewSnapshot({ sessionId: sid, revision: d.snapshotRevision, messages: d.context.messages,
+      if (syncEnabled && d.treeFormat === "summary") {
+        setSessionViewSnapshot({ sessionId: sid, revision: d.snapshotRevision ?? null, livePreview: !d.snapshotRevision, ...(!d.snapshotRevision ? { data: d } : {}), messages: d.context.messages,
           entryIds: d.context.entryIds, leafId: d.leafId, oldestEntryId: d.context.oldestEntryId,
           hasMore: d.context.hasMore, summaryTree: d.tree, thinkingLevel: d.context.thinkingLevel,
           model: d.context.model, stats: d.stats, totalActiveMs: d.totalActiveMs, loadedEntryIds: d.context.entryIds });
       }
+
+      if (syncEnabled && d.snapshotRevision) markSessionResidentFresh(sid);
 
       if (d.wrapperRebuilt) {
         eventConnectionRef.current?.close();
@@ -737,23 +772,46 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
   const loadContext = useCallback(async (sid: string, leafId: string | null, before?: string | null, options?: { tail?: number; signal?: AbortSignal }) => {
     try {
-      const params = new URLSearchParams({ deferThinking: "1", deferMedia: "1" });
-      if (leafId) params.set("leafId", leafId);
-      // Page upward: ask the server for the `tail` ancestors preceding `before`,
-      // then prepend them. Omitting `before` fetches the most-recent `tail`.
-      if (before) params.set("before", before);
-      if (options?.tail) params.set("tail", String(options.tail));
-      const url = `/api/sessions/${encodeURIComponent(sid)}/context?${params}`;
-      const res = await fetch(url, { signal: options?.signal });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const d = await res.json() as { context: SessionData["context"] };
+      const isCurrent = () => (
+        sessionIdRef.current === sid
+        && (sessionPropIdRef.current === null || sessionPropIdRef.current === sid)
+        && (before ? (activeLeafIdRef.current === leafId && historyCursorRef.current === before) : true)
+        && !options?.signal?.aborted
+        && sessionHookMountedRef.current
+      );
+
+      let contextData: { context: SessionData["context"] } | null = null;
+      if (before && isSessionMemoryCacheEnabled()) {
+        const pageResult = await fetchHistoryPageContext({
+          sessionId: sid,
+          leafId,
+          before,
+          tail: options?.tail,
+          deferThinking: true,
+          deferMedia: true,
+          signal: options?.signal,
+          isCurrent,
+        });
+        if (!pageResult) return;
+        contextData = { context: pageResult.context as SessionData["context"] };
+      } else {
+        const params = new URLSearchParams({ deferThinking: "1", deferMedia: "1" });
+        if (leafId) params.set("leafId", leafId);
+        // Page upward: ask the server for the `tail` ancestors preceding `before`,
+        // then prepend them. Omitting `before` fetches the most-recent `tail`.
+        if (before) params.set("before", before);
+        if (options?.tail) params.set("tail", String(options.tail));
+        const url = `/api/sessions/${encodeURIComponent(sid)}/context?${params}`;
+        const res = await fetch(url, { signal: options?.signal });
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        contextData = await res.json() as { context: SessionData["context"] };
+      }
+
       if (
-        sessionIdRef.current !== sid
-        || (sessionPropIdRef.current !== null && sessionPropIdRef.current !== sid)
-        || (before ? (activeLeafIdRef.current !== leafId || historyCursorRef.current !== before) : false)
-        || options?.signal?.aborted
-        || !sessionHookMountedRef.current
+        !contextData
+        || !isCurrent()
       ) return;
+      const d = contextData;
       historyCursorRef.current = d.context.oldestEntryId ?? null;
       hasEarlierMessagesRef.current = Boolean(d.context.hasMore);
       setHistoryCursor(d.context.oldestEntryId);
@@ -1528,6 +1586,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
               content,
               isError: partialResult?.isError,
               details: partialResult?.details,
+              inProgress: true,
             });
             return next;
           });
@@ -2287,8 +2346,18 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   }, [scrollToBottom]);
 
   useEffect(() => {
+    let cacheEnabled = isSessionMemoryCacheEnabled();
     const invalidate = (event: Event) => {
-      if (event instanceof StorageEvent && event.key !== null && event.key !== "pi-enh-settings-v1" && event.key !== "pi-enh-plugin-session-memory-cache") return;
+      if (event instanceof StorageEvent) {
+        if (event.key !== null && event.key !== "pi-enh-settings-v1" && event.key !== "pi-enh-plugin-session-memory-cache") return;
+        // Other tabs also save unrelated settings into the shared preference
+        // object. Only a cache preference transition invalidates resident chats.
+        const nextEnabled = isSessionMemoryCacheEnabled(window.localStorage);
+        if (nextEnabled === cacheEnabled) return;
+        cacheEnabled = nextEnabled;
+      } else {
+        cacheEnabled = isSessionMemoryCacheEnabled();
+      }
       clearSessionViewCache();
       const sid = sessionIdRef.current;
       if (sid) {
@@ -2305,46 +2374,66 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     };
   }, [loadSession]);
 
+  // Paging widens the resident view without altering the exact wire baseline.
+  // Its suffix must still match the certified tail before it can be reused.
+  function saveResidentView() {
+      const sid = sessionIdRef.current;
+      const currentData = dataRef.current;
+      const syncEnabled = isSessionMemoryCacheEnabled();
+      if (syncEnabled && !agentRunningRef.current && sid && currentData && currentData.sessionId === sid && currentData.snapshotRevision
+        && messagesRef.current.length === entryIdsRef.current.length) {
+        const existing = getSessionViewSnapshot(sid, false);
+        const entryIds = entryIdsRef.current;
+        if (existing?.messages === messagesRef.current && existing.entryIds === entryIds) return;
+        const wire = getSessionWireBaseline(sid, false);
+        const coverable = Boolean(wire && viewMatchesBaseline(wire, messagesRef.current, entryIds));
+        if (coverable) {
+          setSessionViewSnapshot({
+            sessionId: sid,
+            revision: currentData.snapshotRevision,
+            messages: messagesRef.current,
+            entryIds: entryIdsRef.current,
+            leafId: activeLeafIdRef.current,
+            oldestEntryId: historyCursorRef.current,
+            hasMore: hasEarlierMessagesRef.current,
+            summaryTree: currentData.tree,
+            thinkingLevel: currentData.context.thinkingLevel,
+            model: currentData.context.model,
+            stats: currentData.stats,
+            totalActiveMs: currentData.totalActiveMs,
+            loadedEntryIds: entryIdsRef.current,
+          });
+        }
+      }
+  }
+  useLayoutEffect(() => {
+    saveResidentView();
+    // The snapshot uses the current refs; these fields identify a settled view change.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [data, messages, entryIds, agentRunning]);
+
   // Load session on mount
   useEffect(() => {
     sessionHookMountedRef.current = true;
     if (session) {
-      bumpSessionEpoch(session.id);
       sessionIdRef.current = session.id;
-      // Snapshot fast path: show the cached history window immediately, then
-      // run the normal forced read in the background as the freshness check.
+      // Paint a resident view immediately; list revisions and native events
+      // invalidate it. Mounting a chat never forces wrapper reconstruction.
       // Only the settled history fields are restored — no streaming, queue, or
       // run state — and the background read remains authoritative.
-      const syncEnabled = isSessionMemoryCacheEnabled();
-      const cached = syncEnabled ? getSessionViewSnapshot(session.id) : null;
-      if (cached) {
-        setData({
-          sessionId: session.id,
-          filePath: "",
-          snapshotRevision: cached.revision,
-          treeFormat: "summary",
-          totalActiveMs: cached.totalActiveMs ?? 0,
-          tree: cached.summaryTree as SessionData["tree"],
-          leafId: cached.leafId,
-          context: {
-            messages: cached.messages,
-            entryIds: cached.entryIds,
-            oldestEntryId: cached.oldestEntryId,
-            hasMore: cached.hasMore,
-            thinkingLevel: cached.thinkingLevel,
-            model: cached.model,
-          },
-          stats: cached.stats as SessionData["stats"],
-        });
-        setActiveLeafId(cached.leafId);
-        setMessages(cached.messages);
-        setEntryIds(cached.entryIds);
-        setHistoryCursor(cached.oldestEntryId);
-        setHasEarlierMessages(cached.hasMore);
-        setError(null);
-        setLoading(false);
+      // The initial render already owns a resident snapshot. Only fill a cache
+      // that arrived between render and this effect; never blank a visible view.
+      const preview = !dataRef.current ? getResidentSessionData(session.id) : null;
+      if (preview) {
+        dataRef.current = preview; messagesRef.current = preview.context.messages; entryIdsRef.current = preview.context.entryIds;
+        historyCursorRef.current = preview.context.oldestEntryId; hasEarlierMessagesRef.current = preview.context.hasMore;
+        setData(preview); setActiveLeafId(preview.leafId);
+        setMessages(preview.context.messages); setEntryIds(preview.context.entryIds);
+        setHistoryCursor(preview.context.oldestEntryId); setHasEarlierMessages(preview.context.hasMore);
+        setError(null); setLoading(false);
       }
-      loadSession(session.id, !cached, true, { force: true }).then((loadedAgentState) => {
+      const cached = Boolean(dataRef.current);
+      loadSession(session.id, !cached, true, { resident: true }).then((loadedAgentState) => {
         const agentState = loadedAgentState as { running: boolean; state?: AgentStateResponse } | null;
         if (agentState?.running) {
           loadTools(session.id);
@@ -2385,38 +2474,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           }
         });
       }
-      // Persist the settled view of the outgoing session so switching back can
-      // restore it instantly. Only when the cached window still covers every
-      // entry the UI has loaded (paged-in history included).
-      const sid = sessionIdRef.current;
-      if (sid) bumpSessionEpoch(sid);
-      const currentData = dataRef.current;
-      const syncEnabled = isSessionMemoryCacheEnabled();
-      if (syncEnabled && !agentRunningRef.current && sid && currentData && currentData.sessionId === sid && currentData.snapshotRevision
-        && messagesRef.current.length === entryIdsRef.current.length) {
-        const existing = getSessionViewSnapshot(sid);
-        const entryIds = entryIdsRef.current;
-        const coverable = !existing || entryIds.every((id) => existing.entryIds.includes(id) || (existing.loadedEntryIds ?? []).includes(id));
-        if (coverable) {
-          setSessionViewSnapshot({
-            sessionId: sid,
-            revision: currentData.snapshotRevision,
-            messages: messagesRef.current,
-            entryIds: entryIdsRef.current,
-            leafId: activeLeafIdRef.current,
-            oldestEntryId: historyCursorRef.current,
-            hasMore: hasEarlierMessagesRef.current,
-            summaryTree: currentData.tree,
-            thinkingLevel: currentData.context.thinkingLevel,
-            model: currentData.context.model,
-            stats: currentData.stats,
-            totalActiveMs: currentData.totalActiveMs,
-            loadedEntryIds: entryIdsRef.current,
-          });
-        } else {
-          deleteSessionViewSnapshot(sid);
-        }
-      }
+      saveResidentView();
       if (liveFollowFrameRef.current !== null) {
         cancelAnimationFrame(liveFollowFrameRef.current);
         liveFollowFrameRef.current = null;
@@ -2447,6 +2505,16 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   useLayoutEffect(() => {
     return registerSessionReloadAliases(getEnhancementWindow(), {
       getSessionId: () => sessionIdRef.current ?? sessionPropIdRef.current ?? null,
+      getSessionData: () => {
+        const current = dataRef.current;
+        if (!current || current.sessionId !== sessionIdRef.current
+          || (sessionPropIdRef.current !== null && sessionPropIdRef.current !== current.sessionId)
+          || messagesRef.current.length !== entryIdsRef.current.length) return null;
+        return { ...current, context: { ...current.context,
+          messages: messagesRef.current, entryIds: entryIdsRef.current,
+          oldestEntryId: historyCursorRef.current, hasMore: hasEarlierMessagesRef.current,
+        } };
+      },
       isActive: () => (
         sessionHookMountedRef.current
         && Boolean(
@@ -2459,6 +2527,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       ),
     });
   }, [session?.id]);
+
+  useLayoutEffect(() => {
+    // Enhancement metrics consume the native settled history. No second fetch,
+    // message store or event stream is created by this notification.
+    if (data?.sessionId && data.sessionId === sessionIdRef.current) {
+      window.dispatchEvent(new CustomEvent("pi-native-session-data-change", { detail: { sessionId: data.sessionId } }));
+    }
+  }, [data, messages, entryIds]);
 
   useEffect(() => {
     const container = scrollContainerRef.current;
@@ -2475,6 +2551,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   }, [agentRunning]);
 
   useLayoutEffect(() => {
+    if (opts.deferInitialScroll) return;
     if (messages.length > 0) {
       if (pendingScrollToUserRef.current) {
         pendingScrollToUserRef.current = false;
@@ -2487,7 +2564,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         scrollToBottom("auto");
       }
     }
-  }, [messages.length, agentRunning, scrollToBottom, scrollUserMsgToTop]);
+  }, [messages.length, agentRunning, scrollToBottom, scrollUserMsgToTop, opts.deferInitialScroll]);
 
   // Load the model list with bounded retries; loadModels exposes each failure.
   useEffect(() => {
@@ -2563,6 +2640,15 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     setSessionStatsOverride(null);
   }, [messages.length, contextUsage?.tokens, contextUsage?.percent, contextUsage?.contextWindow]);
 
+  // Native error UI reuses the existing read-only loader; no second session/cache state machine.
+  const retryLoadSession = useCallback(() => {
+    const sid = session?.id ?? sessionIdRef.current;
+    if (sid) {
+      setError(null);
+      void loadSession(sid, true, true, { force: true });
+    }
+  }, [session?.id, loadSession]);
+
   const thinkingLevel: ThinkingLevelOption = displayThinkingLevel ?? "auto";
 
   return {
@@ -2590,6 +2676,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     setNoticePaused: setPausedNoticeId,
     handleToolPresetChange, handleThinkingLevelChange, loadTools, loadSlashCommands, setActiveLeafId, setData, setMessages, loadContext,
     scrollToBottom, scrollUserMsgToTop, scrollToMessage,
+    retryLoadSession,
     dispatch, setAgentRunning, setForkingEntryId,
     bashRunning, pendingBash,
     // Subscriptions

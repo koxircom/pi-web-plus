@@ -63,7 +63,7 @@ test("previews the first thinking line and reveals the full text with the saved 
       assert.match(html, new RegExp(`aria-expanded="${expanded}"`));
       assert.equal((html.match(/>[^<]*Independent reasoning[^<]*</g) ?? []).length, 1);
       assert.equal(html.includes("Detailed second line."), expanded);
-      assert.match(html, /aria-label="Thinking: /);
+      assert.match(html, /aria-label="思考: /);
       assert.match(html, /3s/);
     }
   } finally {
@@ -121,8 +121,8 @@ test("keeps streamed tool input out of collapsed markup while counting it", () =
     content: [block],
   }, { isStreaming: true });
 
-  assert.match(html, /write/);
-  assert.match(html, /Generating parameters/);
+  assert.match(html, /data-pi-native-tool-status="running"/);
+  assert.match(html, /进行中/);
   assert.doesNotMatch(html, /secret-stream-fragment/);
   assert.equal(getToolCallInputText(block), block.rawInput);
   assert.equal(getTokenEstimateText(block), block.rawInput);
@@ -163,10 +163,10 @@ test("renders subagents as standard tool calls with only an extra session button
     onOpenSession() {},
   });
 
-  assert.match(html, /border:1px solid rgba\(34,197,94,0\.25\)/);
-  assert.match(html, />Agent</);
-  assert.match(html, />Explore</);
-  assert.match(html, /aria-label="Open sub-agent session"/);
+  assert.match(html, /data-pi-native-tool-status="success"/);
+  assert.match(html, />子任务</);
+  assert.match(html, />成功</);
+  assert.match(html, /aria-label="打开子代理会话"/);
   assert.doesNotMatch(html, />completed</);
   assert.doesNotMatch(html, />Find parser</);
 
@@ -179,7 +179,7 @@ test("renders subagents as standard tool calls with only an extra session button
     toolResults: new Map(),
     onOpenSession() {},
   });
-  assert.doesNotMatch(ordinaryHtml, /Open sub-agent session/);
+  assert.doesNotMatch(ordinaryHtml, /打开子代理会话/);
 });
 
 const COMPLETE_SKILL_EXPANSION = `<skill name="review" location="/skills/review/SKILL.md">
@@ -215,8 +215,8 @@ test("renders a truncation notice for stopReason length", () => {
   });
 
   assert.match(html, /role="alert"/);
-  assert.match(html, /output limit/i);
-  assert.match(html, /follow-up/i);
+  assert.match(html, /输出长度上限/);
+  assert.match(html, /后续消息/);
 });
 
 test("renders a truncation notice for thinking-only messages with stopReason length", () => {
@@ -229,7 +229,7 @@ test("renders a truncation notice for thinking-only messages with stopReason len
   });
 
   assert.match(html, /role="alert"/);
-  assert.match(html, /output limit/i);
+  assert.match(html, /输出长度上限/);
 });
 
 test("renders partial assistant content before the provider error", () => {
@@ -306,7 +306,7 @@ test("renders user-message images as buttons that open a larger preview", () => 
     timestamp: Date.now(),
   });
 
-  assert.match(html, /<button[^>]+aria-label="Preview image"[^>]*>/);
+  assert.match(html, /<button[^>]+aria-label="预览图片"[^>]*>/);
   assert.match(html, /<img[^>]+src="data:image\/png;base64,YWJj"/);
 });
 
@@ -335,7 +335,8 @@ test("marks apply_patch returned failures as errors even when isError is unset",
   }, { toolResults: new Map([[block.toolCallId, failed]]) });
 
   assert.match(html, /border:1px solid rgba\(248,113,113,0\.45\)/);
-  assert.match(html, />apply_patch</);
+  assert.match(html, /data-pi-native-tool-status="failure"/);
+  assert.doesNotMatch(html, /Recovery: MUST/);
   assert.doesNotMatch(html, /border:1px solid rgba\(34,197,94,0\.25\)/);
 });
 
@@ -347,7 +348,7 @@ test("renders custom-message images as buttons that open a larger preview", () =
     timestamp: Date.now(),
   });
 
-  assert.match(html, /<button[^>]+aria-label="Preview image"[^>]*>/);
+  assert.match(html, /<button[^>]+aria-label="预览图片"[^>]*>/);
   assert.match(html, /<img[^>]+src="data:image\/png;base64,YWJj"/);
 });
 
@@ -373,7 +374,7 @@ test("shows tool-result images while the tool details stay collapsed", () => {
     content: [block],
   }, { toolResults: new Map([[block.toolCallId, result]]) });
 
-  assert.match(html, /<button[^>]+aria-label="Preview image"[^>]*>/);
+  assert.match(html, /<button[^>]+aria-label="预览图片"[^>]*>/);
   assert.match(html, /<img[^>]+src="data:image\/png;base64,YWJj"/);
   assert.doesNotMatch(html, /captured-1280x720/);
   assert.doesNotMatch(html, /"tabId"/);

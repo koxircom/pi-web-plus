@@ -11,7 +11,7 @@ export async function GET(
     const rpc = getRpcSession(id);
     if (rpc?.isAlive()) {
       const state = await rpc.send({ type: "get_state" });
-      return NextResponse.json({ running: true, state });
+      return NextResponse.json({ running: rpc.isRunning(), runtimeAlive: true, state });
     }
 
     if (!await resolveSessionPath(id)) {

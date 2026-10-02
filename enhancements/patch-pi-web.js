@@ -2,9 +2,120 @@
 
 const fs = require("node:fs");
 const path = require("node:path");
+const { execFileSync } = require("node:child_process");
 
-const home = process.env.USERPROFILE || process.env.HOME || "~";
+const home = process.env.USERPROFILE || process.env.HOME || "C:/Users/KOXIR";
 const ENHANCEMENT_SOURCE = path.join(home, ".pi", "agent", "scripts", "pi-web-enhancements.js");
+const LOCKS_SCRIPT_PATH = fs.existsSync(path.join(home, ".pi", "agent", "scripts", "pi-web-enhancement-locks.cjs"))
+  ? path.join(home, ".pi", "agent", "scripts", "pi-web-enhancement-locks.cjs")
+  : path.join(__dirname, "pi-web-enhancement-locks.cjs");
+const { withGlobalBuildLock, inspectManifestModuleDiffs } = require(LOCKS_SCRIPT_PATH);
+const {
+  extractEnhancementMetadata,
+  buildFastPluginReaderSnippet,
+} = require("./pi-web-settings-prepaint.cjs");
+
+function resolveSettingsModule02Path(customHome = home) {
+  const consumerBundle = path.join(customHome, '.pi', 'agent', 'scripts', 'pi-web-enhancements.js');
+  if (!fs.existsSync('/workspace/pi-web/components/SessionSidebar.tsx') && fs.existsSync(consumerBundle)) return consumerBundle;
+  const directCandidate = path.join(__dirname, "enhancements", "modules", "02-plugin-registry-and-settings-schema.js");
+  if (fs.existsSync(directCandidate)) return directCandidate;
+  const homeCandidate = path.join(customHome, ".pi", "agent", "scripts", "enhancements", "modules", "02-plugin-registry-and-settings-schema.js");
+  if (fs.existsSync(homeCandidate)) return homeCandidate;
+  return directCandidate;
+}
+// Development source runs the browser gate; consumption-only targets validate the
+// same deletion contract without acquiring build/test dependencies or user state.
+function runSessionDeleteRegressionGate(options) {
+  const gatePath = path.join(__dirname, "session-delete-regression-gate.cjs");
+  const isDevelopmentSource = fs.existsSync('/workspace/pi-web/components/SessionSidebar.tsx');
+  if (fs.existsSync(gatePath)) {
+    if (isDevelopmentSource) return require(gatePath).runSessionDeleteRegressionGate(options);
+  }
+  if (isDevelopmentSource) {
+    throw new Error("[session-delete-gate] Development browser gate missing; deployment refused");
+  }
+  const code = String(options.candidateBundleText || "");
+  const section = (start, end) => {
+    const a = code.indexOf(start), b = code.indexOf(end, a + start.length);
+    return a >= 0 && b > a ? code.slice(a, b) : "";
+  };
+  const mark = section("function markSessionAsDeleted(", "function markSessionDeleteConfirmed(");
+  const restore = section("function restoreSessionDeleteState(", "function cleanupDeletedSessionEverywhere(");
+  const native = code.match(/try\s*\{\s*markSessionAsDeleted\(targetSessionId\);\s*deleteMarked\s*=\s*true;\s*await ensureSessionIngestedBeforeDelete\(targetSessionId\);\s*\}\s*catch\s*\(ensureErr\)/g) || [];
+  const fast = section("function beginFastSessionDelete(", "window.__PI_ENH_BEGIN_FAST_SESSION_DELETE__");
+  if (!mark.includes("__PI_ENH_RERENDER_SESSIONS__") || !restore.includes("__PI_ENH_RERENDER_SESSIONS__") || native.length < 2 || !fast.includes("__PI_ENH_FAST_SESSION_DELETE_IDS__")) {
+    throw new Error("[session-delete-gate] Consumer deletion contract failed; static deployment refused");
+  }
+  console.log("[session-delete-gate] Consumer contract PASS (browser acceptance runs on development source).");
+  return { passed: true, mode: "consumer-contract" };
+}
+
+function resolveScriptAssetPath(filename, customHome = home) {
+  const homeCandidate = path.join(customHome, ".pi", "agent", "scripts", filename);
+  if (fs.existsSync(homeCandidate)) return homeCandidate;
+  const localCandidate = path.join(__dirname, filename);
+  if (fs.existsSync(localCandidate)) return localCandidate;
+  return homeCandidate;
+}
+
+function stripBundledEnhancementPreamble(rawCode) {
+  if (typeof rawCode !== "string" || !rawCode) return "";
+  if (!rawCode.includes("window.__PI_ENH_ASSET_BUILD__")) return rawCode;
+  const bannerMarker = "\n;\n/**\n * Pi Web Enhancements";
+  const bannerIdx = rawCode.indexOf(bannerMarker);
+  if (bannerIdx !== -1) {
+    return rawCode.slice(bannerIdx + 3);
+  }
+  const altMarker = "\n/**\n * Pi Web Enhancements";
+  const altIdx = rawCode.indexOf(altMarker);
+  if (altIdx !== -1) {
+    return rawCode.slice(altIdx + 1);
+  }
+  return rawCode;
+}
+
+function resolvePatchLockConfig(options = {}) {
+  const stateFile =
+    options.stateFile ||
+    process.env.PI_ENHANCEMENT_LOCKS_FILE ||
+    path.join(home, ".pi", "agent", "state", "pi-web-enhancement-locks.json");
+  const modulesDir =
+    options.modulesDir ||
+    process.env.PI_ENHANCEMENT_MODULES_DIR ||
+    path.join(home, ".pi", "agent", "scripts", "enhancements", "modules");
+
+  const isCertifiedSnapshot = Boolean(
+    options.snapshotManifestPath && fs.existsSync(options.snapshotManifestPath)
+  );
+
+  const sdkOnly = Boolean(
+    options.sdkOnly ||
+    process.argv.includes("--sdk-only") ||
+    process.argv.includes("--skip-builder-sync")
+  );
+
+  let hasModuleDiffs = false;
+  if (!sdkOnly && !isCertifiedSnapshot && fs.existsSync(path.join(modulesDir, "manifest.json"))) {
+    const diffReport = inspectManifestModuleDiffs({ modulesDir });
+    hasModuleDiffs = Boolean(diffReport.hasManifest && diffReport.modifiedModules.length > 0);
+  }
+
+  const skipBuilderSync =
+    isCertifiedSnapshot ||
+    sdkOnly ||
+    (Boolean(options.skipBuilderSync) && !hasModuleDiffs);
+  const enforceUnlockedDiffCheck = !isCertifiedSnapshot && !sdkOnly && options.enforceUnlockedDiffCheck !== false;
+
+  return {
+    stateFile,
+    modulesDir,
+    hasModuleDiffs,
+    skipBuilderSync,
+    enforceUnlockedDiffCheck,
+    isCertifiedSnapshot,
+  };
+}
 
 function safeWriteFileSync(filePath, content, encoding = "utf8") {
   try {
@@ -50,6 +161,16 @@ function repairModelSelectorMobileAutoFocus(content) {
   return content.replace(
     /("chat\.filterModels"\),["']aria-label["']:[A-Za-z0-9_$]+\("chat\.filterModels"\),)autoFocus:!0,/g,
     '$1autoFocus:!1,'
+  );
+}
+
+function repairModelSelectorRetainKeyboard(content) {
+  if (typeof content !== "string" || !content) return content;
+  // 原生上游在 ModelSelector 按钮点击时强制调用 document.activeElement.blur()，导致移动端输入框失焦并强行收起虚拟键盘
+  // 彻底固化修复：移除 activeElement.blur()，确保移动端打字时切换模型不中断软键盘与输入状态
+  return content.replace(
+    /"u">typeof document&&document\.activeElement instanceof HTMLElement&&document\.activeElement\.blur\(\);/g,
+    ""
   );
 }
 
@@ -391,9 +512,512 @@ function patchWebAndOfficialPiVersionStrings(content, webVer, piVer) {
     .replace(/"[0-9]+\.[0-9]+\.[0-9]+p[0-9]+\.[0-9]+\.[0-9]+"/g, `"${webVer}p${piVer}"`);
 }
 
-function patchPackage(pkgDir, options = {}) {
+const LAYOUT_ENHANCEMENTS_START_MARKER_RE = /\n;\/\* PI_WEB_ENHANCEMENTS_START(?: [^*]*)? \*\//;
+const LAYOUT_ENHANCEMENTS_INLINE_BUNDLE_MARKER = "\n;/* PI_WEB_ENHANCEMENTS_INLINE_BUNDLE */\n";
+
+function replaceBoundedLayoutInlineTail(content, { loaderCode, validatedBundledEnhancement } = {}) {
+  if (typeof content !== "string" || !content) {
+    return { ok: false, reason: "empty-layout-content", content };
+  }
+  if (
+    typeof loaderCode !== "string" ||
+    !loaderCode ||
+    typeof validatedBundledEnhancement !== "string" ||
+    !validatedBundledEnhancement
+  ) {
+    return { ok: false, reason: "unvalidated-enhancement-bundle", content };
+  }
+  const markerMatch = LAYOUT_ENHANCEMENTS_START_MARKER_RE.exec(content);
+  if (!markerMatch) {
+    return { ok: false, reason: "missing-start-marker", content };
+  }
+  const prefix = content.slice(0, markerMatch.index);
+  const markerToken = markerMatch[0];
+  const nextTail = "\n" + loaderCode + LAYOUT_ENHANCEMENTS_INLINE_BUNDLE_MARKER + validatedBundledEnhancement;
+  const nextContent = prefix + markerToken + nextTail;
+
+  if (nextContent.slice(0, markerMatch.index) !== prefix) {
+    return { ok: false, reason: "prefix-integrity-check-failed", content };
+  }
   try {
-    if (!fs.existsSync(pkgDir)) return;
+    new (require("node:vm").Script)(nextContent, { filename: "layout-bounded-inline.js" });
+  } catch (syntaxErr) {
+    return {
+      ok: false,
+      reason: "layout-syntax-invalid",
+      error: syntaxErr,
+      content,
+    };
+  }
+  return {
+    ok: true,
+    changed: nextContent !== content,
+    prefix,
+    marker: markerToken,
+    content: nextContent,
+  };
+}
+
+function atomicWriteValidatedFileSync(filePath, content, encoding = "utf8") {
+  if (fs.existsSync(filePath)) {
+    const existing = fs.readFileSync(filePath, encoding);
+    if (existing === content) return false;
+  }
+  const tmpPath = `${filePath}.${process.pid}.${Date.now()}.tmp`;
+  try {
+    fs.writeFileSync(tmpPath, content, encoding);
+    const verifyWritten = fs.readFileSync(tmpPath, encoding);
+    if (verifyWritten !== content) {
+      throw new Error(`Atomic write verification mismatch for ${filePath}`);
+    }
+    fs.renameSync(tmpPath, filePath);
+    return true;
+  } catch (err) {
+    try {
+      if (fs.existsSync(tmpPath)) fs.unlinkSync(tmpPath);
+    } catch (_) {}
+    throw err;
+  }
+}
+
+function syncBoundedLayoutInlineChunks(pkgDir, { loaderCode, validatedBundledEnhancement } = {}) {
+  const chunksDir = path.join(pkgDir, ".next", "static", "chunks", "app");
+  if (!fs.existsSync(chunksDir)) {
+    return { updated: [], unchanged: [], rejected: [], reason: "chunks-dir-missing" };
+  }
+  const layoutFiles = fs
+    .readdirSync(chunksDir)
+    .filter((file) => file.startsWith("layout-") && file.endsWith(".js"))
+    .sort();
+  if (layoutFiles.length === 0) {
+    return { updated: [], unchanged: [], rejected: [], reason: "no-layout-chunks" };
+  }
+  if (!validatedBundledEnhancement || !loaderCode) {
+    console.warn(
+      `[patch-pi-web] Fail-closed: refusing to update layout inline bundle in ${chunksDir} without validated enhancement bundle`
+    );
+    return {
+      updated: [],
+      unchanged: [],
+      rejected: layoutFiles.map((file) => ({
+        path: path.join(chunksDir, file),
+        reason: "unvalidated-enhancement-bundle",
+      })),
+      reason: "unvalidated-enhancement-bundle",
+    };
+  }
+
+  const updated = [];
+  const unchanged = [];
+  const rejected = [];
+  for (const file of layoutFiles) {
+    const layoutPath = path.join(chunksDir, file);
+    const currentContent = fs.readFileSync(layoutPath, "utf8");
+    const replaced = replaceBoundedLayoutInlineTail(currentContent, {
+      loaderCode,
+      validatedBundledEnhancement,
+    });
+    if (!replaced.ok) {
+      console.warn(
+        `[patch-pi-web] Fail-closed: refusing to modify ${layoutPath} (${replaced.reason})`
+      );
+      rejected.push({ path: layoutPath, reason: replaced.reason });
+      continue;
+    }
+    if (!replaced.changed) {
+      unchanged.push(layoutPath);
+      continue;
+    }
+    atomicWriteValidatedFileSync(layoutPath, replaced.content, "utf8");
+    updated.push(layoutPath);
+  }
+  return { updated, unchanged, rejected };
+}
+
+const NATIVE_TITLE_HEAD_OBSERVER_SOURCE_V3 =
+  '(0,i.useEffect)(()=>{let e=()=>{document.title!==nP&&(document.title=nP)};e();let t=new MutationObserver(e);return t.observe(document.head,{childList:!0,subtree:!0,characterData:!0}),()=>t.disconnect()},[nP])';
+const NATIVE_TITLE_SINGLE_OWNER_TARGET_V3 =
+  '(0,i.useEffect)(()=>{document.title!==nP&&(document.title=nP)},[nP])';
+
+function applyNativeTitleSingleOwnerBridge(content) {
+  if (typeof content !== "string" || !content) return { content, modified: false };
+  if (!content.includes(NATIVE_TITLE_HEAD_OBSERVER_SOURCE_V3)) {
+    return { content, modified: false };
+  }
+  return {
+    content: content.replace(NATIVE_TITLE_HEAD_OBSERVER_SOURCE_V3, NATIVE_TITLE_SINGLE_OWNER_TARGET_V3),
+    modified: true,
+  };
+}
+
+function applyPortablePageBridgesV3(content) {
+  if (typeof content !== "string" || !content) return { content, modified: false };
+  let modified = false;
+
+  const titleBridge = applyNativeTitleSingleOwnerBridge(content);
+  if (titleBridge.modified) {
+    content = titleBridge.content;
+    modified = true;
+  }
+
+  const minimapHistoryBridgeSourceV3 = 'nu=(0,i.useCallback)(()=>{tP(e=>Math.max(e,2*et.length))},[et.length]),np=';
+  const legacyMinimapHistoryBridgeTargetV3 = 'nu=(0,i.useCallback)(()=>{tP(e=>Math.max(e,2*et.length))},[et.length]);window.__PI_ENH_GET_HISTORY_STATE__=()=>({sessionId:e?.id??e5.current??null,totalTurns:eN?.userMessages??0,hasEarlierMessages:!!eo,entryIds:er,oldestEntryId:ei});window.__PI_ENH_LOAD_EARLIER__=async a=>{if(tV.current||!eo||!ei)return!1;let n=e?.id??e5.current;if(!n)return!1;let r=Number(a),o=Number.isFinite(r)?Math.max(50,Math.min(500,Math.round(r))):250;tV.current=!0;let l=e6.current;l&&(tK.current=l.scrollHeight-l.scrollTop);try{return!!await tf(n,tx,ei,{tail:o})}finally{tV.current=!1}};let np=';
+  const minimapHistoryBridgeTargetV3 = 'nu=(0,i.useCallback)(()=>{tP(e=>Math.max(e,2*et.length))},[et.length]);(0,i.useEffect)(()=>{tP(e=>Math.max(e,2*et.length+100))},[et.length]);window.__PI_ENH_GET_HISTORY_STATE__=()=>({sessionId:e?.id??e5.current??null,totalTurns:eN?.userMessages??0,hasEarlierMessages:Boolean(eo||(tO?.current>0)),hasRemoteEarlier:!!eo,hasLocalEarlier:Boolean(tO?.current>0),localEarlierCount:tO?.current||0,entryIds:er,oldestEntryId:ei});window.__PI_ENH_LOAD_EARLIER__=async a=>{if(tV.current)return!1;let s=Boolean(tO?.current>0);if(s){tP(e=>Math.max(e,2*et.length+100));if(!eo||!ei)return!0}if(!eo||!ei)return!1;let n=e?.id??e5.current;if(!n)return!1;let r=Number(a),o=Number.isFinite(r)?Math.max(50,Math.min(500,Math.round(r))):250;tV.current=!0;let l=e6.current;l&&(tK.current=l.scrollHeight-l.scrollTop);try{let res=await tf(n,tx,ei,{tail:o});if(res)tP(e=>Math.max(e,2*et.length+100));return Boolean(res||s)}finally{tV.current=!1}};let np=';
+  if (content.includes(legacyMinimapHistoryBridgeTargetV3)) {
+    content = content.replace(legacyMinimapHistoryBridgeTargetV3, minimapHistoryBridgeTargetV3);
+    modified = true;
+  } else if (content.includes(minimapHistoryBridgeSourceV3)) {
+    content = content.replace(minimapHistoryBridgeSourceV3, minimapHistoryBridgeTargetV3);
+    modified = true;
+  }
+
+  const sessionRefreshSuffixV3 = 'finally{r===W.current&&P(!1)}},[]),tw=(0,i.useRef)(!1);';
+  const sessionRefreshHookV3 = 'finally{r===W.current&&P(!1)}},[]),tw=(window.__PI_ENH_REFRESH_SESSIONS__=(e=!1,t=!1)=>tb(e,t),window.__PI_ENH_GET_RAW_SESSIONS__=()=>L,window.__PI_ENH_RERENDER_SESSIONS__=()=>{try{$(prev=>Array.isArray(prev)?[...prev]:prev)}catch(e){}},window.__PI_ENH_SESSION_DELETED__=e=>{try{p?.(e)}catch{}},window.__PI_ENH_SET_UNREAD_SESSION__=(sId,isU)=>{try{e8(prev=>{let next=new Set(prev);if(isU)next.add(sId);else next.delete(sId);return next;})}catch(e){}},window.__PI_ENH_IS_SESSION_UNREAD__=(sId)=>Boolean(e4?.has?.(sId)),(0,i.useRef)(!1));';
+  if (content.includes(sessionRefreshSuffixV3)) {
+    content = content.replace(sessionRefreshSuffixV3, sessionRefreshHookV3);
+    modified = true;
+  }
+
+  const sessionListHeadersSourceV3 = 'tY.length>0&&(0,r.jsx)("div",{style:{position:"relative",height:54*tY.length+(window.__PI_ENH_GET_SESSION_HEADERS_HEIGHT__?.(tY)||0)},children:tZ.map(t=>{let n=tY[t],i=[n.root,...n.subagents],o=n.latestModified===n.root.modified?n.root:{...n.root,modified:n.latestModified};return(0,r.jsx)("div",{onFocus:()=>tf(n.root.id),onBlur:()=>tf(null),style:{position:"absolute",top:window.__PI_ENH_GET_SESSION_ITEM_TOP__?.(t,tY)??54*t,left:0,right:0},children:(0,r.jsx)(ec,{session:o,isSelected:i.some(t=>t.id===e),isRunning:i.some(e=>e1.has(e.id)),isUnread:i.some(e=>e4.has(e.id)),onClick:()=>tP(n.root),onRenamed:tb,onDeleted:e=>{p?.(e),tb()}})},n.root.id)})})';
+  const sessionListHeadersTargetV3 = 'tY.length>0&&(0,r.jsx)("div",{style:{position:"relative",height:54*tY.length+(window.__PI_ENH_GET_SESSION_HEADERS_HEIGHT__?.(tY)||0)},children:[...(window.__PI_ENH_GET_SESSION_HEADERS__?.(r,tY)||[]),...tZ.map(t=>{let n=tY[t],i=[n.root,...n.subagents],o=n.latestModified===n.root.modified?n.root:{...n.root,modified:n.latestModified};return(0,r.jsx)("div",{onFocus:()=>tf(n.root.id),onBlur:()=>tf(null),style:{position:"absolute",top:window.__PI_ENH_GET_SESSION_ITEM_TOP__?.(t,tY)??54*t,left:0,right:0},children:(0,r.jsx)(ec,{session:o,isSelected:i.some(t=>t.id===e),isRunning:i.some(e=>e1.has(e.id)),isUnread:i.some(e=>e4.has(e.id)),onClick:()=>tP(n.root),onRenamed:tb,onDeleted:e=>{p?.(e),tb()}})},n.root.id)})]})';
+  if (content.includes(sessionListHeadersSourceV3)) {
+    content = content.replace(sessionListHeadersSourceV3, sessionListHeadersTargetV3);
+    modified = true;
+  }
+
+  const sessionReloadBridgeSourceV3 = 'finally{c()&&t&&!i&&b(!1)}})();return t$.current.set(d,g),g.finally(()=>{t$.current.get(d)===g&&t$.current.delete(d)}),await g},[tF,tV]),tX=';
+  const sessionReloadBridgeTargetV3 = 'finally{c()&&t&&!i&&b(!1)}})();return t$.current.set(d,g),g.finally(()=>{t$.current.get(d)===g&&t$.current.delete(d)}),await g},[tF,tV]),tp_enh_reload=(typeof window!=="undefined"?(window.__PI_WEB_RELOAD_SESSION__=(...args)=>tG(...args),window.__PI_WEB_NATIVE_RELOAD_CURRENT_SESSION__=(t=!1)=>{let s=tr.current;if(s)return tG(s,t,!0,{force:!0})},window.__PI_ENH_RELOAD_CURRENT_SESSION__||(window.__PI_ENH_RELOAD_CURRENT_SESSION__=(t=!1)=>{let s=tr.current;if(s)return tG(s,t,!0,{force:!0})}),null):null),tX=';
+  if (content.includes(sessionReloadBridgeSourceV3)) {
+    content = content.replace(sessionReloadBridgeSourceV3, sessionReloadBridgeTargetV3);
+    modified = true;
+  }
+
+  const nativeSessionActions = 'x&&!e.transient&&(0,r.jsxs)("div",{style:{display:"flex",gap:4,flexShrink:0},children:';
+  const namedNativeSessionActions = '!e.transient&&(0,r.jsxs)("div",{className:"pi-enh-native-session-actions",style:{display:"flex",gap:4,flexShrink:0},children:';
+  if (content.includes(nativeSessionActions)) {
+    content = content.replace(nativeSessionActions, namedNativeSessionActions);
+    modified = true;
+  }
+
+  return { content, modified };
+}
+
+function patchPublicServiceWorker(pkgDir, assetBuild) {
+  const swPath = path.join(pkgDir, "public", "sw.js");
+  if (!fs.existsSync(swPath)) return false;
+
+  let sw = fs.readFileSync(swPath, "utf8");
+  let swMod = false;
+
+  if (sw.includes("&& key !== STATIC_CACHE")) {
+    sw = sw.replace("&& key !== STATIC_CACHE", "");
+    swMod = true;
+  }
+
+  // 1. 静态重载补丁标记与 cache: "reload"
+  if (!sw.includes("/* PI_PATCH_SW_STATIC_RELOAD */")) {
+    const oldCacheFirst = `async function cacheFirst(request) {
+  const cached = await caches.match(request);
+  if (cached) return cached;
+
+  const response = await fetchWithTimeout(request, ASSET_TIMEOUT_MS);
+  if (response.ok && response.type === "basic") {
+    const cache = await caches.open(STATIC_CACHE);
+    await cache.put(request, response.clone());
+  }
+  return response;
+}`;
+    const newCacheFirst = `/* PI_PATCH_SW_STATIC_RELOAD */
+async function cacheFirst(request) {
+  const cached = await caches.match(request);
+  if (cached) return cached;
+
+  // Uncached or updated build: use cache: "reload" to pierce browser HTTP immutable disk cache
+  const reloadRequest = new Request(request.url, {
+    method: request.method,
+    headers: request.headers,
+    mode: request.mode === "navigate" ? "same-origin" : request.mode,
+    credentials: request.credentials,
+    redirect: request.redirect,
+    cache: "reload",
+  });
+  const response = await fetchWithTimeout(reloadRequest, ASSET_TIMEOUT_MS);
+  if (response.ok && response.type === "basic") {
+    const cache = await caches.open(STATIC_CACHE);
+    await cache.put(request, response.clone());
+  }
+  return response;
+}`;
+    if (sw.includes(oldCacheFirst)) {
+      sw = sw.replace(oldCacheFirst, newCacheFirst);
+      swMod = true;
+    }
+  }
+
+  // 2. 绑定当前构建哈希到 STATIC_CACHE
+  if (assetBuild) {
+    const cacheVersionRegex = /const STATIC_CACHE = `\${CACHE_PREFIX}-static-\${CACHE_VERSION}[^`]*`;/;
+    const targetCacheDef = `const STATIC_CACHE = \`\${CACHE_PREFIX}-static-\${CACHE_VERSION}-${assetBuild}\`;`;
+    if (cacheVersionRegex.test(sw)) {
+      const cur = sw.match(cacheVersionRegex)[0];
+      if (cur !== targetCacheDef) {
+        sw = sw.replace(cacheVersionRegex, targetCacheDef);
+        swMod = true;
+      }
+    }
+  }
+
+  // 3. activate 事件清理旧版本缓存并在存在旧缓存时刷新受控窗口
+  const oldActivate = `self.addEventListener("activate", (event) => {
+  event.waitUntil(
+    caches
+      .keys()
+      .then((keys) =>
+        Promise.all(
+          keys
+            .filter((key) => key.startsWith(\`\${CACHE_PREFIX}-\`) && key !== STATIC_CACHE)
+            .map((key) => caches.delete(key)),
+        ),
+      )
+      .then(() => self.clients.claim()),
+  );
+});`;
+  const newActivate = `self.addEventListener("activate", (event) => {
+  event.waitUntil(
+    (async () => {
+      const keys = await caches.keys();
+      const staleKeys = keys.filter(
+        (key) => key.startsWith(\`\${CACHE_PREFIX}-\`) && key !== STATIC_CACHE
+      );
+      const hadStaleCache = staleKeys.length > 0;
+      await Promise.all(staleKeys.map((key) => caches.delete(key)));
+      await self.clients.claim();
+      if (hadStaleCache) {
+        const windowClients = await self.clients.matchAll({ type: "window", includeUncontrolled: true });
+        for (const client of windowClients) {
+          try {
+            if (typeof client.navigate === "function" && client.url) {
+              await client.navigate(client.url);
+            }
+          } catch (_) {}
+        }
+      }
+    })()
+  );
+});`;
+  if (sw.includes(oldActivate)) {
+    sw = sw.replace(oldActivate, newActivate);
+    swMod = true;
+  }
+
+  // 4. // no-esc-patch 标记
+  if (!sw.includes("// no-esc-patch")) {
+    sw = "// no-esc-patch\n" + sw;
+    swMod = true;
+  }
+
+  // 5. 保留 navigate 302 重定向
+  if (!sw.includes("event.respondWith(Response.redirect(redirectUrl.href, 302))")) {
+    const navSearch = 'if (request.mode === "navigate") {';
+    const navPatch = `if (request.mode === "navigate") {
+    const rawPath = url.pathname.replace(/^\\/+|\\/+$/g, "");
+    if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(rawPath)) {
+      const redirectUrl = new URL("/", self.location.origin);
+      redirectUrl.search = url.search;
+      redirectUrl.searchParams.set("session", rawPath);
+      event.respondWith(Response.redirect(redirectUrl.href, 302));
+      return;
+    }`;
+    if (sw.includes(navSearch)) {
+      sw = sw.replace(navSearch, navPatch);
+      swMod = true;
+    }
+  }
+
+  if (swMod) {
+    safeWriteFileSync(swPath, sw, "utf8");
+    return true;
+  }
+  return false;
+}
+
+function syncPortablePageBridgeChunks(pkgDir) {
+  const chunksDir = path.join(pkgDir, ".next", "static", "chunks", "app");
+  if (!fs.existsSync(chunksDir)) return;
+  for (const file of fs.readdirSync(chunksDir)) {
+    if (file.startsWith("page-") && file.endsWith(".js")) {
+      const fullPath = path.join(chunksDir, file);
+      const currentContent = fs.readFileSync(fullPath, "utf8");
+      const { content: nextContent, modified } = applyPortablePageBridgesV3(currentContent);
+      if (modified && nextContent !== currentContent) {
+        try {
+          new (require("node:vm").Script)(nextContent, { filename: file });
+          atomicWriteValidatedFileSync(fullPath, nextContent, "utf8");
+        } catch (err) {
+          console.warn(`[patch-pi-web] Refusing to write syntax-invalid page chunk ${fullPath}: ${err.message}`);
+        }
+      }
+    }
+  }
+}
+
+function isNativeSessionBridgePkg(pkgDir) {
+  if (!pkgDir || typeof pkgDir !== "string") return false;
+  const pkgJsonPath = path.join(pkgDir, "package.json");
+  if (!fs.existsSync(pkgJsonPath)) return false;
+  try {
+    const pkg = JSON.parse(fs.readFileSync(pkgJsonPath, "utf8"));
+    return Boolean(
+      pkg &&
+      pkg.standalone === true &&
+      pkg.capabilities &&
+      pkg.capabilities.nativeSessionBridge === true
+    );
+  } catch {
+    return false;
+  }
+}
+
+function verifyNativeReleaseGate(pkgDir) {
+  const pkgJsonPath = path.join(pkgDir, "package.json");
+  let pkg;
+  try {
+    pkg = JSON.parse(fs.readFileSync(pkgJsonPath, "utf8"));
+  } catch (err) {
+    throw new Error(`[patch-pi-web] [NATIVE GATE] Failed to parse package.json in ${pkgDir}: ${err.message}`);
+  }
+
+  const gateScript = path.join(pkgDir, "scripts", "verify-session-native-gate.cjs");
+  if (!fs.existsSync(gateScript)) {
+    throw new Error(
+      `[patch-pi-web] [NATIVE GATE FAIL-CLOSED] Target ${pkgDir} declares nativeSessionBridge capability but is missing verification gate script (${gateScript}). Legacy patching refused.`
+    );
+  }
+
+  try {
+    const stdout = execFileSync(
+      process.execPath,
+      [gateScript, "--packed"],
+      {
+        cwd: pkgDir,
+        timeout: 15000,
+        stdio: ["ignore", "pipe", "pipe"],
+        env: {
+          ...process.env,
+          NODE_ENV: "production",
+        },
+        encoding: "utf8",
+      }
+    );
+    return {
+      nativeReleaseProtected: true,
+      legacyPatchSkipped: true,
+      pkgDir,
+      version: pkg.version,
+      edition: pkg.piWebEdition,
+      capabilities: pkg.capabilities,
+      gateScript,
+      verifiedAt: new Date().toISOString(),
+      output: stdout ? stdout.trim() : "",
+    };
+  } catch (execErr) {
+    const stderr = execErr.stderr ? String(execErr.stderr).trim() : "";
+    const stdout = execErr.stdout ? String(execErr.stdout).trim() : "";
+    const details = stderr || stdout || execErr.message;
+    throw new Error(
+      `[patch-pi-web] [NATIVE GATE FAIL-CLOSED] Native session verification gate failed for ${pkgDir} (exit code ${execErr.status ?? "unknown"}): ${details}. Legacy patching refused.`
+    );
+  }
+}
+
+function collectDefaultCandidates() {
+  const candidates = [
+    process.env.PI_WEB_DIR,
+    path.join(home, "AppData", "Roaming", "npm", "node_modules", "@agegr", "pi-web"),
+    "/usr/local/lib/node_modules/@agegr/pi-web",
+    "/usr/lib/node_modules/@agegr/pi-web",
+    path.join(home, ".workbuddy", "binaries", "node", "versions", "22.22.2-3", "lib", "node_modules", "@agegr", "pi-web"),
+    "/opt/homebrew/lib/node_modules/@agegr/pi-web",
+  ].filter(Boolean);
+
+  const found = [];
+  for (const candidate of candidates) {
+    if (fs.existsSync(candidate)) {
+      found.push(candidate);
+    }
+  }
+
+  const localAppData = process.env.LOCALAPPDATA || path.join(home, "AppData", "Local");
+  const npxBase = path.join(localAppData, "npm-cache", "_npx");
+  if (fs.existsSync(npxBase)) {
+    try {
+      for (const hashDir of fs.readdirSync(npxBase)) {
+        const candidate = path.join(npxBase, hashDir, "node_modules", "@agegr", "pi-web");
+        if (fs.existsSync(candidate)) {
+          found.push(candidate);
+        }
+      }
+    } catch {}
+  }
+  return [...new Set(found)];
+}
+
+function patchPackage(pkgDir, options = {}) {
+  if (!pkgDir || !fs.existsSync(pkgDir)) return null;
+
+  if (isNativeSessionBridgePkg(pkgDir)) {
+    const gateResult = verifyNativeReleaseGate(pkgDir);
+    console.log(
+      `[patch-pi-web] [NATIVE GATE] ${pkgDir} (v${gateResult.version}) native session bridge verified; legacy patching skipped.`
+    );
+    return gateResult;
+  }
+
+  // 快照发布模式安全守卫：仅允许 staticOnly=true
+  if (options.snapshotManifestPath) {
+    if (options.staticOnly !== true) {
+      const err = new Error("[patch-pi-web] 快照发布模式仅允许 staticOnly=true，禁止执行服务端修改或重启！");
+      err.code = "SNAPSHOT_STATIC_ONLY_REQUIRED";
+      throw err;
+    }
+  }
+
+  let verifiedSnapshotRawSha = null;
+  if (options.snapshotManifestPath && fs.existsSync(options.snapshotManifestPath)) {
+    try {
+      const snapM = JSON.parse(fs.readFileSync(options.snapshotManifestPath, "utf8"));
+      verifiedSnapshotRawSha = snapM.bundleSha256 || snapM.rawSha256;
+    } catch (_) {}
+  }
+
+  const lockCfg = resolvePatchLockConfig(options);
+  return withGlobalBuildLock(
+    {
+      sessionId: options.sessionId,
+      operationToken: options.operationToken,
+      stateFile: lockCfg.stateFile,
+      modulesDir: lockCfg.modulesDir,
+      canonicalModulesDir: options.canonicalModulesDir,
+      snapshotManifestPath: options.snapshotManifestPath,
+      isPidAlive: options.isPidAlive,
+      waitTimeoutMs: options.waitTimeoutMs,
+      enforceUnlockedDiffCheck: lockCfg.enforceUnlockedDiffCheck,
+      operation: options.operation || "patch-package",
+    },
+    ({ operationToken }) => {
+      try {
+        if (!fs.existsSync(pkgDir)) return;
+
+        const explicitPublicOnly = options.publicOnly === true;
+        const explicitSyncLayoutInline =
+          options.syncLayoutInline === true || options.layoutInline === true;
+        const isSnapshotStatic = Boolean(options.snapshotManifestPath && options.staticOnly === true);
+        const allowBoundedLayoutInlineSync =
+          (!explicitPublicOnly || isSnapshotStatic) &&
+          (explicitSyncLayoutInline || options.staticOnly === true);
+        if (explicitSyncLayoutInline && !options.staticOnly) {
+          options = { ...options, publicOnly: true };
+        }
 
     // 【Koxir Standalone Edition (1.0.0+) 自有独立发行版守卫与自动升级】
     const pkgJsonPath = path.join(pkgDir, "package.json");
@@ -402,6 +1026,18 @@ function patchPackage(pkgDir, options = {}) {
         const pkgJson = JSON.parse(fs.readFileSync(pkgJsonPath, "utf8"));
         const isStandalonePkg = pkgJson.standalone === true || pkgJson.piWebEdition === STANDALONE_EDITION;
         const verStr = String(pkgJson.version || "");
+        const releaseParts = verStr.split(".").map(Number);
+        if (isStandalonePkg && releaseParts.length === 3 && releaseParts.every(Number.isInteger) &&
+            (releaseParts[0] > 1 || (releaseParts[0] === 1 && (releaseParts[1] > 0 || releaseParts[2] >= 2)))) {
+          // GitHub Release 1.0.2+ owns the server routes and compiled client chunks.
+          // Legacy patching may only sync private public assets; never downgrade a release to 1.0.0.
+          options = { ...options, publicOnly: true };
+          console.log(
+            `[patch-pi-web] Portable release ${verStr}: ${
+              allowBoundedLayoutInlineSync ? "public assets + bounded layout inline sync" : "public assets only"
+            }`
+          );
+        }
         const isUnauthorizedUpstream = !isStandalonePkg && verStr !== "0.9.1" && !verStr.startsWith("1.");
         if (isUnauthorizedUpstream) {
           console.error(`[patch-pi-web] [STANDALONE GUARD] 检测到 ${pkgDir} 被外部原版 (${verStr}) 覆盖！正在恢复为 Koxir Standalone ${STANDALONE_BASE_VERSION} 独立发行版...`);
@@ -421,18 +1057,21 @@ function patchPackage(pkgDir, options = {}) {
           }
         }
         const latestPkgJson = JSON.parse(fs.readFileSync(pkgJsonPath, "utf8"));
-        const targetVer = (!latestPkgJson.version || latestPkgJson.version === "0.9.1" || latestPkgJson.version === "0.9.3")
-          ? STANDALONE_BASE_VERSION
-          : latestPkgJson.version;
-        if (
-          latestPkgJson.version !== targetVer ||
-          latestPkgJson.piWebEdition !== STANDALONE_EDITION ||
-          latestPkgJson.standalone !== true
-        ) {
-          latestPkgJson.version = targetVer;
-          latestPkgJson.piWebEdition = STANDALONE_EDITION;
-          latestPkgJson.standalone = true;
-          safeWriteFileSync(pkgJsonPath, JSON.stringify(latestPkgJson, null, 2) + "\n", "utf8");
+        const isSnapshotMode = Boolean(options.snapshotManifestPath || options.isCertifiedSnapshot);
+        if (!isSnapshotMode) {
+          const targetVer = (!latestPkgJson.version || latestPkgJson.version === "0.9.1" || latestPkgJson.version === "0.9.3")
+            ? STANDALONE_BASE_VERSION
+            : latestPkgJson.version;
+          if (
+            latestPkgJson.version !== targetVer ||
+            latestPkgJson.piWebEdition !== STANDALONE_EDITION ||
+            latestPkgJson.standalone !== true
+          ) {
+            latestPkgJson.version = targetVer;
+            latestPkgJson.piWebEdition = STANDALONE_EDITION;
+            latestPkgJson.standalone = true;
+            safeWriteFileSync(pkgJsonPath, JSON.stringify(latestPkgJson, null, 2) + "\n", "utf8");
+          }
         }
       } catch (verErr) {
         console.warn(`[patch-pi-web] 独立版版本校验警告: ${verErr.message}`);
@@ -471,33 +1110,127 @@ function patchPackage(pkgDir, options = {}) {
     const publicOnly = options.publicOnly === true;
     const staticOnly = options.staticOnly === true || publicOnly;
     const officialPiVersion = resolveOfficialPiAgentVersion(pkgDir);
+    const installedWebVersion = (() => {
+      try {
+        const installed = JSON.parse(fs.readFileSync(path.join(pkgDir, "package.json"), "utf8"));
+        return installed.piWebEdition === STANDALONE_EDITION && /^1\.\d+\.\d+$/.test(installed.version)
+          ? installed.version : STANDALONE_BASE_VERSION;
+      } catch (_) { return STANDALONE_BASE_VERSION; }
+    })();
     if (!staticOnly) patchAllOpenAIResponsesReasoning(pkgDir);
 
-    // 按需单模块独立编辑与热构建联动：若 enhancements/modules/*.js 有改动，自动先合成 pi-web-enhancements.js
-    const builderPath = path.join(home, ".pi", "agent", "scripts", "build-pi-web-enhancements.cjs");
-    if (!options.skipBuilderSync && fs.existsSync(builderPath)) {
-      try {
-        require(builderPath).ensureSynced();
-      } catch (buildErr) {
-        console.warn("[patch-pi-web] Module builder sync warning:", buildErr.message);
+    // 按需单模块独立编辑与热构建联动：若 enhancements/modules/*.js 有改动，自动先合成 pi-web-enhancements.js (fail-closed)
+    const homeBuilderPath = path.join(home, ".pi", "agent", "scripts", "build-pi-web-enhancements.cjs");
+    const builderPath =
+      options.builderPath ||
+      (fs.existsSync(homeBuilderPath)
+        ? homeBuilderPath
+        : fs.existsSync(path.join(lockCfg.modulesDir, "manifest.json"))
+          ? path.join(__dirname, "build-pi-web-enhancements.cjs")
+          : homeBuilderPath);
+    const shouldSkipBuilderSync = Boolean(lockCfg.skipBuilderSync);
+    if (!shouldSkipBuilderSync) {
+      if (fs.existsSync(builderPath)) {
+        require(builderPath).ensureSynced({
+          ...options,
+          primaryBundlePath: options.primaryBundlePath || options.enhancementSource || ENHANCEMENT_SOURCE,
+          mirrorBundlePath:
+            options.mirrorBundlePath !== undefined
+              ? options.mirrorBundlePath
+              : lockCfg.modulesDir === "/root/.pi/agent/scripts/enhancements/modules"
+                ? undefined
+                : null,
+          stateFile: lockCfg.stateFile,
+          modulesDir: lockCfg.modulesDir,
+          enforceUnlockedDiffCheck: true,
+          operationToken,
+        });
+      } else if (lockCfg.hasModuleDiffs) {
+        const err = new Error(
+          `[patch-pi-web] Fail-closed: module modifications detected in ${lockCfg.modulesDir} but builder script not found at ${builderPath}`
+        );
+        err.code = "ENHANCEMENT_BUILDER_MISSING";
+        throw err;
       }
     }
 
     let enhCode = "";
-    if (fs.existsSync(ENHANCEMENT_SOURCE)) {
-      enhCode = fs.readFileSync(ENHANCEMENT_SOURCE, "utf8");
+    let enhancementCandidatePath = null;
+    let snapshotBundleCandidate = null;
+    if (options.snapshotManifestPath) {
+      const snapDir = path.dirname(options.snapshotManifestPath);
+      const candidates = [
+        path.join(snapDir, "pi-web-enhancements.js"),
+        path.join(path.dirname(snapDir), "pi-web-enhancements.js"),
+      ];
+      for (const cand of candidates) {
+        if (fs.existsSync(cand)) {
+          snapshotBundleCandidate = cand;
+          break;
+        }
+      }
+    }
+    const enhancementCandidates = [
+      options.enhancementSource,
+      snapshotBundleCandidate,
+      options.primaryBundlePath,
+      ENHANCEMENT_SOURCE,
+      path.join(pkgDir, "public", "pi-web-enhancements.js"),
+      resolveScriptAssetPath("pi-web-enhancements.js", home),
+    ].filter(Boolean);
+    for (const candidatePath of enhancementCandidates) {
+      if (fs.existsSync(candidatePath)) {
+        enhCode = stripBundledEnhancementPreamble(fs.readFileSync(candidatePath, "utf8"));
+        if (enhCode) {
+          enhancementCandidatePath = candidatePath;
+          break;
+        }
+      }
     }
 
+    if (!enhCode) {
+      const err = new Error("[patch-pi-web] Fail-closed: enhancement candidate bundle is missing; static patch refused.");
+      err.code = "ENHANCEMENT_CANDIDATE_MISSING";
+      throw err;
+    }
+
+    // 绑定 enhancementSource/raw 到认证 snapshot 严格相等（拒传不同 bundle）
+    if (verifiedSnapshotRawSha) {
+      const candidateRawSha = require("node:crypto").createHash("sha256").update(enhCode).digest("hex");
+      if (candidateRawSha !== verifiedSnapshotRawSha) {
+        const err = new Error(
+          `[patch-pi-web] 拒绝发布不同 bundle：传入 bundle SHA (${candidateRawSha}) 与认证快照 SHA (${verifiedSnapshotRawSha}) 不一致！`
+        );
+        err.code = "SNAPSHOT_BUNDLE_MISMATCH";
+        throw err;
+      }
+    }
+
+    runSessionDeleteRegressionGate({
+      modulesDir: options.modulesDir || lockCfg.modulesDir,
+      candidateBundleText: enhCode,
+      candidateBundlePath: enhancementCandidatePath,
+      stateFile: lockCfg.stateFile,
+      pkgDir,
+      enforceUnlockedDiffCheck: options.enforceUnlockedDiffCheck,
+      nonProductionFixture: options.nonProductionFixture,
+      forceProduction: options.forceProduction,
+      snapshotManifestPath: options.snapshotManifestPath,
+      operation: "patch-candidate",
+    });
+
     // A passive, bounded recorder loads before the app/enhancement runtime.
-    const diagnosticsPath = path.join(home, ".pi", "agent", "scripts", "pi-web-crash-diagnostics.js");
+    const diagnosticsPath = options.diagnosticsPath || resolveScriptAssetPath("pi-web-crash-diagnostics.js", home);
     const diagnosticsCode = fs.existsSync(diagnosticsPath) ? fs.readFileSync(diagnosticsPath, "utf8") : "";
     const usageModules = ["usage-ledger-core.js", "pi-usage-panel.js"].map(file => {
-      const source = path.join(home, ".pi", "agent", "scripts", file);
+      const source = resolveScriptAssetPath(file, home);
       return fs.existsSync(source) ? fs.readFileSync(source, "utf8") : "";
     }).join("\n;\n");
-    const assetBuild = require("node:crypto").createHash("sha256").update(enhCode + diagnosticsCode + usageModules).digest("hex").slice(0, 16);
-    const durableStateEnabled = fs.existsSync(path.join(home, ".pi", "agent", "state", "enhancement-state", "journal.jsonl"));
-    const diagnosticBootstrap = `window.__PI_ENH_DURABLE_STATE_ENABLED__ = ${JSON.stringify(durableStateEnabled)};\nwindow.__PI_ENH_ASSET_BUILD__ = ${JSON.stringify(assetBuild)};\n${diagnosticsCode}\n`;
+    const assetBuild = require("node:crypto").createHash("sha256").update(enhCode + diagnosticsCode + usageModules + officialPiVersion).digest("hex").slice(0, 16);
+    const stateDir = path.join(home, ".pi", "agent", "state", "enhancement-state");
+    const durableStateEnabled = ["journal.jsonl", "current.json"].some(file => fs.existsSync(path.join(stateDir, file)));
+    const nativeStateApi = fs.existsSync(path.join(pkgDir, ".next", "server", "app", "api", "enhancement-state", "route.js"));
+    const diagnosticBootstrap = `window.__PI_ENH_NATIVE_STATE_API__ = ${JSON.stringify(nativeStateApi)};\nwindow.__PI_ENH_DURABLE_STATE_ENABLED__ = ${JSON.stringify(durableStateEnabled)};\nwindow.__PI_OFFICIAL_AGENT_VERSION__ = ${JSON.stringify(officialPiVersion)};\nwindow.__PI_ENH_ASSET_BUILD__ = ${JSON.stringify(assetBuild)};\n${diagnosticsCode}\n`;
 
     // 1. Copy enhancements script to public/. Next's production server only
     // serves public files known at build time, so a newly added JSON manifest
@@ -604,11 +1337,20 @@ function patchPackage(pkgDir, options = {}) {
     }
 
     let validatedBundledEnhancement = "";
-    if (enhCode && enhCode.length >= 500000 && enhCode.includes("window.__PI_WEB_ENHANCEMENTS_LOADED__")) {
+    if (
+      enhCode &&
+      enhCode.length >= 500000 &&
+      enhCode.includes("window.__PI_WEB_ENHANCEMENTS_LOADED__") &&
+      diagnosticsCode.includes("__PI_ENH_CRASH_DIAGNOSTICS__")
+    ) {
       const manifestBootstrap = `window.__PI_ENH_ARCHIVED_MANIFEST__ = ${JSON.stringify(archivedManifest)};\nwindow.__PI_ENH_PINNED_MANIFEST__ = ${JSON.stringify(pinnedManifest)};\nwindow.__PI_ENH_SHORTCUTS_MANIFEST__ = ${JSON.stringify(shortcutsManifest)};\nwindow.__PI_ENH_USAGE_LEDGER__ = window.__PI_ENH_USAGE_LEDGER__ || null;\nwindow.__PI_ENH_ODOO_ADDONS_MANIFEST__ = ${JSON.stringify(odooAddonsManifest)};\nwindow.__PI_ENH_TAGS_MANIFEST__ = ${JSON.stringify(tagsManifest)};\n`;
       const bundledEnhancement = diagnosticBootstrap + manifestBootstrap + usageModules + "\n;\n" + enhCode;
-      new (require("node:vm").Script)(bundledEnhancement, { filename: "pi-web-enhancements.bundle.js" });
-      validatedBundledEnhancement = bundledEnhancement;
+      try {
+        new (require("node:vm").Script)(bundledEnhancement, { filename: "pi-web-enhancements.bundle.js" });
+        validatedBundledEnhancement = bundledEnhancement;
+      } catch (vmErr) {
+        console.warn(`[patch-pi-web] Refusing to deploy syntax-invalid enhancement bundle: ${vmErr.message}`);
+      }
     }
 
     if (fs.existsSync(publicDir) && enhCode) {
@@ -630,13 +1372,9 @@ function patchPackage(pkgDir, options = {}) {
       safeWriteFileSync(destPinned, fs.readFileSync(pinnedSource, "utf8"), "utf8");
     }
 
-    if (fs.existsSync(publicDir)) {
+    if (fs.existsSync(publicDir) && fs.existsSync(shortcutsSource)) {
       const destShortcuts = path.join(publicDir, "pi-shortcuts-manifest.json");
-      if (fs.existsSync(shortcutsSource)) {
-        safeWriteFileSync(destShortcuts, fs.readFileSync(shortcutsSource, "utf8"), "utf8");
-      } else if (!fs.existsSync(destShortcuts)) {
-        safeWriteFileSync(destShortcuts, JSON.stringify(shortcutsManifest, null, 2), "utf8");
-      }
+      safeWriteFileSync(destShortcuts, fs.readFileSync(shortcutsSource, "utf8"), "utf8");
     }
 
     if (fs.existsSync(publicDir) && fs.existsSync(usageLedgerSource)) {
@@ -667,25 +1405,24 @@ function patchPackage(pkgDir, options = {}) {
       }
     }
 
-    if (fs.existsSync(publicDir)) {
+    if (fs.existsSync(publicDir) && fs.existsSync(odooAddonsSource)) {
       const destOdooAddons = path.join(publicDir, "pi-odoo-addons-manifest.json");
-      if (fs.existsSync(odooAddonsSource)) {
-        safeWriteFileSync(destOdooAddons, fs.readFileSync(odooAddonsSource, "utf8"), "utf8");
-      } else if (!fs.existsSync(destOdooAddons)) {
-        safeWriteFileSync(destOdooAddons, JSON.stringify(odooAddonsManifest || { revision: 0, updatedAt: "1970-01-01T00:00:00.000Z", sessions: {}, latestByAddon: {} }, null, 2), "utf8");
-      }
+      safeWriteFileSync(destOdooAddons, fs.readFileSync(odooAddonsSource, "utf8"), "utf8");
     }
 
-    if (fs.existsSync(publicDir)) {
+    if (fs.existsSync(publicDir) && fs.existsSync(tagsSource)) {
       const destTags = path.join(publicDir, "pi-tags-manifest.json");
-      if (fs.existsSync(tagsSource)) {
-        safeWriteFileSync(destTags, fs.readFileSync(tagsSource, "utf8"), "utf8");
-      } else if (!fs.existsSync(destTags)) {
-        safeWriteFileSync(destTags, JSON.stringify(tagsManifest || { definitions: [], mappings: {}, revision: 0 }, null, 2), "utf8");
-      }
+      safeWriteFileSync(destTags, fs.readFileSync(tagsSource, "utf8"), "utf8");
     }
 
     // Lightweight dynamic hot-loader definition with retry & watchdog
+    // 同源数据缺失时拒绝发布，不能悄悄退回另一套旧配置/旧布局。
+    const settingsModule02 = options.snapshotManifestPath
+      ? path.join(lockCfg.modulesDir, "02-plugin-registry-and-settings-schema.js")
+      : resolveSettingsModule02Path(home);
+    const metadata = extractEnhancementMetadata(settingsModule02);
+    const fastPluginReaderCode = buildFastPluginReaderSnippet(metadata);
+
     const loaderCode = `${diagnosticBootstrap};(function(){
   if (typeof window === "undefined" || window.__PI_WEB_LOADER_INJECTED__) return;
   window.__PI_WEB_LOADER_INJECTED__ = true;
@@ -696,7 +1433,8 @@ function patchPackage(pkgDir, options = {}) {
   window.__PI_ENH_ODOO_ADDONS_MANIFEST__ = window.__PI_ENH_ODOO_ADDONS_MANIFEST__ || ${JSON.stringify(odooAddonsManifest || null)};
   window.__PI_ENH_TAGS_MANIFEST__ = window.__PI_ENH_TAGS_MANIFEST__ || ${JSON.stringify(tagsManifest || null)};
 
-  // 1. Zero-FOUC Pre-Hydration: DOM 绘制前瞬间应用深色主题与背景色，100% 杜绝白屏闪烁
+${fastPluginReaderCode ? fastPluginReaderCode + "\n\n" : ""}` +
+`  // 1. Zero-FOUC Pre-Hydration: DOM 绘制前瞬间应用深色主题与背景色，100% 杜绝白屏闪烁
   var isDark = true;
   try {
     var mode = localStorage.getItem("pi-web-theme-mode") || localStorage.getItem("theme") || "system";
@@ -719,7 +1457,7 @@ function patchPackage(pkgDir, options = {}) {
       var sStyle = document.createElement('style');
       sStyle.id = 'pi-zero-fouc-shortcuts-style';
       sStyle.textContent = [
-        '[data-pi-enh-shortcuts-host] > button:not(.pi-enh-shortcut-btn),',
+        '[data-pi-enh-shortcuts-host]:not([data-pi-enh-shortcuts-disabled]) > button:not(.pi-enh-shortcut-btn),',
         '.sidebar-container > div:last-child:not([data-pi-enh-shortcuts-disabled]) > button:not(.pi-enh-shortcut-btn) {',
         '  display: none !important;',
         '}',
@@ -766,13 +1504,6 @@ function patchPackage(pkgDir, options = {}) {
         '  text-overflow: ellipsis;',
         '  white-space: nowrap;',
         '  font-size: 10.5px;',
-        '}',
-        'html[data-pi-opening-tab="usage"] .settings-dialog-surface .settings-general,',
-        'html[data-pi-opening-tab="enhancements"] .settings-dialog-surface .settings-general,',
-        'html[data-pi-opening-tab="archived"] .settings-dialog-surface .settings-general,',
-        'html[data-pi-opening-tab="notifications"] .settings-dialog-surface .settings-general,',
-        'html[data-pi-opening-tab="tags"] .settings-dialog-surface .settings-general {',
-        '  display: none !important;',
         '}',
         '.pi-enh-session-row-host {',
         '  touch-action: pan-y manipulation !important;',
@@ -895,7 +1626,7 @@ function patchPackage(pkgDir, options = {}) {
         '  overflow: hidden !important;',
         '  text-overflow: ellipsis !important;',
         '  white-space: nowrap !important;',
-        '  line-height: 1.4 !important;',
+        '  line-height: 20px !important;',
         '}',
         'html.pi-enh-session-compact-active .pi-enh-session-meta,',
         'html.pi-enh-session-compact-active .pi-enh-session-row-host:not([data-pi-enh-has-tags="true"]) > div:not(.pi-enh-native-session-actions):not(.pi-enh-session-odoo-addons) > div:last-child:not(.pi-enh-session-odoo-addons) {',
@@ -910,7 +1641,9 @@ function patchPackage(pkgDir, options = {}) {
         '  gap: 6px !important;',
         '  margin-top: 2px !important;',
         '}',
-        'html.pi-enh-session-compact-active .pi-enh-session-meta > *,',
+        'html.pi-enh-session-compact-active .pi-enh-session-meta > * {',
+        '  white-space: nowrap !important;',
+        '}',
         'html.pi-enh-session-compact-active .pi-enh-session-time,',
         'html.pi-enh-session-compact-active .pi-enh-session-meta > span:first-child,',
         'html.pi-enh-session-compact-active .pi-enh-session-msg-count {',
@@ -1010,7 +1743,7 @@ function patchPackage(pkgDir, options = {}) {
     }
 
     function mountFastShortcuts(host) {
-      if (!host || host.querySelector('.pi-enh-shortcuts-bar')) return;
+      if (!host || host.hasAttribute('data-pi-enh-shortcuts-disabled') || (typeof window.__PI_ENH_IS_PLUGIN_ENABLED__ === 'function' && !window.__PI_ENH_IS_PLUGIN_ENABLED__('settings-tab-shortcuts')) || host.querySelector('.pi-enh-shortcuts-bar')) return;
       host.setAttribute('data-pi-enh-shortcuts-host', 'true');
       var list = getFastShortcutList();
       var bar = document.createElement('div');
@@ -1032,7 +1765,6 @@ function patchPackage(pkgDir, options = {}) {
         if (typeof window.__PI_ENH_TRIGGER_SHORTCUT__ === 'function') {
           window.__PI_ENH_TRIGGER_SHORTCUT__(id);
         } else {
-          document.documentElement.setAttribute('data-pi-opening-tab', id);
           window.__PI_PENDING_SHORTCUT_TARGET__ = id;
           if (typeof window.__PI_OPEN_SETTINGS__ === 'function') {
             window.__PI_OPEN_SETTINGS__(id === 'settings' ? 'general' : id);
@@ -1042,16 +1774,7 @@ function patchPackage(pkgDir, options = {}) {
       host.appendChild(bar);
     }
 
-    function isPluginFastActive(pluginId) {
-      try {
-        var raw = localStorage.getItem("pi-enh-plugins-v1");
-        if (raw) {
-          var cfg = JSON.parse(raw);
-          if (cfg && typeof cfg[pluginId] === "boolean") return cfg[pluginId];
-        }
-      } catch(e) {}
-      return true;
-    }
+    // [Canonical Fast Reader] isPluginFastActive 已由 helper 编译注入在顶部
 
     try {
       var docRoot = document.documentElement;
@@ -1207,8 +1930,8 @@ function patchPackage(pkgDir, options = {}) {
       return baseHeadersHeight + extraHeight;
     }
 
-    window.__PI_WEB_STANDALONE_EDITION__ = "koxir-standalone-1.0.0";
-    window.__PI_WEB_STANDALONE_VERSION__ = "1.0.0";
+    window.__PI_WEB_STANDALONE_EDITION__ = ${JSON.stringify(`koxir-standalone-${installedWebVersion}`)};
+    window.__PI_WEB_STANDALONE_VERSION__ = ${JSON.stringify(installedWebVersion)};
     window.__PI_OFFICIAL_AGENT_VERSION__ = ${JSON.stringify(officialPiVersion)};
     if (!window.__PI_WEB_ENHANCEMENTS_LOADED__) {
       window.__PI_ENH_IS_PLUGIN_ENABLED__ = window.__PI_ENH_IS_PLUGIN_ENABLED__ || isPluginFastActive;
@@ -1458,6 +2181,35 @@ function patchPackage(pkgDir, options = {}) {
   window.__PI_ENH_RELOAD__ = function(forceBust) {
     loadScript(forceBust !== false);
   };
+
+  // 若当前页面加载到了浏览器 HTTP 磁盘 immutable 缓存中的旧内联 bundle，延迟 1.2s 对比并自动热更新
+  setTimeout(function() {
+    try {
+      if (typeof window === "undefined" || !window.fetch || window.location.pathname.indexOf("/login") >= 0) return;
+      window.fetch("/pi-web-enhancement-loader.js?t=" + Date.now(), { cache: "no-store" })
+        .then(function(r) { return r && r.ok ? r.text() : ""; })
+        .then(function(txt) {
+          if (!txt) return;
+          var m = txt.match(/window\\.__PI_ENH_ASSET_BUILD__\\s*=\\s*"([a-f0-9]{16})"/);
+          if (m && m[1] && m[1] !== assetBuildHash) {
+            console.warn("[Pi Enh Loader] Immutable chunk mismatch (cached: " + assetBuildHash + ", remote: " + m[1] + "). Hot reloading latest script...");
+            try {
+              var scs = document.querySelectorAll("script[src]");
+              for (var i = 0; i < scs.length; i++) {
+                var s = scs[i].getAttribute("src");
+                if (s && (s.indexOf("/chunks/app/layout-") >= 0 || s.indexOf("/chunks/app/page-") >= 0)) {
+                  window.fetch(s, { cache: "reload" }).catch(function() {});
+                }
+              }
+            } catch(_) {}
+            if (typeof window.__PI_WEB_ENHANCEMENTS_CLEANUP__ === "function") {
+              try { window.__PI_WEB_ENHANCEMENTS_CLEANUP__(); } catch(_) {}
+            }
+            loadScript(true);
+          }
+        }).catch(function() {});
+    } catch(_) {}
+  }, 1200);
 })();`;
 
     if (fs.existsSync(publicDir)) {
@@ -1465,7 +2217,36 @@ function patchPackage(pkgDir, options = {}) {
       safeWriteFileSync(destLoader, loaderCode, "utf8");
     }
 
-    // Explicit live deployment mode: never touch running server/SDK or client bundles.
+    if (allowBoundedLayoutInlineSync && options.publicOnly) {
+      const inlineSync = syncBoundedLayoutInlineChunks(pkgDir, {
+        loaderCode,
+        validatedBundledEnhancement,
+      });
+      if (options.syncLayoutInline === true && inlineSync.updated.length + inlineSync.unchanged.length === 0) {
+        throw new Error(`[patch-pi-web] Fail-closed: no validated layout inline bundle was deployed (${inlineSync.reason || inlineSync.rejected.map(item => item.reason).join(", ")})`);
+      }
+      syncPortablePageBridgeChunks(pkgDir);
+    }
+
+    // The standalone native bootstrap does not execute the public hot-loader.
+    // Compile the same plugin prepaint into its bounded prefix; preserve native bytes.
+    if (options.syncPrepaintInline !== false) {
+      try {
+        const prepaint = require("./pi-web-prepaint-inline.cjs").syncPrepaintInline(pkgDir, {
+          modulesDir: lockCfg.modulesDir,
+          bundlePath: fs.existsSync('/workspace/pi-web/components/SessionSidebar.tsx') ? undefined : (options.enhancementSource || ENHANCEMENT_SOURCE),
+          required: options.syncPrepaintInline === true,
+        });
+        if (prepaint && prepaint.updated && prepaint.updated.length) console.log("[patch-pi-web] native prepaint prefix:", JSON.stringify(prepaint));
+      } catch (prepaintErr) {
+        if (options.syncPrepaintInline === true) throw prepaintErr;
+      }
+    }
+
+    // 无论是否 publicOnly，public/sw.js 均属于 public 目录核心静态资源，必须在返回前完成修补
+    patchPublicServiceWorker(pkgDir, assetBuild);
+
+    // Explicit live mode: no running server/SDK or native body rewrites (bounded prepaint only).
     if (options.publicOnly === true) return;
 
     // If an optional source-owned loader bridge is present in public/,
@@ -1547,6 +2328,12 @@ function patchPackage(pkgDir, options = {}) {
           const repairedModelAutoFocus = repairModelSelectorMobileAutoFocus(content);
           if (repairedModelAutoFocus !== content) {
             content = repairedModelAutoFocus;
+            modified = true;
+          }
+
+          const repairedModelRetainKeyboard = repairModelSelectorRetainKeyboard(content);
+          if (repairedModelRetainKeyboard !== content) {
+            content = repairedModelRetainKeyboard;
             modified = true;
           }
 
@@ -1706,8 +2493,27 @@ function patchPackage(pkgDir, options = {}) {
 
           const minimapHistoryBridgeSource = 't1=(0,i.useCallback)(()=>{tC(e=>Math.max(e,2*ee.length))},[ee.length]),t2=';
           const minimapHistoryBridgeTarget = 't1=(0,i.useCallback)(()=>{tC(e=>Math.max(e,2*ee.length))},[ee.length]);window.__PI_ENH_GET_HISTORY_STATE__=()=>({sessionId:e?.id??eV.current??null,totalTurns:e$?.userMessages??0,hasEarlierMessages:!!ei,entryIds:en,oldestEntryId:er});window.__PI_ENH_LOAD_EARLIER__=async a=>{if(tI.current||!ei||!er)return!1;let n=e?.id??eV.current;if(!n)return!1;let r=Number(a),o=Number.isFinite(r)?Math.max(50,Math.min(500,Math.round(r))):250;tI.current=!0;let l=eJ.current;l&&(tE.current=l.scrollHeight-l.scrollTop);try{return!!await tr(n,ti,er,{tail:o})}finally{tI.current=!1}};let t2=';
+          const minimapHistoryBridgeSourceV3 = 'nu=(0,i.useCallback)(()=>{tP(e=>Math.max(e,2*et.length))},[et.length]),np=';
+          const legacyMinimapHistoryBridgeTargetV3 = 'nu=(0,i.useCallback)(()=>{tP(e=>Math.max(e,2*et.length))},[et.length]);window.__PI_ENH_GET_HISTORY_STATE__=()=>({sessionId:e?.id??e5.current??null,totalTurns:eN?.userMessages??0,hasEarlierMessages:!!eo,entryIds:er,oldestEntryId:ei});window.__PI_ENH_LOAD_EARLIER__=async a=>{if(tV.current||!eo||!ei)return!1;let n=e?.id??e5.current;if(!n)return!1;let r=Number(a),o=Number.isFinite(r)?Math.max(50,Math.min(500,Math.round(r))):250;tV.current=!0;let l=e6.current;l&&(tK.current=l.scrollHeight-l.scrollTop);try{return!!await tf(n,tx,ei,{tail:o})}finally{tV.current=!1}};let np=';
+          const minimapHistoryBridgeTargetV3 = 'nu=(0,i.useCallback)(()=>{tP(e=>Math.max(e,2*et.length))},[et.length]);(0,i.useEffect)(()=>{tP(e=>Math.max(e,2*et.length+100))},[et.length]);window.__PI_ENH_GET_HISTORY_STATE__=()=>({sessionId:e?.id??e5.current??null,totalTurns:eN?.userMessages??0,hasEarlierMessages:Boolean(eo||(tO?.current>0)),hasRemoteEarlier:!!eo,hasLocalEarlier:Boolean(tO?.current>0),localEarlierCount:tO?.current||0,entryIds:er,oldestEntryId:ei});window.__PI_ENH_LOAD_EARLIER__=async a=>{if(tV.current)return!1;let s=Boolean(tO?.current>0);if(s){tP(e=>Math.max(e,2*et.length+100));if(!eo||!ei)return!0}if(!eo||!ei)return!1;let n=e?.id??e5.current;if(!n)return!1;let r=Number(a),o=Number.isFinite(r)?Math.max(50,Math.min(500,Math.round(r))):250;tV.current=!0;let l=e6.current;l&&(tK.current=l.scrollHeight-l.scrollTop);try{let res=await tf(n,tx,ei,{tail:o});if(res)tP(e=>Math.max(e,2*et.length+100));return Boolean(res||s)}finally{tV.current=!1}};let np=';
           if (content.includes(minimapHistoryBridgeSource)) {
             content = content.replace(minimapHistoryBridgeSource, minimapHistoryBridgeTarget);
+            modified = true;
+          } else if (content.includes(legacyMinimapHistoryBridgeTargetV3)) {
+            content = content.replace(legacyMinimapHistoryBridgeTargetV3, minimapHistoryBridgeTargetV3);
+            modified = true;
+          } else if (content.includes(minimapHistoryBridgeSourceV3)) {
+            content = content.replace(minimapHistoryBridgeSourceV3, minimapHistoryBridgeTargetV3);
+            modified = true;
+          }
+
+          // Native chat rendering splits each turn into up to 2 DOM entries in `c`
+          // (ProcessDetailsGroup + answer), so the visible count floor effect must
+          // grow to 2*ee.length; also upgrades chunks where the bridge is already injected.
+          const historyVisibleCountEffectSource = '(0,i.useEffect)(()=>{tC(e=>Math.max(e,ee.length))},[ee.length])';
+          const historyVisibleCountEffectTarget = '(0,i.useEffect)(()=>{tC(e=>Math.max(e,2*ee.length))},[ee.length])';
+          if (content.includes(historyVisibleCountEffectSource)) {
+            content = content.replace(historyVisibleCountEffectSource, historyVisibleCountEffectTarget);
             modified = true;
           }
 
@@ -1752,6 +2558,8 @@ function patchPackage(pkgDir, options = {}) {
           // page reload or a Pi Web service restart.
           const sessionRefreshSuffix = 'finally{n===z.current&&A(!1)}},[]),tp=(0,i.useRef)(!1);';
           const sessionRefreshHook = 'finally{n===z.current&&A(!1)}},[]),tp=(window.__PI_ENH_REFRESH_SESSIONS__=(e=!1,t=!1)=>tu(e,t),window.__PI_ENH_GET_RAW_SESSIONS__=()=>R,window.__PI_ENH_RERENDER_SESSIONS__=()=>{try{L(prev=>Array.isArray(prev)?[...prev]:prev)}catch(e){}},window.__PI_ENH_SESSION_DELETED__=e=>{try{p?.(e)}catch{}},window.__PI_ENH_SET_UNREAD_SESSION__=(sId,isU)=>{try{e5(prev=>{let next=new Set(prev);if(isU)next.add(sId);else next.delete(sId);return next;})}catch(e){}},window.__PI_ENH_IS_SESSION_UNREAD__=(sId)=>Boolean(e8?.has?.(sId)),(0,i.useRef)(!1));';
+          const sessionRefreshSuffixV3 = 'finally{r===W.current&&P(!1)}},[]),tw=(0,i.useRef)(!1);';
+          const sessionRefreshHookV3 = 'finally{r===W.current&&P(!1)}},[]),tw=(window.__PI_ENH_REFRESH_SESSIONS__=(e=!1,t=!1)=>tb(e,t),window.__PI_ENH_GET_RAW_SESSIONS__=()=>L,window.__PI_ENH_RERENDER_SESSIONS__=()=>{try{$(prev=>Array.isArray(prev)?[...prev]:prev)}catch(e){}},window.__PI_ENH_SESSION_DELETED__=e=>{try{p?.(e)}catch{}},window.__PI_ENH_SET_UNREAD_SESSION__=(sId,isU)=>{try{e8(prev=>{let next=new Set(prev);if(isU)next.add(sId);else next.delete(sId);return next;})}catch(e){}},window.__PI_ENH_IS_SESSION_UNREAD__=(sId)=>Boolean(e4?.has?.(sId)),(0,i.useRef)(!1));';
           const previousSessionRefreshHook4 = 'finally{n===z.current&&A(!1)}},[]),tp=(window.__PI_ENH_REFRESH_SESSIONS__=(e=!1,t=!1)=>tu(e,t),window.__PI_ENH_SESSION_DELETED__=e=>{try{p?.(e)}catch{}},window.__PI_ENH_SET_UNREAD_SESSION__=(sId,isU)=>{try{e5(prev=>{let next=new Set(prev);if(isU)next.add(sId);else next.delete(sId);return next;})}catch(e){}},window.__PI_ENH_IS_SESSION_UNREAD__=(sId)=>Boolean(e8?.has?.(sId)),(0,i.useRef)(!1));';
           const previousSessionRefreshHook3 = 'finally{n===z.current&&A(!1)}},[]),tp=(window.__PI_ENH_REFRESH_SESSIONS__=(e=!1,t=!1)=>tu(e,t),window.__PI_ENH_SESSION_DELETED__=e=>{try{p?.(e)}catch{}},(0,i.useRef)(!1));';
           const previousSessionRefreshHook = 'finally{n===z.current&&A(!1)}},[]),tp=(window.__PI_ENH_REFRESH_SESSIONS__=()=>tu(),(0,i.useRef)(!1));';
@@ -1762,6 +2570,9 @@ function patchPackage(pkgDir, options = {}) {
           const parameterizedEffectRefreshFn = 'let e=(e=!1,t=!1)=>{tu(e,t)};';
           if (content.includes(sessionRefreshSuffix)) {
             content = content.replace(sessionRefreshSuffix, sessionRefreshHook);
+            modified = true;
+          } else if (content.includes(sessionRefreshSuffixV3)) {
+            content = content.replace(sessionRefreshSuffixV3, sessionRefreshHookV3);
             modified = true;
           } else if (content.includes(previousSessionRefreshHook4)) {
             content = content.replace(previousSessionRefreshHook4, sessionRefreshHook);
@@ -1801,6 +2612,8 @@ function patchPackage(pkgDir, options = {}) {
           const sessionListHeadersMalformed = 'tD.length>0&&(0,r.jsx)("div",{style:{position:"relative",height:54*tD.length+(window.__PI_ENH_GET_SESSION_HEADERS_HEIGHT__?.(tD)||0)},children:[...(window.__PI_ENH_GET_SESSION_HEADERS__?.(r,tD)||[]),...tH.map(t=>{let n=tD[t],i=[n.root,...n.subagents],o=n.latestModified===n.root.modified?n.root:{...n.root,modified:n.latestModified};return(0,r.jsx)("div",{onFocus:()=>ta(n.root.id),onBlur:()=>ta(null),style:{position:"absolute",top:(window.__PI_ENH_GET_SESSION_ITEM_TOP__?.(t,tD)??54*t),left:0,right:0},children:(0,r.jsx)(el,{session:o,isSelected:i.some(t=>t.id===e),isRunning:i.some(e=>e2.has(e.id)),isUnread:i.some(e=>e8.has(e.id)),onClick:()=>tT(n.root),onRenamed:tu,onDeleted:e=>{p?.(e),tu()}})},n.root.id)})})';
           const winSessionListHeadersSource = 't_.length>0&&(0,r.jsx)("div",{style:{position:"relative",height:54*t_.length},children:tD.map(t=>{let n=t_[t],i=[n.root,...n.subagents],o=n.latestModified===n.root.modified?n.root:{...n.root,modified:n.latestModified};return(0,r.jsx)("div",{onFocus:()=>ta(n.root.id),onBlur:()=>ta(null),style:{position:"absolute",top:54*t,left:0,right:0},children:(0,r.jsx)(ea,{session:o,isSelected:i.some(t=>t.id===e),isRunning:i.some(e=>e2.has(e.id)),isUnread:i.some(e=>e8.has(e.id)),onClick:()=>tT(n.root),onRenamed:tu,onDeleted:e=>{p?.(e),tu()}})},n.root.id)})})';
           const winSessionListHeadersTarget = 't_.length>0&&(0,r.jsx)("div",{style:{position:"relative",height:54*t_.length+(window.__PI_ENH_GET_SESSION_HEADERS_HEIGHT__?.(t_)||0)},children:[...(window.__PI_ENH_GET_SESSION_HEADERS__?.(r,t_)||[]),...tD.map(t=>{let n=t_[t],i=[n.root,...n.subagents],o=n.latestModified===n.root.modified?n.root:{...n.root,modified:n.latestModified};return(0,r.jsx)("div",{onFocus:()=>ta(n.root.id),onBlur:()=>ta(null),style:{position:"absolute",top:(window.__PI_ENH_GET_SESSION_ITEM_TOP__?.(t,t_)??54*t),left:0,right:0},children:(0,r.jsx)(ea,{session:o,isSelected:i.some(t=>t.id===e),isRunning:i.some(e=>e2.has(e.id)),isUnread:i.some(e=>e8.has(e.id)),onClick:()=>tT(n.root),onRenamed:tu,onDeleted:e=>{p?.(e),tu()}})},n.root.id)})]})';
+          const sessionListHeadersSourceV3 = 'tY.length>0&&(0,r.jsx)("div",{style:{position:"relative",height:54*tY.length+(window.__PI_ENH_GET_SESSION_HEADERS_HEIGHT__?.(tY)||0)},children:tZ.map(t=>{let n=tY[t],i=[n.root,...n.subagents],o=n.latestModified===n.root.modified?n.root:{...n.root,modified:n.latestModified};return(0,r.jsx)("div",{onFocus:()=>tf(n.root.id),onBlur:()=>tf(null),style:{position:"absolute",top:window.__PI_ENH_GET_SESSION_ITEM_TOP__?.(t,tY)??54*t,left:0,right:0},children:(0,r.jsx)(ec,{session:o,isSelected:i.some(t=>t.id===e),isRunning:i.some(e=>e1.has(e.id)),isUnread:i.some(e=>e4.has(e.id)),onClick:()=>tP(n.root),onRenamed:tb,onDeleted:e=>{p?.(e),tb()}})},n.root.id)})})';
+          const sessionListHeadersTargetV3 = 'tY.length>0&&(0,r.jsx)("div",{style:{position:"relative",height:54*tY.length+(window.__PI_ENH_GET_SESSION_HEADERS_HEIGHT__?.(tY)||0)},children:[...(window.__PI_ENH_GET_SESSION_HEADERS__?.(r,tY)||[]),...tZ.map(t=>{let n=tY[t],i=[n.root,...n.subagents],o=n.latestModified===n.root.modified?n.root:{...n.root,modified:n.latestModified};return(0,r.jsx)("div",{onFocus:()=>tf(n.root.id),onBlur:()=>tf(null),style:{position:"absolute",top:window.__PI_ENH_GET_SESSION_ITEM_TOP__?.(t,tY)??54*t,left:0,right:0},children:(0,r.jsx)(ec,{session:o,isSelected:i.some(t=>t.id===e),isRunning:i.some(e=>e1.has(e.id)),isUnread:i.some(e=>e4.has(e.id)),onClick:()=>tP(n.root),onRenamed:tb,onDeleted:e=>{p?.(e),tb()}})},n.root.id)})]})';
           if (content.includes(sessionListHeadersMalformed)) {
             content = content.replace(sessionListHeadersMalformed, sessionListHeadersTarget);
             modified = true;
@@ -1809,6 +2622,9 @@ function patchPackage(pkgDir, options = {}) {
             modified = true;
           } else if (content.includes(winSessionListHeadersSource)) {
             content = content.replace(winSessionListHeadersSource, winSessionListHeadersTarget);
+            modified = true;
+          } else if (content.includes(sessionListHeadersSourceV3)) {
+            content = content.replace(sessionListHeadersSourceV3, sessionListHeadersTargetV3);
             modified = true;
           }
 
@@ -1842,11 +2658,16 @@ function patchPackage(pkgDir, options = {}) {
           const sessionReloadBridgeSourceV2 = 'finally{t&&!r&&b(!1)}},[ty,tC]),tR=';
           const sessionReloadBridgeLegacyV2 = 'finally{t&&!r&&b(!1)}},[ty,tC]),tp_enh_reload=(typeof window!=="undefined"?(window.__PI_WEB_RELOAD_SESSION__=(...args)=>tI(...args),window.__PI_ENH_RELOAD_CURRENT_SESSION__=(t=!1)=>{let s=e4.current;if(s)return tI(s,t,!0)},null):null),tR=';
           const sessionReloadBridgeTargetV2 = 'finally{t&&!r&&b(!1)}},[ty,tC]),tp_enh_reload=(typeof window!=="undefined"?(window.__PI_WEB_RELOAD_SESSION__=(...args)=>tI(...args),window.__PI_WEB_NATIVE_RELOAD_CURRENT_SESSION__=(t=!1)=>{let s=e4.current;if(s)return tI(s,t,!0)},window.__PI_ENH_RELOAD_CURRENT_SESSION__||(window.__PI_ENH_RELOAD_CURRENT_SESSION__=(t=!1)=>{let s=e4.current;if(s)return tI(s,t,!0)}),null):null),tR=';
+          const sessionReloadBridgeSourceV3 = 'finally{c()&&t&&!i&&b(!1)}})();return t$.current.set(d,g),g.finally(()=>{t$.current.get(d)===g&&t$.current.delete(d)}),await g},[tF,tV]),tX=';
+          const sessionReloadBridgeTargetV3 = 'finally{c()&&t&&!i&&b(!1)}})();return t$.current.set(d,g),g.finally(()=>{t$.current.get(d)===g&&t$.current.delete(d)}),await g},[tF,tV]),tp_enh_reload=(typeof window!=="undefined"?(window.__PI_WEB_RELOAD_SESSION__=(...args)=>tG(...args),window.__PI_WEB_NATIVE_RELOAD_CURRENT_SESSION__=(t=!1)=>{let s=tr.current;if(s)return tG(s,t,!0,{force:!0})},window.__PI_ENH_RELOAD_CURRENT_SESSION__||(window.__PI_ENH_RELOAD_CURRENT_SESSION__=(t=!1)=>{let s=tr.current;if(s)return tG(s,t,!0,{force:!0})}),null):null),tX=';
           if (content.includes(sessionReloadBridgeLegacyV2)) {
             content = content.replace(sessionReloadBridgeLegacyV2, sessionReloadBridgeTargetV2);
             modified = true;
           } else if (content.includes(sessionReloadBridgeSourceV2)) {
             content = content.replace(sessionReloadBridgeSourceV2, sessionReloadBridgeTargetV2);
+            modified = true;
+          } else if (content.includes(sessionReloadBridgeSourceV3)) {
+            content = content.replace(sessionReloadBridgeSourceV3, sessionReloadBridgeTargetV3);
             modified = true;
           }
 
@@ -1941,61 +2762,11 @@ function patchPackage(pkgDir, options = {}) {
     }
 
     // 3.5 Patch public/sw.js to prevent stale immutable static caching
-    const swPath = path.join(pkgDir, "public", "sw.js");
-    if (fs.existsSync(swPath)) {
-      let sw = fs.readFileSync(swPath, "utf8");
-      let swMod = false;
+    patchPublicServiceWorker(pkgDir, assetBuild);
 
-      if (sw.includes("&& key !== STATIC_CACHE")) {
-        sw = sw.replace("&& key !== STATIC_CACHE", "");
-        swMod = true;
-      }
-
-      // 静态资源与增强脚本彻底移交浏览器原生网络栈，杜绝 SW 内部转发和 cache: "reload" 导致的移动端死锁与掉帧
-      const checkApiOnly = 'if (url.pathname.startsWith("/api/") || url.pathname === "/sw.js") return;';
-      const checkBypassStatic = 'if (url.pathname.startsWith("/api/") || url.pathname === "/sw.js" || url.pathname.startsWith("/_next/static/") || url.pathname === "/pi-web-enhancements.js") return;';
-      if (sw.includes(checkApiOnly)) {
-        sw = sw.replace(checkApiOnly, checkBypassStatic);
-        swMod = true;
-      }
-
-      // 彻底清理旧的 PI_PATCH_SW_STATIC_RELOAD 块，全面放行原生网络栈
-      const staticFetchMarker = "/* PI_PATCH_SW_STATIC_RELOAD */";
-      if (sw.includes(staticFetchMarker)) {
-        const sIdx = sw.indexOf(staticFetchMarker);
-        const eIdx = sw.indexOf("return;\n  }", sIdx);
-        if (eIdx !== -1) {
-          sw = sw.slice(0, sIdx) + sw.slice(eIdx + "return;\n  }".length);
-          swMod = true;
-        }
-      }
-
-      if (!sw.includes("// no-esc-patch")) {
-        sw = "// no-esc-patch\n" + sw;
-        swMod = true;
-      }
-
-      if (!sw.includes("event.respondWith(Response.redirect(redirectUrl.href, 302))")) {
-        const navSearch = 'if (request.mode === "navigate") {';
-        const navPatch = `if (request.mode === "navigate") {
-    const rawPath = url.pathname.replace(/^\\/+|\\/+$/g, "");
-    if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(rawPath)) {
-      const redirectUrl = new URL("/", self.location.origin);
-      redirectUrl.search = url.search;
-      redirectUrl.searchParams.set("session", rawPath);
-      event.respondWith(Response.redirect(redirectUrl.href, 302));
-      return;
-    }`;
-        if (sw.includes(navSearch)) {
-          sw = sw.replace(navSearch, navPatch);
-          swMod = true;
-        }
-      }
-
-      if (swMod) {
-        safeWriteFileSync(swPath, sw, "utf8");
-      }
-    }
+    // Static-only live deployment may update public assets and .next/static client chunks,
+    // but must return before touching any running .next/server files.
+    if (staticOnly) return;
 
     // 3.6 Stamp ?v=<version>-<assetBuild> onto layout-*.js and page-*.js in pre-rendered HTML & RSC manifests
     // so browsers with cached immutable /_next/static/chunks/app/*.js immediately fetch the v1.0.0 bundle.
@@ -2042,11 +2813,6 @@ function patchPackage(pkgDir, options = {}) {
         safeWriteFileSync(appUpdateRouteForVer, auPatched, "utf8");
       }
     }
-
-    // Static-only deployment is the safe path for a running Pi Web service:
-    // public assets and client chunks are updated, while .next/server stays
-    // entirely untouched until the user chooses a separate restart window.
-    if (staticOnly) return;
 
     // 4. Remove the retired server-HTML runtime. It can remain cached by a
     // running Next server and prevent the current layout chunk from loading.
@@ -2168,49 +2934,143 @@ function patchPackage(pkgDir, options = {}) {
         safeWriteFileSync(path.join(pkgDir, "bin", "pi-web-native-collapse-patch.js"), fs.readFileSync(nativePatchSource, "utf8"), "utf8");
       } catch {}
     }
+      } catch (err) {
+        console.error("[patch-pi-web] error:", err);
+        process.exitCode = 1;
+        throw err;
+      }
+    }
+  );
+}
+
+function run(options = {}) {
+  const isExplicitCandidates = Array.isArray(options.candidates);
+  const targetCandidates = isExplicitCandidates
+    ? [...new Set(options.candidates.filter(c => c && fs.existsSync(c)))]
+    : collectDefaultCandidates();
+
+  const nativeProtectedResults = [];
+  const legacyCandidates = [];
+
+  for (const candidate of targetCandidates) {
+    if (isNativeSessionBridgePkg(candidate)) {
+      const gateResult = verifyNativeReleaseGate(candidate);
+      console.log(
+        `[patch-pi-web] [NATIVE GATE] ${candidate} (v${gateResult.version}) native session bridge verified; legacy patching skipped.`
+      );
+      nativeProtectedResults.push(gateResult);
+    } else {
+      legacyCandidates.push(candidate);
+    }
+  }
+
+  // 若明确检测到候选且所有候选均为已验证的 native 版本，在 resolvePatchLockConfig / build lock 前直接返回
+  if (targetCandidates.length > 0 && legacyCandidates.length === 0) {
+    return {
+      operationToken: options.operationToken || null,
+      nativeReleaseProtected: true,
+      legacyPatchSkipped: true,
+      protectedCandidates: nativeProtectedResults,
+      legacyCandidates: [],
+    };
+  }
+
+  if (options.snapshotManifestPath && options.staticOnly !== true) {
+    const err = new Error("[patch-pi-web] 快照发布模式仅允许 staticOnly=true");
+    err.code = "SNAPSHOT_STATIC_ONLY_REQUIRED";
+    throw err;
+  }
+
+  const syncLayoutInline =
+    options.syncLayoutInline ??
+    (process.argv.includes("--sync-layout-inline") || process.argv.includes("--layout-inline"));
+  const staticOnly = options.staticOnly ?? (process.argv.includes("--static-only") || syncLayoutInline);
+  const publicOnly = options.publicOnly ?? process.argv.includes("--public-only");
+  const sdkOnly = options.sdkOnly ?? (process.argv.includes("--sdk-only") || process.argv.includes("--skip-builder-sync"));
+  const lockCfg = resolvePatchLockConfig({ ...options, staticOnly, publicOnly, syncLayoutInline, sdkOnly });
+
+  return withGlobalBuildLock(
+    {
+      sessionId: options.sessionId,
+      operationToken: options.operationToken,
+      stateFile: lockCfg.stateFile,
+      modulesDir: lockCfg.modulesDir,
+      canonicalModulesDir: options.canonicalModulesDir,
+      isPidAlive: options.isPidAlive,
+      waitTimeoutMs: options.waitTimeoutMs,
+      enforceUnlockedDiffCheck: lockCfg.enforceUnlockedDiffCheck,
+      snapshotManifestPath: options.snapshotManifestPath,
+      operation: options.operation || (sdkOnly ? "patch-sdk-update" : (staticOnly ? "patch-static-deploy" : "patch-run")),
+    },
+    ({ operationToken }) => {
+      const patchOptions = {
+        ...options,
+        staticOnly,
+        publicOnly,
+        syncLayoutInline,
+        sdkOnly,
+        stateFile: lockCfg.stateFile,
+        modulesDir: options.modulesDir || lockCfg.modulesDir,
+        canonicalModulesDir: options.canonicalModulesDir,
+        skipBuilderSync: lockCfg.skipBuilderSync,
+        enforceUnlockedDiffCheck: lockCfg.enforceUnlockedDiffCheck,
+        snapshotManifestPath: options.snapshotManifestPath,
+        operationToken,
+      };
+
+      let patchedCount = 0;
+      for (const candidate of legacyCandidates) {
+        if (candidate && fs.existsSync(candidate)) {
+          patchPackage(candidate, patchOptions);
+          patchedCount++;
+        }
+      }
+      if (patchedCount === 0 && options.snapshotManifestPath) {
+        const err = new Error("[patch-pi-web] 没有匹配的目标 package 候选目录，拒绝宣称部署");
+        err.code = "ENHANCEMENT_PATCH_NO_TARGET_MATCHED";
+        throw err;
+      }
+
+      return {
+        operationToken,
+        nativeProtectedResults,
+        legacyCandidates,
+      };
+    }
+  );
+}
+
+if (require.main === module) {
+  try {
+    run();
   } catch (err) {
-    console.error("[patch-pi-web] error:", err);
+    console.error(`[patch-pi-web] ERROR: ${err?.stack || err?.message || err}`);
     process.exitCode = 1;
   }
 }
 
-function run(options = {}) {
-  const staticOnly = options.staticOnly ?? process.argv.includes("--static-only");
-  const publicOnly = options.publicOnly ?? process.argv.includes("--public-only");
-  const patchOptions = { staticOnly, publicOnly, skipBuilderSync: Boolean(options.skipBuilderSync) };
-
-  // Candidate global package directories across Windows and Linux / Docker
-  const candidates = [
-    process.env.PI_WEB_DIR,
-    path.join(home, "AppData", "Roaming", "npm", "node_modules", "@agegr", "pi-web"),
-    "/usr/local/lib/node_modules/@agegr/pi-web",
-    "/usr/lib/node_modules/@agegr/pi-web",
-    path.join(home, ".workbuddy", "binaries", "node", "versions", "22.22.2-3", "lib", "node_modules", "@agegr", "pi-web"),
-    "/opt/homebrew/lib/node_modules/@agegr/pi-web",
-  ].filter(Boolean);
-
-  for (const candidate of candidates) {
-    if (fs.existsSync(candidate)) {
-      patchPackage(candidate, patchOptions);
-    }
-  }
-
-  const localAppData = process.env.LOCALAPPDATA || path.join(home, "AppData", "Local");
-  const npxBase = path.join(localAppData, "npm-cache", "_npx");
-  if (fs.existsSync(npxBase)) {
-    try {
-      for (const hashDir of fs.readdirSync(npxBase)) {
-        const candidate = path.join(npxBase, hashDir, "node_modules", "@agegr", "pi-web");
-        if (fs.existsSync(candidate)) {
-          patchPackage(candidate, patchOptions);
-        }
-      }
-    } catch {}
-  }
-}
-
-if (require.main === module) {
-  run();
-}
-
-module.exports = { run, patchPackage, patchNoEscape: run, repairStreamingThinkingLevel, patchDirectToolbarControls, patchSidebarBottomShortcuts, patchMarkdownFileImageSupport, repairStreamingSendShortcuts, repairComposerInitialMount, patchUserMessageReconcile, repairModelSelectorMobileAutoFocus, repairComposerCleanPlaceholder, patchDisableNativeAtFiles };
+module.exports = {
+  run,
+  patchPackage,
+  patchNoEscape: run,
+  isNativeSessionBridgePkg,
+  verifyNativeReleaseGate,
+  collectDefaultCandidates,
+  replaceBoundedLayoutInlineTail,
+  syncBoundedLayoutInlineChunks,
+  repairStreamingThinkingLevel,
+  patchDirectToolbarControls,
+  patchSidebarBottomShortcuts,
+  patchMarkdownFileImageSupport,
+  repairStreamingSendShortcuts,
+  repairComposerInitialMount,
+  patchUserMessageReconcile,
+  repairModelSelectorMobileAutoFocus,
+  repairModelSelectorRetainKeyboard,
+  repairComposerCleanPlaceholder,
+  patchDisableNativeAtFiles,
+  applyPortablePageBridgesV3,
+  applyNativeTitleSingleOwnerBridge,
+  NATIVE_TITLE_HEAD_OBSERVER_SOURCE_V3,
+  NATIVE_TITLE_SINGLE_OWNER_TARGET_V3,
+};

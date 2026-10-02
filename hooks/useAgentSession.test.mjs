@@ -177,13 +177,15 @@ test("session mount probes external appends and interrupted hydration retries on
     source.indexOf("// Load session on mount"),
     source.indexOf("sessionHookMountedRef.current = false"),
   );
-  assert.match(loadSessionSource, /options\?: \{ force\?: boolean; streamRetry\?: boolean(?:; abortRetry\?: boolean)?(?:; signal\?: AbortSignal)? \}/);
+  assert.match(loadSessionSource, /options\?: \{ force\?: boolean; streamRetry\?: boolean(?:; abortRetry\?: boolean)?(?:; signal\?: AbortSignal)?; resident\?: boolean \}/);
   assert.match(loadSessionSource, /!options\?\.streamRetry/);
   assert.match(loadSessionSource, /if \(ownsCurrentView\(\)\) void loadSession\(sid, true, includeState, \{ force: true, streamRetry: true \}\)/);
-  // URL construction moved to the protocol coordinator; force remains opt-in.
+  assert.match(loadSessionSource, /options\?\.resident && !options.force/);
+  assert.match(loadSessionSource, /force: options\?\.force \|\| Boolean\(options\?\.resident && !reuseResident\)/);
+  // Cold misses still probe disk; certified resident views avoid history re-fetch.
   assert.match(loadSessionSource, /buildSessionSyncUrl\(\{[^}]*force: options\?\.force/);
   assert.match(loadSessionSource, /d\.wrapperRebuilt[\s\S]*?eventConnectionRef\.current\?\.close\(\)[\s\S]*?maintain\(sid\)/);
-  assert.match(mountSource, /loadSession\(session\.id, !cached, true, \{ force: true \}\)/);
+  assert.match(mountSource, /loadSession\(session\.id, !cached, true, \{ resident: true \}\)/);
   assert.match(source, /await loadSession\(sid\)/);
   assert.equal([...source.matchAll(/\{ force: true \}/g)].length, 1);
 });
@@ -353,7 +355,7 @@ test("uses server pagination state instead of guessing from rendered rows", () =
     source.indexOf("const loadContext = useCallback"),
     source.indexOf("const loadTools = useCallback"),
   );
-  assert.match(source, /const \[hasEarlierMessages, setHasEarlierMessages\] = useState\(false\)/);
+  assert.match(source, /const \[hasEarlierMessages, setHasEarlierMessages\] = useState\(data\?\.context.hasMore \?\? false\)/);
   assert.match(source, /setHasEarlierMessages\(d\.context\.hasMore\)/);
   assert.match(source, /setHistoryCursor\(d\.context\.oldestEntryId\)/);
   assert.match(loadContextSource, /setData\(\(prev\) => \{[\s\S]*messages: \[\.\.\.d\.context\.messages, \.\.\.prev\.context\.messages\]/);
@@ -451,7 +453,7 @@ test("restoring a running session does not clear an SSE snapshot", () => {
   assert.doesNotMatch(mountSource, /dispatch\(\{ type: "start" \}\)/);
 });
 
-test("shows the latest streamed tool execution progress in the running phase", () => {
+test("tracks tool execution progress privately and shows public tool outcomes", () => {
   const updateSource = source.slice(
     source.indexOf('case "tool_execution_update"'),
     source.indexOf('case "tool_execution_end"'),
@@ -459,8 +461,8 @@ test("shows the latest streamed tool execution progress in the running phase", (
 
   assert.match(updateSource, /getToolExecutionProgress\(event\.partialResult\)/);
   assert.match(updateSource, /tools: \[\.\.\.tools\.filter\([\s\S]*?, updated\]/);
-  assert.match(chatWindowSource, /if \(latest\?\.progress\)/);
-  assert.match(chatWindowSource, /chat\.runningNamedTool[\s\S]*latest\.progress/);
+  assert.match(chatWindowSource, /getToolPublicStatus\(block, toolResultsMap\.get\(block\.toolCallId\)\)/);
+  assert.doesNotMatch(chatWindowSource, /chat\.runningNamedTool[\s\S]*latest\.progress/);
 });
 
 test("reconnects active shell output to its streaming tool call", () => {
@@ -591,8 +593,8 @@ test("keeps a newly sent user message at the top while its response starts", () 
     source.indexOf("const handleScrollPositionChange"),
   );
   const scrollEffectSource = source.slice(
-    source.indexOf("useLayoutEffect(() => {\n    if (messages.length > 0)"),
-    source.indexOf("// Load model list"),
+    source.indexOf("useLayoutEffect(() => {\n    if (opts.deferInitialScroll) return;"),
+    source.indexOf("// Load the model list"),
   );
 
   assert.match(streamUpdateSource, /!pendingScrollToUserRef\.current && isNearBottomRef\.current/);
@@ -653,8 +655,8 @@ test("uses the prompt anchor as the only trailing message spacer", () => {
 
 test("keeps a detached viewport in place when streaming completes", () => {
   const scrollEffectSource = source.slice(
-    source.indexOf("useLayoutEffect(() => {\n    if (messages.length > 0)"),
-    source.indexOf("// Load model list"),
+    source.indexOf("useLayoutEffect(() => {\n    if (opts.deferInitialScroll) return;"),
+    source.indexOf("// Load the model list"),
   );
 
   assert.match(scrollEffectSource, /!agentRunningRef\.current && isNearBottomRef\.current[\s\S]*?scrollToBottom\("auto"\)/);

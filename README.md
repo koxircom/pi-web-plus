@@ -1,20 +1,12 @@
-# Pi Web Plus
+> **v1.2.0** uses Pi Coding Agent **1.0.0**. Native React owns the composer, settings, branding, session cache and Minimap. Shared enhancement styles ship in the native CSS pipeline; workbook/usage resources load on demand. Install the prebuilt archive from [Releases](https://github.com/koxircom/pi-web-plus/releases/tag/v1.2.0). Legacy built-file injection scripts are not the upgrade path for this edition.
 
-<p align="left">
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="./public/icons/pi-web-plus-logo-dark.svg" />
-    <source media="(prefers-color-scheme: light)" srcset="./public/icons/pi-web-plus-logo-light.svg" />
-    <img alt="π+ Pi Web Plus" src="./public/icons/pi-web-plus-logo-light.svg" width="200" height="32" />
-  </picture>
-</p>
-
-> **Branding update:** The π+ SVG branding is included in the current `main` source. Historical v1.1.0 release assets remain unchanged.
+# Pi Web Standalone Edition
 
 [中文文档](./README.zh-CN.md) | [日本語](./README.ja.md) | [Русский](./README.ru.md)
 
-Standalone local browser UI (**Pi Web Plus**, Standalone Edition) for the [pi coding agent](https://github.com/earendil-works/pi) (`@earendil-works/pi-coding-agent`). Pi Web Plus shares the same local configuration and session files as pi, so you can browse and resume conversations, run agent turns, configure models and resources, and inspect project files from a browser.
+Standalone local browser UI for the [pi coding agent](https://github.com/earendil-works/pi) (`@earendil-works/pi-coding-agent`). Pi Web Standalone Edition shares the same local configuration and session files as pi, so you can browse and resume conversations, run agent turns, configure models and resources, and inspect project files from a browser.
 
-> **Note**: Any third-party upstream static demo reflects the legacy upstream baseline rather than **Pi Web Plus** (Standalone Edition, which includes built-in enhancement plugins and standalone release distribution via [`koxircom/pi-web-plus`](https://github.com/koxircom/pi-web-plus)).
+> **Note**: Any third-party upstream static demo reflects the legacy upstream baseline rather than **Pi Web Standalone Edition** (which includes built-in enhancement plugins and standalone release distribution via [`koxircom/pi-web-plus`](https://github.com/koxircom/pi-web-plus)).
 
 ![Pi Web displaying a pi session with structured Markdown, tool calls, and project navigation](docs/screenshot2.png)
 
@@ -30,28 +22,24 @@ Standalone local browser UI (**Pi Web Plus**, Standalone Edition) for the [pi co
 
 ## Quick Start
 
-Pi Web Plus requires Node.js 22.19.0 or newer (`node >=22.19`). Check your version with `node --version`, then install the prebuilt release tarball from [`koxircom/pi-web-plus` GitHub Releases](https://github.com/koxircom/pi-web-plus/releases) and start `pi-web`:
+Pi Web Standalone requires Node.js 22.19.0 or newer (`node >=22.19`). Check your version with `node --version`, then install the prebuilt release tarball from [`koxircom/pi-web-plus` GitHub Releases](https://github.com/koxircom/pi-web-plus/releases) and start `pi-web`:
 
 ```bash
-npm install -g https://github.com/koxircom/pi-web-plus/releases/download/v1.1.0/pi-web-standalone-1.1.0.tgz
+npm install -g https://github.com/koxircom/pi-web-plus/releases/download/v1.2.0/pi-web-standalone-1.2.0.tgz
 pi-web
 ```
 
-> **Important**: The package name in `package.json` remains `@agegr/pi-web` for compatibility, but Pi Web Plus is distributed exclusively through [`koxircom/pi-web-plus` GitHub Releases](https://github.com/koxircom/pi-web-plus/releases). Do **not** pull or install `@agegr/pi-web` from the public npm registry, as that would install the legacy upstream package instead of Pi Web Plus.
+> **Important**: The package name in `package.json` remains `@agegr/pi-web` for compatibility, but Pi Web Standalone is distributed exclusively through [`koxircom/pi-web-plus` GitHub Releases](https://github.com/koxircom/pi-web-plus/releases). Do **not** pull or install `@agegr/pi-web` from the public npm registry, as that would install the legacy upstream package instead of the Standalone Edition.
 
 The CLI opens a browser after the server is ready. If it does not, open [http://127.0.0.1:30141](http://127.0.0.1:30141). Pi Web listens only on `127.0.0.1` by default.
 
 If no model provider is configured yet, open the **Models** panel to sign in or add an API key.
 
-The command above uses the `v1.1.0` release asset (`pi-web-standalone-1.1.0.tgz`) as the standard example. To install or upgrade to a specific release, stop the running process with `Ctrl+C`, replace both `v1.1.0` and `1.1.0` in the URL with the target `<version>` from [GitHub Releases](https://github.com/koxircom/pi-web-plus/releases), and run the install command again:
+The command above uses the planned `v1.0.2` release asset (`pi-web-standalone-1.0.2.tgz`) as the target format. To install or upgrade to a specific release, stop the running process with `Ctrl+C`, replace both `v1.0.2` and `1.0.2` in the URL with the target `<version>` from [GitHub Releases](https://github.com/koxircom/pi-web-plus/releases), and run the install command again:
 
 ```bash
 npm install -g https://github.com/koxircom/pi-web-plus/releases/download/v<version>/pi-web-standalone-<version>.tgz
 ```
-
-- **SDK & Global CLI boundary**: Pi Web `v1.1.0` declares `@earendil-works/pi-*` SDK dependencies at `0.99.1` for the Web UI runtime. Installing or upgrading Pi Web does **not** automatically upgrade a separately installed global `pi` Agent CLI.
-- **No bundled `node_modules` in `.tgz`**: The release tarball contains prebuilt `.next/` and static assets without `node_modules/`, so standard `npm install` dependency resolution is required (or reuse a verified matching `node_modules/` when staging offline).
-- **Preserve instance data on upgrade**: When upgrading or unpacking over an existing deployment, protect custom static manifests (`public/pi-*-manifest.json`), local sessions (`~/.pi/agent/sessions/`), and usage ledgers (`pi-usage-ledger.json` / `~/.pi/agent/state/`) so default empty templates do not overwrite live user data.
 
 To uninstall, run `npm uninstall -g @agegr/pi-web`.
 
@@ -91,10 +79,10 @@ Password authentication does not encrypt the connection. Do not expose Pi Web ov
 
 Server-side model and API requests honor the standard `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY` environment variables.
 
-On macOS or Linux (after installing the [GitHub Release tarball](https://github.com/koxircom/pi-web-plus/releases/download/v1.1.0/pi-web-standalone-1.1.0.tgz)):
+On macOS or Linux (after installing the [GitHub Release tarball](https://github.com/koxircom/pi-web-plus/releases/download/v1.2.0/pi-web-standalone-1.2.0.tgz)):
 
 ```bash
-npm install -g https://github.com/koxircom/pi-web-plus/releases/download/v1.1.0/pi-web-standalone-1.1.0.tgz
+npm install -g https://github.com/koxircom/pi-web-plus/releases/download/v1.2.0/pi-web-standalone-1.2.0.tgz
 HTTP_PROXY=http://127.0.0.1:7890 \
 HTTPS_PROXY=http://127.0.0.1:7890 \
 NO_PROXY=localhost,127.0.0.1 \
@@ -104,7 +92,7 @@ pi-web
 On Windows PowerShell:
 
 ```powershell
-npm install -g https://github.com/koxircom/pi-web-plus/releases/download/v1.1.0/pi-web-standalone-1.1.0.tgz
+npm install -g https://github.com/koxircom/pi-web-plus/releases/download/v1.2.0/pi-web-standalone-1.2.0.tgz
 $env:HTTP_PROXY = "http://127.0.0.1:7890"
 $env:HTTPS_PROXY = "http://127.0.0.1:7890"
 $env:NO_PROXY = "localhost,127.0.0.1"

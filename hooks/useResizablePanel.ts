@@ -3,6 +3,7 @@
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useRef,
   useState,
   type KeyboardEvent,
@@ -11,7 +12,13 @@ import {
 } from "react";
 import { clampPanelWidth } from "@/lib/panel-layout";
 
+const useIsomorphicLayoutEffect = typeof window !== "undefined" ? useLayoutEffect : useEffect;
+
+// Body cursor/selection belong to one panel drag across all hook instances.
+let cancelActiveResize: (() => void) | null = null;
+
 interface DragState {
+  cancel: () => void;
   pointerId: number;
   startPosition: number;
   startWidth: number;
@@ -41,6 +48,7 @@ interface CommitOptions {
 
 function readStoredWidth(storageKey: string): number | null {
   try {
+    if (typeof window === "undefined" || !window.localStorage) return null;
     const stored = window.localStorage.getItem(storageKey);
     if (stored === null) return null;
     const parsed = Number.parseInt(stored, 10);
@@ -52,6 +60,7 @@ function readStoredWidth(storageKey: string): number | null {
 
 function writeStoredWidth(storageKey: string, width: number): void {
   try {
+    if (typeof window === "undefined" || !window.localStorage) return;
     window.localStorage.setItem(storageKey, String(width));
   } catch {
     // Resizing remains available when storage is unavailable.
@@ -75,6 +84,8 @@ export function useResizablePanel(options: UseResizablePanelOptions) {
   const panelRef = useRef<HTMLDivElement>(null);
   const dragRef = useRef<DragState | null>(null);
   const restoredRef = useRef(false);
+  const tempTransitionSuppressedRef = useRef(false);
+  const priorTransitionRef = useRef<string | null>(null);
   const [width, setWidth] = useState(defaultWidth);
   const [isResizing, setIsResizing] = useState(false);
   const [mounted, setMounted] = useState(false);
@@ -114,6 +125,7 @@ export function useResizablePanel(options: UseResizablePanelOptions) {
     const drag = dragRef.current;
     if (!drag || drag.pointerId !== pointerId) return;
     dragRef.current = null;
+    if (cancelActiveResize === drag.cancel) cancelActiveResize = null;
     restoreBodyState(drag);
     setIsResizing(false);
     commitWidth(widthRef.current, { forcePersist: true });
@@ -132,13 +144,15 @@ export function useResizablePanel(options: UseResizablePanelOptions) {
     event.preventDefault();
     event.stopPropagation();
 
-    const activeDrag = dragRef.current;
-    if (activeDrag) finishResize(activeDrag.pointerId);
+    // End the previous owner before taking a snapshot of the body styles.
+    cancelActiveResize?.();
 
     const target = event.currentTarget;
     target.focus({ preventScroll: true });
     target.setPointerCapture(event.pointerId);
+    const cancel = () => finishResize(event.pointerId);
     dragRef.current = {
+      cancel,
       pointerId: event.pointerId,
       startPosition: axis === "vertical" ? event.clientY : event.clientX,
       startWidth: widthRef.current,
@@ -146,6 +160,7 @@ export function useResizablePanel(options: UseResizablePanelOptions) {
       previousCursor: document.body.style.cursor,
       previousUserSelect: document.body.style.userSelect,
     };
+    cancelActiveResize = cancel;
     document.body.style.cursor = axis === "vertical" ? "row-resize" : "col-resize";
     document.body.style.userSelect = "none";
     setIsResizing(true);
@@ -215,9 +230,16 @@ export function useResizablePanel(options: UseResizablePanelOptions) {
     }
   }, [axis, commitWidth, effectiveMaxWidth, growthDirection, minWidth, resetWidth, widthRef]);
 
-  useEffect(() => {
+  useIsomorphicLayoutEffect(() => {
     if (restoredRef.current) return;
     restoredRef.current = true;
+
+    const node = panelRef.current;
+    if (node && !tempTransitionSuppressedRef.current) {
+      priorTransitionRef.current = node.style.transition;
+      node.style.transition = "none";
+      tempTransitionSuppressedRef.current = true;
+    }
 
     const storedWidth = readStoredWidth(storageKey);
     const candidate = storedWidth ?? getDefaultWidth?.() ?? defaultWidth;
@@ -225,7 +247,31 @@ export function useResizablePanel(options: UseResizablePanelOptions) {
     if (storedWidth !== null && storedWidth !== restoredWidth) {
       writeStoredWidth(storageKey, restoredWidth);
     }
+    if (node) {
+      void node.offsetWidth;
+    }
+
+    return () => {
+      // cleanup 仅本 hook 拥有临时 transition，且不增加 timer/observer
+      if (tempTransitionSuppressedRef.current) {
+        if (node) {
+          node.style.transition = priorTransitionRef.current ?? "";
+        }
+        tempTransitionSuppressedRef.current = false;
+        priorTransitionRef.current = null;
+      }
+    };
   }, [commitWidth, defaultWidth, getDefaultWidth, storageKey]);
+
+  useEffect(() => {
+    if (!tempTransitionSuppressedRef.current) return;
+    const node = panelRef.current;
+    if (node) {
+      node.style.transition = priorTransitionRef.current ?? "";
+    }
+    tempTransitionSuppressedRef.current = false;
+    priorTransitionRef.current = null;
+  });
 
   useEffect(() => {
     if (!restoredRef.current) return;
@@ -260,6 +306,7 @@ export function useResizablePanel(options: UseResizablePanelOptions) {
       const drag = dragRef.current;
       if (!drag) return;
       dragRef.current = null;
+      if (cancelActiveResize === drag.cancel) cancelActiveResize = null;
       restoreBodyState(drag);
     };
   }, [restoreBodyState]);

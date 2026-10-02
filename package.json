@@ -1,9 +1,16 @@
 {
   "name": "@agegr/pi-web",
-  "version": "1.1.0",
+  "version": "1.2.0",
+  "capabilities": {
+    "nativeSettingsHost": true,
+    "nativeSettingsLayout": true,
+    "nativeBranding": true,
+    "nativeComposerLayout": true,
+    "nativeComposerPreferences": true
+  },
   "piWebEdition": "koxir-standalone",
   "standalone": true,
-  "description": "Pi Web Plus — Standalone Edition Web UI for the pi coding agent",
+  "description": "Pi Web Standalone Edition — Web UI for the pi coding agent",
   "homepage": "https://github.com/koxircom/pi-web-plus#readme",
   "repository": {
     "type": "git",
@@ -27,9 +34,15 @@
     "!.next/**/*.js.map",
     "public",
     "next.config.ts",
-    "package.json"
+    "package.json",
+    "!public/pi-*-manifest.json",
+    "!public/pi-usage-ledger.json",
+    "!public/*.before-*",
+    "!public/**/*.test.mjs"
   ],
   "scripts": {
+    "prebuild": "node enhancements/build-pi-web-enhancements.cjs --build --verify && node scripts/build-session-history-worker.cjs",
+    "prepack": "node enhancements/build-pi-web-enhancements.cjs --verify && node scripts/check-client-budget.cjs && node scripts/build-session-history-worker.cjs",
     "postinstall": "node bin/prepare-terminal.js",
     "dev": "next dev -H 127.0.0.1 -p 30141",
     "dev:lan": "next dev -H 0.0.0.0 -p 30141",
@@ -40,24 +53,25 @@
     "test:terminal": "node e2e/terminal.mjs",
     "test:e2e": "node e2e/run.mjs",
     "test": "node --experimental-strip-types --test \"app/**/*.test.mjs\" \"components/**/*.test.mjs\" \"hooks/**/*.test.mjs\" \"lib/**/*.test.mjs\" \"public/**/*.test.mjs\"",
-    "release": "npm run build && npm pack"
+    "release": "npm run build && npm pack",
+    "postbuild": "node scripts/check-client-budget.cjs"
   },
   "dependencies": {
     "@earendil-works/pi-agent-core": "0.99.1",
-    "@earendil-works/pi-ai": "0.99.1",
-    "@earendil-works/pi-coding-agent": "0.99.1",
+    "@earendil-works/pi-ai": "1.0.0",
+    "@earendil-works/pi-coding-agent": "1.0.0",
     "@earendil-works/pi-tui": "0.99.1",
     "@xterm/addon-fit": "0.11.0",
     "@xterm/xterm": "6.0.0",
-    "js-yaml": "^5.2.3",
+    "js-yaml": "5.4.2",
     "next": "16.3.6",
     "node-pty": "1.2.0-beta.15",
     "proper-lockfile": "4.1.2",
-    "react": "^19.2.4",
-    "react-dom": "^19.2.4",
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
     "semver": "7.8.5",
     "undici": "8.11.0",
-    "web-push": "^3.6.7"
+    "web-push": "3.6.7"
   },
   "devDependencies": {
     "@tailwindcss/postcss": "^4.2.2",
@@ -70,6 +84,7 @@
     "@types/semver": "7.8.0",
     "@types/web-push": "^3.6.4",
     "ansi_up": "^6.0.6",
+    "esbuild": "0.28.2",
     "eslint": "^9",
     "eslint-config-next": "16.3.6",
     "jiti": "^2.7.0",

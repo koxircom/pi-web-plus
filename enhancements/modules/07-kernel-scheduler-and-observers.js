@@ -1,20 +1,113 @@
+  // DOM 同步模式与限域判定
+  let pendingDomSyncMode = null;
+
+  function isEditorLocalTextOrNodeMutation(m) {
+    if (!m) return false;
+    const targetEl = m.target?.nodeType === 1 ? m.target : m.target?.parentElement;
+    if (!targetEl || typeof targetEl.closest !== "function") return false;
+
+    const insideTextarea = Boolean(targetEl.closest("textarea.chat-input-textarea"));
+    const insideFormatted = Boolean(targetEl.closest(".pi-enh-formatted-composer"));
+    if (!insideTextarea && !insideFormatted) return false;
+
+    // Never mask queue, menu, control, attachment, or dialog work inside the composer.
+    if (targetEl.closest('.pi-enh-queue-panel, [data-queue], [role="dialog"], [role="menu"], [role="listbox"], [role="alert"], .at-mention-menu, .slash-command-menu, .pi-enh-quick-actions-bar, .pi-enh-composer-below-host, .pi-enh-cursor-controls, .pi-enh-mode-switch, button, select, [role="button"]')) {
+      return false;
+    }
+
+    if (m.type === "characterData") return true;
+    if (m.type !== "childList") return false;
+
+    const nodes = [...(m.addedNodes || []), ...(m.removedNodes || [])];
+    if (!nodes.length) return false;
+    for (const node of nodes) {
+      if (node.nodeType === 3) continue;
+      if (node.nodeType !== 1) return false;
+      const tag = node.nodeName;
+      if (["TEXTAREA", "BUTTON", "IMG", "SVG", "SELECT", "INPUT"].includes(tag)) return false;
+      if (node.classList?.contains("pi-enh-formatted-composer") || node.classList?.contains("pi-enh-cursor-composer")) return false;
+      if (node.getAttribute?.("role") || node.querySelector?.('textarea, button, img, svg, [role="dialog"], [role="menu"], [role="listbox"], .pi-enh-formatted-composer')) return false;
+      if (!["BR", "SPAN", "DIV", "P"].includes(tag)) return false;
+    }
+    return true;
+  }
+
+  function isChatTextMutation(m) {
+    if (!m) return false;
+    const targetEl = m.target?.nodeType === 1 ? m.target : m.target?.parentElement;
+    if (!targetEl || typeof targetEl.closest !== "function") return false;
+    const container = getChatContentContainer();
+    if (!container || !container.contains(targetEl)) return false;
+    if (!targetEl.closest('[data-message-role="assistant"] [data-message-text="true"]')) return false;
+    if (targetEl.closest('button, [role="dialog"], [role="alert"], pre, code, .pi-enh-queue-panel')) return false;
+
+    if (m.type === "characterData") {
+      return true;
+    }
+    if (m.type === "childList") {
+      const added = m.addedNodes || [];
+      const removed = m.removedNodes || [];
+      if (added.length === 0 && removed.length === 0) return false;
+      for (let i = 0; i < added.length; i++) {
+        if (added[i].nodeType !== 3) return false;
+      }
+      for (let i = 0; i < removed.length; i++) {
+        if (removed[i].nodeType !== 3) return false;
+      }
+      return true;
+    }
+    return false;
+  }
+
+  function getMutationSyncScope(mutations) {
+    if (!mutations || !Array.isArray(mutations) || mutations.length === 0) {
+      return "full";
+    }
+    let hasChatText = false;
+    for (let i = 0; i < mutations.length; i++) {
+      const mutation = mutations[i];
+      if (isEditorLocalTextOrNodeMutation(mutation)) continue;
+      if (isChatTextMutation(mutation)) {
+        hasChatText = true;
+        continue;
+      }
+      return "full";
+    }
+    return hasChatText ? "chat-text" : "none";
+  }
+
   // Debounced DOM Synchronization and Mutex Guard
-  function scheduleDomSync() {
+  function scheduleDomSync(rawScope) {
     if (isDisposed) return;
+
+    const requestedScope = typeof rawScope === "string" ? rawScope : rawScope?.scope;
+    if (requestedScope === "none") return;
+    const scopeToSchedule = requestedScope === "chat-text" ? "chat-text" : "full";
+
+    // One pending scope owns both scheduled and guarded requests; full cannot be downgraded.
+    if (pendingDomSyncMode === null || scopeToSchedule === "full") {
+      pendingDomSyncMode = scopeToSchedule;
+    }
     if (isMutatingInternally) {
       hasDeferredSync = true;
       return;
     }
-    if (domSyncTimerId !== null) {
-      clearTimeout(domSyncTimerId);
-    }
+
     syncScheduled = true;
+
+    // 防止持续重置计时器导致饥饿：若已有排期待触发，保留当前定时器并已合并更高优先级模式
+    if (domSyncTimerId !== null) {
+      return;
+    }
+
     const flush = () => {
       domSyncFrameId = null;
       domSyncTimerId = null;
       syncScheduled = false;
+      const targetScope = pendingDomSyncMode || "full";
+      pendingDomSyncMode = null;
       if (isDisposed) return;
-      runAllSyncOperations();
+      runAllSyncOperations(targetScope);
     };
     domSyncTimerId = setTimeout(flush, 50);
   }
@@ -28,6 +121,12 @@
     domSyncTimerId = null;
     syncScheduled = false;
     hasDeferredSync = false;
+    pendingDomSyncMode = null;
+    if (chatObserver) {
+      try { chatObserver.disconnect(); } catch (e) {}
+      chatObserver = null;
+    }
+    observedTarget = null;
   });
 
   function initChatObserver() {
@@ -44,40 +143,16 @@
             observedTarget = container;
           }
         }
-        withMutationGuard(() => {
-          if (isPluginEnabled("task-tool-auto-collapse")) {
-            syncAllTaskToolAutoCollapse();
-          }
-          if (isPluginEnabled("compaction-auto-collapse") && typeof syncCompactionCards === "function") {
-            syncCompactionCards();
-          }
-          if (isPluginEnabled("pi-mail-auto-collapse") && typeof syncPiMailCards === "function") {
-            syncPiMailCards();
-          }
-          if (typeof syncPiWebPlusBranding === "function") {
-            syncPiWebPlusBranding();
-          }
-        });
 
         // 针对输入框、队列变动立即触发同步，消除 50ms 延时导致的界面跳动（带内部变更守卫防死循环）
         if (mutations && mutations.length > 0) {
           let touchesComposer = false;
-          let touchesDialog = false;
           for (let i = 0; i < mutations.length; i++) {
             const m = mutations[i];
+            if (isEditorLocalTextOrNodeMutation(m)) continue;
             const target = m.target;
             if (target && typeof target.closest === "function" && target.closest("fieldset, .pi-enh-queue-panel, .pi-enh-cursor-composer")) {
               touchesComposer = true;
-            }
-            if (m.type === "childList" && m.addedNodes && m.addedNodes.length > 0) {
-              for (let j = 0; j < m.addedNodes.length; j++) {
-                const node = m.addedNodes[j];
-                if (node.nodeType === 1) {
-                  if (node.getAttribute?.("role") === "dialog" || (typeof node.querySelector === "function" && node.querySelector('[role="dialog"]'))) {
-                    touchesDialog = true;
-                  }
-                }
-              }
             }
           }
           if (touchesComposer && !isMutatingInternally) {
@@ -90,25 +165,20 @@
             const cardReady = Boolean(document.querySelector(".pi-enh-cursor-composer"));
             if (!isTypingInComposer || !cardReady) {
               withMutationGuard(() => {
-                syncCodexComposerLayout();
                 syncComposerMarkdownFormat();
                 syncComposerModes();
                 syncComposerQueuePanel();
                 syncComposerCleanPlaceholder();
                 const textarea = findComposerTextarea();
                 const card = textarea?.closest('fieldset > div[style*="max-width"]');
-                if (card && textarea) updateCardContentState(card, textarea);
+                if (card && textarea) syncComposerAttachmentSendability(card, textarea);
               });
             }
           }
-          if (touchesDialog && isPluginEnabled("ask-user-web-native") && !isMutatingInternally) {
-            withMutationGuard(() => {
-              syncAskUserWebNative();
-            });
-          }
         }
 
-        scheduleDomSync();
+        const syncScope = getMutationSyncScope(mutations);
+        scheduleDomSync(syncScope);
       });
 
       const container = getChatContentContainer();
@@ -175,9 +245,6 @@
       syncSessionTags();
       syncSessionOdooAddons();
       syncSessionSectionHeaders();
-      if (typeof syncPiWebPlusBranding === "function") {
-        syncPiWebPlusBranding();
-      }
     });
   }
 
@@ -241,10 +308,6 @@
           withMutationGuard(() => {
             syncSessionTags();
           });
-        } else if (!isMutatingInternally && typeof syncPiWebPlusBranding === "function") {
-          withMutationGuard(() => {
-            syncPiWebPlusBranding();
-          });
         }
       });
       const root = document.querySelector(".sidebar-container") || document.documentElement || document.body;
@@ -261,35 +324,6 @@
   }
 
   initSidebarObserver();
-
-  let themeBrandObserver = null;
-  function initThemeBrandObserver() {
-    if (themeBrandObserver || typeof MutationObserver !== "function" || typeof document === "undefined") return;
-    try {
-      const docEl = document.documentElement;
-      if (!docEl) return;
-      themeBrandObserver = new MutationObserver(() => {
-        if (isDisposed || isMutatingInternally) return;
-        if (typeof syncPiWebPlusBranding === "function") {
-          withMutationGuard(() => {
-            syncPiWebPlusBranding();
-          });
-        }
-      });
-      themeBrandObserver.observe(docEl, {
-        attributes: true,
-        attributeFilter: ["class", "data-theme", "style"],
-      });
-      activeCleanups.push(() => {
-        if (themeBrandObserver) {
-          try { themeBrandObserver.disconnect(); } catch (e) {}
-          themeBrandObserver = null;
-        }
-      });
-    } catch (e) {}
-  }
-
-  initThemeBrandObserver();
 
   try {
     const rawSessions = typeof window !== "undefined" && typeof window.__PI_ENH_GET_RAW_SESSIONS__ === "function" ? window.__PI_ENH_GET_RAW_SESSIONS__() : null;

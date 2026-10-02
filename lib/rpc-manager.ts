@@ -1,3 +1,4 @@
+import { createProgressCommentaryExtension } from "./progress-commentary";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { createAgentSessionFromServices, createAgentSessionServices, getAgentDir, initTheme, SessionManager, SettingsManager, Theme } from "@earendil-works/pi-coding-agent";
 import { KeybindingsManager as TuiKeybindingsManager, TUI_KEYBINDINGS } from "@earendil-works/pi-tui";
@@ -17,6 +18,7 @@ import { getProjectTrustStatus, projectTrustReloadOptions } from "./project-trus
 import { persistExplicitStartupPreferences } from "./startup-preferences";
 import { notifySessionComplete } from "./web-push";
 import { hasActiveSessionLivenessProvider } from "./session-liveness";
+import { cancelSessionWakeups } from "./lock-handoff-dispatcher";
 import type { SlashCommandInfo } from "@earendil-works/pi-coding-agent";
 import type { AgentSessionLike, ExtensionUiContextLike, ToolInfo } from "./pi-types";
 import type {
@@ -669,6 +671,12 @@ export class AgentSessionWrapper {
       }
 
       case "abort":
+        // Stop cancels deferred lock work, but never releases a lock while a tool is still writing.
+        try {
+          cancelSessionWakeups(this.sessionId);
+        } catch (error) {
+          console.error("[pi-web] failed to cancel deferred lock work on Stop:", error instanceof Error ? error.message : error);
+        }
         this.forceShutdownOnIdle = true;
         // Stop must unwind extension commands that have not started the agent yet.
         this.extensionUiAbortController.abort(new DOMException("Extension UI cancelled by Stop", "AbortError"));
@@ -2085,6 +2093,7 @@ export async function startRpcSession(
           ? { ...CHAT_ONLY_RESOURCE_LOADER_OPTIONS, extensionFactories: [exactSystemPromptExtension] }
         : {
             extensionFactories: [
+              createProgressCommentaryExtension(),
               createProjectCommandBashExtension({
                 cwd: sessionCwd,
                 settings: settingsManager,

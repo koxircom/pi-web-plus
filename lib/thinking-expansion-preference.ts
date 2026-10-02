@@ -6,10 +6,18 @@ export const THINKING_EXPANDED_EVENT = "pi-thinking-expanded-changed";
 
 export function isThinkingExpandedByDefault(): boolean {
   if (typeof window === "undefined") return false;
-  return window.localStorage.getItem(STORAGE_KEY) === "true";
+  try {
+    return window.localStorage.getItem(STORAGE_KEY) === "true";
+  } catch {
+    return false;
+  }
 }
 
 export function setThinkingExpandedByDefault(expanded: boolean): void {
-  window.localStorage.setItem(STORAGE_KEY, String(expanded));
-  window.dispatchEvent(new Event(THINKING_EXPANDED_EVENT));
+  try {
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem(STORAGE_KEY, String(expanded));
+      window.dispatchEvent(new Event(THINKING_EXPANDED_EVENT));
+    }
+  } catch {}
 }

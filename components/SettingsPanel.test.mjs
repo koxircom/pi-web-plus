@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 const panelSource = await readFile(new URL("./SettingsPanel.tsx", import.meta.url), "utf8");
+const isolatedHostSource = await readFile(new URL("./IsolatedSettingsHost.tsx", import.meta.url), "utf8");
 const cssSource = await readFile(new URL("../app/settings.css", import.meta.url), "utf8");
 const globalCssSource = await readFile(new URL("../app/globals.css", import.meta.url), "utf8");
 const shellSource = await readFile(new URL("./AppShell.tsx", import.meta.url), "utf8");
@@ -100,13 +101,13 @@ test("keeps General free of divider rows", () => {
   assert.doesNotMatch(panelSource, /borderLeft: index > 0/);
 });
 
-test("uses top navigation on desktop and one compact section picker on mobile", () => {
+test("uses sidebar navigation on desktop and one compact section picker on mobile", () => {
   assert.match(panelSource, /className="settings-mobile-section-picker"/);
   assert.match(panelSource, /className="settings-section-tabs"/);
   assert.match(panelSource, /className="settings-section-tab"/);
-  assert.match(cssSource, /\.settings-section-tab \{[\s\S]*?width: 96px/);
+  assert.match(cssSource, /\.settings-section-tab \{[\s\S]*?width: 100%/);
   assert.match(cssSource, /\.settings-section-icon \{[\s\S]*?flex-shrink: 0/);
-  assert.match(cssSource, /\.settings-section-tab::after \{[\s\S]*?width: 24px/);
+  assert.match(cssSource, /\.settings-section-tab::after \{[\s\S]*?width: 3px/);
   assert.match(cssSource, /\.settings-section-tab\[aria-current="page"\]::after/);
   assert.match(cssSource, /\.settings-section-tab:focus-visible:not\(\[aria-current="page"\]\)/);
   assert.match(cssSource, /\.settings-section-tab:focus-visible\[aria-current="page"\][\s\S]*?outline: none/);
@@ -115,7 +116,6 @@ test("uses top navigation on desktop and one compact section picker on mobile", 
   assert.doesNotMatch(panelSource, /width: isMobile \? "100%" : 188/);
   assert.match(panelSource, /<main className="settings-dialog-main">/);
   assert.doesNotMatch(panelSource, /<style>/);
-  assert.doesNotMatch(panelSource, /style=\{\{/);
 });
 
 test("labels agent profiles as sub-agents", () => {
@@ -146,4 +146,42 @@ test("keeps password authentication to one login field and one settings action",
   assert.match(panelSource, /t\("auth\.logOut"\)/);
   assert.match(loginSource, /className="web-login-composer"[\s\S]*?type="password"[\s\S]*?<button type="submit"/);
   assert.match(globalCssSource, /\.web-login-composer \{[\s\S]*?display: flex;[\s\S]*?border-radius: 14px/);
+});
+
+test("provides React-owned childless isolated hosts for extension sections, maintenance, and tab actions", () => {
+  // One shared lifecycle, with React's loading node outside the childless host.
+  assert.equal((panelSource.match(/<IsolatedSettingsHost/g) ?? []).length, 3);
+  assert.match(isolatedHostSource, /useSyncExternalStore\(subscribe, getRenderer, noServerRenderer\)/);
+  assert.match(isolatedHostSource, /className="settings-extension-loading" role="status"/);
+  assert.match(isolatedHostSource, /ref=\{hostRef\}[\s\S]*?data-host-id=\{id\}[\s\S]*?\/\>/);
+  assert.match(isolatedHostSource, /\[id, renderer, sectionId\]/);
+  assert.doesNotMatch(panelSource, /cleanupRef|subscribeRenderer\(/);
+
+  assert.match(panelSource, /id="maintenance" sectionId="general"/);
+  assert.match(panelSource, /<MaintenanceHost/);
+  assert.match(panelSource, /className="settings-section-tab-row"/);
+  assert.match(panelSource, /<TabActionHost/);
+  assert.match(panelSource, /id=\{`tab-action:\$\{sectionId\}`\}/);
+});
+
+test("enforces safe resizing lifecycle: no animating timers, pointercancel reverts, keyboard supports", () => {
+  // 1. No unnecessary animation timer or isAnimating
+  assert.doesNotMatch(panelSource, /animTimerRef|isAnimating|setIsAnimating/);
+  assert.doesNotMatch(cssSource, /\.is-animating/);
+  assert.match(cssSource, /\.settings-dialog-surface:not\(\.is-resizing\)/);
+
+  // 2. pointercancel reverts to initial size without saving
+  assert.match(panelSource, /handlePointerCancel/);
+  assert.match(panelSource, /handlePointerUp/);
+  assert.match(panelSource, /onLostPointerCapture=\{handleLostPointerCapture\}/);
+
+  // 3. Keyboard resizing and double click reset
+  assert.match(panelSource, /handleSidebarKeyDown/);
+  assert.match(panelSource, /handleDialogResizerKeyDown/);
+  assert.match(panelSource, /handleSidebarDoubleClick/);
+  assert.match(panelSource, /handleDialogDoubleClick/);
+
+  // 4. activateSection verifies target availability
+  assert.match(panelSource, /if \(!target\) return false;/);
+  assert.match(panelSource, /if \(target\.requiresProject && !cwd(?:Ref\.current)?\) return false;/);
 });

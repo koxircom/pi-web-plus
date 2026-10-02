@@ -69,6 +69,14 @@ export class ModelsConfigReadError extends Error {
   }
 }
 
+/** A submitted config cannot satisfy the models.json root schema. */
+export class ModelsConfigWriteError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ModelsConfigWriteError";
+  }
+}
+
 /**
  * Mirrors pi's `stripJsonComments` (utils/json.js, not exported by the SDK):
  * drops `//` line comments and trailing commas, leaving string literals alone.
@@ -102,7 +110,38 @@ export function readModelsConfig(
   if (!isRecord(parsed)) {
     throw new ModelsConfigReadError(`Failed to read ${modelsPath}: expected a JSON object`);
   }
+  if (!isRecord(parsed.providers)) {
+    throw new ModelsConfigReadError(
+      `Invalid models.json schema: providers must be present and be an object\n\nFile: ${modelsPath}`,
+    );
+  }
   return parsed;
+}
+
+/** Compare JSON content without changing business arrays or nested revision fields. */
+function stableConfigJson(value: unknown): string {
+  const canonical = (input: unknown): unknown => {
+    if (Array.isArray(input)) return input.map(canonical);
+    if (isRecord(input)) {
+      return Object.fromEntries(Object.keys(input).sort().map((key) => [key, canonical(input[key])]));
+    }
+    return input;
+  };
+  return JSON.stringify(canonical(value));
+}
+
+function sameStoredConfig(current: Record<string, unknown>, next: Record<string, unknown>): boolean {
+  if (stableConfigJson(current) === stableConfigJson(next)) return true;
+  // Old clients may keep incrementing the archive synchronization revision.
+  // Both sides must already have a valid revision before ignoring only this root key.
+  if (typeof current.archivedRevision !== "number" || !Number.isFinite(current.archivedRevision) || current.archivedRevision <= 0 ||
+      typeof next.archivedRevision !== "number" || !Number.isFinite(next.archivedRevision) || next.archivedRevision <= 0 ||
+      !Array.isArray(current.archivedSessions) || !Array.isArray(next.archivedSessions)) return false;
+  const before = { ...current };
+  const after = { ...next };
+  delete before.archivedRevision;
+  delete after.archivedRevision;
+  return stableConfigJson(before) === stableConfigJson(after);
 }
 
 export function writeModelsConfig(
@@ -111,10 +150,16 @@ export function writeModelsConfig(
 ): void {
   // Refuse to replace a file this panel could not read: the draft being saved
   // was not built from it, so writing would silently discard its contents.
-  readModelsConfig(modelsPath);
+  const current = readModelsConfig(modelsPath);
+  if (!isRecord(data.providers)) {
+    throw new ModelsConfigWriteError(
+      'Invalid models.json config: "providers" is required and must be an object',
+    );
+  }
   const dir = dirname(modelsPath);
   if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
   const normalized = normalizeModelsConfigCosts(sanitizeModelsConfig(data));
+  if (existsSync(modelsPath) && sameStoredConfig(current, normalized)) return;
   writePrivateFileAtomicSync(modelsPath, JSON.stringify(normalized, null, 2));
   invalidateModelsCache();
 }

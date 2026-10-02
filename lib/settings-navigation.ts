@@ -1,4 +1,4 @@
-export const SETTINGS_SECTION_VALUES = [
+export const NATIVE_SETTINGS_SECTION_VALUES = [
   "general",
   "models",
   "skills",
@@ -6,8 +6,21 @@ export const SETTINGS_SECTION_VALUES = [
   "plugins",
 ] as const;
 
+export const EXTENSION_SETTINGS_SECTION_VALUES = [
+  "enhancements",
+  "notifications",
+  "archived",
+  "usage",
+  "tags",
+] as const;
+
+export const SETTINGS_SECTION_VALUES = [
+  ...NATIVE_SETTINGS_SECTION_VALUES,
+  ...EXTENSION_SETTINGS_SECTION_VALUES,
+] as const;
+
 export type SettingsSection = (typeof SETTINGS_SECTION_VALUES)[number];
-export type SettingsDetailSection = Exclude<SettingsSection, "general">;
+export type SettingsDetailSection = Exclude<(typeof NATIVE_SETTINGS_SECTION_VALUES)[number], "general">;
 
 const STORAGE_KEY = "pi-web:settings-navigation";
 const PROJECT_SECTIONS = new Set<SettingsSection>(["skills", "agents", "plugins"]);

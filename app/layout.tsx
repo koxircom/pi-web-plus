@@ -4,8 +4,11 @@ import { PwaRegistration } from "@/components/PwaRegistration";
 import { PiWebEnhancementsRuntime } from "@/components/PiWebEnhancementsRuntime";
 import { THEME_INIT_SCRIPT } from "@/lib/theme";
 import "katex/dist/katex.min.css";
+import { BRAND_NAME } from "@/lib/branding";
 import "./globals.css";
 import "./settings.css";
+import "./composer.css";
+import "./enhancements.css";
 
 const notoSansMono = Noto_Sans_Mono({
   subsets: ["latin", "cyrillic"],
@@ -14,16 +17,21 @@ const notoSansMono = Noto_Sans_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Pi Web",
-  description: "Pi Web interface for the pi coding agent",
-  applicationName: "Pi Web",
+  title: BRAND_NAME,
+  description: `${BRAND_NAME} 编程代理网页界面`,
+  applicationName: BRAND_NAME,
   manifest: "/manifest.webmanifest",
   icons: {
     icon: [
       {
-        url: "/icons/icon-192.png",
-        sizes: "192x192",
-        type: "image/png",
+        url: "/icon.svg",
+        sizes: "any",
+        type: "image/svg+xml",
+      },
+      {
+        url: "/favicon.ico",
+        sizes: "16x16 32x32 48x48 64x64 128x128 256x256",
+        type: "image/x-icon",
       },
     ],
     apple: [
@@ -37,7 +45,7 @@ export const metadata: Metadata = {
   appleWebApp: {
     capable: true,
     statusBarStyle: "black-translucent",
-    title: "Pi Web",
+    title: BRAND_NAME,
   },
   formatDetection: {
     telephone: false,
@@ -61,7 +69,7 @@ export default function RootLayout({
   children: React.ReactNode;
 }) {
   return (
-    <html lang="en" translate="no" className={`${notoSansMono.variable} notranslate`} suppressHydrationWarning>
+    <html lang="zh-CN" translate="no" className={`${notoSansMono.variable} notranslate`} suppressHydrationWarning>
       <head>
         <meta name="google" content="notranslate" />
         <script

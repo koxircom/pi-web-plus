@@ -1,3 +1,4 @@
+import { selectSessionReadRuntime, isSessionReadStable } from "@/lib/session-read-source";
 import { NextResponse } from "next/server";
 import { existsSync, lstatSync, readdirSync, readFileSync, statSync, writeFileSync } from "fs";
 import { dirname, join, resolve as resolvePath } from "path";
@@ -59,7 +60,9 @@ export async function GET(
       wrapperRebuilt = true;
       liveWrapper = undefined;
     }
-    const liveRpc = liveWrapper;
+    // A retained idle wrapper has finished writing. Read disk so its history
+    // can receive a stable revision while the runtime remains available.
+    const liveRpc = selectSessionReadRuntime(liveWrapper);
     const resolvedPath = liveRpc ? null : await resolveSessionPath(id);
     if (!liveRpc && !resolvedPath) {
       return NextResponse.json({ error: "Session not found" }, { status: 404 });
@@ -171,7 +174,7 @@ export async function GET(
         deferThinking,
         deferMedia: deferToolResultImages,
       };
-      const initialRpc = liveRpc;
+      const initialRpc = liveWrapper;
       const syncResponse = await negotiateSessionSync({
         sessionId: id,
         filePath,
@@ -183,9 +186,7 @@ export async function GET(
         buildSnapshot,
         isStableRead: () => {
           const currentRpc = getRpcSession(id);
-          if (!initialRpc && currentRpc?.isAlive()) return false;
-          if (currentRpc?.isRunning()) return false;
-          return true;
+          return isSessionReadStable(initialRpc, currentRpc);
         },
       });
       const res = jsonResponse(req, syncResponse, {

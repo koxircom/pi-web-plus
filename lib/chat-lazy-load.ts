@@ -2,12 +2,14 @@ export const VISIBLE_PAGE_SIZE = 50;
 export const CHAT_SCROLL_TAIL_TOLERANCE = 8;
 export const CHAT_SCROLL_REATTACH_TOLERANCE = 96;
 
-export function getVisibleRenderWindow(totalCount: number, visibleCount: number): {
+export function getVisibleRenderWindow(totalCount: number, visibleCount: number, restoredAnchorIndex = -1): {
   startIndex: number;
   hasMore: boolean;
 } {
   const clampedVisibleCount = Math.min(Math.max(visibleCount, 0), Math.max(totalCount, 0));
-  const startIndex = Math.max(0, totalCount - clampedVisibleCount);
+  const tailStart = Math.max(0, totalCount - clampedVisibleCount);
+  const startIndex = restoredAnchorIndex >= 0 && restoredAnchorIndex < totalCount
+    ? Math.min(tailStart, restoredAnchorIndex) : tailStart;
   return { startIndex, hasMore: startIndex > 0 };
 }
 

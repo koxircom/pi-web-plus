@@ -213,6 +213,7 @@ export function registerEnhancementOpenSettings(
   // Sidebar fallback must never clobber an already registered external or primary setter.
   if (!options?.fallback || !hasExternalPrimary) {
     win.__PI_OPEN_SETTINGS__ = state.installedDispatcher;
+    win.__PI_ENH_OPEN_SETTINGS__ = state.installedDispatcher;
   }
 
   let cleaned = false;
@@ -223,9 +224,13 @@ export function registerEnhancementOpenSettings(
     if (
       state.primaryHandlers.size === 0
       && state.fallbackHandlers.size === 0
-      && win.__PI_OPEN_SETTINGS__ === state.installedDispatcher
     ) {
-      delete win.__PI_OPEN_SETTINGS__;
+      if (win.__PI_OPEN_SETTINGS__ === state.installedDispatcher) {
+        delete win.__PI_OPEN_SETTINGS__;
+      }
+      if (win.__PI_ENH_OPEN_SETTINGS__ === state.installedDispatcher) {
+        delete win.__PI_ENH_OPEN_SETTINGS__;
+      }
     }
   };
 }

@@ -10,7 +10,7 @@ test("confines extension overlays to the content region above the composer", () 
   assert.doesNotMatch(source, /function ExtensionRequestSheet/);
   assert.match(
     source,
-    /className="relative flex min-h-0 min-w-0 flex-1 overflow-hidden"[\s\S]*?<ExtensionDialog[\s\S]*?<ExtensionCustomPanel[\s\S]*?className="relative shrink-0"[\s\S]*?{chatInputElement}/,
+    /className="relative flex min-h-0 min-w-0 flex-1 overflow-hidden"[\s\S]*?<ExtensionDialog[\s\S]*?<ExtensionCustomPanel[\s\S]*?className="chat-composer-footer relative shrink-0"(?: key="chat-input-container")?[\s\S]*?{chatInputElement}/,
   );
   assert.match(dialogSource, /position: "absolute"[\s\S]*?inset: 0/);
   assert.match(dialogSource, /pointerEvents: "none"/);
@@ -44,5 +44,5 @@ test("preserves title newlines like pi's TUI and keeps long titles from hiding t
 test("resets collapse state when a new extension request arrives", () => {
   assert.match(source, /<ExtensionDialog key=\{extensionDialog.id\}/);
   assert.match(source, /<ExtensionCustomPanel key=\{extensionCustomUi.id\}/);
-  assert.match(customSource, /if \(!collapsed\) inputRef.current\?\.focus\(\);\s*}, \[collapsed\]\)/);
+  assert.match(customSource, /if \(!collapsed\) focusEditable\(inputRef.current\);\s*}, \[collapsed\]\)/);
 });
