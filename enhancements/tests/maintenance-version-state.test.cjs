@@ -1,0 +1,7 @@
+"use strict";
+const fs=require("node:fs"),path=require("node:path"),vm=require("node:vm"),test=require("node:test"),assert=require("node:assert/strict");
+const dir=path.join(__dirname,"../modules"),source=fs.readFileSync(path.join(dir,"06-chat-view-and-tool-cards.js"),"utf8"),maintenance=fs.readFileSync(path.join(dir,"08-settings-panels-and-lifecycle.js"),"utf8");
+const getter=source.slice(source.indexOf("  function getPiAgentUpdateState()"),source.indexOf("  let piAgentCheckInFlight ="));
+function run(cached){const c={window:{__PI_OFFICIAL_AGENT_VERSION__:"1.0.0"},localStorage:{getItem:()=>cached?JSON.stringify(cached):null},PI_AGENT_OFFICIAL_REPO:"https://github.com/earendil-works/pi",PI_AGENT_UPDATE_STORAGE_KEY:"fixture",PI_AGENT_UPDATE_CACHE_TTL:60000};vm.createContext(c);vm.runInContext(getter+";this.read=getPiAgentUpdateState",c);return c;}
+test("cold settings card initializes the authoritative installed version before any update probe",()=>{assert.match(maintenance,/const state = getPiAgentUpdateState\(\);/);const c=run(),s=c.read();assert.equal(s.currentVersion,"1.0.0");assert.equal(c.read(),s);assert.equal(s.updateAvailable,false);});
+test("a cached previous install cannot create a spurious update for the current kernel",()=>{const c=run({currentVersion:"0.99.1",latestVersion:"1.0.0",updateAvailable:true,checkedAt:Date.now()});const s=c.read();assert.equal(s.currentVersion,"1.0.0");assert.equal(s.updateAvailable,false);assert.equal(s.latestVersion,null);});

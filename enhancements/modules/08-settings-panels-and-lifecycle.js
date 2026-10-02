@@ -91,13 +91,7 @@
     card.className = "pi-enh-version-card";
     card.style.cssText = "display: flex; flex-direction: column; gap: 8px; padding: 10px 12px; background: var(--bg-surface, rgba(255,255,255,0.03)); border: 1px solid var(--border, rgba(255,255,255,0.08)); border-radius: 8px; margin-top: 8px; font-size: 12px;";
 
-    const state = (typeof window !== "undefined" && window.__PI_AGENT_UPDATE_STATE__) || {
-      currentVersion: "0.99.1",
-      latestVersion: null,
-      updateAvailable: false,
-      releaseUrl: "https://github.com/earendil-works/pi/releases",
-      isChecking: false,
-    };
+    const state = getPiAgentUpdateState();
     const suiteVer = (typeof window !== "undefined" && window.__PI_WEB_STANDALONE_VERSION__) || "1.0.5";
     const updateTag = state.updateAvailable
       ? `<span style="display:inline-flex;align-items:center;gap:3px;padding:1px 6px;border-radius:9999px;font-size:10px;font-weight:600;background:rgba(16,185,129,0.15);color:#10b981;border:1px solid rgba(16,185,129,0.4);"><span style="width:4px;height:4px;border-radius:50%;background:#10b981;"></span>可升级至 v${state.latestVersion}</span>`

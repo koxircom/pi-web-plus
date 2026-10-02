@@ -135,6 +135,10 @@ function validateOwnershipGate() {
   for (const token of ["captureDomSessionSnapshot(", "showSessionDomSnapshotOverlay(", "showSessionStaticLoadingPlaceholder("]) {
     if (module03.includes(token)) throw new Error("会话显示必须由原生缓存拥有：" + token);
   }
+  const module08 = fs.readFileSync(path.join(MODULES_DIR, "08-settings-panels-and-lifecycle.js"), "utf8");
+  if (!module08.includes("const state = getPiAgentUpdateState();")) {
+    throw new Error("设置版本卡片必须读取现有版本状态，不能使用独立的旧版默认值");
+  }
   const module01 = fs.readFileSync(path.join(MODULES_DIR, "01-bootstrap-and-core-state.js"), "utf8");
   const layout = fs.readFileSync(path.join(__dirname, "..", "app/layout.tsx"), "utf8");
   const nativeStyles = fs.readFileSync(path.join(__dirname, "..", "app/enhancements.css"), "utf8");
