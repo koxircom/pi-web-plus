@@ -27,7 +27,7 @@ import {
   useChatAppearance,
 } from "@/hooks/useChatAppearance";
 import { sendAgentCommand } from "@/lib/agent-client";
-import type { ShellToolSettingsResponse } from "@/lib/api-types";
+import type { ProjectTrustStatus, ToolSettingsResponse } from "@/lib/api-types";
 import {
   setLastSettingsSection,
   type SettingsSection,
@@ -65,18 +65,43 @@ import {
 } from "@/lib/settings-extensions";
 import { IsolatedSettingsHost } from "./IsolatedSettingsHost";
 
-const ModelsConfig = dynamic(() =>
-  import("./ModelsConfig").then((module) => module.ModelsConfig),
-);
-const SkillsConfig = dynamic(() =>
-  import("./SkillsConfig").then((module) => module.SkillsConfig),
-);
-const AgentsConfig = dynamic(() =>
-  import("./AgentsConfig").then((module) => module.AgentsConfig),
-);
-const PluginsConfig = dynamic(() =>
-  import("./PluginsConfig").then((module) => module.PluginsConfig),
-);
+function SettingsSectionLoading({ section, error, retry }: {
+  section: SettingsSection;
+  error?: Error | null;
+  retry?: () => void;
+}) {
+  const { t } = useI18n();
+  const labels = { models: t("common.models"), skills: t("common.skills"), agents: t("common.agents"), plugins: t("common.plugins"), mcp: t("settings.mcp") };
+  return (
+    <div className="settings-section-loading" role={error ? "alert" : "status"} aria-busy={!error}>
+      <h2>{labels[section as keyof typeof labels]}</h2>
+      <p>{error ? "此设置页加载失败，请重试。" : t("i18n.loading")}</p>
+      {error ? <ConfigButton onClick={retry}>重试加载</ConfigButton> : (
+        <div className="settings-loading-skeleton" aria-hidden="true">
+          <div /><div /><div />
+        </div>
+      )}
+    </div>
+  );
+}
+
+const loadModelsConfig = () => import("./ModelsConfig").then((module) => module.ModelsConfig);
+const loadSkillsConfig = () => import("./SkillsConfig").then((module) => module.SkillsConfig);
+const loadAgentsConfig = () => import("./AgentsConfig").then((module) => module.AgentsConfig);
+const loadPluginsConfig = () => import("./PluginsConfig").then((module) => module.PluginsConfig);
+const loadMcpConfig = () => import("./McpConfig").then((module) => module.McpConfig);
+const ModelsConfig = dynamic(loadModelsConfig, { loading: (props) => <SettingsSectionLoading section="models" {...props} /> });
+const SkillsConfig = dynamic(loadSkillsConfig, { loading: (props) => <SettingsSectionLoading section="skills" {...props} /> });
+const AgentsConfig = dynamic(loadAgentsConfig, { loading: (props) => <SettingsSectionLoading section="agents" {...props} /> });
+const PluginsConfig = dynamic(loadPluginsConfig, { loading: (props) => <SettingsSectionLoading section="plugins" {...props} /> });
+const McpConfig = dynamic(loadMcpConfig, { loading: (props) => <SettingsSectionLoading section="mcp" {...props} /> });
+
+const sectionLoaders = { models: loadModelsConfig, skills: loadSkillsConfig, agents: loadAgentsConfig, plugins: loadPluginsConfig, mcp: loadMcpConfig };
+function preloadSettingsSection(section: SettingsSection) {
+  const loader = sectionLoaders[section as keyof typeof sectionLoaders];
+  // Warm only the hovered/focused code chunk; no component/data request is mounted.
+  if (loader) void loader().catch(() => {});
+}
 
 interface Props {
   cwd: string | null;
@@ -86,6 +111,12 @@ interface Props {
   onSessionReloaded: () => void;
   quoteSelectionEnabled: boolean;
   onQuoteSelectionChange: (enabled: boolean) => void;
+  /** The page's trust status for `cwd`; Settings › MCP reloads when it changes. */
+  projectTrust?: ProjectTrustStatus | null;
+  /** Opens the page's trust dialog for `cwd`. */
+  onOpenTrustDialog?: () => void;
+  /** Settings › MCP changed `cwd`'s project trust. */
+  onProjectTrustChanged?: (cwd: string, status: ProjectTrustStatus) => void;
 }
 
 export function SettingsSectionIcon({ section, size = 16, strokeWidth = 1.8 }: { section: SettingsSection; size?: number; strokeWidth?: number }) {
@@ -107,6 +138,7 @@ export function SettingsSectionIcon({ section, size = 16, strokeWidth = 1.8 }: {
   if (section === "skills") return <svg {...common}><path d="m12 2-10 5 10 5 10-5-10-5Z" /><path d="m2 12 10 5 10-5M2 17l10 5 10-5" /></svg>;
   if (section === "agents") return <svg {...common} className="settings-section-icon is-agent"><rect x="5" y="7" width="14" height="11" rx="2" /><path d="M9 11h.01M15 11h.01M9 15h6M12 7V4M10 4h4" /></svg>;
   if (section === "plugins") return <svg {...common}><path d="M9 7V2M15 7V2M6 13V8a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v5a6 6 0 0 1-12 0ZM12 19v3" /></svg>;
+  if (section === "mcp") return <svg {...common}><rect x="3" y="3" width="18" height="7" rx="2" /><rect x="3" y="14" width="18" height="7" rx="2" /><path d="M7 6.5h.01M7 17.5h.01M11 6.5h6M11 17.5h6" /></svg>;
   if (section === "enhancements") return <svg {...common}><path d="M12 2v4m0 12v4M2 12h4m12 0h4m-3.5-6.5 2.5-2.5m-15 15 2.5-2.5m0-10-2.5-2.5m15 15-2.5-2.5" /><circle cx="12" cy="12" r="4" /></svg>;
   if (section === "notifications") return <svg {...common}><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9" /><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0" /></svg>;
   if (section === "archived") return <svg {...common}><rect width="20" height="5" x="2" y="3" rx="1" /><path d="M4 8v11a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8" /><path d="M10 12h4" /></svg>;
@@ -126,11 +158,6 @@ interface SettingsHostContextProps {
 function MaintenanceHost(props: SettingsHostContextProps) {
   return <IsolatedSettingsHost {...props} id="maintenance" sectionId="general"
     className="settings-general-maintenance-host settings-extension-host" hideWhenEmpty />;
-}
-
-function TabActionHost({ sectionId, ...props }: SettingsHostContextProps & { sectionId: string }) {
-  return <IsolatedSettingsHost {...props} id={`tab-action:${sectionId}`} sectionId={sectionId}
-    className="settings-tab-action-host settings-extension-host" hideWhenEmpty />;
 }
 
 const subscribeSettingsPreferences = (listener: () => void) =>
@@ -158,7 +185,7 @@ function GeneralSettings({
     subscribeSettingsPreferences, readDashboardPreference, readDashboardPreference,
   );
   const { width: chatContentWidth, setWidth: setChatContentWidth, fontSize, setFontSize } = useChatAppearance();
-  const [shellSettings, setShellSettings] = useState<ShellToolSettingsResponse | null>(null);
+  const [shellSettings, setShellSettings] = useState<ToolSettingsResponse | null>(null);
   const [shellSaving, setShellSaving] = useState(false);
   const [shellError, setShellError] = useState<string | null>(null);
   const [thinkingExpanded, setThinkingExpanded] = useState(false);
@@ -194,7 +221,7 @@ function GeneralSettings({
     let cancelled = false;
     void fetch("/api/tools/settings")
       .then(async (response) => {
-        const data = await response.json() as ShellToolSettingsResponse & { error?: string };
+        const data = await response.json() as ToolSettingsResponse & { error?: string };
         if (!response.ok || data.error) throw new Error(data.error ?? `HTTP ${response.status}`);
         if (!cancelled) setShellSettings(data);
       })
@@ -213,7 +240,7 @@ function GeneralSettings({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ enabled }),
       });
-      const data = await response.json() as ShellToolSettingsResponse & { error?: string };
+      const data = await response.json() as ToolSettingsResponse & { error?: string };
       if (!response.ok || data.error) throw new Error(data.error ?? `HTTP ${response.status}`);
       setShellSettings(data);
       if (sessionId) {
@@ -470,6 +497,9 @@ export function SettingsPanel({
   onSessionReloaded,
   quoteSelectionEnabled,
   onQuoteSelectionChange,
+  projectTrust,
+  onOpenTrustDialog,
+  onProjectTrustChanged,
 }: Props) {
   const { t } = useI18n();
 
@@ -507,6 +537,7 @@ export function SettingsPanel({
       { id: "skills", label: t("common.skills"), requiresProject: true },
       { id: "agents", label: t("common.agents"), requiresProject: true },
       { id: "plugins", label: t("common.plugins"), requiresProject: true },
+      { id: "mcp", label: t("settings.mcp"), requiresProject: false },
     ],
     [t],
   );
@@ -892,23 +923,18 @@ export function SettingsPanel({
                     type="button"
                     className="settings-section-tab"
                     disabled={disabled}
-                    title={disabled ? t("settings.projectRequired") : item.label}
+                    title={disabled ? t("settings.projectRequired") : isSettingsPluginEnabled("settings-tab-shortcuts") ? `${item.label}（双击添加／取消快捷入口）` : item.label}
                     aria-current={selected ? "page" : undefined}
                     data-section-id={item.id}
                     data-pi-enh-tab={legacyTabAttr}
                     onClick={() => activateSection(item.id)}
+                    onDoubleClick={() => settingsExtensionRegistry.invokeTabAction(item.id)}
+                    onPointerEnter={() => { if (!disabled) preloadSettingsSection(item.id); }}
+                    onFocus={() => { if (!disabled) preloadSettingsSection(item.id); }}
                   >
                     <SettingsSectionIcon section={item.id} />
                     <span>{item.label}</span>
                   </button>
-                  <TabActionHost
-                    sectionId={item.id}
-                    onClose={onClose}
-                    activateSection={activateSectionById}
-                    availableSections={availableSectionIds}
-                    cwd={cwd}
-                    sessionId={sessionId}
-                  />
                 </div>
               );
             })}
@@ -967,6 +993,7 @@ export function SettingsPanel({
               "plugins",
               <PluginsConfig embedded key={cwd} cwd={cwd} sessionId={sessionId} onClose={onClose} onReloaded={onSessionReloaded} />,
             )}
+          {sectionHost("mcp", <McpConfig embedded key={cwd ?? ""} cwd={cwd} trust={projectTrust} onTrustProject={onOpenTrustDialog} onProjectTrustChanged={onProjectTrustChanged} onClose={onClose} />)}
 
           {/* 5 个 legacy extension section host */}
           {enabledExtensions.map((ext) =>

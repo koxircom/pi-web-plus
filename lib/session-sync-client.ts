@@ -129,6 +129,31 @@ export function reconcileSyncResponse(params: {
   };
 }
 
+/** Keep already loaded ancestors when a confirmed tail window advances.
+ * The wire baseline stays narrow and exact; only the display view is widened.
+ * A changed branch, unknown gap or edited overlap must fail closed.
+ */
+export function preserveLoadedHistoryPrefix(
+  next: SessionData,
+  base: SessionWireBaseline | null,
+  current: { messages: AgentMessage[]; entryIds: string[]; oldestEntryId: string | null; hasMore: boolean },
+): SessionData {
+  if (!base || base.sessionId !== next.sessionId || current.messages.length < current.entryIds.length
+    || !viewMatchesBaseline(base, current.messages.slice(0, current.entryIds.length), current.entryIds)) return next;
+  const nextIds = next.context.entryIds;
+  const offset = nextIds.length ? current.entryIds.indexOf(nextIds[0]) : -1;
+  if (offset <= 0) return next;
+  const overlap = Math.min(current.entryIds.length - offset, nextIds.length);
+  if (!overlap || !nextIds.slice(0, overlap).every((id, i) => id === current.entryIds[offset + i]
+    && isAgentMessageEqual(next.context.messages[i], current.messages[offset + i]))) return next;
+  return { ...next, context: { ...next.context,
+    messages: current.messages.slice(0, offset).concat(next.context.messages),
+    entryIds: current.entryIds.slice(0, offset).concat(nextIds),
+    oldestEntryId: current.oldestEntryId,
+    hasMore: current.hasMore,
+  } };
+}
+
 /** A wider view is reusable only if its suffix exactly covers this confirmed wire window. */
 export function viewMatchesBaseline(base: SessionWireBaseline, viewMessages: AgentMessage[], viewIds: string[]): boolean {
   if (viewMessages.length !== viewIds.length || viewIds.length < base.entryIds.length) return false;

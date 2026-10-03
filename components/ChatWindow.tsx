@@ -23,6 +23,7 @@ import { useIsMobile, allowsAutomaticEditableFocus, focusEditable } from "@/hook
 import { useScrollbarVisibility } from "@/hooks/useScrollbarVisibility";
 import type { SessionStatsInfo } from "@/lib/pi-types";
 import type { ToolEntry } from "@/lib/tool-presets";
+import type { SettingsSection } from "@/lib/settings-navigation";
 import { findChatScrollAnchor, type ChatScrollPosition } from "@/lib/chat-scroll-position";
 import {
   captureScrollDistance,
@@ -59,12 +60,14 @@ interface Props {
   onSessionForked?: (newSessionId: string) => void;
   modelsRefreshKey?: number;
   chatInputRef?: React.RefObject<ChatInputHandle | null>;
-  onBranchDataChange?: (tree: SessionTreeNode[], activeLeafId: string | null, onLeafChange: (leafId: string | null) => void) => void;
+  onBranchDataChange?: (tree: SessionTreeNode[], activeLeafId: string | null, onLeafChange: (leafId: string | null) => void, locked: boolean) => void;
   onSystemPromptChange?: (prompt: string | null) => void;
   onSystemToolsChange?: (tools: ToolEntry[] | null) => void;
   onSystemInfoLoaderChange?: (loader: (() => Promise<void>) | null) => void;
   onSessionStatsChange?: (stats: SessionStatsInfo | null) => void;
   onSessionStatsPanelOpen?: () => void;
+  /** Opens Settings on a section: a bare `/mcp` that pi's built-in MCP extension owns opens Settings › MCP. */
+  onOpenSettings?: (section: SettingsSection) => void;
   onContextUsageChange?: (usage: { percent: number | null; contextWindow: number; tokens: number | null } | null) => void;
   onOpenFile?: (filePath: string, page?: number) => void;
   onOpenSession?: (sessionId: string) => void;
@@ -154,7 +157,7 @@ function ProcessDetailsGroup({ toolStates, defaultExpanded = false, reveal = fal
   );
 }
 
-export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initialScrollPosition, onScrollPositionChange, sessionRunning, newSessionCwd, newSessionDraftKey, onAgentEnd, onAttentionNeeded, onSessionCreated, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSystemToolsChange, onSystemInfoLoaderChange, onSessionStatsChange, onSessionStatsPanelOpen, onContextUsageChange, onOpenFile, onOpenSession, onAskInNewChat, quoteSelectionEnabled = false, initialPrompt, onInitialPromptConsumed, soundEnabled = true, onSoundToggle, playDoneSound = () => {}, unlockAudio }: Props) {
+export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initialScrollPosition, onScrollPositionChange, sessionRunning, newSessionCwd, newSessionDraftKey, onAgentEnd, onAttentionNeeded, onSessionCreated, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSystemToolsChange, onSystemInfoLoaderChange, onSessionStatsChange, onSessionStatsPanelOpen, onOpenSettings, onContextUsageChange, onOpenFile, onOpenSession, onAskInNewChat, quoteSelectionEnabled = false, initialPrompt, onInitialPromptConsumed, soundEnabled = true, onSoundToggle, playDoneSound = () => {}, unlockAudio }: Props) {
   const { t } = useI18n();
   const isMobile = useIsMobile();
   useEffect(() => {
@@ -170,7 +173,7 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
   playDoneSoundRef.current = playDoneSound;
   const soundEnabledRef = useRef(soundEnabled);
   soundEnabledRef.current = soundEnabled;
-  const soundedExtensionDialogIdRef = useRef<string | null>(null);
+  const extensionDialogShownRef = useRef(false);
   const wrappedOnAgentEnd = useCallback(() => {
     if (completionNotificationsEnabled && soundEnabledRef.current) {
       playDoneSoundRef.current();
@@ -214,6 +217,7 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
   } = useAgentSession({
     session, sessionRunning, newSessionCwd, newSessionDraftKey, onAgentEnd: wrappedOnAgentEnd, onAttentionNeeded, onSessionCreated, onSessionForked,
     modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSystemToolsChange, onSystemInfoLoaderChange, onSessionStatsPanelOpen,
+    onOpenSettings,
     deferInitialScroll: Boolean(pendingScrollRestore),
   });
   const sessionBusy = agentRunning || bashRunning;
@@ -380,13 +384,12 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
     void handleSend(initialPrompt);
   }, [initialPrompt, loading, error, handleSend, onInitialPromptConsumed]);
 
+  // One sound when a dialog appears with none on screen. A dialog queued behind
+  // another one surfaces the moment the user answers that one, so it stays quiet.
   useEffect(() => {
-    if (
-      !completionNotificationsEnabled
-      || !extensionDialog
-      || soundedExtensionDialogIdRef.current === extensionDialog.id
-    ) return;
-    soundedExtensionDialogIdRef.current = extensionDialog.id;
+    const surfaced = Boolean(extensionDialog) && !extensionDialogShownRef.current;
+    extensionDialogShownRef.current = Boolean(extensionDialog);
+    if (!completionNotificationsEnabled || !surfaced) return;
     playDoneSoundRef.current();
   }, [completionNotificationsEnabled, extensionDialog]);
 
@@ -406,6 +409,7 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
     setSentinelNode(node);
   }, []);
   const visibleStartIndexRef = useRef(0);
+  const visibleStartKeyRef = useRef<string | null>(null);
   const restoredVisibleCountRef = useRef(visibleCount);
   const visibleCountRef = useRef(visibleCount);
   visibleCountRef.current = visibleCount;
@@ -1234,6 +1238,12 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
           <div style={{ minWidth: 0, padding: `0 ${CHAT_COLUMN_PADDING}px` }}>
             <div ref={messageContentRef} style={{ width: "100%", minWidth: 0, maxWidth: "var(--chat-content-max-width, 820px)", margin: "0 auto" }}>
             {(() => {
+              // Streamed blocks use the same disclosure owner as committed history.
+              // Appending the live message here preserves the process group through
+              // message_end instead of briefly rendering technical cards outside it.
+              const displayMessages = streamState.isStreaming && hasStreamingContent && streamState.streamingMessage
+                ? [...messages, streamState.streamingMessage]
+                : messages;
               let lastUserIdx = -1;
               for (let i = messages.length - 1; i >= 0; i--) {
                 if (messages[i].role === "user") { lastUserIdx = i; break; }
@@ -1255,7 +1265,8 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
               };
 
               const renderMessage = (idx: number, options: { attachRef?: boolean; keyPrefix?: string; messageOverride?: AgentMessage; showTimestamp?: boolean; writtenFiles?: WrittenFile[] } = {}): ReactNode => {
-                const msg = options.messageOverride ?? messages[idx];
+                const msg = options.messageOverride ?? displayMessages[idx];
+                const isStreaming = idx === messages.length && displayMessages !== messages;
                 const isVisible = isMessageGroupAnchor(msg) || msg.role === "assistant";
                 const currentRefIdx = visibleRefIndexByMessage.get(idx);
                 const keyPrefix = options.keyPrefix ?? "message";
@@ -1263,13 +1274,13 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
                 let showTimestamp = false;
                 if (msg.role === "assistant") {
                   showTimestamp = true;
-                  for (let j = idx + 1; j < messages.length; j++) {
-                    const r = messages[j].role;
+                  for (let j = idx + 1; j < displayMessages.length; j++) {
+                    const r = displayMessages[j].role;
                     if (r === "user") break;
                     if (r === "assistant") { showTimestamp = false; break; }
                   }
                   // Hide on the currently-streaming tail (the streaming bubble owns the live timestamp)
-                  if (showTimestamp && streamState.isStreaming && idx === messages.length - 1) {
+                  if (showTimestamp && isStreaming) {
                     showTimestamp = false;
                   }
                 }
@@ -1278,6 +1289,7 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
                   <MessageView
                     key={`${keyPrefix}-view-${messageKey}`}
                     message={msg}
+                    isStreaming={isStreaming}
                     toolResults={toolResultsMap}
                     modelNames={modelNames}
                     cwd={messageCwd}
@@ -1285,7 +1297,7 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
                     onOpenSession={onOpenSession}
                     entryId={entryIds[idx]}
                     searchBlock={entryIds[idx] === pendingSearchScroll?.entryId ? searchBlock : undefined}
-                    onFork={sessionBusy || isNew ? undefined : handleFork}
+                    onFork={bashRunning || isNew ? undefined : handleFork}
                     forking={forkingEntryId === entryIds[idx]}
                     onNavigate={sessionBusy ? undefined : handleNavigate}
                     onEditContent={handleEditContent}
@@ -1325,15 +1337,15 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
               };
               const finalAssistantIndices = new Set<number>();
               let lastAssistant = -1;
-              for (let i = 0; i < messages.length; i++) {
-                if (isMessageGroupAnchor(messages[i])) {
+              for (let i = 0; i < displayMessages.length; i++) {
+                if (isMessageGroupAnchor(displayMessages[i])) {
                   if (lastAssistant >= 0) finalAssistantIndices.add(lastAssistant);
                   lastAssistant = -1;
-                } else if (messages[i].role === "assistant") lastAssistant = i;
+                } else if (displayMessages[i].role === "assistant") lastAssistant = i;
               }
               if (lastAssistant >= 0) finalAssistantIndices.add(lastAssistant);
-              for (let idx = 0; idx < messages.length; idx++) {
-                const message = messages[idx];
+              for (let idx = 0; idx < displayMessages.length; idx++) {
+                const message = displayMessages[idx];
                 if (message.role !== "assistant") {
                   // Tool results belong to their paired calls, not separate public text.
                   if (message.role === "toolResult") continue;
@@ -1343,15 +1355,17 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
                 }
                 const finalInTurn = finalAssistantIndices.has(idx);
                 const turnContent: AssistantContentBlock[] = [];
-                if (finalInTurn) {
+                if (finalInTurn && idx < messages.length) {
                   let start = idx;
-                  while (start > 0 && !isMessageGroupAnchor(messages[start - 1])) start--;
-                  for (let i = start; i <= idx; i++) if (messages[i].role === "assistant") turnContent.push(...(messages[i] as AssistantMessage).content);
+                  while (start > 0 && !isMessageGroupAnchor(displayMessages[start - 1])) start--;
+                  for (let i = start; i <= idx; i++) if (displayMessages[i].role === "assistant") turnContent.push(...(displayMessages[i] as AssistantMessage).content);
                 }
-                const writtenFiles = finalInTurn ? extractTurnWrittenFiles(turnContent, toolResultsMap, messageCwd) : undefined;
+                const writtenFiles = finalInTurn && idx < messages.length ? extractTurnWrittenFiles(turnContent, toolResultsMap, messageCwd) : undefined;
                 const runs = splitAssistantDisplayRuns(message);
                 runs.forEach((run, runIndex) => {
-                  const key = `${entryIds[idx] ?? idx}-${runIndex}`;
+                  // Entry IDs arrive only at commit; keep disclosure identity stable
+                  // so a user's explicit expansion survives the stream handoff.
+                  const key = `${idx}-${run.message.displayBlockIndices?.[0] ?? runIndex}`;
                   if (run.kind === "public") {
                     flushProcess();
                     rendered.push(renderMessage(idx, { keyPrefix: `public-${runIndex}`, messageOverride: run.message, showTimestamp: finalInTurn && runIndex === runs.length - 1, writtenFiles: runIndex === runs.length - 1 ? writtenFiles : undefined }));
@@ -1371,7 +1385,14 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
                   ? node.props["data-scroll-anchor"] === pendingScrollRestore.anchorKey
                   : node.props["data-entry-id"] === pendingScrollRestore.anchorEntryId)
               )) : -1;
-              const { startIndex } = getVisibleRenderWindow(rendered.length, visibleCount, anchorIndex);
+              // New output widens the mounted window; it must not evict history
+              // that the user already revealed. Keys also survive prepended pages.
+              const retainedStartIndex = visibleStartKeyRef.current === null ? -1 : rendered.findIndex((node) => (
+                isValidElement(node) && node.key === visibleStartKeyRef.current
+              ));
+              const { startIndex } = getVisibleRenderWindow(rendered.length, visibleCount, anchorIndex >= 0 ? anchorIndex : retainedStartIndex);
+              const firstVisibleNode = rendered[startIndex];
+              visibleStartKeyRef.current = isValidElement(firstVisibleNode) ? firstVisibleNode.key : null;
               restoredVisibleCountRef.current = rendered.length - startIndex;
               visibleStartIndexRef.current = startIndex;
               const hasMore = startIndex > 0 || hasEarlierMessages;
@@ -1391,12 +1412,10 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
                 </>
               );
             })()}
-            {streamState.isStreaming && hasStreamingContent && streamState.streamingMessage && (
-              <MessageView message={streamState.streamingMessage as AgentMessage} toolResults={toolResultsMap} isStreaming modelNames={modelNames} cwd={messageCwd} onOpenFile={onOpenFile} onOpenSession={onOpenSession} />
-            )}
-
-            {agentRunning && !hasStreamingContent && agentPhase && (
-              <div className="break-words py-2 text-[13px] text-text-muted">
+            {/* Keep one status row during streaming and tool execution; technical
+                deltas must not repeatedly add/remove space below the disclosure. */}
+            {agentRunning && (
+              <div data-pi-native-agent-status="true" className="min-h-[36px] break-words py-2 text-[13px] text-text-muted">
                 <span className="animate-[pulse_1.5s_infinite]">{phaseLabel(agentPhase, t)}</span>
               </div>
             )}
@@ -1494,7 +1513,7 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
             <span aria-hidden="true" style={{ fontSize: 15 }}>@</span>
             <span>{t("chat.askInCurrent")}</span>
           </button>
-          {onAskInNewChat && quotedSelection.sourceEntryId && !sessionBusy && (
+          {onAskInNewChat && quotedSelection.sourceEntryId && !bashRunning && (
             <button
               type="button"
               className="file-viewer-icon-button"

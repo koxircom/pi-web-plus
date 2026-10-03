@@ -1,4 +1,4 @@
-> **v1.2.0** uses Pi Coding Agent **1.0.0**. Native React owns the composer, settings, branding, session cache and Minimap. Shared enhancement styles ship in the native CSS pipeline; workbook/usage resources load on demand. Install the prebuilt archive from [Releases](https://github.com/koxircom/pi-web-plus/releases/tag/v1.2.0). Legacy built-file injection scripts are not the upgrade path for this edition.
+> **v1.3.0** uses Pi Coding Agent **1.0.0**. Native React owns the composer, settings, branding, session cache and Minimap. Shared enhancement styles ship in the native CSS pipeline; workbook/usage resources load on demand. Install the prebuilt archive from [Releases](https://github.com/koxircom/pi-web-plus/releases/tag/v1.3.0). Legacy built-file injection scripts are not the upgrade path for this edition.
 
 # Pi Web Standalone Edition
 
@@ -25,7 +25,7 @@ Standalone local browser UI for the [pi coding agent](https://github.com/earendi
 Pi Web Standalone requires Node.js 22.19.0 or newer (`node >=22.19`). Check your version with `node --version`, then install the prebuilt release tarball from [`koxircom/pi-web-plus` GitHub Releases](https://github.com/koxircom/pi-web-plus/releases) and start `pi-web`:
 
 ```bash
-npm install -g https://github.com/koxircom/pi-web-plus/releases/download/v1.2.0/pi-web-standalone-1.2.0.tgz
+npm install -g https://github.com/koxircom/pi-web-plus/releases/download/v1.3.0/pi-web-standalone-1.3.0.tgz
 pi-web
 ```
 
@@ -79,10 +79,10 @@ Password authentication does not encrypt the connection. Do not expose Pi Web ov
 
 Server-side model and API requests honor the standard `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY` environment variables.
 
-On macOS or Linux (after installing the [GitHub Release tarball](https://github.com/koxircom/pi-web-plus/releases/download/v1.2.0/pi-web-standalone-1.2.0.tgz)):
+On macOS or Linux (after installing the [GitHub Release tarball](https://github.com/koxircom/pi-web-plus/releases/download/v1.3.0/pi-web-standalone-1.3.0.tgz)):
 
 ```bash
-npm install -g https://github.com/koxircom/pi-web-plus/releases/download/v1.2.0/pi-web-standalone-1.2.0.tgz
+npm install -g https://github.com/koxircom/pi-web-plus/releases/download/v1.3.0/pi-web-standalone-1.3.0.tgz
 HTTP_PROXY=http://127.0.0.1:7890 \
 HTTPS_PROXY=http://127.0.0.1:7890 \
 NO_PROXY=localhost,127.0.0.1 \
@@ -92,7 +92,7 @@ pi-web
 On Windows PowerShell:
 
 ```powershell
-npm install -g https://github.com/koxircom/pi-web-plus/releases/download/v1.2.0/pi-web-standalone-1.2.0.tgz
+npm install -g https://github.com/koxircom/pi-web-plus/releases/download/v1.3.0/pi-web-standalone-1.3.0.tgz
 $env:HTTP_PROXY = "http://127.0.0.1:7890"
 $env:HTTPS_PROXY = "http://127.0.0.1:7890"
 $env:NO_PROXY = "localhost,127.0.0.1"

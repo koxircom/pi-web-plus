@@ -97,6 +97,8 @@ export type SettingsExtensionMount = (
 
 export interface SettingsNativeAbi {
   registerRenderer(id: string, mount: SettingsExtensionMount): () => void;
+  registerTabAction(id: string, action: () => void): () => void;
+  invokeTabAction(id: string): boolean;
   notifyPreferencesChanged(): void;
   activateSection(id: string): boolean;
   getActiveSection(): string | null;
@@ -122,6 +124,7 @@ interface ModalRuntime {
 
 class SettingsExtensionRegistry {
   private renderers: RendererMap = new Map();
+  private tabActions = new Map<string, () => void>();
   private preferenceListeners: Set<PreferenceListener> = new Set();
   private rendererListeners: Set<RendererChangeListener> = new Set();
   private currentModal: ModalRuntime | null = null;
@@ -143,6 +146,20 @@ class SettingsExtensionRegistry {
         this.notifyRendererChanged(id);
       }
     };
+  }
+
+  public registerTabAction(id: string, action: () => void): () => void {
+    this.tabActions.set(id, action);
+    return () => {
+      if (this.tabActions.get(id) === action) this.tabActions.delete(id);
+    };
+  }
+
+  public invokeTabAction(id: string): boolean {
+    const action = this.tabActions.get(id);
+    if (!action || !isSettingsPluginEnabled("settings-tab-shortcuts")) return false;
+    action();
+    return true;
   }
 
   public getRenderer(id: string): SettingsExtensionMount | undefined {
@@ -218,6 +235,8 @@ class SettingsExtensionRegistry {
 
     const abi: SettingsNativeAbi = {
       registerRenderer: (id, mount) => this.registerRenderer(id, mount),
+      registerTabAction: (id, action) => this.registerTabAction(id, action),
+      invokeTabAction: (id) => this.invokeTabAction(id),
       notifyPreferencesChanged: () => this.notifyPreferencesChanged(),
       activateSection: (id) => this.activateSection(id),
       getActiveSection: () => this.getActiveSection(),

@@ -973,13 +973,6 @@
       defaultEnabled: true,
     },
     {
-      id: "mobile-model-keyboard-guard",
-      name: "移动端模型切换防弹软键盘",
-      desc: "移动端点击切换模型时保持软键盘展开不打断输入，下拉菜单物理锚定紧挨在按钮正上方，键盘收起时自适应同步跟随，防止菜单脱节悬空。",
-      category: "交互增强",
-      defaultEnabled: true,
-    },
-    {
       id: "composer-clean-placeholder",
       name: "清空输入框提示词",
       desc: "清空主输入框中冗长繁杂的占位提示词（如‘输入 / 使用命令，输入 @ 查找文件’），去除折行干扰，优化中文字体呈现，保持输入框纯净极简。",
@@ -1375,7 +1368,7 @@
     { id: "subagent-dispatch", name: "子 Agent 调度", desc: "管理全部子任务统一使用的服务端模型；实际模型由服务端动态读取。", category: "偏好记忆", version: "1.0.0", defaultEnabled: true, features: ["subagent-model-override"] },
     { id: "selection-context", name: "划选引用与上下文", desc: "管理文本划选引用、注释与发送上下文。", category: "交互增强", version: "1.0.0", defaultEnabled: true, features: ["quick-quote"] },
     { id: "session-sidebar", name: "会话列表增强", desc: "管理会话列表的快捷菜单、归档、标签、布局、颜色、快捷入口和搜索。", category: "交互增强", version: "1.0.0", defaultEnabled: true, features: ["context-menu", "session-pin-archive", "session-section-headers", "session-model-label", "session-item-compact", "session-color", "session-tags", "session-odoo-addons", "session-dblclick-rename", "session-search-shortcut", "session-search-project-folding", "session-batch-actions", "settings-tab-shortcuts", "mobile-swipe-drawer"] },
-    { id: "composer-workflow", name: "输入与附件增强", desc: "管理编辑器快捷操作、草稿、附件和移动端输入保护。", category: "交互增强", version: "1.0.0", defaultEnabled: true, features: ["stop-fast-response", "quick-action-buttons", "empty-send-continue", "composer-draft-cache", "composer-file-paste", "composer-image-zoom", "mobile-enter-newline", "mobile-model-keyboard-guard", "composer-clean-placeholder", "codex-composer-layout", "composer-model-reasoning-pill", "composer-queue-panel", "running-model-switch", "composer-markdown-format", "composer-format-toggle", "composer-compact-button", "composer-tool-preset", "composer-modes", "at-mention-plugins"] },
+    { id: "composer-workflow", name: "输入与附件增强", desc: "管理编辑器快捷操作、草稿、附件和移动端输入保护。", category: "交互增强", version: "1.0.0", defaultEnabled: true, features: ["stop-fast-response", "quick-action-buttons", "empty-send-continue", "composer-draft-cache", "composer-file-paste", "composer-image-zoom", "mobile-enter-newline", "composer-clean-placeholder", "codex-composer-layout", "composer-model-reasoning-pill", "composer-queue-panel", "running-model-switch", "composer-markdown-format", "composer-format-toggle", "composer-compact-button", "composer-tool-preset", "composer-modes", "at-mention-plugins"] },
     { id: "ask-user-experience", name: "ask_user 交互", desc: "管理网页原生问答选择器与批量原型预览。", category: "交互增强", version: "1.1.1", defaultEnabled: true, features: ["ask-user-web-native", "ask-user-batch-prototype"] },
     { id: "background-attention", name: "后台会话提醒", desc: "管理跨项目状态、提示音与桌面通知。", category: "运行监控", version: "1.0.0", defaultEnabled: true, features: ["project-status-indicator", "session-attention-sound", "session-attention-desktop"] },
     { id: "notification-management", name: "通知管理", desc: "管理所有站内通知、网页操作提示、提示音与桌面提醒，并查看通知历史。", category: "偏好记忆", version: "1.0.0", defaultEnabled: true, features: ["notification-center"] },
@@ -2005,12 +1998,6 @@
       }
     } else if (id === "codex-composer-layout" || id === "composer-model-reasoning-pill") {
       window.dispatchEvent(new Event("pi-native-composer-preferences-change"));
-    } else if (id === "mobile-model-keyboard-guard") {
-      if (!enabled) {
-        removeMobileModelKeyboardGuard();
-      } else {
-        syncMobileModelKeyboardGuard();
-      }
     } else if (id === "composer-clean-placeholder") {
       if (!enabled) {
         removeComposerCleanPlaceholder();
@@ -16072,7 +16059,6 @@
   annotationEditor = null;
   let annotationList = null;
   let annotationEditorState = null;
-  let annotationSpeechRecognition = null;
   let annotationListCloseTimer = null;
   let activeAnnotationSaveHandler = null;
   let annotationEditorOpenedAt = 0;
@@ -16277,8 +16263,6 @@
   function closeAnnotationEditor() {
     activeAnnotationSaveHandler = null;
     annotationEditorOpenedAt = 0;
-    try { annotationSpeechRecognition?.stop?.(); } catch {}
-    annotationSpeechRecognition = null;
     if (annotationEditor) annotationEditor.remove();
     if (annotationDraftMarker) annotationDraftMarker.remove();
     annotationDraftMarker = null;
@@ -16290,7 +16274,8 @@
   function getComposerBoundaryTop() {
     try {
       const composer = getComposerTextarea();
-      const composerRoot = composer?.closest?.("form") || 
+      const composerRoot = composer?.closest?.(".chat-composer-card") ||
+                           composer?.closest?.("form") || 
                            composer?.closest?.(".chat-input-container") || 
                            composer?.parentElement?.parentElement || 
                            composer;
@@ -16404,7 +16389,7 @@
     if (!element || !selectionBounds) return;
     const chatBounds = getChatViewBoundary();
     const availableWidth = Math.max(260, chatBounds.width - 24);
-    const width = Math.min(430, availableWidth);
+    const width = Math.min(360, availableWidth);
     const measuredHeight = element.getBoundingClientRect?.().height || 150;
 
     const composerTop = getComposerBoundaryTop();
@@ -16546,44 +16531,12 @@
     }
   }
 
-  function toggleAnnotationDictation(textarea, button) {
-    const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!Recognition) {
-      showToast("当前浏览器不支持语音注释");
-      return;
-    }
-    if (annotationSpeechRecognition) {
-      try { annotationSpeechRecognition.stop(); } catch {}
-      annotationSpeechRecognition = null;
-      button.classList.remove("is-listening");
-      return;
-    }
-    const recognition = new Recognition();
-    recognition.lang = document.documentElement.lang || "zh-CN";
-    recognition.continuous = true;
-    recognition.interimResults = true;
-    const initialValue = textarea.value.trim();
-    recognition.onresult = (event) => {
-      let transcript = "";
-      for (let index = 0; index < event.results.length; index += 1) transcript += event.results[index][0]?.transcript || "";
-      textarea.value = [initialValue, transcript.trim()].filter(Boolean).join(initialValue ? " " : "");
-    };
-    recognition.onend = () => {
-      annotationSpeechRecognition = null;
-      button.classList.remove("is-listening");
-    };
-    recognition.onerror = () => showToast("语音注释未能启动");
-    annotationSpeechRecognition = recognition;
-    button.classList.add("is-listening");
-    recognition.start();
-  }
-
   function resizeAnnotationComment(textarea) {
     if (!textarea) return;
     textarea.style.height = "auto";
-    const height = Math.max(52, Math.min(240, textarea.scrollHeight || 52));
+    const height = Math.max(38, Math.min(220, textarea.scrollHeight || 38));
     textarea.style.height = `${height}px`;
-    textarea.style.overflowY = (textarea.scrollHeight || 0) > 240 ? "auto" : "hidden";
+    textarea.style.overflowY = (textarea.scrollHeight || 0) > 220 ? "auto" : "hidden";
   }
 
   function openAnnotationEditor(quote, itemId, rect, sourceRange) {
@@ -16611,20 +16564,16 @@
 
     const comment = document.createElement("textarea");
     comment.className = "pi-enh-annotation-comment";
-    comment.rows = 2;
+    comment.rows = 1;
     comment.placeholder = "添加可选评论…";
     comment.value = existing?.comment || "";
     comment.setAttribute("aria-label", "注释内容");
-    comment.addEventListener("input", () => resizeAnnotationComment(comment));
+    comment.addEventListener("input", () => {
+      resizeAnnotationComment(comment);
+      scheduleAnnotationReposition();
+    });
     const actions = document.createElement("div");
     actions.className = "pi-enh-annotation-editor-actions";
-    const remove = createAnnotationButton("", "pi-enh-annotation-delete pi-enh-annotation-icon-button", itemId ? "删除此条注释" : "放弃");
-    remove.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18M8 6V4h8v2m-9 0 1 14h8l1-14M10 10v6m4-6v6"/></svg>';
-    // 新增引用草稿时自动隐藏垃圾桶，避免与右侧“取消”按钮功能重复；编辑已有注释时保留垃圾桶作为“彻底删除”
-    if (!itemId) {
-      remove.style.display = "none";
-    }
-
     const existingIndex = itemId ? listAnnotations().findIndex((item) => item.id === itemId) : -1;
     const annotationNumber = existingIndex !== -1 ? existingIndex + 1 : listAnnotations().length + 1;
     const indexBadge = document.createElement("span");
@@ -16633,19 +16582,9 @@
     indexBadge.setAttribute("aria-label", `第 ${annotationNumber} 条注释`);
     indexBadge.setAttribute("title", `当前正在编辑第 ${annotationNumber} 条注释`);
 
-    const mic = createAnnotationButton("", "pi-enh-annotation-mic pi-enh-annotation-icon-button", "语音输入注释");
-    mic.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3Zm-6 9a6 6 0 0 0 12 0M12 18v3m-4 0h8"/></svg>';
-    const cancel = createAnnotationButton("取消", "pi-enh-annotation-cancel");
-    const save = createAnnotationButton("保存", "pi-enh-annotation-save");
+    const save = createAnnotationButton("", "pi-enh-annotation-save", itemId ? "保存注释更改" : "保存注释");
+    save.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4.5 4.5L19 7"/></svg>';
     if (!itemId) annotationDraftMarker = createAnnotationMarker(listAnnotations().length + 1, anchorRect, null);
-    remove.addEventListener("click", () => {
-      if (itemId) removeAnnotation(itemId);
-      closeAnnotationEditor();
-      syncAnnotationComposer();
-      closeAnnotationList();
-    });
-    mic.addEventListener("click", () => toggleAnnotationDictation(comment, mic));
-    cancel.addEventListener("click", closeAnnotationEditor);
     const saveAnnotation = () => {
       if (itemId) {
         updateAnnotation(itemId, selectedQuote, comment.value);
@@ -16675,7 +16614,7 @@
         saveAnnotation();
       }
     });
-    actions.append(remove, indexBadge, mic, cancel, save);
+    actions.append(indexBadge, save);
     editor.append(quotePreview, comment, actions);
     document.body.appendChild(editor);
     annotationEditor = editor;
@@ -17063,37 +17002,15 @@
     if (sel) sel.removeAllRanges();
   }
 
-  const QUICK_PROMPTS = {
-    quote: "",
-    explain: "请详细解释一下上述内容的核心逻辑与设计背景。",
-    test: "请为上述代码编写完善的单元测试用例，覆盖核心分支与边界异常情况。",
-    fix: "请仔细检查上述内容，分析是否存在潜在 Bug、异常边界或逻辑隐患，并提供修复方案。",
-    refactor: "请对上述代码进行重构与性能优化，遵循最佳实践并提升可读性。",
-  };
-
   function getQuoteBar() {
     if (!quoteBar) {
       quoteBar = document.createElement("div");
       quoteBar.className = "pi-enh-quote-bar";
       quoteBar.style.display = "none";
       quoteBar.innerHTML = `
-        <button class="pi-enh-quote-copy-btn" data-action="copy" title="复制选中文本到剪贴板">
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor">
-            <path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/>
-          </svg>
-          <span>复制</span>
-        </button>
-        <button class="pi-enh-quote-btn" data-action="quote" title="打开引用注释编辑框">
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor">
-            <path d="M4.583 17.321C3.553 16.227 3 15 3 13.011c0-3.5 2.457-6.637 6.03-8.188l.893 1.378c-3.335 1.804-3.987 4.145-4.247 5.621.537-.278 1.24-.375 1.929-.311 1.804.167 3.226 1.648 3.226 3.489a3.5 3.5 0 01-3.5 3.5c-1.073 0-2.099-.49-2.748-1.179zm10 0C13.553 16.227 13 15 13 13.011c0-3.5 2.457-6.637 6.03-8.188l.893 1.378c-3.335 1.804-3.987 4.145-4.247 5.621.537-.278 1.24-.375 1.929-.311 1.804.167 3.226 1.648 3.226 3.489a3.5 3.5 0 01-3.5 3.5c-1.073 0-2.099-.49-2.748-1.179z"/>
-          </svg>
-          <span>引用</span>
-        </button>
+        <button class="pi-enh-quote-copy-btn" data-action="copy" title="复制选中文本到剪贴板">复制</button>
         <div class="pi-enh-quote-divider"></div>
-        <button class="pi-enh-quote-action-btn" data-action="explain" title="引用并提问：请详细解释这段内容">解释</button>
-        <button class="pi-enh-quote-action-btn" data-action="test" title="引用并提问：为上述内容编写单元测试">单测</button>
-        <button class="pi-enh-quote-action-btn" data-action="fix" title="引用并提问：排查分析此处问题与修复方案">排查</button>
-        <button class="pi-enh-quote-action-btn" data-action="refactor" title="引用并提问：重构优化这段逻辑">优化</button>
+        <button class="pi-enh-quote-btn" data-action="quote" title="打开引用注释编辑框">引用</button>
       `;
       document.body.appendChild(quoteBar);
 
@@ -17131,9 +17048,6 @@
         }
         if (action === "quote") {
           openAnnotationEditor(currentSelectedText, null, currentSelectedRect, currentSelectedRange);
-        } else {
-          const promptSuffix = QUICK_PROMPTS[action] || "";
-          insertQuoteToTextarea(currentSelectedText, promptSuffix);
         }
         quoteBarInteracting = false;
         hideQuoteBar(true);
@@ -17295,66 +17209,6 @@
       addManagedTimeout(handleSelectionChange, 20);
     }
   }, true);
-
-  function insertQuoteToTextarea(rawText, extraPrompt) {
-    if (!rawText) return;
-
-    const textarea = document.querySelector('textarea[style*="fontFamily"]') ||
-      document.querySelector('form textarea') ||
-      document.querySelector("textarea");
-
-    if (!textarea) {
-      showToast("未找到输入框");
-      return;
-    }
-
-    let insertBlock = rawText
-      .split("\n")
-      .map((line) => `> ${line}`)
-      .join("\n") + "\n\n";
-
-    if (extraPrompt) {
-      insertBlock += extraPrompt + "\n";
-    }
-
-    const currentVal = textarea.value || "";
-    let newVal;
-    if (!currentVal) {
-      newVal = insertBlock;
-    } else {
-      const prefix = currentVal.endsWith("\n\n")
-        ? ""
-        : currentVal.endsWith("\n")
-        ? "\n"
-        : "\n\n";
-      newVal = currentVal + prefix + insertBlock;
-    }
-
-    try {
-      const proto = Object.getPrototypeOf(textarea);
-      const setter = Object.getOwnPropertyDescriptor(proto, "value")?.set ||
-        Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value")?.set;
-      if (setter) {
-        setter.call(textarea, newVal);
-      } else {
-        textarea.value = newVal;
-      }
-    } catch {
-      textarea.value = newVal;
-    }
-
-    textarea.dispatchEvent(new Event("input", { bubbles: true }));
-    textarea.focus();
-    const endPos = textarea.value.length;
-    textarea.setSelectionRange(endPos, endPos);
-    textarea.scrollTop = textarea.scrollHeight;
-
-    const quoteIconSvg = `<svg width="14" height="14" viewBox="0 0 24 24" fill="#60a5fa"><path d="M4.583 17.321C3.553 16.227 3 15 3 13.011c0-3.5 2.457-6.637 6.03-8.188l.893 1.378c-3.335 1.804-3.987 4.145-4.247 5.621.537-.278 1.24-.375 1.929-.311 1.804.167 3.226 1.648 3.226 3.489a3.5 3.5 0 01-3.5 3.5c-1.073 0-2.099-.49-2.748-1.179zm10 0C13.553 16.227 13 15 13 13.011c0-3.5 2.457-6.637 6.03-8.188l.893 1.378c-3.335 1.804-3.987 4.145-4.247 5.621.537-.278 1.24-.375 1.929-.311 1.804.167 3.226 1.648 3.226 3.489a3.5 3.5 0 01-3.5 3.5c-1.073 0-2.099-.49-2.748-1.179z"/></svg>`;
-    showToast(extraPrompt ? "已引用并填入追问" : "已添加到引用", quoteIconSvg);
-
-    const sel = window.getSelection();
-    if (sel) sel.removeAllRanges();
-  }
 
   // ==========================================
   // 2.5 ask_user Web-native Picker (网页原生选择器)
@@ -20541,7 +20395,6 @@
     };
     renderAskUserBatchPrototype();
   }
-
   // ==========================================
   // 2.6 AI Quick Actions (同轮 AI 结构化选择 + 安全兜底)
   // ==========================================
@@ -26880,23 +26733,27 @@
     ensureQueuePanelStyle();
     const textarea = findComposerTextarea();
     const card = textarea?.closest('fieldset > div[style*="max-width"]');
-    const nativeQueue = card && Array.from(card.children).find((node) =>
-      Array.from(node.querySelectorAll("button")).some((button) => /移回输入框|Recall/i.test(button.textContent || ""))
+    // The native queue lives inside the banner stack, not directly in the card.
+    // Resolve only the recall button's own queue; never hide the shared banners.
+    const recallButton = card && Array.from(card.querySelectorAll("button")).find((button) =>
+      /移回输入框|Recall/i.test(button.textContent || "")
     );
-    if (!nativeQueue) {
-      closeQueueHoverCard();
-      composerQueuePanel?.remove();
-      composerQueuePanel = null;
-      composerQueueSignature = "";
-      composerQueueLastEntriesSignature = "";
-      composerQueueActionsState = null;
+    const nativeQueue = recallButton?.parentElement?.parentElement;
+    const entries = nativeQueue ? Array.from(nativeQueue.children).filter((row) =>
+      row.hasAttribute("title") && /^(steer|follow-up)$/.test(row.firstElementChild?.textContent?.trim() || "")
+    ).map((row) => ({
+      kind: row.firstElementChild.textContent.trim(),
+      text: row.getAttribute("title") || "",
+    })) : [];
+    if (!entries.length || entries.length !== nativeQueue.children.length - 1) {
+      // Fail open: an unrecognized native structure must remain readable.
+      removeComposerQueuePanel();
       return;
     }
+    for (const node of card.querySelectorAll(".pi-enh-native-queue-hidden")) {
+      if (node !== nativeQueue) node.classList.remove("pi-enh-native-queue-hidden");
+    }
     nativeQueue.classList.add("pi-enh-native-queue-hidden");
-    const entries = Array.from(nativeQueue.children).filter((node) => node.hasAttribute("title")).map((row) => ({
-      kind: row.firstElementChild?.textContent?.trim() === "steer" ? "steer" : "follow-up",
-      text: row.getAttribute("title") || "",
-    }));
     const sessionId = getCurrentSessionId();
     if (activeQueueHoverCard && (!activeQueueHoverOwner || !activeQueueHoverOwner.isConnected || activeQueueHoverSessionId !== sessionId)) {
       closeQueueHoverCard();
@@ -27249,370 +27106,6 @@
 
   window.__PI_ENH_IS_MODEL_OR_THINKING_TARGET__ = isModelOrThinkingSelectorTarget;
   window.__PI_ENH_FOCUS_COMPOSER_TEXTAREA__ = focusComposerTextarea;
-
-  // ==========================================
-  // 3.54.8 Mobile Model Keyboard Guard (移动端模型切换防弹软键盘与视口安全守护)
-  // ==========================================
-  const MOBILE_MODEL_GUARD_STYLE_ID = "pi-enh-mobile-model-keyboard-guard-style";
-
-  function ensureMobileModelGuardStyle() {
-    if (document.getElementById(MOBILE_MODEL_GUARD_STYLE_ID)) return;
-    const style = document.createElement("style");
-    style.id = MOBILE_MODEL_GUARD_STYLE_ID;
-    style.textContent = `
-      /* 物理吸附铁律：模型选择下拉菜单必须紧挨在按钮正上方，杜绝脱节与半空悬浮 */
-      .model-selector.is-toolbar > div[role="listbox"],
-      .model-selector div[role="listbox"] {
-        position: absolute !important;
-        bottom: calc(100% + 6px) !important;
-        top: auto !important;
-        right: 0 !important;
-        left: auto !important;
-        max-width: min(320px, calc(100vw - 16px)) !important;
-        z-index: 1200 !important;
-        box-sizing: border-box !important;
-        box-shadow: 0 -4px 16px rgba(0, 0, 0, 0.14), 0 0 0 1px var(--border) !important;
-      }
-    `;
-    document.head.appendChild(style);
-  }
-
-  let activeTouchTriggerBtn = null;
-  let touchStartX = 0;
-  let touchStartY = 0;
-  let touchStartTime = 0;
-  let touchIsMoved = false;
-
-  function handleModelSelectorTouchStart(e) {
-    if (e?.target?.closest?.("[data-pi-native-thinking-selector]")) return;
-    if (!isPluginEnabled("mobile-model-keyboard-guard")) return;
-    const target = e?.target;
-    if (!target) return;
-    const el = target.nodeType === 1 ? target : target.parentElement;
-    if (!el || typeof el.closest !== "function") return;
-
-    if (el.closest('textarea, [contenteditable], .pi-enh-cursor-editor, input')) {
-      return;
-    }
-    if (el.closest('dialog, .settings-modal, [data-modal]')) return;
-
-    const isTrigger = el.closest(
-      '.model-selector button, .model-selector [role="button"], [data-pi-thinking-control] > button, [data-pi-thinking-button]'
-    );
-    if (!isTrigger) return;
-    if (el.closest('div[role="listbox"], [role="option"]')) return;
-
-    // 检查当前是否正处于打字/键盘展开态
-    const active = document.activeElement;
-    const isEditing = active && (
-      active.tagName === "TEXTAREA" ||
-      active.tagName === "INPUT" ||
-      active.isContentEditable
-    );
-
-    // 核心物理保护：若处于键盘展开状态，在 touchstart 阻止默认失焦行为，保证键盘绝对不被收起！
-    if (isEditing) {
-      if (typeof e.preventDefault === "function") {
-        e.preventDefault();
-      }
-      activeTouchTriggerBtn = isTrigger;
-      const t = e.touches ? e.touches[0] : e;
-      touchStartX = t?.clientX || 0;
-      touchStartY = t?.clientY || 0;
-      touchStartTime = Date.now();
-      touchIsMoved = false;
-    }
-  }
-
-  function handleModelSelectorTouchMove(e) {
-    if (!activeTouchTriggerBtn) return;
-    const t = e.touches ? e.touches[0] : e;
-    if (t) {
-      const dist = Math.hypot((t.clientX || 0) - touchStartX, (t.clientY || 0) - touchStartY);
-      if (dist > 12) {
-        touchIsMoved = true;
-      }
-    }
-  }
-
-  function handleModelSelectorTouchEnd() {
-    if (!activeTouchTriggerBtn) return;
-    const btn = activeTouchTriggerBtn;
-    activeTouchTriggerBtn = null;
-
-    if (touchIsMoved) return;
-    if (Date.now() - touchStartTime > 600) return;
-
-    // 手指抬起，手动触发受信任的 click 事件打开菜单，完美弥补 touchstart 阻止失焦带来的原生 click 抑制！
-    try {
-      btn.click();
-    } catch (_) {}
-  }
-
-  function handleModelSelectorTouchCancel() {
-    activeTouchTriggerBtn = null;
-    touchIsMoved = false;
-  }
-
-  function handleModelSelectorPointerDown(e) {
-    if (e?.target?.closest?.("[data-pi-native-thinking-selector]")) return;
-    // 桌面端鼠标点击拦截失焦：若当前正在打字，阻止 mousedown 默认失焦，保持输入框焦点且不影响 click 派发
-    if (e.pointerType === "mouse") {
-      const active = document.activeElement;
-      if (active && (active.tagName === "TEXTAREA" || active.tagName === "INPUT" || active.isContentEditable)) {
-        const isTrigger = e.target?.closest?.('.model-selector button, .model-selector [role="button"], [data-pi-thinking-control] > button, [data-pi-thinking-button]');
-        if (isTrigger && !e.target.closest('div[role="listbox"], [role="option"]')) {
-          if (typeof e.preventDefault === "function") e.preventDefault();
-        }
-      }
-    }
-  }
-
-  function handleModelSelectorClick(e) {
-    if (e?.target?.closest?.("[data-pi-native-thinking-selector]")) return;
-    if (!isPluginEnabled("mobile-model-keyboard-guard")) return;
-    const target = e?.target;
-    if (!target) return;
-    const el = target.nodeType === 1 ? target : target.parentElement;
-    if (!el || typeof el.closest !== "function") return;
-
-    // 绝对防御铁律：如果点击的是输入框本身或任何可编辑容器，绝不拦截，坚决退出！
-    if (el.closest('textarea, [contenteditable], .pi-enh-cursor-editor, input')) {
-      return;
-    }
-    if (el.closest('dialog, .settings-modal, [data-modal]')) return;
-
-    // 检查是否真正点击了模型选择器触发按钮或思考控件触发按钮
-    const isTrigger = el.closest(
-      '.model-selector button, .model-selector [role="button"], [data-pi-thinking-control] > button, [data-pi-thinking-button]'
-    );
-    if (!isTrigger) return;
-
-    // 若点击已在展开的菜单内部列表项，不干扰
-    if (el.closest('div[role="listbox"], [role="option"]')) return;
-
-    // 记录触发前是否是编辑框聚焦态
-    const prevActive = document.activeElement;
-    const wasEditing = prevActive && (
-      prevActive.tagName === "TEXTAREA" ||
-      prevActive.tagName === "INPUT" ||
-      prevActive.isContentEditable
-    );
-
-    // 遵从用户指令：点击模型选择按钮绝不收起软键盘，严禁调用 active.blur()！
-    addManagedTimeout(syncOpenModelListboxes, 0);
-
-    // 如果之前正在打字（软键盘展开），确保编辑框保持焦点，绝不被收起软键盘
-    if (wasEditing && prevActive && prevActive.isConnected) {
-      addManagedTimeout(() => {
-        if (prevActive.isConnected && document.activeElement !== prevActive) {
-          try {
-            prevActive.focus({ preventScroll: true });
-          } catch (_) {}
-        }
-      }, 0);
-    }
-  }
-
-  function inspectAndProtectModelListbox(listbox) {
-    if (!listbox || listbox.nodeType !== 1 || typeof listbox.closest !== "function") return;
-    if (listbox.closest('dialog, .settings-modal, [data-modal]')) return;
-    const selectorParent = listbox.closest('.model-selector');
-    if (!selectorParent || !listbox.matches('div[role="listbox"]')) return;
-    if (!isPluginEnabled("mobile-model-keyboard-guard")) return;
-
-    const isMobile = typeof isMobileEnvironment === "function" && isMobileEnvironment();
-
-    if (!listbox.__piModelGuardOrig) {
-      listbox.__piModelGuardOrig = {
-        position: listbox.style.position,
-        zIndex: listbox.style.zIndex,
-        maxHeight: listbox.style.maxHeight,
-        top: listbox.style.top,
-        bottom: listbox.style.bottom,
-        left: listbox.style.left,
-        right: listbox.style.right,
-        maxWidth: listbox.style.maxWidth,
-      };
-    }
-
-    // 1. 物理吸附锚定：下拉菜单必须始终挨在模型选择按钮上方 6px，绝对避免高空悬浮脱节
-    listbox.style.setProperty("position", "absolute", "important");
-    listbox.style.setProperty("bottom", "calc(100% + 6px)", "important");
-    listbox.style.setProperty("top", "auto", "important");
-    listbox.style.setProperty("right", "0", "important");
-    listbox.style.setProperty("left", "auto", "important");
-    listbox.style.zIndex = "1200";
-
-    const composerParent = listbox.closest('.pi-enh-cursor-composer') || selectorParent.closest('fieldset > div');
-    for (const parent of [selectorParent, composerParent]) {
-      if (!parent) continue;
-      if (parent.__piModelGuardZIndex === undefined) parent.__piModelGuardZIndex = parent.style.zIndex;
-      parent.style.zIndex = "1200";
-    }
-
-    // 2. 动态视口高度与边界安全限制（visualViewport 边界安全保护）
-    const viewport = window.visualViewport;
-    const viewportTop = viewport?.offsetTop || 0;
-    const viewportHeight = viewport?.height || window.innerHeight;
-    const viewportBottom = viewportTop + viewportHeight;
-    const triggerBtn = selectorParent.querySelector('button[aria-haspopup="listbox"], button');
-
-    if (triggerBtn && viewportBottom > viewportTop) {
-      const r = triggerBtn.getBoundingClientRect();
-      const availAbove = Math.floor(r.top - viewportTop - 12);
-      const safeMaxHeight = Math.max(80, Math.min(availAbove > 0 ? availAbove : 200, Math.floor(viewportHeight * 0.75)));
-      listbox.style.maxHeight = `${safeMaxHeight}px`;
-
-      // 水平防溢出：确保向左展开的菜单不会超出视口左边缘
-      const safeLeft = (viewport?.offsetLeft || 0) + 8;
-      const safeRight = (viewport?.offsetLeft || 0) + (viewport?.width || window.innerWidth) - 8;
-      const availWidth = Math.floor(Math.max(160, safeRight - safeLeft));
-      listbox.style.maxWidth = `${Math.min(320, availWidth)}px`;
-
-      // 如果按钮右边界距离视口左侧太近，向左展开会超出屏幕左侧，则改向右展开
-      if (r.right - 320 < safeLeft && r.left >= safeLeft) {
-        listbox.style.setProperty("right", "auto", "important");
-        listbox.style.setProperty("left", "0", "important");
-      }
-    }
-
-    // 3. 移动端/触屏环境下，拦截搜索框自动聚焦调起虚拟键盘
-    if (isMobile) {
-      const filterInput = listbox.querySelector('input');
-      if (filterInput) {
-        if (filterInput.hasAttribute("autofocus")) {
-          filterInput.removeAttribute("autofocus");
-        }
-        filterInput.autofocus = false;
-
-        // 若挂载时被浏览器/React 自动聚焦，且用户未显式点击该 input，立即 blur()
-        if (document.activeElement === filterInput && !filterInput.__piUserExplicitClicked) {
-          try {
-            filterInput.blur();
-          } catch (err) {}
-        }
-
-        if (!filterInput.__piKeyboardGuarded) {
-          filterInput.__piKeyboardGuarded = true;
-          // 用户主动点击该搜索框时，放行允许弹出键盘打字
-          filterInput.addEventListener("pointerdown", () => {
-            filterInput.__piUserExplicitClicked = true;
-          }, { passive: true, capture: true });
-
-          // 拦截被动聚焦事件
-          filterInput.addEventListener("focus", () => {
-            if (!isPluginEnabled("mobile-model-keyboard-guard")) return;
-            if (!filterInput.__piUserExplicitClicked && (typeof isMobileEnvironment === "function" && isMobileEnvironment())) {
-              try {
-                filterInput.blur();
-              } catch (err) {}
-            }
-          }, { capture: true });
-        }
-      }
-    }
-  }
-
-  function syncOpenModelListboxes() {
-    if (!isPluginEnabled("mobile-model-keyboard-guard")) return;
-    const listboxes = document.querySelectorAll('.model-selector > div[role="listbox"], .model-selector div[role="listbox"]');
-    for (const lb of listboxes) {
-      inspectAndProtectModelListbox(lb);
-    }
-  }
-
-  function syncMobileModelKeyboardGuard() {
-    if (!isPluginEnabled("mobile-model-keyboard-guard")) {
-      removeMobileModelKeyboardGuard();
-      return;
-    }
-    ensureMobileModelGuardStyle();
-    syncOpenModelListboxes();
-  }
-
-  function removeMobileModelKeyboardGuard() {
-    const style = document.getElementById(MOBILE_MODEL_GUARD_STYLE_ID);
-    if (style) style.remove();
-    for (const lb of document.querySelectorAll('.model-selector > div[role="listbox"], .model-selector div[role="listbox"]')) {
-      const orig = lb.__piModelGuardOrig;
-      if (orig) {
-        lb.style.zIndex = orig.zIndex;
-        lb.style.maxHeight = orig.maxHeight;
-        lb.style.top = orig.top;
-        lb.style.bottom = orig.bottom;
-        lb.style.left = orig.left;
-        lb.style.right = orig.right;
-        lb.style.maxWidth = orig.maxWidth;
-        delete lb.__piModelGuardOrig;
-      }
-    }
-    for (const el of document.querySelectorAll('.model-selector, .pi-enh-cursor-composer')) {
-      if (el.__piModelGuardZIndex === undefined) continue;
-      el.style.zIndex = el.__piModelGuardZIndex;
-      delete el.__piModelGuardZIndex;
-    }
-  }
-
-  // 监听 touch 与 pointer 事件：键盘展开时 touchstart 拦截失焦保持键盘不被关闭，并在 touchend 手动触发点击打开菜单
-  addManagedListener(document, "touchstart", handleModelSelectorTouchStart, { passive: false, capture: true });
-  addManagedListener(document, "touchmove", handleModelSelectorTouchMove, { passive: true, capture: true });
-  addManagedListener(document, "touchend", handleModelSelectorTouchEnd, { passive: true, capture: true });
-  addManagedListener(document, "touchcancel", handleModelSelectorTouchCancel, { passive: true, capture: true });
-  addManagedListener(document, "pointerdown", handleModelSelectorPointerDown, true);
-  addManagedListener(document, "click", handleModelSelectorClick, true);
-  addManagedListener(document, "input", (e) => {
-    if (!isPluginEnabled("mobile-model-keyboard-guard")) return;
-    const lb = e?.target?.closest?.('.model-selector div[role="listbox"]');
-    if (lb) inspectAndProtectModelListbox(lb);
-  }, false);
-  if (typeof window !== "undefined") {
-    addManagedListener(window, "resize", syncOpenModelListboxes, { passive: true });
-    if (window.visualViewport) {
-      addManagedListener(window.visualViewport, "resize", syncOpenModelListboxes, { passive: true });
-      addManagedListener(window.visualViewport, "scroll", syncOpenModelListboxes, { passive: true });
-    }
-  }
-
-  // 观察 DOM 中模型选择器 listbox 的动态挂载
-  if (typeof MutationObserver !== "undefined") {
-    const listboxObserver = new MutationObserver((mutations) => {
-      if (!isPluginEnabled("mobile-model-keyboard-guard")) return;
-      for (const mut of mutations) {
-        if (mut.addedNodes?.length) {
-          for (const node of mut.addedNodes) {
-            if (node.nodeType === 1) {
-              if (node.matches?.('.model-selector > div[role="listbox"], .model-selector div[role="listbox"]')) {
-                inspectAndProtectModelListbox(node);
-              } else if (typeof node.querySelector === "function") {
-                const lb = node.querySelector('.model-selector > div[role="listbox"], .model-selector div[role="listbox"]');
-                if (lb) inspectAndProtectModelListbox(lb);
-              }
-            }
-          }
-        }
-      }
-    });
-    try {
-      const lbRoot = document.body || document.documentElement;
-      if (lbRoot) {
-        listboxObserver.observe(lbRoot, { childList: true, subtree: true });
-      }
-      activeCleanups.push(() => {
-        try { listboxObserver.disconnect(); } catch (e) {}
-      });
-    } catch (e) {}
-  }
-
-  syncMobileModelKeyboardGuard();
-  activeCleanups.push(removeMobileModelKeyboardGuard);
-  window.__PI_ENH_SYNC_MOBILE_MODEL_GUARD__ = syncMobileModelKeyboardGuard;
-  window.__PI_ENH_REMOVE_MOBILE_MODEL_GUARD__ = removeMobileModelKeyboardGuard;
-  window.__PI_ENH_INSPECT_MODEL_LISTBOX__ = inspectAndProtectModelListbox;
-  window.__PI_ENH_HANDLE_MODEL_SELECTOR_CLICK__ = handleModelSelectorClick;
-  window.__PI_ENH_HANDLE_MODEL_POINTERDOWN__ = handleModelSelectorPointerDown;
-  window.__PI_ENH_HANDLE_MODEL_TOUCHSTART__ = handleModelSelectorTouchStart;
-  window.__PI_ENH_HANDLE_MODEL_TOUCHEND__ = handleModelSelectorTouchEnd;
 
   // ==========================================
   // 3.55.1 Composer Tool Buttons Visibility (压缩上下文与工具预设按钮显隐控制)
@@ -31571,6 +31064,10 @@
       const target = e.target;
       if (!isChatComposerTextarea(target)) return;
 
+      // 原生输入框已拥有手机换行、IME 与列表续行；旧适配只服务旧输入框。
+      if (target.dataset.piNativeListContinuation === "true"
+          && window.matchMedia("(max-width: 640px)").matches) return;
+
       // 拦截回车发送：强行阻断 React onKeyDown 监听器
       if (typeof e.preventDefault === "function") e.preventDefault();
       if (typeof e.stopPropagation === "function") e.stopPropagation();
@@ -32575,7 +32072,7 @@
     }
 
     btn.classList.toggle("is-active", isSessionBatchMode);
-    btn.title = isSessionBatchMode ? "退出批量管理 (Esc)" : "批量管理会话 (多选/删除)";
+    btn.title = isSessionBatchMode ? "退出批量管理 (Esc)" : "批量管理会话 (多选/复制 ID/删除)";
   }
 
   function removeSessionBatchTrigger() {
@@ -32622,12 +32119,11 @@
         </span>
       </div>
       <div class="pi-enh-session-batch-actions">
-        <button type="button" class="pi-enh-session-batch-btn pi-enh-session-batch-btn-danger" data-action="batch-delete" ${selectedCount === 0 ? "disabled" : ""} title="${selectedCount > 0 ? `彻底删除已选 ${selectedCount} 个会话` : "请先勾选要删除的会话"}">
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"></path><path d="M10 11v6M14 11v6"></path></svg>
-          <span>删除${selectedCount > 0 ? ` (${selectedCount})` : ""}</span>
+        <button type="button" class="pi-enh-session-batch-btn" data-action="batch-copy-ids" style="padding: 6px;" ${selectedCount === 0 ? "disabled" : ""} aria-label="复制所选会话 ID" title="${selectedCount > 0 ? `复制已选 ${selectedCount} 个会话 ID（每行一个）` : "请先勾选要复制 ID 的会话"}">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
         </button>
-        <button type="button" class="pi-enh-session-batch-btn pi-enh-session-batch-btn-exit" data-action="batch-exit" title="完成并退出批量选择 (Esc)">
-          <span>完成</span>
+        <button type="button" class="pi-enh-session-batch-btn pi-enh-session-batch-btn-danger" data-action="batch-delete" style="padding: 6px;" ${selectedCount === 0 ? "disabled" : ""} aria-label="删除所选会话" title="${selectedCount > 0 ? `彻底删除已选 ${selectedCount} 个会话` : "请先勾选要删除的会话"}">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"></path><path d="M10 11v6M14 11v6"></path></svg>
         </button>
       </div>
     `;
@@ -32649,11 +32145,13 @@
       });
     }
 
-    const exitBtn = bar.querySelector('button[data-action="batch-exit"]');
-    if (exitBtn) {
-      exitBtn.addEventListener("click", (e) => {
+    const copyBtn = bar.querySelector('button[data-action="batch-copy-ids"]');
+    if (copyBtn) {
+      copyBtn.addEventListener("click", (e) => {
         e.stopPropagation();
-        setSessionBatchMode(false);
+        const ids = Array.from(selectedSessionBatchIds);
+        if (ids.length === 0) return;
+        copyText(ids.join("\n"), `已复制 ${ids.length} 个会话 ID（每行一个）`);
       });
     }
   }
@@ -42289,93 +41787,36 @@
     tags: { id: "tags", label: "会话标签" },
   };
 
-  function getSectionShortcutMetadata(sectionId, context) {
+  function getSectionShortcutMetadata(sectionId) {
     const predefined = SECTION_SHORTCUT_METADATA[sectionId];
-    let label = predefined ? predefined.label : sectionId;
-    let id = predefined ? predefined.id : sectionId;
-
-    if (context?.nav?.availableSections && Array.isArray(context.nav.availableSections)) {
-      const match = context.nav.availableSections.find((s) => s.id === sectionId);
-      if (match?.label) label = match.label;
-    }
-
+    const label = predefined ? predefined.label : sectionId;
+    const id = predefined ? predefined.id : sectionId;
     const iconHtml = SHORTCUT_ICONS[sectionId] || SHORTCUT_ICONS[id] || SHORTCUT_ICONS.settings || "";
     return { id, label, iconHtml };
   }
 
-  const mountedPinHosts = new Map();
-
-  function notifyMountedPinHosts() {
-    for (const record of mountedPinHosts.values()) {
-      try { record.update(); } catch (_) {}
+  // React owns tab events; the extension owns only shortcut state/persistence.
+  function toggleSettingsTabShortcut(sectionId) {
+    if (!isPluginEnabled("settings-tab-shortcuts")) return;
+    const meta = getSectionShortcutMetadata(sectionId);
+    const currentShortcuts = getStoredQuickShortcuts();
+    const idx = currentShortcuts.findIndex((s) => s.id === sectionId || (sectionId === "general" && s.id === "settings") || (sectionId === "settings" && s.id === "general"));
+    if (idx >= 0) {
+      currentShortcuts.splice(idx, 1);
+      setStoredQuickShortcuts(currentShortcuts);
+      showToast(`已从快捷入口移除「${meta.label}」`, meta.iconHtml);
+    } else {
+      const newItem = { id: meta.id, label: meta.label, iconHtml: meta.iconHtml || "" };
+      const settingsIdx = currentShortcuts.findIndex((s) => s.id === "settings" || s.id === "general");
+      if (settingsIdx >= 0) currentShortcuts.splice(settingsIdx, 0, newItem);
+      else currentShortcuts.push(newItem);
+      setStoredQuickShortcuts(currentShortcuts);
+      showToast(`已添加「${meta.label}」到左下角快捷入口`, meta.iconHtml);
     }
+    syncBottomShortcutsBar(true);
   }
 
-  // 2. 独立快捷 Pin 控件 Host 渲染 (处于 button 外同行，不污染 React tab DOM)
-  function mountTabActionPin(sectionId, host, context) {
-    if (!host) return () => {};
-    host.innerHTML = "";
-
-    const meta = getSectionShortcutMetadata(sectionId, context);
-
-    const btn = document.createElement("button");
-    btn.type = "button";
-    btn.className = "pi-enh-tab-pin-btn";
-    btn.style.cssText = "background: none; border: none; padding: 2px 4px; cursor: pointer; color: var(--text-muted); display: inline-flex; align-items: center; justify-content: center;";
-
-    function updatePinState() {
-      const shortcuts = getStoredQuickShortcuts();
-      const isPinned = isShortcutActive(shortcuts, sectionId);
-      btn.classList.toggle("is-pinned", isPinned);
-      btn.setAttribute("aria-label", isPinned ? `取消快捷入口固定: ${meta.label}` : `添加到快捷入口: ${meta.label}`);
-      btn.setAttribute("title", isPinned ? `点击从快捷入口移除「${meta.label}」` : `点击添加「${meta.label}」到左下角快捷入口`);
-      btn.innerHTML = `<svg width="12" height="12" viewBox="0 0 24 24" fill="${isPinned ? "currentColor" : "none"}" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/></svg>`;
-    }
-
-    updatePinState();
-
-    const onClick = (e) => {
-      e.stopPropagation();
-      e.preventDefault();
-      const currentShortcuts = getStoredQuickShortcuts();
-      const idx = currentShortcuts.findIndex((s) => s.id === sectionId || (sectionId === "general" && s.id === "settings") || (sectionId === "settings" && s.id === "general"));
-      if (idx >= 0) {
-        currentShortcuts.splice(idx, 1);
-        setStoredQuickShortcuts(currentShortcuts);
-        if (typeof showToast === "function") showToast(`已从快捷入口移除「${meta.label}」`, meta.iconHtml);
-      } else {
-        const newItem = {
-          id: meta.id,
-          label: meta.label,
-          iconHtml: meta.iconHtml || ""
-        };
-        const settingsIdx = currentShortcuts.findIndex((s) => s.id === "settings" || s.id === "general");
-        if (settingsIdx >= 0) {
-          currentShortcuts.splice(settingsIdx, 0, newItem);
-        } else {
-          currentShortcuts.push(newItem);
-        }
-        setStoredQuickShortcuts(currentShortcuts);
-        if (typeof showToast === "function") showToast(`已添加「${meta.label}」到左下角快捷入口`, meta.iconHtml);
-      }
-      syncBottomShortcutsBar(true);
-      notifyMountedPinHosts();
-    };
-
-    btn.addEventListener("click", onClick);
-    host.appendChild(btn);
-
-    const record = { sectionId, update: updatePinState };
-    mountedPinHosts.set(host, record);
-
-    return () => {
-      mountedPinHosts.delete(host);
-      btn.removeEventListener("click", onClick);
-      btn.remove();
-    };
-  }
-
-  // 3. 注册桥 (向 Native ABI 注册 5 扩展面板、maintenance 与 tab-action)
+  // 3. Register isolated panels and native-owned tab actions.
   let nativeBridgeRegistered = false;
   let unregisterNativeRenderers = [];
 
@@ -42440,9 +41881,7 @@
 
     const allSections = ["general", "models", "skills", "agents", "plugins", "enhancements", "notifications", "archived", "usage", "tags"];
     for (const sec of allSections) {
-      const unreg = abi.registerRenderer(`tab-action:${sec}`, (host, context) => {
-        return mountTabActionPin(sec, host, context);
-      });
+      const unreg = abi.registerTabAction(sec, () => toggleSettingsTabShortcut(sec));
       if (typeof unreg === "function") {
         unregisterNativeRenderers.push(unreg);
       }
@@ -42649,7 +42088,6 @@
             if (remoteRevision > 0) setLocalShortcutsRevision(remoteRevision);
             window.__PI_ENH_SHORTCUTS_MANIFEST__ = remoteList;
             syncBottomShortcutsBar(true);
-            notifyMountedPinHosts();
           } else if (remoteRevision > 0 && remoteRevision > localRev) {
             setLocalShortcutsRevision(remoteRevision);
           }
@@ -42728,17 +42166,7 @@
       if (shouldPersist) {
         void persistQuickShortcutsToServer(list);
       }
-      notifyMountedPinHosts();
     } catch (e) {}
-  }
-
-  function isShortcutActive(shortcutList, tabId) {
-    return shortcutList.some((item) => {
-      if (item.id === tabId) return true;
-      if (tabId === "general" && item.id === "settings") return true;
-      if (tabId === "settings" && item.id === "general") return true;
-      return false;
-    });
   }
 
   function locateShortcutsContainer() {
@@ -42863,7 +42291,6 @@
         showToast(`已从快捷入口移除「${removed ? removed.label : id}」`, icon, 2000);
 
         syncBottomShortcutsBar(true);
-        notifyMountedPinHosts();
       });
     }
   }
@@ -43848,11 +43275,13 @@ function renderUsagePanel(panel, nav) {
     </div>`;
     const loadingView = panel.firstElementChild;
     window.__PI_ENH_LOAD_OPTIONAL__("usage-panel").then(() => {
-      if (panel.isConnected && !panel.closest("[hidden]") && panel.firstElementChild === loadingView && isPluginEnabled("usage-cost-dashboard")) {
+      // A visited native host stays mounted while hidden. Complete its load so
+      // returning to Usage cannot strand the host on the loading view.
+      if (panel.isConnected && panel.firstElementChild === loadingView && isPluginEnabled("usage-cost-dashboard")) {
         renderUsagePanel(panel, nav);
       }
     }).catch(() => {
-      if (!panel.isConnected || panel.closest("[hidden]") || panel.firstElementChild !== loadingView) return;
+      if (!panel.isConnected || panel.firstElementChild !== loadingView) return;
       panel.innerHTML = '<div role="alert">用量统计组件加载失败，请重试。 <button type="button">重试</button></div>';
       panel.querySelector("button")?.addEventListener("click", () => renderUsagePanel(panel, nav), { once: true });
     });

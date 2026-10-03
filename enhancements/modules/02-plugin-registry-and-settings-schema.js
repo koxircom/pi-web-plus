@@ -200,13 +200,6 @@
       defaultEnabled: true,
     },
     {
-      id: "mobile-model-keyboard-guard",
-      name: "移动端模型切换防弹软键盘",
-      desc: "移动端点击切换模型时保持软键盘展开不打断输入，下拉菜单物理锚定紧挨在按钮正上方，键盘收起时自适应同步跟随，防止菜单脱节悬空。",
-      category: "交互增强",
-      defaultEnabled: true,
-    },
-    {
       id: "composer-clean-placeholder",
       name: "清空输入框提示词",
       desc: "清空主输入框中冗长繁杂的占位提示词（如‘输入 / 使用命令，输入 @ 查找文件’），去除折行干扰，优化中文字体呈现，保持输入框纯净极简。",
@@ -602,7 +595,7 @@
     { id: "subagent-dispatch", name: "子 Agent 调度", desc: "管理全部子任务统一使用的服务端模型；实际模型由服务端动态读取。", category: "偏好记忆", version: "1.0.0", defaultEnabled: true, features: ["subagent-model-override"] },
     { id: "selection-context", name: "划选引用与上下文", desc: "管理文本划选引用、注释与发送上下文。", category: "交互增强", version: "1.0.0", defaultEnabled: true, features: ["quick-quote"] },
     { id: "session-sidebar", name: "会话列表增强", desc: "管理会话列表的快捷菜单、归档、标签、布局、颜色、快捷入口和搜索。", category: "交互增强", version: "1.0.0", defaultEnabled: true, features: ["context-menu", "session-pin-archive", "session-section-headers", "session-model-label", "session-item-compact", "session-color", "session-tags", "session-odoo-addons", "session-dblclick-rename", "session-search-shortcut", "session-search-project-folding", "session-batch-actions", "settings-tab-shortcuts", "mobile-swipe-drawer"] },
-    { id: "composer-workflow", name: "输入与附件增强", desc: "管理编辑器快捷操作、草稿、附件和移动端输入保护。", category: "交互增强", version: "1.0.0", defaultEnabled: true, features: ["stop-fast-response", "quick-action-buttons", "empty-send-continue", "composer-draft-cache", "composer-file-paste", "composer-image-zoom", "mobile-enter-newline", "mobile-model-keyboard-guard", "composer-clean-placeholder", "codex-composer-layout", "composer-model-reasoning-pill", "composer-queue-panel", "running-model-switch", "composer-markdown-format", "composer-format-toggle", "composer-compact-button", "composer-tool-preset", "composer-modes", "at-mention-plugins"] },
+    { id: "composer-workflow", name: "输入与附件增强", desc: "管理编辑器快捷操作、草稿、附件和移动端输入保护。", category: "交互增强", version: "1.0.0", defaultEnabled: true, features: ["stop-fast-response", "quick-action-buttons", "empty-send-continue", "composer-draft-cache", "composer-file-paste", "composer-image-zoom", "mobile-enter-newline", "composer-clean-placeholder", "codex-composer-layout", "composer-model-reasoning-pill", "composer-queue-panel", "running-model-switch", "composer-markdown-format", "composer-format-toggle", "composer-compact-button", "composer-tool-preset", "composer-modes", "at-mention-plugins"] },
     { id: "ask-user-experience", name: "ask_user 交互", desc: "管理网页原生问答选择器与批量原型预览。", category: "交互增强", version: "1.1.1", defaultEnabled: true, features: ["ask-user-web-native", "ask-user-batch-prototype"] },
     { id: "background-attention", name: "后台会话提醒", desc: "管理跨项目状态、提示音与桌面通知。", category: "运行监控", version: "1.0.0", defaultEnabled: true, features: ["project-status-indicator", "session-attention-sound", "session-attention-desktop"] },
     { id: "notification-management", name: "通知管理", desc: "管理所有站内通知、网页操作提示、提示音与桌面提醒，并查看通知历史。", category: "偏好记忆", version: "1.0.0", defaultEnabled: true, features: ["notification-center"] },
@@ -1232,12 +1225,6 @@
       }
     } else if (id === "codex-composer-layout" || id === "composer-model-reasoning-pill") {
       window.dispatchEvent(new Event("pi-native-composer-preferences-change"));
-    } else if (id === "mobile-model-keyboard-guard") {
-      if (!enabled) {
-        removeMobileModelKeyboardGuard();
-      } else {
-        syncMobileModelKeyboardGuard();
-      }
     } else if (id === "composer-clean-placeholder") {
       if (!enabled) {
         removeComposerCleanPlaceholder();

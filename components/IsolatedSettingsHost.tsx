@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useSyncExternalStore } from "react";
+import { useCallback, useLayoutEffect, useRef, useState, useSyncExternalStore } from "react";
 import { useI18n } from "@/hooks/useI18n";
 import { settingsExtensionRegistry, type SettingsExtensionContext } from "@/lib/settings-extensions";
 
@@ -25,6 +25,8 @@ export function IsolatedSettingsHost(props: Props) {
   const { id, sectionId, className, hideWhenEmpty, showLoading, fill } = props;
   const { t } = useI18n();
   const hostRef = useRef<HTMLDivElement>(null);
+  const [mountFailed, setMountFailed] = useState(false);
+  const [mountAttempt, setMountAttempt] = useState(0);
   const currentProps = useRef(props);
   currentProps.current = props;
 
@@ -35,7 +37,8 @@ export function IsolatedSettingsHost(props: Props) {
   const getRenderer = useCallback(() => settingsExtensionRegistry.getRenderer(id), [id]);
   const renderer = useSyncExternalStore(subscribe, getRenderer, noServerRenderer);
 
-  useEffect(() => {
+  // Mount the renderer before paint rather than briefly showing an empty host.
+  useLayoutEffect(() => {
     const host = hostRef.current;
     if (!host || !renderer) return;
 
@@ -53,9 +56,11 @@ export function IsolatedSettingsHost(props: Props) {
     let cleanup: (() => void) | void;
     try {
       cleanup = renderer(host, context);
+      setMountFailed(false);
     } catch (error) {
       host.replaceChildren();
       console.error(`Error mounting settings host ${id}:`, error);
+      setMountFailed(true);
     }
 
     return () => {
@@ -67,12 +72,17 @@ export function IsolatedSettingsHost(props: Props) {
         host.replaceChildren();
       }
     };
-  }, [id, renderer, sectionId]);
+  }, [id, renderer, sectionId, mountAttempt]);
 
   return (
     <>
-      {showLoading && !renderer && (
-        <div className="settings-extension-loading" role="status">{t("common.loading")}</div>
+      {showLoading && (!renderer || mountFailed) && (
+        <div className="settings-extension-loading" role={mountFailed ? "alert" : "status"}>
+          {mountFailed ? <div>此设置页加载失败。 <button type="button" onClick={() => {
+            setMountFailed(false);
+            setMountAttempt((attempt) => attempt + 1);
+          }}>重试加载</button></div> : t("i18n.loading")}
+        </div>
       )}
       <div
         ref={hostRef}

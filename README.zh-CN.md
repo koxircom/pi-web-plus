@@ -1,7 +1,7 @@
-> **1.2.0**：内核 Pi Coding Agent 1.0.0。从 [GitHub Releases](https://github.com/koxircom/pi-web-plus/releases/tag/v1.2.0) 安装预构建包：
+> **1.3.0**：内核 Pi Coding Agent 1.0.0。从 [GitHub Releases](https://github.com/koxircom/pi-web-plus/releases/tag/v1.3.0) 安装预构建包：
 >
 > ```bash
-> npm install -g https://github.com/koxircom/pi-web-plus/releases/download/v1.2.0/pi-web-standalone-1.2.0.tgz
+> npm install -g https://github.com/koxircom/pi-web-plus/releases/download/v1.3.0/pi-web-standalone-1.3.0.tgz
 > pi-web
 > ```
 >
@@ -32,7 +32,7 @@
 Pi Web Standalone 要求 Node.js 22.19.0 或更高版本（`node >=22.19`）。先用 `node --version` 检查版本，然后从 [`koxircom/pi-web-plus` GitHub Releases](https://github.com/koxircom/pi-web-plus/releases) 全局安装官方预构建 `.tgz` 发行包并启动 `pi-web`：
 
 ```bash
-npm install -g https://github.com/koxircom/pi-web-plus/releases/download/v1.2.0/pi-web-standalone-1.2.0.tgz
+npm install -g https://github.com/koxircom/pi-web-plus/releases/download/v1.3.0/pi-web-standalone-1.3.0.tgz
 pi-web
 ```
 
@@ -84,10 +84,10 @@ PI_WEB_PASSWORD='足够长的随机密码' pi-web --hostname 0.0.0.0
 
 服务端的模型和 API 请求会读取标准的 `HTTP_PROXY`、`HTTPS_PROXY` 和 `NO_PROXY` 环境变量。
 
-macOS 或 Linux（通过 [GitHub Release `.tgz` 安装包](https://github.com/koxircom/pi-web-plus/releases/download/v1.2.0/pi-web-standalone-1.2.0.tgz)安装并启动）：
+macOS 或 Linux（通过 [GitHub Release `.tgz` 安装包](https://github.com/koxircom/pi-web-plus/releases/download/v1.3.0/pi-web-standalone-1.3.0.tgz)安装并启动）：
 
 ```bash
-npm install -g https://github.com/koxircom/pi-web-plus/releases/download/v1.2.0/pi-web-standalone-1.2.0.tgz
+npm install -g https://github.com/koxircom/pi-web-plus/releases/download/v1.3.0/pi-web-standalone-1.3.0.tgz
 HTTP_PROXY=http://127.0.0.1:7890 \
 HTTPS_PROXY=http://127.0.0.1:7890 \
 NO_PROXY=localhost,127.0.0.1 \
@@ -97,7 +97,7 @@ pi-web
 Windows PowerShell：
 
 ```powershell
-npm install -g https://github.com/koxircom/pi-web-plus/releases/download/v1.2.0/pi-web-standalone-1.2.0.tgz
+npm install -g https://github.com/koxircom/pi-web-plus/releases/download/v1.3.0/pi-web-standalone-1.3.0.tgz
 $env:HTTP_PROXY = "http://127.0.0.1:7890"
 $env:HTTPS_PROXY = "http://127.0.0.1:7890"
 $env:NO_PROXY = "localhost,127.0.0.1"

@@ -21,6 +21,7 @@ const NATIVE_SETTINGS_SECTIONS = Object.freeze([
   "skills",
   "agents",
   "plugins",
+  "mcp",
 ]);
 
 const BUNDLED_MODULES = Object.freeze([
@@ -194,7 +195,7 @@ function checkReleaseOwnership(sources) {
       "设置由单一原生导航承载",
       settingsNavOk,
       "五个原生设置区与启用的 legacy 扩展共用一个对话框导航。",
-      "SettingsPanel 必须保留 general/models/skills/agents/plugins 五个原生区，将启用的 legacy 扩展显式追加到同一导航，并只声明一个对话框根节点。",
+      "SettingsPanel 必须保留 general/models/skills/agents/plugins/mcp 六个原生区，将启用的 legacy 扩展显式追加到同一导航，并只声明一个对话框根节点。",
       [SOURCE_FILES.settingsPanel],
     ),
     createCheck(

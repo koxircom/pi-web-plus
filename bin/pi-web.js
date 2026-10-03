@@ -14,6 +14,8 @@ const { spawn } = require("child_process");
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const path = require("path");
 // eslint-disable-next-line @typescript-eslint/no-require-imports
+const { pathToFileURL } = require("url");
+// eslint-disable-next-line @typescript-eslint/no-require-imports
 const fs = require("fs");
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const { getHelpText, parseLaunchOptions } = require("./pi-web-options");
@@ -85,7 +87,7 @@ nextArgs.push("-H", hostname);
 // and path-with-spaces problems on Windows when shell: true is used.
 const child = spawn(
   process.execPath,
-  ["--import", path.join(__dirname, "pi-agent-runtime-bootstrap.mjs"), ...getNextNodeArgs(nextBin, nextArgs)],
+  ["--import", pathToFileURL(path.join(__dirname, "pi-agent-runtime-bootstrap.mjs")).href, ...getNextNodeArgs(nextBin, nextArgs)],
   {
     cwd: pkgDir,
     stdio: ["inherit", "pipe", "inherit"],

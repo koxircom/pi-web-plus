@@ -23,6 +23,8 @@ import {
   buildEntriesFromFiles, buildAtInsertText, extractAtQuery, filterFileEntries,
   type AtQueryMatch, type FileIndexEntry,
 } from "@/lib/file-fuzzy";
+import { getMarkdownListContinuation } from "@/lib/markdown-list-continuation";
+import { isBareMcpCommand, isBuiltinMcpCommand } from "@/lib/mcp-command";
 import { FolderIcon, getFileIcon } from "./FileIcons";
 import { ImagePreview } from "./ImagePreview";
 import { useIsMobile, allowsAutomaticEditableFocus, focusEditable } from "@/hooks/useIsMobile";
@@ -455,6 +457,17 @@ export function canRunBuiltinSlashCommandWhileStreaming(message: string): boolea
 
 export function isExactSlashCommand(message: string, command: SlashCommandPaletteItem): boolean {
   return command.source === "builtin" && message.trim() === `/${command.name}`;
+}
+
+export function offersBuiltinSlashCommandWhileStreaming(message: string): boolean {
+  return canRunBuiltinSlashCommandWhileStreaming(message) || isBareMcpCommand(message);
+}
+
+export function submitsSlashCommandOnEnter(message: string, command: SlashCommandPaletteItem, isStreaming: boolean): boolean {
+  if (command.source === "builtin") {
+    return isExactSlashCommand(message, command) && (!isStreaming || command.availableWhileStreaming === true);
+  }
+  return isBuiltinMcpCommand(command) && isBareMcpCommand(message);
 }
 
 export function canClearBuiltinCommandInput(message: string, imageCount: number, submittedMessage: string): boolean {
@@ -1186,7 +1199,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     if (!msg && !currentImageCount) return;
     if (currentImageCount > MAX_ATTACHED_IMAGES) return;
     onAudioUnlock?.();
-    const builtinAllowed = !isStreaming || canRunBuiltinSlashCommandWhileStreaming(msg);
+    const builtinAllowed = !isStreaming || offersBuiltinSlashCommandWhileStreaming(msg);
     if (builtinAllowed && await runBuiltinCommand(msg)) return;
     if (isStreaming) return;
     clearInput();
@@ -1434,9 +1447,8 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     if (!msg && !currentImageCount) return;
     if (currentImageCount > MAX_ATTACHED_IMAGES) return;
     onAudioUnlock?.();
-    if (!currentImageCount && onBuiltinCommand && canRunBuiltinSlashCommandWhileStreaming(msg)) {
-      void runBuiltinCommand(msg);
-      return;
+    if (!currentImageCount && onBuiltinCommand && offersBuiltinSlashCommandWhileStreaming(msg)) {
+      if (await runBuiltinCommand(msg)) return;
     }
     queuedSubmissionPendingRef.current = true;
     setQueuedSubmissionPending(true);
@@ -1571,9 +1583,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
         }
         if (sendShortcut && selectedCommand) {
           e.preventDefault();
-          const canSubmitNow = !isStreaming
-            || (selectedCommand.source === "builtin" && selectedCommand.availableWhileStreaming === true);
-          if (canSubmitNow && isExactSlashCommand(value, selectedCommand)) {
+          if (submitsSlashCommandOnEnter(value, selectedCommand, isStreaming)) {
             setSlashMenuOpen(false);
             void handleSend();
           } else {
@@ -1635,6 +1645,25 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     },
     [isMobile, isStreaming, onSteer, onFollowUp, onAbort, slashMenuOpen, slashQuery, displayedSlashCommands, slashActiveIndex, applySlashCommand, sendQueued, handleSend, getNextSlashIndex, atMenuOpen, atQuery, atMatches, atActiveIndex, applyAtCompletion, historyMenuOpen, inputHistory, historyActiveIndex, applyHistoryInput, value]
   );
+
+  useEffect(() => {
+    const ta = textareaRef.current;
+    if (!ta) return;
+    // Shift+Enter on desktop, Enter on mobile keyboards: every newline the
+    // textarea inserts arrives here, while IME confirmations and sends do not.
+    const continueList = (event: InputEvent) => {
+      if (event.inputType !== "insertLineBreak" || event.isComposing) return;
+      const edit = getMarkdownListContinuation(ta.value, ta.selectionStart, ta.selectionEnd);
+      if (!edit) return;
+      event.preventDefault();
+      ta.setSelectionRange(edit.start, edit.end);
+      // insertText keeps the edit on the native undo stack and fires the input
+      // event that updates the controlled value.
+      document.execCommand(edit.text ? "insertText" : "delete", false, edit.text);
+    };
+    ta.addEventListener("beforeinput", continueList);
+    return () => ta.removeEventListener("beforeinput", continueList);
+  }, []);
 
   const handleInput = useCallback(() => {
     const ta = textareaRef.current;
@@ -2511,6 +2540,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
           <textarea
             ref={textareaRef}
             className="chat-input-textarea"
+            data-pi-native-list-continuation="true"
             aria-label={compact ? t("chat.quoteQuestion") : undefined}
             value={value}
             onChange={(e) => {
@@ -2804,6 +2834,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
 
             {onThinkingLevelChange && (
               <ThinkingSelector
+                disabled={false}
                 levels={THINKING_LEVELS.filter((level) => !availableThinkingLevels || level === "auto" || availableThinkingLevels.includes(level))}
                 value={isAutoThinkingSelection ? "auto" : resolvedThinkingLevel ?? "auto"}
                 displayLabel={thinkingDisplayLabel}
@@ -2811,7 +2842,6 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                 descriptions={Object.fromEntries(THINKING_LEVELS.map((level) => [level, t(THINKING_LEVEL_DESC_KEYS[level])]))}
                 label={t("chat.changeReasoningLabel")}
                 title={isStreaming ? t("chat.currentReasoning", { level: thinkingDisplayLabel }) : t("chat.changeReasoning", { level: thinkingDisplayLabel })}
-                disabled={isStreaming}
                 native={isCodexActive}
                 onChange={onThinkingLevelChange}
               />

@@ -2233,7 +2233,6 @@
   annotationEditor = null;
   let annotationList = null;
   let annotationEditorState = null;
-  let annotationSpeechRecognition = null;
   let annotationListCloseTimer = null;
   let activeAnnotationSaveHandler = null;
   let annotationEditorOpenedAt = 0;
@@ -2438,8 +2437,6 @@
   function closeAnnotationEditor() {
     activeAnnotationSaveHandler = null;
     annotationEditorOpenedAt = 0;
-    try { annotationSpeechRecognition?.stop?.(); } catch {}
-    annotationSpeechRecognition = null;
     if (annotationEditor) annotationEditor.remove();
     if (annotationDraftMarker) annotationDraftMarker.remove();
     annotationDraftMarker = null;
@@ -2451,7 +2448,8 @@
   function getComposerBoundaryTop() {
     try {
       const composer = getComposerTextarea();
-      const composerRoot = composer?.closest?.("form") || 
+      const composerRoot = composer?.closest?.(".chat-composer-card") ||
+                           composer?.closest?.("form") || 
                            composer?.closest?.(".chat-input-container") || 
                            composer?.parentElement?.parentElement || 
                            composer;
@@ -2565,7 +2563,7 @@
     if (!element || !selectionBounds) return;
     const chatBounds = getChatViewBoundary();
     const availableWidth = Math.max(260, chatBounds.width - 24);
-    const width = Math.min(430, availableWidth);
+    const width = Math.min(360, availableWidth);
     const measuredHeight = element.getBoundingClientRect?.().height || 150;
 
     const composerTop = getComposerBoundaryTop();
@@ -2707,44 +2705,12 @@
     }
   }
 
-  function toggleAnnotationDictation(textarea, button) {
-    const Recognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!Recognition) {
-      showToast("当前浏览器不支持语音注释");
-      return;
-    }
-    if (annotationSpeechRecognition) {
-      try { annotationSpeechRecognition.stop(); } catch {}
-      annotationSpeechRecognition = null;
-      button.classList.remove("is-listening");
-      return;
-    }
-    const recognition = new Recognition();
-    recognition.lang = document.documentElement.lang || "zh-CN";
-    recognition.continuous = true;
-    recognition.interimResults = true;
-    const initialValue = textarea.value.trim();
-    recognition.onresult = (event) => {
-      let transcript = "";
-      for (let index = 0; index < event.results.length; index += 1) transcript += event.results[index][0]?.transcript || "";
-      textarea.value = [initialValue, transcript.trim()].filter(Boolean).join(initialValue ? " " : "");
-    };
-    recognition.onend = () => {
-      annotationSpeechRecognition = null;
-      button.classList.remove("is-listening");
-    };
-    recognition.onerror = () => showToast("语音注释未能启动");
-    annotationSpeechRecognition = recognition;
-    button.classList.add("is-listening");
-    recognition.start();
-  }
-
   function resizeAnnotationComment(textarea) {
     if (!textarea) return;
     textarea.style.height = "auto";
-    const height = Math.max(52, Math.min(240, textarea.scrollHeight || 52));
+    const height = Math.max(38, Math.min(220, textarea.scrollHeight || 38));
     textarea.style.height = `${height}px`;
-    textarea.style.overflowY = (textarea.scrollHeight || 0) > 240 ? "auto" : "hidden";
+    textarea.style.overflowY = (textarea.scrollHeight || 0) > 220 ? "auto" : "hidden";
   }
 
   function openAnnotationEditor(quote, itemId, rect, sourceRange) {
@@ -2772,20 +2738,16 @@
 
     const comment = document.createElement("textarea");
     comment.className = "pi-enh-annotation-comment";
-    comment.rows = 2;
+    comment.rows = 1;
     comment.placeholder = "添加可选评论…";
     comment.value = existing?.comment || "";
     comment.setAttribute("aria-label", "注释内容");
-    comment.addEventListener("input", () => resizeAnnotationComment(comment));
+    comment.addEventListener("input", () => {
+      resizeAnnotationComment(comment);
+      scheduleAnnotationReposition();
+    });
     const actions = document.createElement("div");
     actions.className = "pi-enh-annotation-editor-actions";
-    const remove = createAnnotationButton("", "pi-enh-annotation-delete pi-enh-annotation-icon-button", itemId ? "删除此条注释" : "放弃");
-    remove.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18M8 6V4h8v2m-9 0 1 14h8l1-14M10 10v6m4-6v6"/></svg>';
-    // 新增引用草稿时自动隐藏垃圾桶，避免与右侧“取消”按钮功能重复；编辑已有注释时保留垃圾桶作为“彻底删除”
-    if (!itemId) {
-      remove.style.display = "none";
-    }
-
     const existingIndex = itemId ? listAnnotations().findIndex((item) => item.id === itemId) : -1;
     const annotationNumber = existingIndex !== -1 ? existingIndex + 1 : listAnnotations().length + 1;
     const indexBadge = document.createElement("span");
@@ -2794,19 +2756,9 @@
     indexBadge.setAttribute("aria-label", `第 ${annotationNumber} 条注释`);
     indexBadge.setAttribute("title", `当前正在编辑第 ${annotationNumber} 条注释`);
 
-    const mic = createAnnotationButton("", "pi-enh-annotation-mic pi-enh-annotation-icon-button", "语音输入注释");
-    mic.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a3 3 0 0 0-3 3v6a3 3 0 0 0 6 0V6a3 3 0 0 0-3-3Zm-6 9a6 6 0 0 0 12 0M12 18v3m-4 0h8"/></svg>';
-    const cancel = createAnnotationButton("取消", "pi-enh-annotation-cancel");
-    const save = createAnnotationButton("保存", "pi-enh-annotation-save");
+    const save = createAnnotationButton("", "pi-enh-annotation-save", itemId ? "保存注释更改" : "保存注释");
+    save.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4.5 4.5L19 7"/></svg>';
     if (!itemId) annotationDraftMarker = createAnnotationMarker(listAnnotations().length + 1, anchorRect, null);
-    remove.addEventListener("click", () => {
-      if (itemId) removeAnnotation(itemId);
-      closeAnnotationEditor();
-      syncAnnotationComposer();
-      closeAnnotationList();
-    });
-    mic.addEventListener("click", () => toggleAnnotationDictation(comment, mic));
-    cancel.addEventListener("click", closeAnnotationEditor);
     const saveAnnotation = () => {
       if (itemId) {
         updateAnnotation(itemId, selectedQuote, comment.value);
@@ -2836,7 +2788,7 @@
         saveAnnotation();
       }
     });
-    actions.append(remove, indexBadge, mic, cancel, save);
+    actions.append(indexBadge, save);
     editor.append(quotePreview, comment, actions);
     document.body.appendChild(editor);
     annotationEditor = editor;
@@ -3224,37 +3176,15 @@
     if (sel) sel.removeAllRanges();
   }
 
-  const QUICK_PROMPTS = {
-    quote: "",
-    explain: "请详细解释一下上述内容的核心逻辑与设计背景。",
-    test: "请为上述代码编写完善的单元测试用例，覆盖核心分支与边界异常情况。",
-    fix: "请仔细检查上述内容，分析是否存在潜在 Bug、异常边界或逻辑隐患，并提供修复方案。",
-    refactor: "请对上述代码进行重构与性能优化，遵循最佳实践并提升可读性。",
-  };
-
   function getQuoteBar() {
     if (!quoteBar) {
       quoteBar = document.createElement("div");
       quoteBar.className = "pi-enh-quote-bar";
       quoteBar.style.display = "none";
       quoteBar.innerHTML = `
-        <button class="pi-enh-quote-copy-btn" data-action="copy" title="复制选中文本到剪贴板">
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor">
-            <path d="M16 1H4c-1.1 0-2 .9-2 2v14h2V3h12V1zm3 4H8c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h11c1.1 0 2-.9 2-2V7c0-1.1-.9-2-2-2zm0 16H8V7h11v14z"/>
-          </svg>
-          <span>复制</span>
-        </button>
-        <button class="pi-enh-quote-btn" data-action="quote" title="打开引用注释编辑框">
-          <svg width="12" height="12" viewBox="0 0 24 24" fill="currentColor">
-            <path d="M4.583 17.321C3.553 16.227 3 15 3 13.011c0-3.5 2.457-6.637 6.03-8.188l.893 1.378c-3.335 1.804-3.987 4.145-4.247 5.621.537-.278 1.24-.375 1.929-.311 1.804.167 3.226 1.648 3.226 3.489a3.5 3.5 0 01-3.5 3.5c-1.073 0-2.099-.49-2.748-1.179zm10 0C13.553 16.227 13 15 13 13.011c0-3.5 2.457-6.637 6.03-8.188l.893 1.378c-3.335 1.804-3.987 4.145-4.247 5.621.537-.278 1.24-.375 1.929-.311 1.804.167 3.226 1.648 3.226 3.489a3.5 3.5 0 01-3.5 3.5c-1.073 0-2.099-.49-2.748-1.179z"/>
-          </svg>
-          <span>引用</span>
-        </button>
+        <button class="pi-enh-quote-copy-btn" data-action="copy" title="复制选中文本到剪贴板">复制</button>
         <div class="pi-enh-quote-divider"></div>
-        <button class="pi-enh-quote-action-btn" data-action="explain" title="引用并提问：请详细解释这段内容">解释</button>
-        <button class="pi-enh-quote-action-btn" data-action="test" title="引用并提问：为上述内容编写单元测试">单测</button>
-        <button class="pi-enh-quote-action-btn" data-action="fix" title="引用并提问：排查分析此处问题与修复方案">排查</button>
-        <button class="pi-enh-quote-action-btn" data-action="refactor" title="引用并提问：重构优化这段逻辑">优化</button>
+        <button class="pi-enh-quote-btn" data-action="quote" title="打开引用注释编辑框">引用</button>
       `;
       document.body.appendChild(quoteBar);
 
@@ -3292,9 +3222,6 @@
         }
         if (action === "quote") {
           openAnnotationEditor(currentSelectedText, null, currentSelectedRect, currentSelectedRange);
-        } else {
-          const promptSuffix = QUICK_PROMPTS[action] || "";
-          insertQuoteToTextarea(currentSelectedText, promptSuffix);
         }
         quoteBarInteracting = false;
         hideQuoteBar(true);
@@ -3456,66 +3383,6 @@
       addManagedTimeout(handleSelectionChange, 20);
     }
   }, true);
-
-  function insertQuoteToTextarea(rawText, extraPrompt) {
-    if (!rawText) return;
-
-    const textarea = document.querySelector('textarea[style*="fontFamily"]') ||
-      document.querySelector('form textarea') ||
-      document.querySelector("textarea");
-
-    if (!textarea) {
-      showToast("未找到输入框");
-      return;
-    }
-
-    let insertBlock = rawText
-      .split("\n")
-      .map((line) => `> ${line}`)
-      .join("\n") + "\n\n";
-
-    if (extraPrompt) {
-      insertBlock += extraPrompt + "\n";
-    }
-
-    const currentVal = textarea.value || "";
-    let newVal;
-    if (!currentVal) {
-      newVal = insertBlock;
-    } else {
-      const prefix = currentVal.endsWith("\n\n")
-        ? ""
-        : currentVal.endsWith("\n")
-        ? "\n"
-        : "\n\n";
-      newVal = currentVal + prefix + insertBlock;
-    }
-
-    try {
-      const proto = Object.getPrototypeOf(textarea);
-      const setter = Object.getOwnPropertyDescriptor(proto, "value")?.set ||
-        Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype, "value")?.set;
-      if (setter) {
-        setter.call(textarea, newVal);
-      } else {
-        textarea.value = newVal;
-      }
-    } catch {
-      textarea.value = newVal;
-    }
-
-    textarea.dispatchEvent(new Event("input", { bubbles: true }));
-    textarea.focus();
-    const endPos = textarea.value.length;
-    textarea.setSelectionRange(endPos, endPos);
-    textarea.scrollTop = textarea.scrollHeight;
-
-    const quoteIconSvg = `<svg width="14" height="14" viewBox="0 0 24 24" fill="#60a5fa"><path d="M4.583 17.321C3.553 16.227 3 15 3 13.011c0-3.5 2.457-6.637 6.03-8.188l.893 1.378c-3.335 1.804-3.987 4.145-4.247 5.621.537-.278 1.24-.375 1.929-.311 1.804.167 3.226 1.648 3.226 3.489a3.5 3.5 0 01-3.5 3.5c-1.073 0-2.099-.49-2.748-1.179zm10 0C13.553 16.227 13 15 13 13.011c0-3.5 2.457-6.637 6.03-8.188l.893 1.378c-3.335 1.804-3.987 4.145-4.247 5.621.537-.278 1.24-.375 1.929-.311 1.804.167 3.226 1.648 3.226 3.489a3.5 3.5 0 01-3.5 3.5c-1.073 0-2.099-.49-2.748-1.179z"/></svg>`;
-    showToast(extraPrompt ? "已引用并填入追问" : "已添加到引用", quoteIconSvg);
-
-    const sel = window.getSelection();
-    if (sel) sel.removeAllRanges();
-  }
 
   // ==========================================
   // 2.5 ask_user Web-native Picker (网页原生选择器)
@@ -6702,4 +6569,3 @@
     };
     renderAskUserBatchPrototype();
   }
-

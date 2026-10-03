@@ -25,6 +25,8 @@ export interface ToolInfo {
   description: string;
   parameters?: unknown;
   promptGuidelines?: string[];
+  /** How the model reaches the tool (pi >= 0.99); absent means `direct`. */
+  exposure?: "direct" | "model-only" | "codemode" | "deferred" | "hidden";
   sourceInfo?: unknown;
 }
 
@@ -143,6 +145,8 @@ export interface AgentSessionLike {
       readonly systemPrompt?: string;
       thinkingLevel?: string;
       streamingMessage?: PiAgentMessage;
+      /** The declared tools, with the descriptions `prepareLoadout` hooks set for the model. */
+      readonly tools?: readonly { readonly name: string; readonly description: string }[];
     };
   };
   readonly extensionRunner: ExtensionRunnerLike;
@@ -157,7 +161,8 @@ export interface AgentSessionLike {
     images?: Array<{ type: "image"; data: string; mimeType: string }>;
     streamingBehavior?: "steer" | "followUp";
     source?: "interactive" | "rpc";
-    preflightResult?: (result: any) => void;
+    /** Called once the SDK accepts the input; a rejected prompt only rejects the returned promise. */
+    preflightResult?: (disposition: "handled" | "queued" | "started") => void;
   }): Promise<void>;
   sendCustomMessage<T = unknown>(message: {
     customType: string;
@@ -184,8 +189,8 @@ export interface AgentSessionLike {
   getLastAssistantText(): string | undefined;
   setAutoCompactionEnabled(enabled: boolean): void;
   setAutoRetryEnabled(enabled: boolean): void;
-  steer(text: string, images?: Array<{ type: "image"; data: string; mimeType: string }>): Promise<unknown>;
-  followUp(text: string, images?: Array<{ type: "image"; data: string; mimeType: string }>): Promise<unknown>;
+  steer(text: string, images?: Array<{ type: "image"; data: string; mimeType: string }>): Promise<"handled" | "queued">;
+  followUp(text: string, images?: Array<{ type: "image"; data: string; mimeType: string }>): Promise<"handled" | "queued">;
   readonly pendingMessageCount: number;
   getSteeringMessages(): readonly string[];
   getFollowUpMessages(): readonly string[];

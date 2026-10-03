@@ -3773,15 +3773,14 @@
       color: var(--text, #f4f4f5); backdrop-filter: blur(16px); animation: piEnhFadeIn 0.14s ease-out;
     }
     .pi-enh-annotation-editor {
-      overflow: hidden; padding: 12px 14px 10px; border: 1px solid var(--border, rgba(255, 255, 255, 0.16)); border-radius: 16px;
-      background: color-mix(in srgb, var(--bg-panel, #202023) 96%, #2d2d30);
-      box-shadow: 0 16px 40px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.06);
-      display: flex; flex-direction: column; min-height: 0;
+      width: min(360px, calc(100vw - 24px)); overflow: hidden; padding: 6px 10px; border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 28px;
+      background: #303030; box-shadow: 0 16px 40px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.04);
+      display: flex; flex-direction: row; align-items: center; gap: 6px; min-height: 0;
       transition: border-color 0.18s ease, box-shadow 0.18s ease;
     }
     .pi-enh-annotation-editor:focus-within {
-      border-color: var(--accent, #38bdf8);
-      box-shadow: 0 0 0 1px var(--accent, #38bdf8), 0 18px 48px rgba(0, 0, 0, 0.55);
+      border-color: rgba(255, 255, 255, 0.14);
+      box-shadow: 0 16px 40px rgba(0, 0, 0, 0.5), inset 0 1px 0 rgba(255, 255, 255, 0.04);
     }
     .pi-enh-annotation-list {
       overflow: auto; padding: 14px; border: 1px solid color-mix(in srgb, var(--text, #f4f4f5) 14%, var(--border, #3f3f46)); border-radius: 18px;
@@ -3792,28 +3791,31 @@
       display: none !important; visibility: hidden !important; height: 0 !important; margin: 0 !important; padding: 0 !important; border: none !important; overflow: hidden !important;
     }
     .pi-enh-annotation-comment {
-      box-sizing: border-box; flex: 1 1 auto; width: 100%; min-height: 52px; max-height: 240px; resize: none; overflow-y: auto; padding: 2px 4px 6px;
-      border: 0 !important; border-radius: 0; background: transparent !important; color: var(--text, #f4f4f5);
-      font: inherit; font-size: 14.5px; line-height: 1.5; outline: none !important; box-shadow: none !important;
+      box-sizing: border-box; flex: 1 1 auto; min-width: 0; width: 100%; min-height: 38px; max-height: 220px; resize: none; overflow-y: hidden; padding: 8px 4px;
+      border: 0 !important; border-radius: 0; background: transparent !important; color: #f4f4f5;
+      font: inherit; font-size: 15px; line-height: 1.45; outline: none !important; box-shadow: none !important;
     }
     .pi-enh-annotation-comment:focus { border-color: transparent !important; }
-    .pi-enh-annotation-comment::placeholder { color: color-mix(in srgb, var(--text-muted, #71717a) 82%, transparent); }
-    .pi-enh-annotation-editor-actions, .pi-enh-annotation-list-header { display: flex; align-items: center; gap: 8px; margin-top: 6px; }
-    .pi-enh-annotation-editor-actions button, .pi-enh-annotation-list-header button {
+    .pi-enh-annotation-comment::placeholder { color: #969699; }
+    .pi-enh-annotation-editor-actions { display: flex; flex: 0 0 auto; align-items: center; gap: 6px; margin: 0; }
+    .pi-enh-annotation-list-header { display: flex; align-items: center; gap: 8px; margin-top: 6px; }
+    .pi-enh-annotation-list-header button {
       min-height: 34px; border: 1px solid var(--border, #52525b); border-radius: 999px; background: transparent;
       color: var(--text, #f4f4f5); padding: 6px 13px; font: inherit; font-size: 13px; cursor: pointer;
     }
-    .pi-enh-annotation-icon-button { display: grid; place-items: center; width: 34px; padding: 0 !important; border-color: transparent !important; }
-    .pi-enh-annotation-icon-button svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; }
     .pi-enh-annotation-editor-index {
-      display: inline-flex; align-items: center; color: var(--text-muted, #a1a1aa); font: inherit;
-      font-size: 12px; font-weight: 500; user-select: none; line-height: 1; opacity: 0.85; padding: 0 4px;
+      display: inline-flex; flex: 0 0 auto; align-items: center; color: #a1a1aa; font: inherit;
+      font-size: 11px; font-weight: 500; user-select: none; line-height: 1; opacity: 0.72; padding: 0 2px;
     }
-    .pi-enh-annotation-mic { margin-left: auto; }
-    .pi-enh-annotation-mic.is-listening { color: #f87171; background: rgba(248, 113, 113, .12); }
-    .pi-enh-annotation-save { border-color: #f4f4f5 !important; background: #f4f4f5 !important; color: #18181b !important; font-weight: 700 !important; }
-    .pi-enh-annotation-delete:hover, .pi-enh-annotation-list-delete:hover { color: #fca5a5 !important; }
-    .pi-enh-annotation-cancel:hover { background: rgba(255, 255, 255, .06); }
+    .pi-enh-annotation-save {
+      display: grid; flex: 0 0 40px; place-items: center; width: 40px; height: 40px; min-height: 40px !important; padding: 0 !important;
+      border: 0 !important; border-radius: 50% !important; background: #e4e4e7 !important; color: #27272a !important;
+      box-shadow: none !important; cursor: pointer; transition: background 0.14s ease;
+    }
+    .pi-enh-annotation-save:hover { background: #f4f4f5 !important; }
+    .pi-enh-annotation-save:focus-visible { outline: 2px solid rgba(255, 255, 255, 0.55); outline-offset: -4px; }
+    .pi-enh-annotation-save svg { display: block; width: 19px; height: 19px; fill: none !important; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+    .pi-enh-annotation-list-delete:hover { color: #fca5a5 !important; }
     .pi-enh-annotation-list { width: min(390px, calc(100vw - 24px)); padding: 12px; border-radius: 14px; }
     .pi-enh-annotation-list-header { justify-content: space-between; margin-top: 0; padding: 2px 4px 9px; border-bottom: 1px solid var(--border, #3f3f46); }
     .pi-enh-annotation-list-item { display: grid; grid-template-columns: minmax(0, 1fr) 32px; gap: 7px; align-items: start; margin-top: 8px; padding: 8px; border: 1px solid var(--border, #3f3f46); border-radius: 10px; }
@@ -3843,7 +3845,8 @@
       fill: currentColor !important;
     }
     @media (max-width: 680px) {
-      .pi-enh-annotation-editor, .pi-enh-annotation-list { max-height: min(400px, calc(100vh - 24px)); padding: 12px; }
+      .pi-enh-annotation-editor { max-height: min(400px, calc(100vh - 24px)); padding: 5px 7px; }
+      .pi-enh-annotation-list { max-height: min(400px, calc(100vh - 24px)); padding: 12px; }
       .pi-enh-annotation-marker { width: 20px; height: 20px; font-size: 9.5px; }
     }
     body:has(.settings-dialog-backdrop, .config-panel-root.is-modal) .pi-enh-annotation-marker,
@@ -3853,114 +3856,24 @@
       display: none !important;
     }
 
-    /* Refined High-Contrast Quick Action Quote Toolbar */
+    /* Compact segmented selection toolbar */
     .pi-enh-quote-bar {
-      position: fixed;
-      z-index: 95;
-      display: inline-flex;
-      align-items: center;
-      background: linear-gradient(180deg, #2d2d32 0%, #222226 100%);
-      color: #f4f4f5;
-      border: 1px solid rgba(255, 255, 255, 0.28);
-      border-radius: 8px;
-      box-shadow: 0 10px 32px rgba(0, 0, 0, 0.65), 0 0 0 1px rgba(255, 255, 255, 0.1), 0 3px 8px rgba(0, 0, 0, 0.4);
-      user-select: none;
-      backdrop-filter: blur(16px);
-      padding: 3px 4px;
-      gap: 3px;
-      animation: piEnhFadeIn 0.12s cubic-bezier(0.16, 1, 0.3, 1);
-      touch-action: manipulation;
+      position: fixed; z-index: 95; display: inline-flex; align-items: stretch; gap: 0; overflow: hidden;
+      padding: 0; border: 1px solid rgba(255, 255, 255, 0.1); border-radius: 12px;
+      background: #303030; color: #f4f4f5;
+      box-shadow: 0 10px 32px rgba(0, 0, 0, 0.58), 0 3px 8px rgba(0, 0, 0, 0.35);
+      user-select: none; backdrop-filter: blur(16px);
+      animation: piEnhFadeIn 0.12s cubic-bezier(0.16, 1, 0.3, 1); touch-action: manipulation;
     }
-    .pi-enh-quote-btn {
-      display: inline-flex;
-      align-items: center;
-      gap: 5px;
-      background: rgba(59, 130, 246, 0.22);
-      color: #60a5fa;
-      border: 1px solid rgba(96, 165, 250, 0.4);
-      border-radius: 6px;
-      padding: 4px 9px;
-      font-size: 12px;
-      font-weight: 600;
-      cursor: pointer;
-      transition: all 0.12s ease;
-      touch-action: manipulation;
+    .pi-enh-quote-copy-btn, .pi-enh-quote-btn {
+      display: inline-flex; align-items: center; justify-content: center; min-height: 32px; min-width: 62px; padding: 6px 13px;
+      border: 0; border-radius: 0; background: transparent; color: inherit;
+      font: inherit; font-size: 13px; font-weight: 550; cursor: pointer;
+      transition: background 0.12s ease; touch-action: manipulation;
     }
-    .pi-enh-quote-btn:hover {
-      background: #2563eb;
-      color: #ffffff;
-      border-color: #2563eb;
-      box-shadow: 0 2px 8px rgba(37, 99, 235, 0.4);
-    }
-    .pi-enh-quote-action-btn {
-      display: inline-flex;
-      align-items: center;
-      background: none;
-      color: #f4f4f5;
-      border: none;
-      border-radius: 6px;
-      padding: 4px 8px;
-      font-size: 12px;
-      font-weight: 500;
-      cursor: pointer;
-      transition: all 0.12s ease;
-      touch-action: manipulation;
-    }
-    .pi-enh-quote-action-btn:hover {
-      background: rgba(255, 255, 255, 0.16);
-      color: #ffffff;
-      box-shadow: 0 1px 3px rgba(0, 0, 0, 0.2);
-    }
-    .pi-enh-quote-copy-btn {
-      display: inline-flex;
-      align-items: center;
-      gap: 4px;
-      background: rgba(16, 185, 129, 0.18);
-      color: #34d399;
-      border: 1px solid rgba(52, 211, 153, 0.35);
-      border-radius: 6px;
-      padding: 4px 8px;
-      font-size: 12px;
-      font-weight: 600;
-      cursor: pointer;
-      transition: all 0.12s ease;
-      touch-action: manipulation;
-    }
-    .pi-enh-quote-copy-btn:hover {
-      background: #059669;
-      color: #ffffff;
-      border-color: #059669;
-      box-shadow: 0 2px 8px rgba(16, 185, 129, 0.4);
-    }
-    .pi-enh-quote-divider {
-      width: 1px;
-      height: 16px;
-      background: rgba(255, 255, 255, 0.22);
-      margin: 0 2px;
-    }
-
-    /* Light Mode Adaptation */
-    html:not(.dark) .pi-enh-quote-bar {
-      background: #ffffff;
-      color: #18181b;
-      border: 1px solid #d4d4d8;
-      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.15), 0 1px 4px rgba(0, 0, 0, 0.08);
-    }
-    html:not(.dark) .pi-enh-quote-copy-btn {
-      background: rgba(16, 185, 129, 0.12);
-      color: #059669;
-      border: 1px solid rgba(16, 185, 129, 0.4);
-    }
-    html:not(.dark) .pi-enh-quote-action-btn {
-      color: #27272a;
-    }
-    html:not(.dark) .pi-enh-quote-action-btn:hover {
-      background: #f4f4f5;
-      color: #000000;
-    }
-    html:not(.dark) .pi-enh-quote-divider {
-      background: #e4e4e7;
-    }
+    .pi-enh-quote-copy-btn:hover, .pi-enh-quote-btn:hover { background: rgba(255, 255, 255, 0.1); }
+    .pi-enh-quote-copy-btn:focus-visible, .pi-enh-quote-btn:focus-visible { outline: 2px solid rgba(255, 255, 255, 0.45); outline-offset: -3px; }
+    .pi-enh-quote-divider { width: 1px; align-self: stretch; flex: 0 0 1px; background: rgba(255, 255, 255, 0.18); }
 
     /* Suppress Native Mobile Context Menu Callout in Chat Area */
     .chat-window, .message-view, main, [data-message-role], .prose, .markdown-body {
@@ -3980,36 +3893,8 @@
 
     /* Mobile / Touch Responsive Enhancement */
     @media (max-width: 768px) {
-      .pi-enh-quote-bar {
-        z-index: 999999;
-        padding: 4px 5px;
-        gap: 3px;
-        border-radius: 9px;
-        border: 1px solid rgba(96, 165, 250, 0.55);
-        box-shadow: 0 12px 36px rgba(0, 0, 0, 0.8), 0 0 0 1px rgba(96, 165, 250, 0.35), 0 4px 14px rgba(0, 0, 0, 0.5);
-      }
-      .pi-enh-quote-copy-btn {
-        padding: 5px 8px;
-        font-size: 12px;
-        min-height: 30px;
-      }
-      .pi-enh-quote-btn {
-        padding: 5px 9px;
-        font-size: 12px;
-        min-height: 30px;
-      }
-      .pi-enh-quote-action-btn {
-        padding: 5px 7px;
-        font-size: 12px;
-        min-height: 30px;
-      }
-      .pi-enh-quote-divider {
-        height: 16px;
-      }
-      html:not(.dark) .pi-enh-quote-bar {
-        border: 1px solid #3b82f6;
-        box-shadow: 0 10px 30px rgba(0, 0, 0, 0.2), 0 0 0 1px rgba(59, 130, 246, 0.3);
-      }
+      .pi-enh-quote-bar { z-index: 999999; padding: 0; }
+      .pi-enh-quote-copy-btn, .pi-enh-quote-btn { min-height: 32px; min-width: 58px; padding: 6px 11px; font-size: 12px; }
     }
 
     /* Duration Breakdown Tooltip */

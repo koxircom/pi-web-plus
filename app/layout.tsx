@@ -24,12 +24,12 @@ export const metadata: Metadata = {
   icons: {
     icon: [
       {
-        url: "/icon.svg",
+        url: "/icon.svg?v=pi-plus-disc-20261003",
         sizes: "any",
         type: "image/svg+xml",
       },
       {
-        url: "/favicon.ico",
+        url: "/favicon.ico?v=pi-plus-disc-20261003",
         sizes: "16x16 32x32 48x48 64x64 128x128 256x256",
         type: "image/x-icon",
       },

@@ -10,7 +10,7 @@ import { FileViewer } from "./FileViewer";
 import { TabBar, type Tab } from "./TabBar";
 import { openFileTab, saveFileViewerState } from "./file-tab-state";
 import { SettingsPanel, SettingsSectionIcon } from "./SettingsPanel";
-import { ProjectTrustDialog } from "./ProjectTrustDialog";
+import { ProjectTrustDialog, type ProjectTrustFailure } from "./ProjectTrustDialog";
 import { BranchNavigator, hasSessionBranches } from "./BranchNavigator";
 import { SystemPromptPanel } from "./SystemPromptPanel";
 import { ToolDefinitionsPanel } from "./ToolDefinitionsPanel";
@@ -57,7 +57,7 @@ import {
   SIDEBAR_MIN_WIDTH,
 } from "@/lib/panel-layout";
 import type { BlockingExtensionUiRequest, SessionInfo, SessionTreeNode } from "@/lib/types";
-import type { ProjectTrustStatus } from "@/lib/api-types";
+import type { McpErrorResponse, ProjectTrustStatus } from "@/lib/api-types";
 import type { ChatInputHandle } from "./ChatInput";
 import type { SessionStatsInfo } from "@/lib/pi-types";
 import type { FileViewerState } from "@/lib/file-viewer-state";
@@ -67,7 +67,7 @@ import {
   composeEnhancementWindowTitle,
   registerEnhancementOpenSettings,
 } from "@/lib/enhancement-sidebar-bridge";
-import { getLastSettingsSection, type SettingsSection } from "@/lib/settings-navigation";
+import { getLastSettingsSection, settingsSectionRequiresProject, type SettingsSection } from "@/lib/settings-navigation";
 
 type SessionCopyField = "file" | "id" | "projectDir" | "gitBranch" | "gitWorktree";
 type AutoNameStatus =
@@ -190,7 +190,7 @@ export function AppShell() {
   const [projectTrust, setProjectTrust] = useState<ProjectTrustStatus | null>(null);
   const [projectTrustDialogOpen, setProjectTrustDialogOpen] = useState(false);
   const [projectTrustBusy, setProjectTrustBusy] = useState(false);
-  const [projectTrustError, setProjectTrustError] = useState<string | null>(null);
+  const [projectTrustError, setProjectTrustError] = useState<ProjectTrustFailure | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(() => !initialNavigation.sidebarCollapsed);
   const [rightPanelOpen, setRightPanelOpen] = useState(false);
   const [rightPanelExpanded, setRightPanelExpanded] = useState(false);
@@ -273,12 +273,14 @@ export function AppShell() {
   // Branch navigator state — populated by ChatWindow via onBranchDataChange
   const [branchTree, setBranchTree] = useState<SessionTreeNode[]>([]);
   const [branchActiveLeafId, setBranchActiveLeafId] = useState<string | null>(null);
+  const [branchSwitchLocked, setBranchSwitchLocked] = useState(false);
   const branchLeafChangeFnRef = useRef<((leafId: string | null) => void) | null>(null);
   const sessionHasBranches = hasSessionBranches(branchTree);
 
-  const handleBranchDataChange = useCallback((tree: SessionTreeNode[], activeLeafId: string | null, onLeafChange: (leafId: string | null) => void) => {
+  const handleBranchDataChange = useCallback((tree: SessionTreeNode[], activeLeafId: string | null, onLeafChange: (leafId: string | null) => void, locked: boolean) => {
     setBranchTree(tree);
     setBranchActiveLeafId(activeLeafId);
+    setBranchSwitchLocked(locked);
     branchLeafChangeFnRef.current = onLeafChange;
   }, []);
 
@@ -395,6 +397,11 @@ export function AppShell() {
     setMobileToolbarMoreOpen(false);
     setActiveTopPanel("session");
   }, [isMobile]);
+
+  // The composer opens Settings too: a bare /mcp opens Settings › MCP (useAgentSession).
+  const openSettingsSection = useCallback((section: SettingsSection) => {
+    setSettingsSection(section);
+  }, []);
 
   const handleSidebarToggle = useCallback(() => {
     if (isMobile) {
@@ -725,6 +732,7 @@ export function AppShell() {
     setSessionKey((k) => k + 1);
     setBranchTree([]);
     setBranchActiveLeafId(null);
+    setBranchSwitchLocked(false);
     setSystemPrompt(null);
     setSystemTools(null);
     setSystemInfoLoading(false);
@@ -781,6 +789,7 @@ export function AppShell() {
     setSessionKey((k) => k + 1);
     setBranchTree([]);
     setBranchActiveLeafId(null);
+    setBranchSwitchLocked(false);
     branchLeafChangeFnRef.current = null;
     setSystemPrompt(null);
     setSystemTools(null);
@@ -811,6 +820,7 @@ export function AppShell() {
     setSessionKey((k) => k + 1);
     setBranchTree([]);
     setBranchActiveLeafId(null);
+    setBranchSwitchLocked(false);
     setSystemPrompt(null);
     setSystemTools(null);
     setSystemInfoLoading(false);
@@ -1034,6 +1044,7 @@ export function AppShell() {
       setSessionKey((k) => k + 1);
       setBranchTree([]);
       setBranchActiveLeafId(null);
+      setBranchSwitchLocked(false);
       setSystemPrompt(null);
       setSystemTools(null);
       setSystemInfoLoading(false);
@@ -1132,6 +1143,8 @@ export function AppShell() {
     if (!projectTrustCwd) return;
 
     const controller = new AbortController();
+    // The answer also lists the project's MCP servers (`mcpFile`, `mcpServers`), unused here: the
+    // trust dialog fetches the listing again when it opens, since the file can change in between.
     fetch(`/api/project-trust?cwd=${encodeURIComponent(projectTrustCwd)}`, {
       signal: controller.signal,
     })
@@ -1157,18 +1170,35 @@ export function AppShell() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ cwd: projectTrustCwd }),
       });
-      const data = await response.json() as ProjectTrustStatus & { error?: string };
-      if (!response.ok || data.error) throw new Error(data.error ?? `HTTP ${response.status}`);
+      const data = await response.json() as ProjectTrustStatus & Partial<McpErrorResponse>;
+      if (!response.ok || data.error) {
+        // The dialog translates the reason; the English error is only its diagnostic.
+        setProjectTrustError({ error: data.error ?? `HTTP ${response.status}`, ...(data.reason ? { reason: data.reason } : {}) });
+        return;
+      }
       setProjectTrust(data);
       setProjectTrustDialogOpen(false);
       setModelsRefreshKey((key) => key + 1);
       setSessionKey((key) => key + 1);
     } catch (error) {
-      setProjectTrustError(error instanceof Error ? error.message : String(error));
+      setProjectTrustError({ error: error instanceof Error ? error.message : String(error) });
     } finally {
       setProjectTrustBusy(false);
     }
   }, [projectTrustBusy, projectTrustCwd]);
+
+  // The restricted-mode banner and Settings › MCP's trust notice open the same dialog.
+  const openProjectTrustDialog = useCallback(() => {
+    setProjectTrustError(null);
+    setProjectTrustDialogOpen(true);
+  }, []);
+
+  // Settings › MCP added a project server: `.pi/mcp.json` alone makes a folder require trust, and a
+  // fresh folder was trusted in the same step. Every mounted section reloads in place on the new
+  // status (projectTrustReloadKey); nothing was rebuilt, so the chat needs no new session key.
+  const handleProjectTrustChanged = useCallback((cwd: string, status: ProjectTrustStatus) => {
+    if (cwd === projectTrustCwd) setProjectTrust(status);
+  }, [projectTrustCwd]);
 
   const activeFileTab = fileTabs.find((tab) => tab.id === activeFileTabId) ?? null;
   const activeCwdName = activeCwd ? getFileName(activeCwd) || activeCwd : null;
@@ -1226,7 +1256,7 @@ export function AppShell() {
           ["models", translate("common.models")],
           ["skills", translate("common.skills")],
         ] as const).map(([section, label]) => {
-          const disabled = section !== "models" && !projectTrustCwd;
+          const disabled = settingsSectionRequiresProject(section) && !projectTrustCwd;
           return (
             <button
               key={section}
@@ -1276,10 +1306,7 @@ export function AppShell() {
     return (
       <button
         type="button"
-        onClick={() => {
-          setProjectTrustError(null);
-          setProjectTrustDialogOpen(true);
-        }}
+        onClick={openProjectTrustDialog}
         title={translate("trust.resourcesNotLoaded")}
         aria-label={translate("trust.resourcesNotLoaded")}
         style={{
@@ -1538,6 +1565,7 @@ export function AppShell() {
             tree={branchTree}
             activeLeafId={branchActiveLeafId}
             onLeafChange={handleBranchLeafChange}
+            locked={branchSwitchLocked}
             inline
             containerRef={topBarRef}
             open={activeTopPanel === "branches"}
@@ -2073,6 +2101,7 @@ export function AppShell() {
               tree={branchTree}
               activeLeafId={branchActiveLeafId}
               onLeafChange={handleBranchLeafChange}
+              locked={branchSwitchLocked}
               inline
               compact
               containerRef={topBarRef}
@@ -2354,6 +2383,7 @@ export function AppShell() {
               onSystemInfoLoaderChange={handleSystemInfoLoaderChange}
               onSessionStatsChange={handleSessionStatsChange}
               onSessionStatsPanelOpen={openSessionStatsPanel}
+              onOpenSettings={openSettingsSection}
               onContextUsageChange={handleContextUsageChange}
               onOpenFile={handleOpenLinkedFile}
               onOpenSession={handleOpenSession}
@@ -2551,8 +2581,12 @@ export function AppShell() {
           setModelsRefreshKey((key) => key + 1);
         }}
         onSessionReloaded={() => setSessionKey((key) => key + 1)}
+        projectTrust={projectTrust}
+        onOpenTrustDialog={openProjectTrustDialog}
+        onProjectTrustChanged={handleProjectTrustChanged}
       />
     )}
+    {/* After Settings, so it opens above it (z-index 1100 over 1000) when Settings › MCP asks for it. */}
     {projectTrustDialogOpen && projectTrustCwd && (
       <ProjectTrustDialog
         cwd={projectTrustCwd}
@@ -2562,6 +2596,7 @@ export function AppShell() {
           if (!projectTrustBusy) setProjectTrustDialogOpen(false);
         }}
         onConfirm={() => void handleTrustProject()}
+        onStatus={setProjectTrust}
       />
     )}
     </>

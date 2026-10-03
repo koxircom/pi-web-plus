@@ -179,93 +179,36 @@
     tags: { id: "tags", label: "会话标签" },
   };
 
-  function getSectionShortcutMetadata(sectionId, context) {
+  function getSectionShortcutMetadata(sectionId) {
     const predefined = SECTION_SHORTCUT_METADATA[sectionId];
-    let label = predefined ? predefined.label : sectionId;
-    let id = predefined ? predefined.id : sectionId;
-
-    if (context?.nav?.availableSections && Array.isArray(context.nav.availableSections)) {
-      const match = context.nav.availableSections.find((s) => s.id === sectionId);
-      if (match?.label) label = match.label;
-    }
-
+    const label = predefined ? predefined.label : sectionId;
+    const id = predefined ? predefined.id : sectionId;
     const iconHtml = SHORTCUT_ICONS[sectionId] || SHORTCUT_ICONS[id] || SHORTCUT_ICONS.settings || "";
     return { id, label, iconHtml };
   }
 
-  const mountedPinHosts = new Map();
-
-  function notifyMountedPinHosts() {
-    for (const record of mountedPinHosts.values()) {
-      try { record.update(); } catch (_) {}
+  // React owns tab events; the extension owns only shortcut state/persistence.
+  function toggleSettingsTabShortcut(sectionId) {
+    if (!isPluginEnabled("settings-tab-shortcuts")) return;
+    const meta = getSectionShortcutMetadata(sectionId);
+    const currentShortcuts = getStoredQuickShortcuts();
+    const idx = currentShortcuts.findIndex((s) => s.id === sectionId || (sectionId === "general" && s.id === "settings") || (sectionId === "settings" && s.id === "general"));
+    if (idx >= 0) {
+      currentShortcuts.splice(idx, 1);
+      setStoredQuickShortcuts(currentShortcuts);
+      showToast(`已从快捷入口移除「${meta.label}」`, meta.iconHtml);
+    } else {
+      const newItem = { id: meta.id, label: meta.label, iconHtml: meta.iconHtml || "" };
+      const settingsIdx = currentShortcuts.findIndex((s) => s.id === "settings" || s.id === "general");
+      if (settingsIdx >= 0) currentShortcuts.splice(settingsIdx, 0, newItem);
+      else currentShortcuts.push(newItem);
+      setStoredQuickShortcuts(currentShortcuts);
+      showToast(`已添加「${meta.label}」到左下角快捷入口`, meta.iconHtml);
     }
+    syncBottomShortcutsBar(true);
   }
 
-  // 2. 独立快捷 Pin 控件 Host 渲染 (处于 button 外同行，不污染 React tab DOM)
-  function mountTabActionPin(sectionId, host, context) {
-    if (!host) return () => {};
-    host.innerHTML = "";
-
-    const meta = getSectionShortcutMetadata(sectionId, context);
-
-    const btn = document.createElement("button");
-    btn.type = "button";
-    btn.className = "pi-enh-tab-pin-btn";
-    btn.style.cssText = "background: none; border: none; padding: 2px 4px; cursor: pointer; color: var(--text-muted); display: inline-flex; align-items: center; justify-content: center;";
-
-    function updatePinState() {
-      const shortcuts = getStoredQuickShortcuts();
-      const isPinned = isShortcutActive(shortcuts, sectionId);
-      btn.classList.toggle("is-pinned", isPinned);
-      btn.setAttribute("aria-label", isPinned ? `取消快捷入口固定: ${meta.label}` : `添加到快捷入口: ${meta.label}`);
-      btn.setAttribute("title", isPinned ? `点击从快捷入口移除「${meta.label}」` : `点击添加「${meta.label}」到左下角快捷入口`);
-      btn.innerHTML = `<svg width="12" height="12" viewBox="0 0 24 24" fill="${isPinned ? "currentColor" : "none"}" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/></svg>`;
-    }
-
-    updatePinState();
-
-    const onClick = (e) => {
-      e.stopPropagation();
-      e.preventDefault();
-      const currentShortcuts = getStoredQuickShortcuts();
-      const idx = currentShortcuts.findIndex((s) => s.id === sectionId || (sectionId === "general" && s.id === "settings") || (sectionId === "settings" && s.id === "general"));
-      if (idx >= 0) {
-        currentShortcuts.splice(idx, 1);
-        setStoredQuickShortcuts(currentShortcuts);
-        if (typeof showToast === "function") showToast(`已从快捷入口移除「${meta.label}」`, meta.iconHtml);
-      } else {
-        const newItem = {
-          id: meta.id,
-          label: meta.label,
-          iconHtml: meta.iconHtml || ""
-        };
-        const settingsIdx = currentShortcuts.findIndex((s) => s.id === "settings" || s.id === "general");
-        if (settingsIdx >= 0) {
-          currentShortcuts.splice(settingsIdx, 0, newItem);
-        } else {
-          currentShortcuts.push(newItem);
-        }
-        setStoredQuickShortcuts(currentShortcuts);
-        if (typeof showToast === "function") showToast(`已添加「${meta.label}」到左下角快捷入口`, meta.iconHtml);
-      }
-      syncBottomShortcutsBar(true);
-      notifyMountedPinHosts();
-    };
-
-    btn.addEventListener("click", onClick);
-    host.appendChild(btn);
-
-    const record = { sectionId, update: updatePinState };
-    mountedPinHosts.set(host, record);
-
-    return () => {
-      mountedPinHosts.delete(host);
-      btn.removeEventListener("click", onClick);
-      btn.remove();
-    };
-  }
-
-  // 3. 注册桥 (向 Native ABI 注册 5 扩展面板、maintenance 与 tab-action)
+  // 3. Register isolated panels and native-owned tab actions.
   let nativeBridgeRegistered = false;
   let unregisterNativeRenderers = [];
 
@@ -330,9 +273,7 @@
 
     const allSections = ["general", "models", "skills", "agents", "plugins", "enhancements", "notifications", "archived", "usage", "tags"];
     for (const sec of allSections) {
-      const unreg = abi.registerRenderer(`tab-action:${sec}`, (host, context) => {
-        return mountTabActionPin(sec, host, context);
-      });
+      const unreg = abi.registerTabAction(sec, () => toggleSettingsTabShortcut(sec));
       if (typeof unreg === "function") {
         unregisterNativeRenderers.push(unreg);
       }
@@ -539,7 +480,6 @@
             if (remoteRevision > 0) setLocalShortcutsRevision(remoteRevision);
             window.__PI_ENH_SHORTCUTS_MANIFEST__ = remoteList;
             syncBottomShortcutsBar(true);
-            notifyMountedPinHosts();
           } else if (remoteRevision > 0 && remoteRevision > localRev) {
             setLocalShortcutsRevision(remoteRevision);
           }
@@ -618,17 +558,7 @@
       if (shouldPersist) {
         void persistQuickShortcutsToServer(list);
       }
-      notifyMountedPinHosts();
     } catch (e) {}
-  }
-
-  function isShortcutActive(shortcutList, tabId) {
-    return shortcutList.some((item) => {
-      if (item.id === tabId) return true;
-      if (tabId === "general" && item.id === "settings") return true;
-      if (tabId === "settings" && item.id === "general") return true;
-      return false;
-    });
   }
 
   function locateShortcutsContainer() {
@@ -753,7 +683,6 @@
         showToast(`已从快捷入口移除「${removed ? removed.label : id}」`, icon, 2000);
 
         syncBottomShortcutsBar(true);
-        notifyMountedPinHosts();
       });
     }
   }
@@ -1738,11 +1667,13 @@ function renderUsagePanel(panel, nav) {
     </div>`;
     const loadingView = panel.firstElementChild;
     window.__PI_ENH_LOAD_OPTIONAL__("usage-panel").then(() => {
-      if (panel.isConnected && !panel.closest("[hidden]") && panel.firstElementChild === loadingView && isPluginEnabled("usage-cost-dashboard")) {
+      // A visited native host stays mounted while hidden. Complete its load so
+      // returning to Usage cannot strand the host on the loading view.
+      if (panel.isConnected && panel.firstElementChild === loadingView && isPluginEnabled("usage-cost-dashboard")) {
         renderUsagePanel(panel, nav);
       }
     }).catch(() => {
-      if (!panel.isConnected || panel.closest("[hidden]") || panel.firstElementChild !== loadingView) return;
+      if (!panel.isConnected || panel.firstElementChild !== loadingView) return;
       panel.innerHTML = '<div role="alert">用量统计组件加载失败，请重试。 <button type="button">重试</button></div>';
       panel.querySelector("button")?.addEventListener("click", () => renderUsagePanel(panel, nav), { once: true });
     });
