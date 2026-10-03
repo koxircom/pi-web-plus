@@ -1,0 +1,38 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import vm from 'node:vm';
+import {readFileSync} from 'node:fs';
+import {stripTypeScriptTypes} from 'node:module';
+const source=readFileSync(new URL('./useAgentSession.ts',import.meta.url),'utf8');
+const helper=readFileSync(new URL('../lib/prompt-preparation.ts',import.meta.url),'utf8').replace('export function','function');
+const extract=(a,b)=>source.slice(source.indexOf(a),source.indexOf(b,source.indexOf(a)));
+const code=stripTypeScriptTypes(helper+'\n'+extract('  const handleSend = useCallback','  const executeBash = useCallback')+'\n'+extract('  const executeBash = useCallback','  const handleFork = useCallback'))+'\n({handleSend,executeBash,handleAbort})';
+const deferred=()=>{let resolve,reject;const promise=new Promise((a,b)=>{resolve=a;reject=b;});return{resolve,reject,promise};};
+const tick=()=>new Promise(r=>setImmediate(r));
+function harness(isNew=false){
+ const newSession=deferred(),events=deferred(),command=deferred(),state={running:false,bash:false,messages:[],restored:[],notices:[],commands:[],stopping:false},ref=current=>({current});
+ const scope={AbortController,DOMException,Promise,useCallback:f=>f,waitForPromptPreparation:undefined,isNew,newSessionCwd:'/test',newSessionModel:null,session:isNew?null:{id:'s'},composerDraftKey:'draft',
+  agentRunningRef:ref(false),bashRunningRef:ref(false),sessionIdRef:ref(isNew?null:'s'),ensuringNewSessionRef:ref(null),promptRunIdRef:ref(0),rpcPromptPendingRef:ref(false),optimisticUserMessageKeyRef:ref(null),pendingScrollToUserRef:ref(false),preparationRef:ref(null),stopInFlightRef:ref(null),executeBashRef:ref(null),
+  ensureNewSession:()=>newSession.promise.then(s=>{scope.sessionIdRef.current=s;return s;}),ensureEventsConnected:()=>events.promise,
+  sendAgentCommand:async(s,c)=>{state.commands.push(c);if(c.type==='abort')await command.promise;},
+  restoreSubmission:(...args)=>state.restored.push(args),setMessages:f=>state.messages=f(state.messages),setAgentRunning:v=>state.running=v,setBashRunning:v=>state.bash=v,setPendingBash:()=>{},setStopRequested:v=>state.stopping=v,
+  setAgentPhase:()=>{},setPromptAnchorActive:()=>{},setPendingModel:()=>{},dispatch:()=>{},bumpSessionEpoch:()=>{},cancelEventStreamGrace:()=>{},markOptimisticUserMessage:()=>{},userMessageKey:()=> 'user',promoteNewSession:()=>{},waitForPromptSettlement:()=>{},reconcileAgentState:()=>{},loadSession:async()=>{},closeEvents:()=>{},addNotice:n=>state.notices.push(n),isPromptRejectedError:()=>false,console};
+ const actions=vm.runInNewContext(code,scope);return{...actions,newSession,events,command,state,scope};
+}
+for(const phase of ['create','events'])test(`Stop during ${phase} prevents later prompt dispatch and restores input`,async()=>{
+ const h=harness(phase==='create'),sending=h.handleSend('keep me');await tick();
+ assert.equal(h.state.running,true);await h.handleAbort();await sending;
+ assert.equal(h.state.running,false);assert.equal(h.state.messages.length,0);assert.equal(h.state.restored[0][0],'keep me');assert.equal(h.state.notices.length,0);
+ h.newSession.resolve('s');h.events.resolve();await tick();
+ assert.equal(h.state.commands.some(c=>c.type==='prompt'),false);
+});
+test('Stop before shell session creation cannot execute a delayed command',async()=>{
+ const h=harness(true),execution=h.executeBash('sleep 30',false);await tick();await h.handleAbort();await execution;
+ h.newSession.resolve('s');await tick();assert.equal(h.state.commands.length,0);assert.equal(h.state.bash,false);assert.equal(h.state.restored[0][0],'!sleep 30');assert.equal(h.state.notices.length,0);
+});
+test('normal preparation dispatches exactly once and repeated Stop shares acknowledgement',async()=>{
+ const h=harness(),sending=h.handleSend('normal');await tick();h.events.resolve();await sending;
+ assert.equal(h.state.commands.filter(c=>c.type==='prompt').length,1);
+ const first=h.handleAbort(),second=h.handleAbort();await tick();assert.equal(h.state.stopping,true);assert.equal(h.state.commands.filter(c=>c.type==='abort').length,1);
+ h.command.resolve();await Promise.all([first,second]);
+});

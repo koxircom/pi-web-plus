@@ -27,7 +27,7 @@ import { getMarkdownListContinuation } from "@/lib/markdown-list-continuation";
 import { isBareMcpCommand, isBuiltinMcpCommand } from "@/lib/mcp-command";
 import { FolderIcon, getFileIcon } from "./FileIcons";
 import { ImagePreview } from "./ImagePreview";
-import { useIsMobile, allowsAutomaticEditableFocus, focusEditable } from "@/hooks/useIsMobile";
+import { useIsMobile, focusEditable } from "@/hooks/useIsMobile";
 import { useI18n } from "@/hooks/useI18n";
 import { useChatAppearance } from "@/hooks/useChatAppearance";
 import { useComposerLayoutPreferences } from "@/hooks/useComposerLayoutPreferences";
@@ -861,22 +861,8 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const draftHydratedKeyRef = useRef<string | null>(null);
   const queuedSubmissionPendingRef = useRef(false);
   const [queuedSubmissionPending, setQueuedSubmissionPending] = useState(false);
-  const isUserFocusedRef = useRef(false);
-  const userSelectionRef = useRef<{ start: number; end: number } | null>(null);
   valueRef.current = value;
   attachedImagesRef.current = attachedImages;
-
-  useLayoutEffect(() => {
-    if (isUserFocusedRef.current && (document.activeElement === document.body || document.activeElement === null)) {
-      const ta = textareaRef.current;
-      if (ta && ta.isConnected && ta.style.display !== "none") {
-        focusEditable(ta, { preventScroll: true });
-        if (userSelectionRef.current) {
-          try { ta.setSelectionRange(userSelectionRef.current.start, userSelectionRef.current.end); } catch (_) {}
-        }
-      }
-    }
-  });
 
   useImperativeHandle(ref, () => ({
     focusEditable() { return focusEditable(textareaRef.current, { preventScroll: true }); },
@@ -2548,40 +2534,10 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
               setValue(e.target.value);
               setHistoryMenuOpen(false);
               updateAtQuery(e.target.value, e.target.selectionStart);
-              userSelectionRef.current = { start: e.target.selectionStart, end: e.target.selectionEnd };
             }}
             onSelect={(e) => {
               const el = e.currentTarget;
               updateAtQuery(el.value, el.selectionStart);
-              userSelectionRef.current = { start: el.selectionStart, end: el.selectionEnd };
-            }}
-            onFocus={(e) => {
-              isUserFocusedRef.current = true;
-              userSelectionRef.current = { start: e.currentTarget.selectionStart, end: e.currentTarget.selectionEnd };
-            }}
-            onBlur={(e) => {
-              if (!allowsAutomaticEditableFocus()) {
-                isUserFocusedRef.current = false;
-                userSelectionRef.current = null;
-                return;
-              }
-              const related = e.relatedTarget as HTMLElement | null;
-              if (related && related !== document.body && !e.currentTarget.contains(related)) {
-                isUserFocusedRef.current = false;
-                userSelectionRef.current = null;
-                return;
-              }
-              queueMicrotask(() => {
-                if (isUserFocusedRef.current && (document.activeElement === document.body || document.activeElement === null)) {
-                  const ta = textareaRef.current;
-                  if (ta && ta.isConnected && ta.style.display !== "none") {
-                    focusEditable(ta, { preventScroll: true });
-                    if (userSelectionRef.current) {
-                      try { ta.setSelectionRange(userSelectionRef.current.start, userSelectionRef.current.end); } catch (_) {}
-                    }
-                  }
-                }
-              });
             }}
             onKeyDown={handleKeyDown}
             onCompositionStart={() => {

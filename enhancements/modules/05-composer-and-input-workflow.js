@@ -12448,7 +12448,7 @@
   });
 
   // ==========================================
-  // 新建会话光标自动聚焦输入框 (New Session Autofocus - 根本级架构支持双态编辑器与防失焦)
+  // 新建会话光标自动聚焦输入框
   // ==========================================
   function findActiveComposerEditable() {
     const textarea = findComposerTextarea();
@@ -12480,11 +12480,8 @@
     }
   }
 
-  let newSessionFocusGuardUntil = 0;
-
   function triggerNewSessionComposerFocus() {
     if (isMobileEnvironment()) return;
-    newSessionFocusGuardUntil = performance.now() + 650;
     let frameCount = 0;
     const maxFrames = 15;
     const poll = () => {
@@ -12508,7 +12505,7 @@
     return false;
   }
 
-  // 点击新建按钮触发聚焦与守卫
+  // 点击新建按钮触发聚焦
   addManagedListener(document, "click", (e) => {
     if (isNewSessionButton(e.target)) {
       triggerNewSessionComposerFocus();
@@ -12522,57 +12519,5 @@
     }
   }, true);
 
-  let lastComposerInteractionTime = 0;
-  let userExplicitExitedComposer = false;
-
-  const recordComposerActive = () => {
-    lastComposerInteractionTime = Date.now();
-    userExplicitExitedComposer = false;
-  };
-
-  addManagedListener(document, "focusin", (e) => {
-    const target = e.target;
-    if (target && (target.matches?.("textarea.chat-input-textarea") || target.closest?.("fieldset, .pi-enh-cursor-composer"))) {
-      recordComposerActive();
-    } else if (target && target !== document.body) {
-      userExplicitExitedComposer = true;
-    }
-  }, true);
-
-  addManagedListener(document, "pointerdown", (e) => {
-    const target = e.target;
-    if (target && (target.matches?.("textarea.chat-input-textarea") || target.closest?.("fieldset, .pi-enh-cursor-composer"))) {
-      recordComposerActive();
-    } else if (target && target.closest?.("button, a, input, select, [role='button'], .sidebar-container, [role='dialog']")) {
-      userExplicitExitedComposer = true;
-    }
-  }, true);
-
-  addManagedListener(document, "input", (e) => {
-    const target = e.target;
-    if (target && (target.matches?.("textarea.chat-input-textarea") || target.closest?.("fieldset, .pi-enh-cursor-composer"))) {
-      recordComposerActive();
-    }
-  }, true);
-
-  // 全生命周期防失焦守护：当焦点非预期坠落到 document.body 时进行自愈恢复
-  addManagedListener(document, "focusout", (e) => {
-    if (isMobileEnvironment()) return;
-    const related = e.relatedTarget;
-    if (related && related !== document.body) {
-      return;
-    }
-
-    queueMicrotask(() => {
-      if (document.activeElement === document.body || document.activeElement === null) {
-        const inNewSessionWindow = performance.now() < newSessionFocusGuardUntil;
-        const inActiveEditWindow = !userExplicitExitedComposer && (Date.now() - lastComposerInteractionTime < 3500);
-
-        if (inNewSessionWindow || inActiveEditWindow) {
-          focusComposerEditable({ force: true });
-        }
-      }
-    });
-  }, true);
-
+  // 聚焦只由明确的输入/新建动作触发；正文拖选造成的失焦应交给浏览器。
   window.__PI_ENH_FOCUS_COMPOSER__ = focusComposerEditable;

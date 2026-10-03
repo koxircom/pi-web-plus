@@ -1,41 +1,39 @@
-> **v1.3.0** uses Pi Coding Agent **1.0.0**. Native React owns the composer, settings, branding, session cache and Minimap. Shared enhancement styles ship in the native CSS pipeline; workbook/usage resources load on demand. Install the prebuilt archive from [Releases](https://github.com/koxircom/pi-web-plus/releases/tag/v1.3.0). Legacy built-file injection scripts are not the upgrade path for this edition.
+> **Pi Web Plus v1.3.2** 基于 Pi Coding Agent 1.0.0。通过 [GitHub Releases](https://github.com/koxircom/pi-web-plus/releases/tag/v1.3.2) 安装预构建包；本地服务默认只监听 `127.0.0.1`。
 
-# Pi Web Standalone Edition
+# Pi Web Plus
 
-[中文文档](./README.zh-CN.md) | [日本語](./README.ja.md) | [Русский](./README.ru.md)
+[简体中文说明](./README.zh-CN.md) | [日本語](./README.ja.md) | [Русский](./README.ru.md)
 
-Standalone local browser UI for the [pi coding agent](https://github.com/earendil-works/pi) (`@earendil-works/pi-coding-agent`). Pi Web Standalone Edition shares the same local configuration and session files as pi, so you can browse and resume conversations, run agent turns, configure models and resources, and inspect project files from a browser.
+Pi Web Plus 是 [Pi Coding Agent](https://github.com/earendil-works/pi) 的本地浏览器工作台，基于 [agegr/pi-web](https://github.com/agegr/pi-web) 开源项目持续维护。它与 pi 共用本机配置和会话文件，让你在浏览器中继续对话、运行智能体、管理模型，并查看项目文件。
 
-> **Note**: Any third-party upstream static demo reflects the legacy upstream baseline rather than **Pi Web Standalone Edition** (which includes built-in enhancement plugins and standalone release distribution via [`koxircom/pi-web-plus`](https://github.com/koxircom/pi-web-plus)).
+## Pi Web Plus 的特色
 
-![Pi Web displaying a pi session with structured Markdown, tool calls, and project navigation](docs/screenshot2.png)
+- **手机图片编辑**：点开输入框里的图片即可裁剪，或用画笔、矩形标注；保存时可替换当前附件，也可将标注图下载到本地。编辑工具适配手机触控。
+- **会话分组与标签**：会话按项目和 worktree 归集；可置顶、归档、标记未读，并添加多维彩色标签，便于整理长期任务。
+- **增强会话搜索**：用 `Ctrl+F`（macOS 为 `⌘F`）打开搜索，查找会话正文并查看命中片段；选择结果可回到对应消息。项目与归档搜索结果可折叠。
+- **紧凑输入与队列操作**：窄屏友好的输入区将模型和思考级别放在一起；运行中的任务可切换后续模型，并查看、取回排队消息，不打断当前回复。
+- **会话驻留与阅读恢复**：近期会话视图可在标签页缓存并预载；切换回来时恢复该会话的消息锚点和阅读位置。长历史采用分页与视口虚拟化，并支持手机与电脑间同步会话更新。
+- **轻量引用与过程阅读**：选中文字即可复制或引用，给引用添加带序号的可选评论；工具结果集中折叠，便于连续阅读任务说明和回复。
+- **本地项目工作区**：浏览和上传项目文件、查看 Git diff、预览常见文本与媒体文件，并通过 Git worktree 切换工作目录。模型、Provider 登录、插件包和技能也可从网页管理。
 
-## Features
-
-- **Session workspace**: browse, resume, rename, export, and delete conversations grouped by project, with running state, context usage, cost, and compaction details.
-- **Two ways to branch**: **New session** creates an independent session file from an earlier message; **Edit from here** creates a branch inside the current session.
-- **Project file tools**: browse and upload files, inspect Git diffs, and preview source, Markdown, images, audio, PDFs, and DOCX files with automatic refresh.
-- **Git worktrees**: switch checkouts from the sidebar while keeping sessions from the same repository grouped together.
-- **Web-based configuration**: manage provider login and API keys, models, model tests, plugin packages, and skills without leaving Pi Web.
-- **English, Simplified Chinese, and Traditional Chinese UI**: Pi Web follows the browser language initially and provides a language switcher in the top bar.
-- **Built-in Enhancement Plugins Suite**: Modular frontend plugins including session context menus, quick quote action bar, execution duration breakdown tooltip, Token/s speed monitoring, modern settings sidebar, and auto-folding tool cards (see [Enhancements Guide](./enhancements/README.md)).
+Pi Web Plus 保留并扩展 agegr 的 pi-web 开源项目，许可证及原版权声明见 [MIT License](./LICENSE)。本项目使用 [Pi Coding Agent](https://github.com/earendil-works/pi)。
 
 ## Quick Start
 
-Pi Web Standalone requires Node.js 22.19.0 or newer (`node >=22.19`). Check your version with `node --version`, then install the prebuilt release tarball from [`koxircom/pi-web-plus` GitHub Releases](https://github.com/koxircom/pi-web-plus/releases) and start `pi-web`:
+Pi Web Plus requires Node.js 22.19.0 or newer (`node >=22.19`). Check your version with `node --version`, then install the prebuilt release tarball from [`koxircom/pi-web-plus` GitHub Releases](https://github.com/koxircom/pi-web-plus/releases) and start `pi-web`:
 
 ```bash
-npm install -g https://github.com/koxircom/pi-web-plus/releases/download/v1.3.0/pi-web-standalone-1.3.0.tgz
+npm install -g https://github.com/koxircom/pi-web-plus/releases/download/v1.3.2/pi-web-standalone-1.3.2.tgz
 pi-web
 ```
 
-> **Important**: The package name in `package.json` remains `@agegr/pi-web` for compatibility, but Pi Web Standalone is distributed exclusively through [`koxircom/pi-web-plus` GitHub Releases](https://github.com/koxircom/pi-web-plus/releases). Do **not** pull or install `@agegr/pi-web` from the public npm registry, as that would install the legacy upstream package instead of the Standalone Edition.
+> **Important**: The package name in `package.json` remains `@agegr/pi-web` for compatibility, but Pi Web Plus is distributed exclusively through [`koxircom/pi-web-plus` GitHub Releases](https://github.com/koxircom/pi-web-plus/releases). Do **not** pull or install `@agegr/pi-web` from the public npm registry; that is the legacy upstream package, not the Pi Web Plus release.
 
 The CLI opens a browser after the server is ready. If it does not, open [http://127.0.0.1:30141](http://127.0.0.1:30141). Pi Web listens only on `127.0.0.1` by default.
 
 If no model provider is configured yet, open the **Models** panel to sign in or add an API key.
 
-The command above uses the planned `v1.0.2` release asset (`pi-web-standalone-1.0.2.tgz`) as the target format. To install or upgrade to a specific release, stop the running process with `Ctrl+C`, replace both `v1.0.2` and `1.0.2` in the URL with the target `<version>` from [GitHub Releases](https://github.com/koxircom/pi-web-plus/releases), and run the install command again:
+The command above installs v1.3.2. To install or upgrade to another release, stop the running process with `Ctrl+C`, replace `v1.3.2` and `1.3.2` in the URL with the target `<version>` from [GitHub Releases](https://github.com/koxircom/pi-web-plus/releases), and run the install command again:
 
 ```bash
 npm install -g https://github.com/koxircom/pi-web-plus/releases/download/v<version>/pi-web-standalone-<version>.tgz
@@ -79,10 +77,10 @@ Password authentication does not encrypt the connection. Do not expose Pi Web ov
 
 Server-side model and API requests honor the standard `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY` environment variables.
 
-On macOS or Linux (after installing the [GitHub Release tarball](https://github.com/koxircom/pi-web-plus/releases/download/v1.3.0/pi-web-standalone-1.3.0.tgz)):
+On macOS or Linux (after installing the [GitHub Release tarball](https://github.com/koxircom/pi-web-plus/releases/download/v1.3.2/pi-web-standalone-1.3.2.tgz)):
 
 ```bash
-npm install -g https://github.com/koxircom/pi-web-plus/releases/download/v1.3.0/pi-web-standalone-1.3.0.tgz
+npm install -g https://github.com/koxircom/pi-web-plus/releases/download/v1.3.2/pi-web-standalone-1.3.2.tgz
 HTTP_PROXY=http://127.0.0.1:7890 \
 HTTPS_PROXY=http://127.0.0.1:7890 \
 NO_PROXY=localhost,127.0.0.1 \
@@ -92,7 +90,7 @@ pi-web
 On Windows PowerShell:
 
 ```powershell
-npm install -g https://github.com/koxircom/pi-web-plus/releases/download/v1.3.0/pi-web-standalone-1.3.0.tgz
+npm install -g https://github.com/koxircom/pi-web-plus/releases/download/v1.3.2/pi-web-standalone-1.3.2.tgz
 $env:HTTP_PROXY = "http://127.0.0.1:7890"
 $env:HTTPS_PROXY = "http://127.0.0.1:7890"
 $env:NO_PROXY = "localhost,127.0.0.1"

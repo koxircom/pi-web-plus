@@ -3738,30 +3738,44 @@
       display: flex;
     }
     .pi-enh-annotation-badge {
-      position: relative; display: inline-flex; align-items: stretch; width: fit-content !important; max-width: fit-content !important; flex: 0 0 auto !important; align-self: flex-start !important; overflow: hidden;
-      margin: 0 0 8px; padding: 0; border: 1px solid var(--border, #52525b); border-radius: 9px;
-      background: color-mix(in srgb, var(--bg-selected, #27272a) 82%, transparent); color: var(--text, #f4f4f5);
-      font: inherit; font-size: 13px; font-weight: 650;
+      position: relative; display: inline-flex; align-items: center; width: fit-content !important; max-width: fit-content !important; flex: 0 0 auto !important; align-self: flex-start !important; overflow: visible;
+      margin: 0 0 8px; padding: 0 3px; border: 1px solid color-mix(in srgb, var(--border, #52525b) 82%, #a1a1aa); border-radius: 999px;
+      background: color-mix(in srgb, var(--bg-panel, #292929) 94%, #52525b); color: var(--text, #e4e4e7);
+      box-shadow: 0 1px 2px rgba(0, 0, 0, .16); font: inherit; font-size: 12px; font-weight: 550;
+      transition: border-color 0.14s ease, background 0.14s ease;
     }
-    .pi-enh-annotation-badge:hover, .pi-enh-annotation-badge:focus-within { border-color: var(--accent, #38bdf8); color: var(--accent, #38bdf8); }
+    .pi-enh-annotation-badge:hover, .pi-enh-annotation-badge:focus-within { border-color: color-mix(in srgb, var(--border, #52525b) 56%, #d4d4d8); background: color-mix(in srgb, var(--bg-panel, #292929) 88%, #52525b); }
     .pi-enh-annotation-badge-summary, .pi-enh-annotation-badge-remove { border: 0; background: transparent; color: inherit; font: inherit; cursor: pointer; }
-    .pi-enh-annotation-badge-summary { display: inline-flex; align-items: center; gap: 7px; padding: 7px 10px; }
+    .pi-enh-annotation-badge-summary { display: inline-flex; align-items: center; gap: 6px; min-height: 27px; padding: 3px 6px; border-radius: 999px; }
     .pi-enh-annotation-badge-summary::before { display: none !important; content: none !important; }
+    .pi-enh-annotation-badge-icon { display: inline-flex; flex: 0 0 auto; color: #a1a1aa; }
+    .pi-enh-annotation-badge-icon svg { display: block; width: 14px; height: 14px; fill: none; stroke: currentColor; stroke-width: 1.65; stroke-linecap: round; stroke-linejoin: round; }
     .pi-enh-annotation-checkbox {
-      appearance: none; -webkit-appearance: none; box-sizing: border-box; width: 14px; height: 14px; margin: 0; padding: 0;
-      border: 1.5px solid currentColor; border-radius: 3.5px; background: transparent; cursor: pointer;
-      position: relative; display: inline-grid; place-content: center; flex-shrink: 0; transition: all 0.12s ease; opacity: 0.85;
+      appearance: none; -webkit-appearance: none; box-sizing: border-box; width: 14px; height: 14px; flex: 0 0 14px; margin: 0 0 0 -14px; padding: 0;
+      border: 1.4px solid currentColor; border-radius: 4px; background: transparent; cursor: pointer;
+      position: relative; display: inline-grid; place-content: center; opacity: 0; pointer-events: none; transform: scale(.78); transition: opacity 0.12s ease, margin 0.12s ease, transform 0.12s ease;
     }
-    .pi-enh-annotation-checkbox:hover { opacity: 1; border-color: var(--accent, #38bdf8); }
-    .pi-enh-annotation-checkbox:checked { opacity: 1; background: var(--accent, #38bdf8); border-color: var(--accent, #38bdf8); }
+    .pi-enh-annotation-badge[data-annotation-count="1"] .pi-enh-annotation-checkbox { display: none; }
+    .pi-enh-annotation-badge[data-annotation-count]:not([data-annotation-count="1"]):hover .pi-enh-annotation-checkbox,
+    .pi-enh-annotation-badge[data-annotation-count]:not([data-annotation-count="1"]):focus-within .pi-enh-annotation-checkbox { margin-left: 0; opacity: 1; pointer-events: auto; transform: none; }
+    .pi-enh-annotation-checkbox:hover { border-color: #d4d4d8; }
+    .pi-enh-annotation-checkbox:checked { opacity: 1; background: #71717a; border-color: #a1a1aa; }
     .pi-enh-annotation-checkbox:checked::after {
       content: ""; width: 8px; height: 4px; border-left: 1.8px solid #ffffff; border-bottom: 1.8px solid #ffffff;
       transform: rotate(-45deg) translate(0.5px, -0.5px); display: block;
     }
-    .pi-enh-annotation-checkbox:focus-visible { outline: 2px solid var(--accent, #38bdf8); outline-offset: 1px; }
-    .pi-enh-annotation-badge-summary:focus-visible, .pi-enh-annotation-badge-remove:focus-visible { outline: 2px solid var(--accent, #38bdf8); outline-offset: -2px; }
-    .pi-enh-annotation-badge-remove { display: grid; place-items: center; width: 34px; padding: 0; border-left: 1px solid color-mix(in srgb, currentColor 25%, transparent); font-size: 19px; line-height: 1; }
-    .pi-enh-annotation-badge-remove:hover { background: rgba(248, 113, 113, .14); color: #fca5a5; }
+    .pi-enh-annotation-checkbox:focus-visible { outline: 2px solid #d4d4d8; outline-offset: 2px; }
+    .pi-enh-annotation-badge-summary:focus-visible { outline: 2px solid #a1a1aa; outline-offset: 1px; }
+    .pi-enh-annotation-badge-remove { display: grid; flex: 0 0 0; place-items: center; box-sizing: border-box; width: 0; height: 20px; min-width: 0; margin: 0; padding: 0; border: 0 solid currentColor; border-radius: 50%; opacity: 0; overflow: hidden; transition: width 0.14s ease, flex-basis 0.14s ease, margin 0.14s ease, opacity 0.14s ease, background 0.14s ease; }
+    .pi-enh-annotation-badge:hover .pi-enh-annotation-badge-remove,
+    .pi-enh-annotation-badge:focus-within .pi-enh-annotation-badge-remove { flex-basis: 20px; width: 20px; margin: 0 2px 0 3px; border-width: 1px; opacity: 1; }
+    .pi-enh-annotation-badge-remove:hover { background: color-mix(in srgb, currentColor 10%, transparent); }
+    .pi-enh-annotation-badge-remove:focus-visible { outline: 2px solid #a1a1aa; outline-offset: 2px; }
+    .pi-enh-annotation-badge-remove svg { display: block; width: 11px; height: 11px; fill: none; stroke: currentColor; stroke-width: 1.45; stroke-linecap: round; }
+    @media (hover: none), (pointer: coarse) {
+      .pi-enh-annotation-badge[data-annotation-count]:not([data-annotation-count="1"]) .pi-enh-annotation-checkbox { margin-left: 0; opacity: 1; pointer-events: auto; transform: none; }
+      .pi-enh-annotation-badge-remove { flex-basis: 20px; width: 20px; margin: 0 2px 0 3px; border-width: 1px; opacity: 1; }
+    }
     ::highlight(pi-enh-annotation-selection) { background: #0f5f9f; color: #fff; }
     .pi-enh-annotation-marker {
       position: fixed; z-index: 85; display: grid; place-items: center; width: 22px; height: 22px; padding: 0;
@@ -3826,24 +3840,6 @@
     .pi-enh-annotation-list-delete { display: grid; place-items: center; width: 32px; height: 32px; padding: 0; border: 0; border-radius: 8px; background: transparent; color: var(--text-muted, #a1a1aa); cursor: pointer; }
     .pi-enh-annotation-list-delete:hover { background: rgba(248, 113, 113, .12); }
     .pi-enh-annotation-list-delete svg { width: 17px; height: 17px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
-    button[data-pi-enh-annotation-enabled="true"],
-    button[data-pi-enh-empty-send-continue="true"] {
-      background: var(--accent, #3b82f6) !important;
-      color: var(--accent-contrast, #fff) !important;
-      cursor: pointer !important;
-      opacity: 1 !important;
-      pointer-events: auto !important;
-      box-shadow: 0 1px 3px color-mix(in srgb, var(--accent, #3b82f6) 25%, transparent) !important;
-    }
-    button[data-pi-enh-annotation-enabled="true"]:hover,
-    button[data-pi-enh-empty-send-continue="true"]:hover {
-      background: color-mix(in srgb, var(--accent, #3b82f6) 88%, #fff) !important;
-    }
-    button[data-pi-enh-annotation-enabled="true"] svg,
-    button[data-pi-enh-empty-send-continue="true"] svg {
-      color: var(--accent-contrast, #fff) !important;
-      fill: currentColor !important;
-    }
     @media (max-width: 680px) {
       .pi-enh-annotation-editor { max-height: min(400px, calc(100vh - 24px)); padding: 5px 7px; }
       .pi-enh-annotation-list { max-height: min(400px, calc(100vh - 24px)); padding: 12px; }

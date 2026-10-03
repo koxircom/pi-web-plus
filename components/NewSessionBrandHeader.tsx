@@ -69,22 +69,23 @@ export function NewSessionUpdateLink({
         alignItems: "center",
         alignSelf: "center",
         gap: 3,
-        minHeight: 28,
+        minHeight: 0,
         minWidth: 0,
-        padding: "0 6px",
+        padding: 0,
         background: "transparent",
         borderRadius: 5,
         color: "var(--accent)",
-        fontSize: 12,
+        fontSize: 11,
         fontWeight: 600,
         lineHeight: 1.2,
         textDecoration: "none",
         transition: "background 0.12s",
         whiteSpace: "nowrap",
-        flexShrink: 0,
+        flexShrink: 1,
+        maxWidth: "100%",
       }}
     >
-      <span style={{ overflow: "hidden", textOverflow: "ellipsis" }}>v{update.latestVersion}</span>
+      <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>v{update.latestVersion}</span>
       <svg
         width="12"
         height="12"
@@ -172,7 +173,6 @@ export function NewSessionBrandHeader({
             height={isMobile ? 28.8 : 32}
             style={{ flexShrink: 0 }}
           />
-          <NewSessionUpdateLink label={getReleaseLabel} updateData={updateData} installedVersion={appVersion} />
         </div>
         <div
           data-pi-element="version-info-col"
@@ -181,9 +181,12 @@ export function NewSessionBrandHeader({
             flexDirection: "column",
             alignItems: "flex-end",
             gap: 2,
-            flexShrink: 0,
+            flexShrink: 1,
+            minWidth: 0,
+            maxWidth: "60%",
           }}
         >
+          <div data-pi-element="web-version-row" style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 6, minWidth: 0, maxWidth: "100%" }}>
           <a
             href={BRAND_GITHUB_URL}
             target="_blank"
@@ -192,6 +195,8 @@ export function NewSessionBrandHeader({
             title={`打开 GitHub 仓库 (${BRAND_GITHUB_URL})`}
             style={{
               fontSize: 11,
+              whiteSpace: "nowrap",
+              flexShrink: 0,
               color: "var(--text-muted)",
               textDecoration: "none",
               cursor: "pointer",
@@ -202,11 +207,13 @@ export function NewSessionBrandHeader({
           >
             web <span style={{ color: "var(--text)" }}>v{appVersion}</span>
           </a>
-          <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 2 }}>
+          <NewSessionUpdateLink label={getReleaseLabel} updateData={updateData} installedVersion={appVersion} />
+          </div>
+          <div data-pi-element="pi-version-row" style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 6, minWidth: 0, maxWidth: "100%" }}>
             <span
               data-pi-element="pi-version"
               title={`当前已安装的 Pi Agent 版本：v${piVersion}`}
-              style={{ fontSize: 11, color: "var(--text-muted)", whiteSpace: "nowrap" }}
+              style={{ fontSize: 11, color: "var(--text-muted)", whiteSpace: "nowrap", flexShrink: 0 }}
             >
               pi <span style={{ color: "var(--text)" }}>v{piVersion}</span>
             </span>
@@ -218,9 +225,9 @@ export function NewSessionBrandHeader({
                 data-pi-element="pi-latest-release"
                 title={`GitHub 官方最新版本：v${piRelease.latestVersion}（当前已安装：v${piVersion}）`}
                 aria-label={`在 GitHub 查看 Pi Agent 最新版本 v${piRelease.latestVersion}；当前已安装 v${piVersion}`}
-                style={{ fontSize: 11, color: "var(--accent)", textDecoration: "none", whiteSpace: "nowrap" }}
+                style={{ display: "inline-flex", alignItems: "center", gap: 3, minWidth: 0, fontSize: 11, color: "var(--accent)", textDecoration: "none", whiteSpace: "nowrap" }}
               >
-                v{piRelease.latestVersion} ↗
+                <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis" }}>v{piRelease.latestVersion}</span><span style={{ flexShrink: 0 }}>↗</span>
               </a>
             ) : null}
           </div>

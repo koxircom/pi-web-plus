@@ -315,6 +315,8 @@ export class AgentSessionWrapper {
   private mcpHostDisposed = false;
   // The MCP wait of the prompt being admitted; Stop ends it.
   private mcpPromptWait: { controller: AbortController; done: Promise<void> } | null = null;
+  // Owns Stop cleanup until the MCP wait and SDK abort have both settled.
+  private abortCleanupPromise: Promise<void> | null = null;
   private unsubscribe: (() => void) | null = null;
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
   private onDestroyCallback: (() => void) | null = null;
@@ -840,7 +842,15 @@ export class AgentSessionWrapper {
         }
       }
 
-      case "abort":
+      case "abort": {
+        if (this.abortCleanupPromise) return { accepted: true };
+
+        let resolveAbortCleanup!: () => void;
+        const abortCleanupOwner = new Promise<void>((resolve) => {
+          resolveAbortCleanup = resolve;
+        });
+        this.abortCleanupPromise = abortCleanupOwner;
+
         // Stop cancels deferred lock work, but never releases a lock while a tool is still writing.
         try {
           cancelSessionWakeups(this.sessionId);
@@ -849,19 +859,53 @@ export class AgentSessionWrapper {
         }
         this.forceShutdownOnIdle = true;
         // Stop must unwind extension commands that have not started the agent yet.
-        this.extensionUiAbortController.abort(new DOMException("Extension UI cancelled by Stop", "AbortError"));
-        // A prompt still waiting for MCP servers is withdrawn before it starts a run.
-        if (this.mcpPromptWait) {
-          const wait = this.mcpPromptWait;
-          wait.controller.abort();
-          await wait.done;
-        }
         try {
-          await this.withFinalIdleReset(() => this.inner.abort());
-          return null;
-        } finally {
-          if (!this.isRunning()) this.forceShutdownOnIdle = false;
+          this.extensionUiAbortController.abort(new DOMException("Extension UI cancelled by Stop", "AbortError"));
+        } catch (error) {
+          console.error("[pi-web] failed to cancel extension UI on Stop:", error instanceof Error ? error.message : error);
         }
+        // A prompt still waiting for MCP servers is withdrawn before it starts a run.
+        const mcpWait = this.mcpPromptWait;
+        if (mcpWait) {
+          try {
+            mcpWait.controller.abort();
+          } catch (error) {
+            console.error("[pi-web] failed to cancel MCP prompt wait on Stop:", error instanceof Error ? error.message : error);
+          }
+        }
+        let sdkAbort: Promise<void>;
+        try {
+          // AgentSession.abort() signals the active run synchronously, then waits for idle.
+          sdkAbort = this.inner.abort();
+        } catch (error) {
+          sdkAbort = Promise.reject(error);
+        }
+        void Promise.allSettled([mcpWait?.done ?? Promise.resolve(), sdkAbort])
+          .then(([mcpResult, abortResult]) => {
+            if (mcpResult.status === "rejected") {
+              console.error("[pi-web] MCP prompt wait cleanup failed after Stop:", mcpResult.reason instanceof Error ? mcpResult.reason.message : mcpResult.reason);
+            }
+            if (abortResult.status === "rejected") {
+              console.error("[pi-web] SDK abort cleanup failed after Stop:", abortResult.reason instanceof Error ? abortResult.reason.message : abortResult.reason);
+              this.emit({ type: "extension_ui_request", id: randomUUID(), method: "notify", notifyType: "error", message: "停止请求未能完成，请重试；后台任务尚未确认结束。" } as ExtensionUiRequest as AgentEvent);
+            }
+          })
+          .catch((error) => {
+            console.error("[pi-web] Stop cleanup failed:", error instanceof Error ? error.message : error);
+          })
+          .finally(() => {
+            try {
+              if (!this.isRunning()) this.forceShutdownOnIdle = false;
+              this.resetIdleTimer();
+            } catch (error) {
+              console.error("[pi-web] failed to reset session idle timer after Stop:", error instanceof Error ? error.message : error);
+            } finally {
+              if (this.abortCleanupPromise === abortCleanupOwner) this.abortCleanupPromise = null;
+              resolveAbortCleanup();
+            }
+          });
+        return { accepted: true };
+      }
 
       case "get_state": {
         const model = this.inner.model;

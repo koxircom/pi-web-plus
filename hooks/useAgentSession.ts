@@ -44,6 +44,7 @@ import { CONFIGURED_TOOL_PRESET, getPresetFromToolNames, getToolNamesForPreset, 
 import type { SessionStatsInfo } from "@/lib/pi-types";
 import { mergeSessionStats, type SessionFileStats } from "@/lib/session-stats";
 import { userMessageKey } from "@/lib/prompt-recovery";
+import { waitForPromptPreparation } from "@/lib/prompt-preparation";
 import { AgentEventConnection } from "@/lib/agent-event-connection";
 import { isNestedToolExecutionEvent, isSystemMessageEvent } from "@/lib/agent-event-wire";
 import { getToolExecutionProgress } from "@/lib/tool-execution-progress";
@@ -161,6 +162,7 @@ type NoticeAction =
   | { type: "remove"; id: string };
 
 export type AgentPhase =
+  | { kind: "stopping" }
   | { kind: "waiting_model" }
   | { kind: "running_command" }
   | { kind: "running_tools"; tools: { id: string; name: string; progress?: string }[] }
@@ -418,6 +420,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [compactError, setCompactError] = useState<string | null>(null);
   const [compactResult, setCompactResult] = useState<CompactResultInfo | null>(null);
   const [agentPhase, setAgentPhase] = useState<AgentPhase>(null);
+  const [stopRequested, setStopRequested] = useState(false);
+  const preparationRef = useRef<AbortController | null>(null);
+  const stopInFlightRef = useRef<Promise<void> | null>(null);
+  useEffect(() => { setStopRequested(false); }, [session?.id]);
+  useEffect(() => {
+    if (!agentRunning && !bashRunning) setStopRequested(false);
+  }, [agentRunning, bashRunning]);
   const [promptAnchorActive, setPromptAnchorActive] = useState(false);
   const [showScrollToBottom, setShowScrollToBottom] = useState(false);
   const [slashCommands, setSlashCommands] = useState<SlashCommandInfo[]>([]);
@@ -728,7 +737,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       }
 
       messagesLoaded = true;
-      if (showLoading) setLoading(false);
+      // A silent replacement owns settlement of an earlier visible load too.
+      setLoading(false);
       if (!includeState) return null;
 
       try {
@@ -775,7 +785,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       if (isCurrentRead()) setError(String(e));
       return "error";
     } finally {
-      if (ownsCurrentView() && showLoading && !messagesLoaded) {
+      if (ownsCurrentView() && !messagesLoaded) {
         if (willRetryAbort) {
           if (dataRef.current) setLoading(false);
         } else if (!isEpochFresh(sid, requestEpoch) && !options?.streamRetry) {
@@ -1797,22 +1807,27 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     const piImages = images?.map((img) => ({ type: "image" as const, data: img.data, mimeType: img.mimeType }));
     let sentSessionId: string | null = null;
     let promptRequestStarted = false;
+    const preparation = new AbortController();
+    preparationRef.current = preparation;
+    setStopRequested(false);
+    const prepare = <T,>(operation: Promise<T>) => waitForPromptPreparation(operation, preparation.signal);
 
     try {
       if (isNew && newSessionCwd) {
         const selectedModel = newSessionModel;
-        const existingSid = sessionIdRef.current ?? await ensuringNewSessionRef.current;
-        const sid = existingSid ?? await ensureNewSession();
+        const existingSid = sessionIdRef.current ?? await prepare(ensuringNewSessionRef.current ?? Promise.resolve(null));
+        const sid = existingSid ?? await prepare(ensureNewSession());
 
         if (!sid) throw new Error("Unable to create a session for the prompt");
         sentSessionId = sid;
         if (selectedModel) {
           setPendingModel(selectedModel);
           if (existingSid) {
-            await sendAgentCommand(sid, { type: "set_model", provider: selectedModel.provider, modelId: selectedModel.modelId });
+            await prepare(sendAgentCommand(sid, { type: "set_model", provider: selectedModel.provider, modelId: selectedModel.modelId }));
           }
         }
-        await ensureEventsConnected(sid);
+        await prepare(ensureEventsConnected(sid));
+        preparationRef.current = null;
         promptRequestStarted = true;
         bumpSessionEpoch(sid);
         await sendAgentCommand(sid, {
@@ -1823,7 +1838,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         promoteNewSession(1, message);
       } else if (session) {
         sentSessionId = session.id;
-        await ensureEventsConnected(session.id);
+        await prepare(ensureEventsConnected(session.id));
+        preparationRef.current = null;
         promptRequestStarted = true;
         bumpSessionEpoch(session.id);
         await sendAgentCommand(session.id, {
@@ -1838,7 +1854,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         void waitForPromptSettlement(sentSessionId, promptRunId);
       }
     } catch (e) {
-      console.error("Failed to send message:", e);
+      const cancelledBeforeDispatch = preparation.signal.aborted && !promptRequestStarted;
+      if (!cancelledBeforeDispatch) console.error("Failed to send message:", e);
       const definitivelyRejected = !promptRequestStarted || isPromptRejectedError(e);
       // A transport/proxy failure after dispatch is ambiguous: the server may
       // have accepted the prompt before the response was lost. Keep SSE alive
@@ -1854,13 +1871,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           ? prev
           : [...prev.slice(0, optimisticIndex), ...prev.slice(optimisticIndex + 1)];
       });
-      addNotice({ type: "error", message: e instanceof Error ? e.message : String(e) });
+      if (!cancelledBeforeDispatch) addNotice({ type: "error", message: e instanceof Error ? e.message : String(e) });
       restoreSubmission(message, images, composerDraftKey);
       optimisticUserMessageKeyRef.current = null;
       // Rejection only describes this submission. Another tab or an event we
       // missed may still have a real run active for the same session, so keep
       // its SSE connection until server state says the wrapper is idle.
-      if (sentSessionId) {
+      if (sentSessionId && !cancelledBeforeDispatch) {
         void reconcileAgentState(sentSessionId);
         return;
       }
@@ -1869,6 +1886,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       setAgentRunning(false);
       setAgentPhase(null);
       dispatch({ type: "end" });
+    } finally {
+      if (preparationRef.current === preparation) preparationRef.current = null;
     }
   }, [isNew, newSessionCwd, newSessionModel, session, ensureNewSession, ensureEventsConnected, promoteNewSession, waitForPromptSettlement, addNotice, cancelEventStreamGrace, closeEvents, composerDraftKey, reconcileAgentState, restoreSubmission]);
 
@@ -1878,8 +1897,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     bashRunningRef.current = true;
     setPendingBash({ command, excludeFromContext });
     setBashRunning(true);
+    setStopRequested(false);
+    const preparation = new AbortController();
+    preparationRef.current = preparation;
     try {
-      const sid = sessionIdRef.current ?? session?.id ?? await ensureNewSession();
+      const sid = sessionIdRef.current ?? session?.id ?? await waitForPromptPreparation(ensureNewSession(), preparation.signal);
+      if (preparation.signal.aborted) throw new DOMException("Preparation cancelled", "AbortError");
+      preparationRef.current = null;
       if (!sid) throw new Error("Unable to create a session for the shell command");
       bumpSessionEpoch(sid);
       await sendAgentCommand(sid, {
@@ -1890,10 +1914,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       await loadSession(sid);
       promoteNewSession(1, inputText);
     } catch (e) {
-      console.error("Failed to execute shell command:", e);
-      addNotice({ type: "error", message: e instanceof Error ? e.message : String(e) });
+      if (!preparation.signal.aborted) {
+        console.error("Failed to execute shell command:", e);
+        addNotice({ type: "error", message: e instanceof Error ? e.message : String(e) });
+      }
       restoreSubmission(inputText, undefined, composerDraftKey);
     } finally {
+      if (preparationRef.current === preparation) preparationRef.current = null;
       bashRunningRef.current = false;
       setPendingBash(null);
       setBashRunning(false);
@@ -1902,22 +1929,27 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   executeBashRef.current = executeBash;
 
   const handleAbort = useCallback(async () => {
-    const sid = sessionIdRef.current;
-    if (!sid) return;
-    if (bashRunningRef.current) {
-      try {
-        await sendAgentCommand(sid, { type: "abort_bash" });
-      } catch (e) {
-        console.error("Failed to abort bash:", e);
-      }
+    if (preparationRef.current) {
+      preparationRef.current.abort();
       return;
     }
-    try {
-      await sendAgentCommand(sid, { type: "abort" });
-    } catch (e) {
-      console.error("Failed to abort:", e);
-    }
-  }, []);
+    if (stopInFlightRef.current) return stopInFlightRef.current;
+    const sid = sessionIdRef.current;
+    if (!sid) return;
+    setStopRequested(true);
+    const operation = (async () => {
+      try {
+        await sendAgentCommand(sid, { type: bashRunningRef.current ? "abort_bash" : "abort" });
+      } catch (e) {
+        setStopRequested(false);
+        console.error("Failed to abort:", e);
+        addNotice({ type: "error", message: "停止请求未确认，请重试。" });
+      }
+    })();
+    stopInFlightRef.current = operation;
+    try { await operation; }
+    finally { if (stopInFlightRef.current === operation) stopInFlightRef.current = null; }
+  }, [addNotice]);
 
   const handleFork = useCallback(async (entryId: string) => {
     if (bashRunningRef.current) return;
@@ -2782,7 +2814,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     notices: noticeState.visible, extensionDialog, waitingExtensionDialogCount, extensionCustomUi, waitingExtensionCustomUiCount, extensionStatuses, extensionWidgets, respondToExtensionUi, sendExtensionCustomInput,
     isAutoModelSelection: isNew && newSessionModel === null,
     isAutoThinkingSelection: isNew && newSessionThinkingLevel === null,
-    agentPhase,
+    agentPhase: stopRequested && (agentRunning || bashRunning) ? { kind: "stopping" } as AgentPhase : agentPhase,
     isNew,
     promptAnchorActive,
     showScrollToBottom,

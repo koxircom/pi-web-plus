@@ -1898,6 +1898,7 @@
     annotationItems = annotationItems.filter((item) => item.id !== id);
     annotationAnchors.delete(id);
     document.querySelector(`.pi-enh-annotation-marker[data-annotation-id="${id}"]`)?.remove();
+    clearQuoteSelection();
     persistAnnotations();
     syncAnnotationMarkers();
     return listAnnotations();
@@ -1919,6 +1920,7 @@
     annotationItems = [];
     annotationAnchors.clear();
     removeAnnotationMarkers();
+    clearQuoteSelection();
     persistAnnotations();
     return [];
   }
@@ -2009,12 +2011,6 @@
     };
 
     doFocus();
-    if (typeof requestAnimationFrame === "function") {
-      requestAnimationFrame(doFocus);
-    }
-    addManagedTimeout(doFocus, 30);
-    addManagedTimeout(doFocus, 90);
-    addManagedTimeout(doFocus, 200);
   }
 
   function removeAnnotationUi() {
@@ -2157,6 +2153,12 @@
         });
         summary.appendChild(checkbox);
 
+        const icon = document.createElement("span");
+        icon.className = "pi-enh-annotation-badge-icon";
+        icon.setAttribute("aria-hidden", "true");
+        icon.innerHTML = '<svg viewBox="0 0 24 24"><path d="M20 11.5a7.5 7.5 0 0 1-7.5 7.5H6l-3 2v-5.5A7.5 7.5 0 1 1 20 11.5Z"/><path d="M8 10h8M8 13.5h5"/></svg>';
+        summary.appendChild(icon);
+
         const label = document.createElement("span");
         label.className = "pi-enh-annotation-badge-label";
         summary.appendChild(label);
@@ -2179,54 +2181,42 @@
         annotationRail.appendChild(annotationBadge);
       }
     }
+    annotationBadge.setAttribute("data-annotation-count", String(items.length));
     const label = annotationBadge.querySelector(".pi-enh-annotation-badge-label");
     if (label) label.textContent = annotationLabel();
     const checkbox = annotationBadge.querySelector(".pi-enh-annotation-checkbox");
     if (checkbox) checkbox.checked = annotationBatchSelectChecked;
 
     const existingRemove = annotationBadge.querySelector(".pi-enh-annotation-badge-remove");
-    if (items.length === 1) {
+    const showRemove = items.length === 1 || (items.length > 1 && annotationBatchSelectChecked);
+    if (showRemove) {
+      const remove = existingRemove || createAnnotationButton("", "pi-enh-annotation-badge-remove", "");
       if (!existingRemove) {
-        const remove = createAnnotationButton("×", "pi-enh-annotation-badge-remove", "删除这条注释");
-        remove.setAttribute("title", "删除这条注释");
+        remove.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m7 7 10 10M17 7 7 17"/></svg>';
         remove.addEventListener("click", (event) => {
           event.preventDefault();
           event.stopPropagation();
-          const soleItem = listAnnotations();
-          if (soleItem.length === 1) removeAnnotation(soleItem[0].id);
+          const currentItems = listAnnotations();
+          if (currentItems.length === 1) {
+            removeAnnotation(currentItems[0].id);
+          } else if (currentItems.length > 1 && annotationBatchSelectChecked) {
+            clearAnnotations();
+            showToast(`已清空全部 ${currentItems.length} 条注释`);
+          } else {
+            return;
+          }
           annotationBatchSelectChecked = false;
           closeAnnotationList();
+          closeAnnotationEditor();
           syncAnnotationComposer();
         });
         annotationBadge.appendChild(remove);
-      } else {
-        existingRemove.setAttribute("aria-label", "删除这条注释");
-        existingRemove.setAttribute("title", "删除这条注释");
       }
-    } else if (items.length > 1) {
-      if (annotationBatchSelectChecked) {
-        if (!existingRemove) {
-          const removeAll = createAnnotationButton("×", "pi-enh-annotation-badge-remove", `清空全部 ${items.length} 条注释`);
-          removeAll.setAttribute("title", `清空全部 ${items.length} 条注释`);
-          removeAll.addEventListener("click", (event) => {
-            event.preventDefault();
-            event.stopPropagation();
-            const count = listAnnotations().length;
-            clearAnnotations();
-            annotationBatchSelectChecked = false;
-            closeAnnotationList();
-            closeAnnotationEditor();
-            syncAnnotationComposer();
-            showToast(`已清空全部 ${count} 条注释`);
-          });
-          annotationBadge.appendChild(removeAll);
-        } else {
-          existingRemove.setAttribute("aria-label", `清空全部 ${items.length} 条注释`);
-          existingRemove.setAttribute("title", `清空全部 ${items.length} 条注释`);
-        }
-      } else if (existingRemove) {
-        existingRemove.remove();
-      }
+      const actionLabel = items.length === 1 ? "删除这条注释" : `清空全部 ${items.length} 条注释`;
+      remove.setAttribute("aria-label", actionLabel);
+      remove.setAttribute("title", actionLabel);
+    } else if (existingRemove) {
+      existingRemove.remove();
     }
   }
 
@@ -2759,7 +2749,7 @@
     const save = createAnnotationButton("", "pi-enh-annotation-save", itemId ? "保存注释更改" : "保存注释");
     save.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m5 12 4.5 4.5L19 7"/></svg>';
     if (!itemId) annotationDraftMarker = createAnnotationMarker(listAnnotations().length + 1, anchorRect, null);
-    const saveAnnotation = () => {
+    const saveAnnotation = (restoreFocus = true) => {
       if (itemId) {
         updateAnnotation(itemId, selectedQuote, comment.value);
       } else {
@@ -2775,8 +2765,7 @@
       syncAnnotationComposer();
       syncAnnotationMarkers();
       showToast("已保存注释");
-      focusComposerTextarea();
-      addManagedTimeout(focusComposerTextarea, 40);
+      if (restoreFocus) focusComposerTextarea();
     };
     save.addEventListener("click", saveAnnotation);
     activeAnnotationSaveHandler = saveAnnotation;
@@ -3231,11 +3220,24 @@
   }
 
   function hideQuoteBar(force = false) {
+    if (force) {
+      if (quoteBarInteractingTimer) clearManagedTimeout(quoteBarInteractingTimer);
+      quoteBarInteractingTimer = null;
+      quoteBarInteracting = false;
+    }
     if (quoteBarInteracting && !force) return;
     if (quoteBar) quoteBar.style.display = "none";
     currentSelectedText = "";
     currentSelectedRange = null;
     currentSelectedRect = null;
+  }
+
+  function clearQuoteSelection() {
+    if (selectionChangeDebounceTimer) {
+      clearManagedTimeout(selectionChangeDebounceTimer);
+      selectionChangeDebounceTimer = null;
+    }
+    hideQuoteBar(true);
   }
 
   function handleSelectionChange() {
@@ -3341,7 +3343,7 @@
     if (annotationEditor.contains(target)) return;
     if (target?.closest?.(".pi-enh-quote-bar, .pi-enh-annotation-marker")) return;
     // 点击编辑框外部，自动无备注保存当前引用，等效于点击保存
-    activeAnnotationSaveHandler();
+    activeAnnotationSaveHandler(false);
   });
   addManagedListener(window, "scroll", scheduleAnnotationReposition, true);
   addManagedListener(window, "resize", scheduleAnnotationReposition);
