@@ -32349,36 +32349,51 @@
       const row = getSessionRowById(sid);
       if (row) row.setAttribute("data-pi-enh-pending-delete", "true");
     }
-    requestSessionListRefresh(false, true);
+    syncSessionBatchRowStates();
 
-    // 2. 依次调用后端删除
-    for (let i = 0; i < targetIds.length; i++) {
-      const sid = targetIds[i];
-      if (confirmBtn) {
-        confirmBtn.textContent = `正在删除 (${i + 1}/${targetIds.length})...`;
-      }
-      if (sid === activeSessionId) {
-        shouldResetActiveView = true;
-      }
+    // 每批共用目录扫描与用量封存；仅依据后端确认清理，列表最后刷新一次。
+    for (let offset = 0; offset < targetIds.length; offset += 100) {
+      const ids = targetIds.slice(offset, offset + 100);
+      let results;
+      let deletedIds = [];
       try {
-        await deleteArchivedSession(sid);
+        const response = await fetch("/api/sessions/batch-delete", {
+          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ids }),
+        });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const payload = await response.json();
+        if (!Array.isArray(payload.results) || !Array.isArray(payload.deletedSessionIds)) throw new Error("无效的删除回执");
+        results = new Map(payload.results.map((result) => [result.id, result]));
+        deletedIds = payload.deletedSessionIds;
+      } catch (err) {
+        console.error("[pi-enh] Batch deletion failed:", err?.message || String(err));
+        results = new Map();
+      }
+      const confirmedIds = new Set(deletedIds);
+      for (const sid of ids) {
+        if (results.get(sid)?.ok === true) { confirmedIds.add(sid); successCount++; }
+        else {
+          failCount++;
+          if (!confirmedIds.has(sid)) {
+            restoreSessionDeleteState(sid);
+            getSessionRowById(sid)?.removeAttribute("data-pi-enh-pending-delete");
+          }
+        }
+      }
+      for (const sid of confirmedIds) {
         markSessionDeleteConfirmed(sid);
         cleanupDeletedSessionEverywhere(sid);
-        successCount++;
-      } catch (err) {
-        failCount++;
-        console.error("[pi-enh] Failed to delete session in batch:", sid, err?.message || String(err));
-        restoreSessionDeleteState(sid);
+        try { window.__PI_ENH_SESSION_DELETED__?.(sid); } catch (e) {}
+        try { void cleanupSessionUploadedFiles(sid).catch(() => {}); } catch (e) {}
+        if (sid === activeSessionId) shouldResetActiveView = true;
       }
+      if (confirmBtn) confirmBtn.textContent = `正在删除 (${offset + ids.length}/${targetIds.length})...`;
     }
 
     // 3. 如果当前激活的会话被删除了，回到根页面
     if (shouldResetActiveView) {
       try {
         window.history.replaceState(null, "", "/");
-        if (typeof window.__PI_ENH_SESSION_DELETED__ === "function") {
-          window.__PI_ENH_SESSION_DELETED__(activeSessionId);
-        }
       } catch (e) {}
     }
 
