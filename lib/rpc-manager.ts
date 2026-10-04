@@ -65,6 +65,8 @@ import {
   snapshot,
 } from "./queue-actions";
 
+import { findAskUserQuestion } from "./ask-user";
+
 // ============================================================================
 // Types
 // ============================================================================
@@ -110,6 +112,8 @@ type ActiveCustomUi = {
   width: number;
   resolve: (value: unknown) => void;
   settled: boolean;
+  askUser?: import("./types").AskUserQuestion;
+  inputBatch?: boolean;
 };
 
 type ExtensionUiRequestBody = Record<string, unknown> & {
@@ -736,6 +740,7 @@ export class AgentSessionWrapper {
           const promptImages = command.images as Array<{ type: "image"; data: string; mimeType: string }> | undefined;
           const streamingBehavior = command.streamingBehavior as "steer" | "followUp" | undefined;
           let preflightAccepted = false;
+          let promptDisposition: "handled" | "queued" | "started" | undefined;
           let preflightSettled = false;
           let promptSettled = false;
           let acceptPreflight!: () => void;
@@ -802,7 +807,10 @@ export class AgentSessionWrapper {
               // validation and extension preflight have accepted the submission.
               // Every disposition (handled, queued, started) is an acceptance; a
               // rejected prompt never calls this and rejects `prompt` instead.
-              preflightResult: () => acceptPreflight(),
+              preflightResult: (disposition) => {
+                promptDisposition = disposition;
+                acceptPreflight();
+              },
             });
           } catch (error) {
             finishPrompt();
@@ -814,7 +822,10 @@ export class AgentSessionWrapper {
             // the internal callback. This waits for the run, but never acks early.
             acceptPreflight();
             finishPrompt();
-            if (!streamingBehavior) this.emit({ type: "prompt_done" });
+            // A steering/follow-up request can race with settlement and start
+            // its own run. Only an actual queue acceptance belongs to the old
+            // run; started/handled requests still need wrapper completion.
+            if (promptDisposition !== "queued") this.emit({ type: "prompt_done" });
           }, (error) => {
             rejectPreflight(error);
             finishPrompt();
@@ -826,7 +837,7 @@ export class AgentSessionWrapper {
                 type: "prompt_error",
                 errorMessage: error instanceof Error ? error.message : String(error),
               });
-              if (!streamingBehavior) this.emit({ type: "prompt_done" });
+              if (promptDisposition !== "queued") this.emit({ type: "prompt_done" });
             }
           }).catch((error) => {
             console.error(
@@ -1239,7 +1250,28 @@ export class AgentSessionWrapper {
       }
 
       case "extension_ui_input": {
-        this.handleExtensionUiInput(command.id as string, command.data as string);
+        const data = command.data;
+        if (Array.isArray(data)) {
+          if (data.length === 0 || data.length > 256 || data.some(item => typeof item !== "string" || item.length > 65536)) {
+            throw new Error("Invalid extension input batch");
+          }
+          // Process in order in one request. Stop at close; never replay a
+          // selection through both React and synthetic keyboard events.
+          const custom = this.activeCustomUis.get(command.id as string);
+          if (!custom) throw new Error("Extension request is no longer pending");
+          custom.inputBatch = true;
+          try {
+            for (const item of data) {
+              if (!this.activeCustomUis.has(command.id as string)) break;
+              this.handleExtensionUiInput(command.id as string, item, false);
+            }
+          } finally {
+            custom.inputBatch = false;
+            if (this.activeCustomUis.has(command.id as string)) this.emitCustomUiRender(command.id as string, custom);
+          }
+        } else {
+          this.handleExtensionUiInput(command.id as string, data as string);
+        }
         return null;
       }
 
@@ -1637,17 +1669,21 @@ export class AgentSessionWrapper {
   }
 
   private emitCustomUiRender(id: string, custom: ActiveCustomUi): void {
+    if (custom.inputBatch) return;
     let lines: string[];
     try {
       lines = custom.component.render(custom.width);
     } catch (error) {
       lines = [`Extension custom UI render failed: ${error instanceof Error ? error.message : String(error)}`];
     }
+    if (!custom.askUser) custom.askUser = findAskUserQuestion(lines, this.inner.agent.state?.messages,
+      ["1", "true", "yes", "on"].includes(String(process.env.PI_ASK_USER_ALLOW_COMMENT).toLowerCase()));
     const event = {
       type: "extension_ui_request",
       id,
       method: "custom",
       lines,
+      ...(custom.askUser ? { askUser: custom.askUser } : {}),
     } as ExtensionUiRequest as AgentEvent;
     this.pendingUiRequests.set(id, event);
     this.emit(event);
@@ -1674,12 +1710,12 @@ export class AgentSessionWrapper {
     custom.resolve(value);
   }
 
-  private handleExtensionUiInput(id: string, data: string): void {
+  private handleExtensionUiInput(id: string, data: string, render = true): void {
     const custom = this.activeCustomUis.get(id);
     if (!custom || typeof data !== "string") return;
     try {
       custom.component.handleInput?.(data);
-      if (this.activeCustomUis.has(id)) this.emitCustomUiRender(id, custom);
+      if (render && this.activeCustomUis.has(id)) this.emitCustomUiRender(id, custom);
     } catch (error) {
       this.closeCustomUi(id, undefined);
       this.emit({

@@ -137,6 +137,16 @@ export interface SystemMessage {
 /** Any message a `message` entry can store, including transcript system messages. */
 export type SessionMessage = AgentMessage | SystemMessage;
 
+export interface AskUserQuestion {
+  toolCallId: string;
+  question: string;
+  context?: string;
+  options: Array<{ title: string; description?: string }>;
+  allowMultiple: boolean;
+  allowFreeform: boolean;
+  allowComment: boolean;
+}
+
 export type ExtensionUiRequest =
   | {
       type: "extension_ui_request";
@@ -213,6 +223,8 @@ export type ExtensionUiRequest =
       id: string;
       method: "custom";
       lines: string[];
+      /** Complete matching tool metadata, attached before the first render. */
+      askUser?: AskUserQuestion;
       closed?: boolean;
     };
 
@@ -393,6 +405,8 @@ export interface SessionInfo {
   /** True while the runtime session exists only in memory and its JSONL file
    *  has not been created yet. Disk-backed actions must wait until this clears. */
   transient?: boolean;
+  /** Client-only placeholder while the first submission is being prepared. */
+  submissionPending?: boolean;
 }
 
 export interface SessionContext {

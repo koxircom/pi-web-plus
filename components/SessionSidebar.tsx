@@ -1,5 +1,7 @@
 "use client";
 
+import { mergeLocalSessions } from "@/lib/session-catalog-client";
+
 import { registerSessionPreloadBridge, updateSessionPreloadCatalog } from "@/lib/session-preload";
 
 import { useEffect, useLayoutEffect, useState, useCallback, useMemo, useRef, type CSSProperties, type ReactNode } from "react";
@@ -130,7 +132,10 @@ function sessionListUrl(summary: boolean, force: boolean): string {
   return "/api/sessions";
 }
 
+const EMPTY_LOCAL_SESSIONS: SessionInfo[] = [];
+
 interface Props {
+  localSessions?: SessionInfo[];
   selectedSessionId: string | null;
   onSelectSession: (session: SessionInfo, isRestore?: boolean, entryId?: string, blockIndex?: number) => void;
   onNewSession?: (sessionId: string, cwd: string) => void;
@@ -420,9 +425,10 @@ function PiWebTitle() {
   );
 }
 
-export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onOpenFile, onOpenTerminal, explorerRefreshKey, onExplorerRefresh, onAtMention, onAtMentions, onBackgroundTaskDone, onRunningSessionIdsChange, onSessionsChange }: Props) {
+export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onOpenFile, onOpenTerminal, explorerRefreshKey, onExplorerRefresh, onAtMention, onAtMentions, onBackgroundTaskDone, onRunningSessionIdsChange, onSessionsChange, localSessions = EMPTY_LOCAL_SESSIONS }: Props) {
   const { t } = useI18n();
-  const [allSessions, setAllSessions] = useState<SessionInfo[]>([]);
+  const [serverSessions, setAllSessions] = useState<SessionInfo[]>([]);
+  const allSessions = useMemo(() => mergeLocalSessions(serverSessions, localSessions), [serverSessions, localSessions]);
   // Tracked in a ref only: the version is compared against the polled value to
   // decide whether the list needs reloading, and no render reads it.
   const sessionListVersionRef = useRef<number | null>(null);
@@ -606,7 +612,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
     return registerEnhancementSidebarBridge({
       refreshSessions: (showLoading = false, force = false) =>
         sidebarBridgeStateRef.current.loadSessions(showLoading, force),
-      getRawSessions: () => sidebarBridgeStateRef.current.allSessions,
+      getRawSessions: () => sidebarBridgeStateRef.current.allSessions.filter((session) => !session.submissionPending),
       rerenderSessions: () => {
         setAllSessions((prev) => (Array.isArray(prev) ? [...prev] : prev));
       },
@@ -792,7 +798,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
 
   useEffect(() => registerSessionPreloadBridge(), []);
   useEffect(() => {
-    updateSessionPreloadCatalog(allSessions, runningSessionIds, unreadSessionIds, selectedSessionId ?? null);
+    updateSessionPreloadCatalog(allSessions.filter((session) => !session.submissionPending), runningSessionIds, unreadSessionIds, selectedSessionId ?? null);
   }, [allSessions, runningSessionIds, unreadSessionIds, selectedSessionId]);
 
   useEffect(() => {
@@ -800,8 +806,8 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   }, [onRunningSessionIdsChange, runningSessionIds]);
 
   useEffect(() => {
-    onSessionsChange?.(allSessions);
-  }, [allSessions, onSessionsChange]);
+    onSessionsChange?.(serverSessions);
+  }, [serverSessions, onSessionsChange]);
 
   useEffect(() => {
     const previous = previousRunningSessionIdsRef.current;
@@ -1144,6 +1150,7 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   // works when the prop value won't change — e.g. re-clicking the already
   // open session after manually switching worktrees.
   const handleSelectSessionFromList = useCallback((s: SessionInfo, entryId?: string, blockIndex?: number) => {
+    if (s.submissionPending) return;
     setAllSessions((current) => current.some((session) => session.id === s.id) ? current : [s, ...current]);
     if (s.cwd) setSelectedCwd(s.cwd);
     onSelectSession(s, false, entryId, blockIndex);
@@ -1190,8 +1197,13 @@ export function SessionSidebar({ selectedSessionId, onSelectSession, onNewSessio
   );
 
   const filteredSessions = useMemo(
-    () => selectedProject ? sessionsForProject(allSessions, selectedProject.key) : allSessions,
-    [allSessions, selectedProject],
+    () => {
+      if (!selectedProject) return allSessions;
+      const projectIds = new Set(sessionsForProject(allSessions, selectedProject.key).map((session) => session.id));
+      return allSessions.filter((session) => projectIds.has(session.id)
+        || (session.submissionPending && session.cwd === selectedCwd));
+    },
+    [allSessions, selectedProject, selectedCwd],
   );
   const showWorktreeSwitcher = Boolean(
     worktreeState?.isGit
@@ -2421,7 +2433,8 @@ function SessionItem({
     <div
       data-pi-enh-session-id={session.id}
       className="pi-enh-session-row-host"
-      onClick={confirmDelete || renaming ? undefined : onClick}
+      aria-disabled={session.submissionPending || undefined}
+      onClick={confirmDelete || renaming || session.submissionPending ? undefined : onClick}
       onContextMenu={confirmDelete || renaming ? undefined : handleContextMenu}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => { setHovered(false); }}
@@ -2431,7 +2444,7 @@ function SessionItem({
         alignItems: "center",
         paddingLeft: depth > 0 ? depth * 12 + 14 : 14,
         paddingRight: 8,
-        cursor: confirmDelete || renaming ? "default" : "pointer",
+        cursor: confirmDelete || renaming || session.submissionPending ? "default" : "pointer",
         background: confirmDelete
           ? "rgba(239,68,68,0.06)"
           : isSelected ? "var(--bg-selected)" : hovered ? "var(--bg-hover)" : "transparent",

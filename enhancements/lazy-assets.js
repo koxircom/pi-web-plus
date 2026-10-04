@@ -51,4 +51,9 @@
     pending.set(name, promise);
     return promise;
   };
+  // A paste may arrive before this loader is ready. Honor that demand once,
+  // using the same in-flight request as explicit preview/editor opens.
+  if (root.__PI_IMAGE_PRELOAD_REQUESTED__) {
+    root.__PI_ENH_LOAD_OPTIONAL__("image-editor").catch(() => {});
+  }
 })(window);

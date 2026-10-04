@@ -1,4 +1,6 @@
-> **PI Web Plus 1.3.8** 基于 Pi Coding Agent 1.0.2。通过 [GitHub Releases](https://github.com/koxircom/pi-web-plus/releases/tag/v1.3.8) 安装预构建包；本地服务默认只监听 `127.0.0.1`。
+> **PI Web Plus 1.3.17** 基于 Pi Coding Agent 1.0.2。通过 [GitHub Releases](https://github.com/koxircom/pi-web-plus/releases/tag/v1.3.17) 安装预构建包；本地服务默认只监听 `127.0.0.1`。
+
+> 1.3.17：新增会话导航书签、模型缓存后台刷新、新会话启动提速与图片功能预热；保留现有聊天界面。
 
 # PI Web Plus
 
@@ -23,7 +25,7 @@ PI Web Plus 保留并扩展 agegr 的 pi-web 开源项目，许可证及原版�
 PI Web Plus 要求 Node.js 22.19.0 或更高版本（`node >=22.19`）。先用 `node --version` 检查版本，然后从 [`koxircom/pi-web-plus` GitHub Releases](https://github.com/koxircom/pi-web-plus/releases) 全局安装官方预构建 `.tgz` 发行包并启动 `pi-web`：
 
 ```bash
-npm install -g https://github.com/koxircom/pi-web-plus/releases/download/v1.3.8/pi-web-plus-1.3.8.tgz
+npm install -g https://github.com/koxircom/pi-web-plus/releases/download/v1.3.17/pi-web-plus-1.3.17.tgz
 pi-web
 ```
 
@@ -33,7 +35,7 @@ pi-web
 
 如果尚未配置模型 Provider，请打开**模型（Models）**面板登录或添加 API Key。
 
-上面的命令安装的是 v1.3.8。安装或升级到其他版本时，请先用 `Ctrl+C` 停止正在运行的进程，将链接中的 `v1.3.8` 和 `1.3.8` 替换为 [GitHub Releases](https://github.com/koxircom/pi-web-plus/releases) 中对应的目标版本号 `<version>` 后重新执行安装命令：
+上面的命令安装的是 v1.3.17。安装或升级到其他版本时，请先用 `Ctrl+C` 停止正在运行的进程，将链接中的 `v1.3.17` 和 `1.3.17` 替换为 [GitHub Releases](https://github.com/koxircom/pi-web-plus/releases) 中对应的目标版本号 `<version>` 后重新执行安装命令：
 
 ```bash
 npm install -g https://github.com/koxircom/pi-web-plus/releases/download/v<version>/pi-web-plus-<version>.tgz
@@ -75,10 +77,10 @@ PI_WEB_PASSWORD='足够长的随机密码' pi-web --hostname 0.0.0.0
 
 服务端的模型和 API 请求会读取标准的 `HTTP_PROXY`、`HTTPS_PROXY` 和 `NO_PROXY` 环境变量。
 
-macOS 或 Linux（通过 [GitHub Release `.tgz` 安装包](https://github.com/koxircom/pi-web-plus/releases/download/v1.3.8/pi-web-plus-1.3.8.tgz)安装并启动）：
+macOS 或 Linux（通过 [GitHub Release `.tgz` 安装包](https://github.com/koxircom/pi-web-plus/releases/download/v1.3.17/pi-web-plus-1.3.17.tgz)安装并启动）：
 
 ```bash
-npm install -g https://github.com/koxircom/pi-web-plus/releases/download/v1.3.8/pi-web-plus-1.3.8.tgz
+npm install -g https://github.com/koxircom/pi-web-plus/releases/download/v1.3.17/pi-web-plus-1.3.17.tgz
 HTTP_PROXY=http://127.0.0.1:7890 \
 HTTPS_PROXY=http://127.0.0.1:7890 \
 NO_PROXY=localhost,127.0.0.1 \
@@ -88,7 +90,7 @@ pi-web
 Windows PowerShell：
 
 ```powershell
-npm install -g https://github.com/koxircom/pi-web-plus/releases/download/v1.3.8/pi-web-plus-1.3.8.tgz
+npm install -g https://github.com/koxircom/pi-web-plus/releases/download/v1.3.17/pi-web-plus-1.3.17.tgz
 $env:HTTP_PROXY = "http://127.0.0.1:7890"
 $env:HTTPS_PROXY = "http://127.0.0.1:7890"
 $env:NO_PROXY = "localhost,127.0.0.1"

@@ -145,6 +145,7 @@ export interface AgentSessionLike {
       readonly systemPrompt?: string;
       thinkingLevel?: string;
       streamingMessage?: PiAgentMessage;
+      readonly messages?: readonly PiAgentMessage[];
       /** The declared tools, with the descriptions `prepareLoadout` hooks set for the model. */
       readonly tools?: readonly { readonly name: string; readonly description: string }[];
     };

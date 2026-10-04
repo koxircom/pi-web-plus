@@ -14,7 +14,7 @@ export interface ModelsData {
 }
 
 interface ModelsCacheState {
-  entries: Map<string, { data: ModelsData; expiresAt: number }>;
+  entries: Map<string, { data: ModelsData; expiresAt: number; retryAfter?: number }>;
   inFlight: Map<string, Promise<ModelsData>>;
   generation: number;
 }
@@ -24,6 +24,9 @@ declare global {
 }
 
 const MODELS_CACHE_TTL_MS = 60_000;
+// Serve stale results only for a bounded grace period, never after explicit invalidation.
+const MODELS_CACHE_STALE_MS = 5 * 60_000;
+const MODELS_REFRESH_RETRY_MS = 10_000;
 const MAX_MODELS_CACHE_ENTRIES = 32;
 // Never interpolate the caught error here; SDK errors can contain paths and provider details.
 const SAFE_MODEL_LOAD_FAILURE_MESSAGE = "暂时无法获取模型，请稍后重试。";
@@ -59,9 +62,22 @@ export function loadModelsWithCache(cwd: string, loader: () => Promise<ModelsDat
   const cached = state.entries.get(cwd);
   if (cached) {
     if (cached.expiresAt > Date.now()) return Promise.resolve(cached.data);
-    state.entries.delete(cwd);
+    if (cached.expiresAt + MODELS_CACHE_STALE_MS <= Date.now()) state.entries.delete(cwd);
+    else {
+      // A tab refresh must not wait on rebuilding an otherwise usable catalog.
+      // Join an existing revalidation and rate-limit failures without timers.
+      if (!state.inFlight.has(cwd) && (cached.retryAfter ?? 0) <= Date.now()) {
+        void refreshModels(cwd, loader).catch(() => {});
+      }
+      return Promise.resolve(cached.data);
+    }
   }
 
+  return refreshModels(cwd, loader);
+}
+
+function refreshModels(cwd: string, loader: () => Promise<ModelsData>): Promise<ModelsData> {
+  const state = getModelsCacheState();
   const existingLoad = state.inFlight.get(cwd);
   if (existingLoad) return existingLoad;
 
@@ -71,8 +87,9 @@ export function loadModelsWithCache(cwd: string, loader: () => Promise<ModelsDat
     .then((data) => {
       if (!data.modelError && state.generation === generation && state.inFlight.get(cwd) === loadPromise) {
         const now = Date.now();
+        state.entries.delete(cwd);
         for (const [key, entry] of state.entries) {
-          if (entry.expiresAt <= now) state.entries.delete(key);
+          if (entry.expiresAt + MODELS_CACHE_STALE_MS <= now) state.entries.delete(key);
         }
         while (state.entries.size >= MAX_MODELS_CACHE_ENTRIES) {
           const oldestKey = state.entries.keys().next().value;
@@ -84,6 +101,12 @@ export function loadModelsWithCache(cwd: string, loader: () => Promise<ModelsDat
       return data;
     })
     .finally(() => {
+      // Failure catalogs and thrown errors both leave the previous success intact.
+      // Identity plus generation checks keep invalidated loads from restoring state.
+      if (state.generation === generation && state.inFlight.get(cwd) === loadPromise) {
+        const cached = state.entries.get(cwd);
+        if (cached && cached.expiresAt <= Date.now()) cached.retryAfter = Date.now() + MODELS_REFRESH_RETRY_MS;
+      }
       if (state.inFlight.get(cwd) === loadPromise) state.inFlight.delete(cwd);
     });
 

@@ -84,7 +84,7 @@
   min-height: 32px;
   max-height: 86px;
   margin: 0 0 0 -34px;
-  padding: 7px 10px 7px 40px;
+  padding: 7px 40px 7px 40px;
   border: 0;
   border-radius: 0;
   background: transparent;
@@ -188,4 +188,47 @@
 .loadEarlier.loading {
   opacity: 0.7;
   cursor: wait;
+}
+
+.bookmark {
+  position: absolute;
+  top: 2px;
+  right: 3px;
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  padding: 0;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-muted);
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 100ms ease, background 100ms ease;
+}
+
+.turn:hover .bookmark,
+.turn:focus-within .bookmark,
+.bookmark[aria-pressed="true"] {
+  opacity: 1;
+}
+
+.bookmark:hover,
+.bookmark:focus-visible {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+.bookmark:focus-visible {
+  outline: 1px solid var(--text-muted);
+  outline-offset: -1px;
+}
+
+.bookmark[aria-pressed="true"] {
+  color: var(--text);
+}
+
+@media (hover: none) {
+  .bookmark { opacity: 1; }
 }

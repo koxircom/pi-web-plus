@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect } from "react";
+import { scheduleImagePreload } from "@/lib/image-capabilities";
 import {
   ensureEnhancementsRuntime as bootstrapEnhancementsRuntime,
   type EnhancementsRuntimeWindow,
@@ -38,6 +39,7 @@ if (typeof window !== "undefined") {
 export function PiWebEnhancementsRuntime() {
   useEffect(() => {
     void ensureEnhancementsRuntime();
+    const cancelImagePreload = scheduleImagePreload();
     const onVisibilityChange = () => {
       const win = window as EnhancementsWindow;
       if (document.visibilityState === "visible" && !win.__PI_WEB_ENHANCEMENTS_LOADED__) {
@@ -45,7 +47,10 @@ export function PiWebEnhancementsRuntime() {
       }
     };
     document.addEventListener("visibilitychange", onVisibilityChange);
-    return () => document.removeEventListener("visibilitychange", onVisibilityChange);
+    return () => {
+      cancelImagePreload();
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+    };
   }, []);
 
   return null;

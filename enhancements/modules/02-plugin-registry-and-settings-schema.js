@@ -209,7 +209,7 @@
     {
       id: "ask-user-web-native",
       name: "ask_user 网页原生选择器",
-      desc: "在对话滚动容器普通文档流中呈现 Codex 风格单列紧凑问答列表；方案与选项说明默认收起，悬停/聚焦可读，支持回看运行内容与自定义回答。", 
+      desc: "原生稳定问答卡片：先选择、再确认，选项说明直接可读，背景与补充意见按需展开；关闭后使用终端兼容视图。", 
       category: "交互增强",
       defaultEnabled: true,
     },
@@ -1088,8 +1088,7 @@
         closeMenu();
       }
     } else if (id === "ask-user-web-native") {
-      if (!enabled) removeAskUserWebNative();
-      else syncAskUserWebNative(); return; return;
+      window.dispatchEvent(new Event("pi-native-composer-preferences-change"));
     } else if (id === "project-status-indicator") {
       setProjectStatusMonitoring(enabled);
       if (!enabled) removeProjectStatusIndicators();

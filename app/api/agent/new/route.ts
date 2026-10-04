@@ -67,12 +67,10 @@ export async function POST(req: Request) {
     allowFileRoot(cwd);
     invalidateSessionListCache();
 
-    const state = await session.send({ type: "get_state" }) as {
-      model?: { id: string; provider: string };
-      thinkingLevel?: string;
-    };
-
     if (promptCommand.type === "ensure_session") {
+      // The runtime already has its identity and initial model. Extension hooks
+      // remain gated by send(prompt); querying full state here would wait for them.
+      const state = { model: session.inner.model, thinkingLevel: session.inner.agent.state?.thinkingLevel ?? "off" };
       return NextResponse.json({
         success: true,
         sessionId: realSessionId,
@@ -83,6 +81,12 @@ export async function POST(req: Request) {
         thinkingLevel: state.thinkingLevel,
       });
     }
+
+    const state = await session.send({ type: "get_state" }) as {
+      model?: { id: string; provider: string };
+      thinkingLevel?: string;
+    };
+
 
     const result = await session.send(promptCommand);
     promptAccepted = promptCommand.type === "prompt";

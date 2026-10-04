@@ -522,6 +522,11 @@
     pending.set(name, promise);
     return promise;
   };
+  // A paste may arrive before this loader is ready. Honor that demand once,
+  // using the same in-flight request as explicit preview/editor opens.
+  if (root.__PI_IMAGE_PRELOAD_REQUESTED__) {
+    root.__PI_ENH_LOAD_OPTIONAL__("image-editor").catch(() => {});
+  }
 })(window);
 
 ;
@@ -691,7 +696,6 @@
     codeBlockScanObserver = null,
     lastObsidianViewerPath = null,
     cachedNativeOnOpenFile = null,
-    instantDialogObserver = null,
     sidebarObserver = null,
     activeTurnStartTime = null,
     activeTurnEntryId = null,
@@ -1544,7 +1548,7 @@
     {
       id: "ask-user-web-native",
       name: "ask_user 网页原生选择器",
-      desc: "在对话滚动容器普通文档流中呈现 Codex 风格单列紧凑问答列表；方案与选项说明默认收起，悬停/聚焦可读，支持回看运行内容与自定义回答。", 
+      desc: "原生稳定问答卡片：先选择、再确认，选项说明直接可读，背景与补充意见按需展开；关闭后使用终端兼容视图。", 
       category: "交互增强",
       defaultEnabled: true,
     },
@@ -2423,8 +2427,7 @@
         closeMenu();
       }
     } else if (id === "ask-user-web-native") {
-      if (!enabled) removeAskUserWebNative();
-      else syncAskUserWebNative(); return; return;
+      window.dispatchEvent(new Event("pi-native-composer-preferences-change"));
     } else if (id === "project-status-indicator") {
       setProjectStatusMonitoring(enabled);
       if (!enabled) removeProjectStatusIndicators();
@@ -17378,1137 +17381,6 @@
   }
 
   // ==========================================
-  // 2.5 ask_user Web-native Picker (网页原生选择器)
-  // ==========================================
-  const askUserNativeStates = new WeakMap();
-  const activeAskUserPanels = new Set();
-
-  function sanitizeAskUserText(text) {
-    if (typeof text !== "string") return "";
-    return text
-      .replace(/<!--[\s\S]*?-->/g, "")
-      .replace(/&lt;!--[\s\S]*?--&gt;/g, "")
-      .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "")
-      .replace(/^\s+|\s+$/g, "");
-  }
-
-  function cleanAskUserCommentsInDOM(scope = document.body) {
-    if (!scope || typeof document === "undefined") return;
-    try {
-      const walker = document.createTreeWalker(
-        scope,
-        NodeFilter.SHOW_TEXT,
-        {
-          acceptNode: (node) => {
-            const val = node.nodeValue;
-            if (val && (val.includes("<!-- ask-user") || val.includes("<!--ask-user") || val.includes("&lt;!-- ask-user") || val.includes("&lt;!--ask-user"))) {
-              return NodeFilter.FILTER_ACCEPT;
-            }
-            return NodeFilter.FILTER_SKIP;
-          }
-        }
-      );
-      let current;
-      while ((current = walker.nextNode())) {
-        current.nodeValue = current.nodeValue
-          .replace(/<!--\s*ask-user:[\s\S]*?-->/gi, "")
-          .replace(/&lt;!--\s*ask-user:[\s\S]*?--&gt;/gi, "")
-          .trim();
-      }
-    } catch (e) {}
-  }
-
-  function getAskUserPanelText(panel) {
-    const pre = panel.querySelector("pre");
-    const raw = pre ? (pre.innerText || pre.textContent || "") : "";
-    return raw.replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "").replace(/\r/g, "");
-  }
-
-  function parseAskUserPanel(panel) {
-    const text = getAskUserPanelText(panel);
-    if (!/\bask_user\b/.test(text)) return null;
-    const rawLines = text.split("\n");
-    let filterIndex = -1;
-    let titleIndex = -1;
-
-    // Remove only the outer frame. Context and option descriptions are not
-    // terminal chrome: recover their complete text from the matching tool args.
-    const lines = rawLines.map((rawLine, idx) => {
-      if (/^[\s╭┌─═-]*ask_user[\s─═╮┐-]*$/.test(rawLine)) return "";
-      const clean = rawLine.replace(/^[\s]*│\s?/, "").replace(/\s*│\s*$/, "").replace(/[╭╮╰╯┌┐└┘]/g, "");
-      if (clean.trim().startsWith("Filter:")) filterIndex = idx;
-      if (clean.trim() === "Question") titleIndex = idx;
-      if (filterIndex >= 0 && clean.includes("│")) {
-        const parts = clean.split("│");
-        return parts[0].trimEnd();
-      }
-      return clean.trimEnd();
-    });
-
-    const options = [];
-    let currentIndex = 0;
-    let isMultiple = false;
-    let firstOptionIndex = -1;
-
-    const startIndex = Math.max(0, filterIndex >= 0 ? filterIndex + 1 : 0);
-    for (let index = startIndex; index < lines.length; index += 1) {
-      const line = lines[index];
-      // 兼容 Unicode 箭头 →、ASCII 箭头 ->、以及 › / ❯ / > 等多种终端指示符
-      const match = line.match(/^\s*(?:(→|->|›|❯|>)\s*)?(\d+)\.\s+(?:\[([^\]]*)\]\s+)?(.+?)\s*$/);
-      if (!match) continue;
-      if (firstOptionIndex === -1) firstOptionIndex = index;
-      const title = match[4].trim();
-      if (!title || /^Type something\./i.test(title)) continue;
-      const checkedMarker = match[3];
-      const isSelected = Boolean(match[1]);
-      const option = {
-        number: Number(match[2]),
-        title: sanitizeAskUserText(title),
-        checked: checkedMarker !== undefined && /[✓xX]/.test(checkedMarker),
-        selected: isSelected,
-      };
-      if (checkedMarker !== undefined) isMultiple = true;
-      if (isSelected) currentIndex = option.number - 1;
-      options.push(option);
-    }
-
-    const hasComment = /Add extra context after selection/i.test(text);
-    const hasFreeform = /Type (?:something|custom response|your answer)/i.test(text);
-    if (options.length === 0 && !hasFreeform) return null;
-    const questionLines = [];
-    const questionStart = titleIndex >= 0 ? titleIndex + 1 : 0;
-    const effectiveQuestionEnd = filterIndex >= 0
-      ? filterIndex
-      : (firstOptionIndex >= 0 ? firstOptionIndex : lines.length);
-
-    for (let index = questionStart; index < effectiveQuestionEnd; index += 1) {
-      const line = lines[index].trim();
-      if (!line || /^[-─═]+$/.test(line)) continue;
-      if (/^Context(?:\s|:)/i.test(line)) break;
-      const cleanLine = line.includes("│") ? line.split("│")[0].trim() : line;
-      const sanitized = sanitizeAskUserText(cleanLine);
-      if (sanitized) questionLines.push(sanitized);
-    }
-    const contextCollapsed = /Context\s*\(\d+ lines\)/i.test(text);
-    const rawQuestionText = questionLines.join(" ") || "请选择一个选项";
-    const identity = JSON.stringify([rawQuestionText, options.map((option) => option.title)]);
-    const signature = JSON.stringify({
-      question: rawQuestionText,
-      options,
-      isMultiple,
-      hasComment,
-      hasFreeform,
-    });
-    return {
-      question: rawQuestionText,
-      identity,
-      contextCollapsed,
-      terminalText: sanitizeAskUserText(text),
-      options,
-      isMultiple,
-      hasComment,
-      hasFreeform,
-      currentIndex,
-      signature,
-    };
-  }
-
-  function matchAskUserSourceFromMessages(messages, data) {
-    if (!Array.isArray(messages) || !data) return null;
-    const normalize = (value) => String(value || "").replace(/\s+/g, "");
-    const pending = new Map();
-    for (const message of messages) {
-      if (message?.role === "assistant") {
-        for (const block of Array.isArray(message.content) ? message.content : []) {
-          const id = getAskUserToolCallId(block);
-          if (isAskUserToolCall(block) && id) {
-            pending.set(id, block.input || block.arguments);
-          }
-        }
-      } else if (isAskUserToolResult(message)) {
-        const resultId = getAskUserToolCallId(message);
-        // 没有真实 toolCallId 时禁止清空其它并行或历史 ask_user 请求。
-        if (resultId) pending.delete(resultId);
-      }
-    }
-    const matches = [...pending.entries()].filter(([, args]) => {
-      if (!args || typeof args.question !== "string") return false;
-      const question = normalize(sanitizeAskUserText(args.question));
-      const visible = normalize(sanitizeAskUserText(data.question));
-      if (visible !== question && !(question.length >= 8 && visible.includes(question))) return false;
-      const options = Array.isArray(args.options) ? args.options : [];
-      return data.options.every((option) => {
-        const original = options[option.number - 1];
-        const title = typeof original === "string" ? original : original?.title;
-        return title && normalize(sanitizeAskUserText(title)) === normalize(sanitizeAskUserText(option.title));
-      });
-    });
-    if (matches.length === 1) {
-      return { ...matches[0][1], toolCallId: matches[0][0] };
-    }
-    return null;
-  }
-
-  function tryExtractAskUserFromCache(sessionId, data) {
-    if (!sessionId || typeof sessionMemoryCache === "undefined") return null;
-    const entry = sessionMemoryCache.get(sessionId);
-    if (!entry) return null;
-    for (const cached of entry.detailRequests.values()) {
-      const payload = cached?.data;
-      const messages = payload?.context?.messages || payload?.messages;
-      if (Array.isArray(messages)) {
-        const match = matchAskUserSourceFromMessages(messages, data);
-        if (match) return match;
-      }
-    }
-    return null;
-  }
-
-  // The custom UI protocol carries terminal lines, not question metadata.
-  // Read one bounded, fresh history slice while the panel is open; never infer
-  // a plan from the last assistant message or a different/unresolved question.
-  async function hydrateAskUserContext(panel, data, state) {
-    if (state.contextLoading || state.contextLoaded || !state.sessionId) return;
-    state.contextLoading = true;
-    const identity = state.identity;
-
-    // 0ms 同步直出：如果当前缓存中已有匹配的 toolCall，立即同步就绪，免除网络延迟
-    const cachedSource = tryExtractAskUserFromCache(state.sessionId, data);
-    if (cachedSource) {
-      state.source = cachedSource;
-      state.contextLoading = false;
-      state.contextLoaded = true;
-      if (panel.isConnected && !state.disabled && !state.submitting && isPluginEnabled("ask-user-web-native")) {
-        renderAskUserWebNative(panel, data, state);
-      }
-      return;
-    }
-
-    const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
-    const timeoutId = controller ? setTimeout(() => controller.abort(), 8000) : null;
-    try {
-      const fetcher = baseFetch || window.fetch;
-      const response = await fetcher(`/api/sessions/${encodeURIComponent(state.sessionId)}/context?deferThinking=1&deferMedia=1&tail=40`, {
-        cache: "no-store", signal: controller ? controller.signal : undefined,
-      });
-      if (!response?.ok) throw new Error("context unavailable");
-      const payload = await response.json();
-      const messages = payload?.context?.messages || payload?.messages;
-      const match = matchAskUserSourceFromMessages(messages, data);
-      if (askUserNativeStates.get(panel) !== state || state.identity !== identity || state.disabled || !panel.isConnected || getSessionIdFromCurrentUrl() !== state.sessionId) return;
-      if (match) state.source = match;
-    } catch (e) {
-      // Keep a visible explanation and original terminal details on failure.
-    } finally {
-      if (timeoutId !== null) clearTimeout(timeoutId);
-      if (state.identity !== identity || askUserNativeStates.get(panel) !== state) return;
-      state.contextLoading = false;
-      state.contextLoaded = true;
-      if (panel.isConnected && !state.disabled && !state.submitting && isPluginEnabled("ask-user-web-native")) {
-        renderAskUserWebNative(panel, data, state);
-      }
-    }
-  }
-
-  const ASK_USER_KEY_SEQUENCES = {
-    Enter: "\r",
-    ArrowUp: "\x1b[A",
-    ArrowDown: "\x1b[B",
-    ArrowRight: "\x1b[C",
-    ArrowLeft: "\x1b[D",
-    Escape: "\x1b",
-    Backspace: "\x7f",
-    Tab: "\t",
-    " ": " ",
-  };
-
-  function toAskUserTerminalData(key, modifiers = {}) {
-    if (modifiers.ctrlKey && !modifiers.altKey && typeof key === "string" && key.length === 1) {
-      const code = key.toUpperCase().charCodeAt(0);
-      if (code >= 64 && code <= 95) return String.fromCharCode(code & 0x1f);
-    }
-    if (key === "Enter") return modifiers.shiftKey ? "\n" : "\r";
-    return ASK_USER_KEY_SEQUENCES[key] ?? (typeof key === "string" && key.length === 1 ? key : null);
-  }
-
-  function extractAskUserReactBridge(panel) {
-    if (!panel) return null;
-    const dialog = panel.matches?.('[role="dialog"]') ? panel : panel.querySelector?.('[role="dialog"]');
-    const input = findAskUserInput(panel);
-    const candidates = [input, dialog, panel].filter(Boolean);
-
-    for (const node of candidates) {
-      try {
-        const key = Object.keys(node).find((k) => k.startsWith("__reactFiber$") || k.startsWith("__reactInternalInstance$"));
-        let fiber = key ? node[key] : null;
-        while (fiber) {
-          const props = fiber.memoizedProps;
-          if (props?.request?.id && typeof props?.onInput === "function") {
-            return {
-              request: props.request,
-              onInput: props.onInput,
-              requestId: props.request.id,
-            };
-          }
-          fiber = fiber.return;
-        }
-      } catch (e) {}
-    }
-    return null;
-  }
-
-  async function postAskUserAgentInput(sessionId, requestId, data) {
-    if (!sessionId || !requestId || typeof data !== "string") return false;
-    try {
-      const fetcher = baseFetch || window.fetch;
-      const res = await fetcher(`/api/agent/${encodeURIComponent(sessionId)}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          type: "extension_ui_input",
-          id: requestId,
-          data,
-        }),
-      });
-      return Boolean(res?.ok);
-    } catch (e) {
-      return false;
-    }
-  }
-
-  function findAskUserInput(panel) {
-    return Array.from(panel.querySelectorAll("textarea")).find((input) => !input.hasAttribute("data-pi-enh-ask-freeform")) || null;
-  }
-
-  function sendAskUserKey(panel, key, modifiers = {}, state = null) {
-    const terminalData = toAskUserTerminalData(key, modifiers);
-    const bridge = extractAskUserReactBridge(panel);
-    const sessionId = state?.sessionId || getSessionIdFromCurrentUrl();
-    let bridgeHandled = false;
-
-    // 通道 A: React Fiber 原生 onInput（彻底免疫移动端 IME/composing 拦截与虚拟键盘事件丢失）
-    if (bridge && terminalData !== null) {
-      try {
-        bridge.onInput(bridge.request, terminalData);
-        bridgeHandled = true;
-      } catch (e) {}
-    }
-
-    // 通道 B: 后台 API 冗余直投（当 React 桥接缺失时走标准 HTTP 接口，防止任何前端事件丢包）
-    if (!bridgeHandled && bridge?.requestId && sessionId && terminalData !== null) {
-      void postAskUserAgentInput(sessionId, bridge.requestId, terminalData);
-      bridgeHandled = true;
-    }
-
-    // 通道 C: 原生 DOM 事件派发与安全焦点处理（向下兼容桌面端与纯 HTML 宿主）
-    const input = findAskUserInput(panel);
-    if (input) {
-      const isMobileTouch = typeof window !== "undefined" && window.matchMedia && window.matchMedia("(hover: none) and (pointer: coarse)").matches;
-      if (!isMobileTouch) {
-        try { input.focus({ preventScroll: true }); } catch (e) {}
-      }
-
-      // 清除可能处于激活状态的移动端 IME composition
-      try {
-        input.dispatchEvent(new CompositionEvent("compositionend", { bubbles: true, cancelable: true }));
-      } catch (e) {}
-
-      if (key.length === 1 && !modifiers.ctrlKey && !modifiers.metaKey && !modifiers.altKey) {
-        sendAskUserText(panel, key);
-      } else {
-        input.dispatchEvent(new KeyboardEvent("keydown", { key, bubbles: true, cancelable: true, ...modifiers }));
-      }
-      return true;
-    }
-
-    return bridgeHandled;
-  }
-
-  function sendAskUserKeys(panel, keys, onDone, state = null) {
-    const stepMs = 55;
-    keys.forEach((entry, index) => {
-      const key = typeof entry === "string" ? entry : entry.key;
-      const modifiers = typeof entry === "string" ? {} : entry;
-      addManagedTimeout(() => {
-        if (isPluginEnabled("ask-user-web-native") && panel.isConnected && !askUserNativeStates.get(panel)?.disabled) {
-          sendAskUserKey(panel, key, modifiers, state);
-        }
-      }, index * stepMs);
-    });
-    if (onDone) addManagedTimeout(onDone, keys.length * stepMs + 90);
-    return keys.length * stepMs + 90;
-  }
-
-  function moveAskUserCursor(panel, data, targetIndex, action, onDone, state = null) {
-    if (targetIndex < 0) return 0;
-    const itemCount = data.options.length + (data.hasComment ? 1 : 0) + (data.hasFreeform ? 1 : 0);
-    const delta = ((targetIndex - data.currentIndex) % itemCount + itemCount) % itemCount;
-    return sendAskUserKeys(panel, [...Array(delta).fill("ArrowDown"), action], onDone, state);
-  }
-
-  function sendAskUserText(panel, text) {
-    const input = findAskUserInput(panel);
-    if (!input) return false;
-    const setter = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, "value")?.set;
-    if (setter) setter.call(input, text);
-    else input.value = text;
-    input.dispatchEvent(new Event("input", { bubbles: true }));
-    return true;
-  }
-
-  function beginAskUserFreeformSubmission(panel, data, state, value) {
-    state.submitting = true;
-    state.resolved = true;
-    state.pendingFreeform = true;
-    state.pendingFreeformValue = value;
-    state.freeformResponseSent = false;
-    return moveAskUserCursor(
-      panel,
-      data,
-      data.options.length + (data.hasComment ? 1 : 0),
-      "Enter",
-      null,
-      state
-    );
-  }
-
-  function submitPendingAskUserFreeform(panel, state) {
-    if (!state.pendingFreeformValue || state.freeformResponseSent) return;
-    if (!/\bCustom response\b|自定义回答/i.test(getAskUserPanelText(panel))) return;
-    if (!sendAskUserText(panel, state.pendingFreeformValue)) return;
-    state.freeformResponseSent = true;
-    sendAskUserKey(panel, "Enter", { ctrlKey: true }, state);
-    resolveCurrentAskUserStatus(state.sessionId);
-  }
-
-  let activeAskUserTooltip = null;
-  let activeAskUserTooltipCleanup = null;
-  let activeAskUserAnchor = null;
-  let askUserTooltipCloseTimer = null;
-  let isOverAskUserTooltip = false;
-  let isOverAskUserAnchor = false;
-
-  function cancelHideAskUserTooltip() {
-    if (askUserTooltipCloseTimer) {
-      clearTimeout(askUserTooltipCloseTimer);
-      askUserTooltipCloseTimer = null;
-    }
-  }
-
-  function scheduleHideAskUserTooltip(delay = 350) {
-    cancelHideAskUserTooltip();
-    askUserTooltipCloseTimer = setTimeout(() => {
-      if (!isOverAskUserTooltip && !isOverAskUserAnchor) {
-        hideAskUserTooltip();
-      }
-    }, delay);
-  }
-
-  function hideAskUserTooltip() {
-    cancelHideAskUserTooltip();
-    isOverAskUserTooltip = false;
-    isOverAskUserAnchor = false;
-    if (activeAskUserTooltipCleanup) {
-      activeAskUserTooltipCleanup();
-      activeAskUserTooltipCleanup = null;
-    }
-    if (activeAskUserAnchor) {
-      try {
-        activeAskUserAnchor.removeAttribute("aria-describedby");
-      } catch (e) {}
-      activeAskUserAnchor = null;
-    }
-    if (activeAskUserTooltip) {
-      activeAskUserTooltip.remove();
-      activeAskUserTooltip = null;
-    }
-  }
-
-  function showAskUserTooltip(anchorElement, text) {
-    if (activeAskUserAnchor === anchorElement && activeAskUserTooltip) {
-      isOverAskUserAnchor = true;
-      cancelHideAskUserTooltip();
-      return;
-    }
-    hideAskUserTooltip();
-    if (!anchorElement || !text || typeof document === "undefined" || !document.body) return;
-
-    const tooltipId = "pi-ask-tip-" + Math.random().toString(36).slice(2, 9);
-    const tooltip = document.createElement("div");
-    tooltip.id = tooltipId;
-    tooltip.className = "pi-enh-ask-tooltip";
-    tooltip.setAttribute("role", "tooltip");
-    tooltip.textContent = text;
-
-    anchorElement.setAttribute("aria-describedby", tooltipId);
-    activeAskUserAnchor = anchorElement;
-    isOverAskUserAnchor = true;
-
-    // 允许移鼠到浮层持续阅读/滚动
-    const onEnterTip = () => {
-      isOverAskUserTooltip = true;
-      cancelHideAskUserTooltip();
-    };
-    const onLeaveTip = () => {
-      isOverAskUserTooltip = false;
-      scheduleHideAskUserTooltip(350);
-    };
-    tooltip.addEventListener("mouseenter", onEnterTip);
-    tooltip.addEventListener("mouseover", onEnterTip);
-    tooltip.addEventListener("mouseleave", onLeaveTip);
-    tooltip.addEventListener("mouseout", (e) => {
-      if (!tooltip.contains(e.relatedTarget)) onLeaveTip();
-    });
-
-    document.body.appendChild(tooltip);
-    activeAskUserTooltip = tooltip;
-
-    const updatePosition = () => {
-      if (!tooltip.isConnected || !anchorElement.isConnected) {
-        hideAskUserTooltip();
-        return;
-      }
-      const rect = anchorElement.getBoundingClientRect();
-      const tipRect = tooltip.getBoundingClientRect();
-      const padding = 8;
-      const viewportWidth = window.innerWidth || document.documentElement.clientWidth;
-      const viewportHeight = window.innerHeight || document.documentElement.clientHeight;
-
-      let top = rect.top - tipRect.height - 6;
-      if (top < padding) {
-        top = rect.bottom + 6;
-      }
-      if (top + tipRect.height > viewportHeight - padding) {
-        top = Math.max(padding, viewportHeight - padding - tipRect.height);
-      }
-
-      let left = rect.left;
-      if (left + tipRect.width > viewportWidth - padding) {
-        left = Math.max(padding, viewportWidth - padding - tipRect.width);
-      }
-      if (left < padding) left = padding;
-
-      tooltip.style.top = `${Math.round(top)}px`;
-      tooltip.style.left = `${Math.round(left)}px`;
-    };
-
-    updatePosition();
-
-    // 滚动时检测：anchor离开可见scroll区域必须关闭，不要漂在历史内容上
-    const onScrollOrResize = () => {
-      if (!tooltip.isConnected || !anchorElement.isConnected) {
-        hideAskUserTooltip();
-        return;
-      }
-      const scrollParent = anchorElement.closest?.(".overflow-y-auto, [class*='overflow-y-auto']") || null;
-      const rect = anchorElement.getBoundingClientRect();
-      if (scrollParent) {
-        const sRect = scrollParent.getBoundingClientRect();
-        if (rect.bottom <= sRect.top || rect.top >= sRect.bottom || rect.right <= sRect.left || rect.left >= sRect.right) {
-          hideAskUserTooltip();
-          return;
-        }
-      } else {
-        const vh = window.innerHeight || document.documentElement.clientHeight || 0;
-        if (rect.bottom <= 0 || rect.top >= vh) {
-          hideAskUserTooltip();
-          return;
-        }
-      }
-      updatePosition();
-    };
-
-    const onKeyDown = (e) => {
-      if (e.key === "Escape") hideAskUserTooltip();
-    };
-
-    // 统一监听与解绑选项
-    const listenerOpts = { passive: true, capture: true };
-    window.addEventListener("scroll", onScrollOrResize, listenerOpts);
-    window.addEventListener("resize", onScrollOrResize, listenerOpts);
-    window.addEventListener("keydown", onKeyDown, { capture: true });
-
-    activeAskUserTooltipCleanup = () => {
-      window.removeEventListener("scroll", onScrollOrResize, listenerOpts);
-      window.removeEventListener("resize", onScrollOrResize, listenerOpts);
-      window.removeEventListener("keydown", onKeyDown, { capture: true });
-    };
-  }
-
-  function getAskUserNativeRoot(panel) {
-    if (!panel) return null;
-    const state = askUserNativeStates.get(panel);
-    if (state?.root && state.root.isConnected) return state.root;
-    if (panel.__pi_enh_root && panel.__pi_enh_root.isConnected) return panel.__pi_enh_root;
-    const panelId = panel.getAttribute?.("data-pi-enh-panel-id");
-    if (panelId) {
-      const el = document.querySelector(`.pi-enh-ask-native[data-pi-enh-panel-id="${panelId}"]`);
-      if (el) return el;
-    }
-    return panel.querySelector?.(".pi-enh-ask-native") || null;
-  }
-
-  function getAskUserScrollContainer(panel) {
-    const chatContent = panel?.closest?.(".chat-content") || document.querySelector(".chat-content");
-    return chatContent?.querySelector?.(".overflow-y-auto, [class*='overflow-y-auto']")
-      || getChatScrollContainer()
-      || null;
-  }
-
-  function getAskUserScrollMountTarget(panel) {
-    const scrollContainer = getAskUserScrollContainer(panel);
-    if (!scrollContainer) return null;
-    const messageContent = scrollContainer.querySelector?.(
-      'div[style*="--chat-content-max-width"], .message-content'
-    );
-    if (messageContent) return messageContent;
-    return scrollContainer;
-  }
-
-  function styleAskUserNativeHost(panel) {
-    panel.classList.remove("pi-enh-ask-fallback-panel");
-    panel.parentElement?.classList.remove("pi-enh-ask-fallback-host");
-    panel.classList.add("pi-enh-ask-native-panel");
-    panel.parentElement?.classList.add("pi-enh-ask-native-host");
-    panel.parentElement?.parentElement?.classList.remove("pi-enh-ask-dock-layout");
-  }
-
-  function restoreAskUserNativeHost(panel) {
-    panel.classList.remove("pi-enh-ask-native-panel", "pi-enh-ask-fallback-panel");
-    panel.parentElement?.classList.remove("pi-enh-ask-native-host", "pi-enh-ask-fallback-host");
-    (askUserNativeStates.get(panel)?.dockLayout || panel.parentElement?.parentElement)?.classList.remove("pi-enh-ask-dock-layout");
-  }
-
-  function removeAskUserWebNative(scope = document) {
-    const isGlobal = !scope || scope === document || scope === document.body;
-
-    const shouldCleanPanel = (panel) => {
-      if (!panel) return false;
-      if (isGlobal) return true;
-      return panel === scope || (Boolean(scope.contains) && scope.contains(panel));
-    };
-    if (isGlobal || shouldCleanPanel(activeAskUserAnchor?.closest?.(".pi-enh-ask-native")?.__pi_enh_panel)) {
-      hideAskUserTooltip();
-    }
-
-    if (typeof activeAskUserPanels !== "undefined") {
-      for (const panel of Array.from(activeAskUserPanels)) {
-        if (!shouldCleanPanel(panel)) continue;
-        const state = askUserNativeStates.get(panel);
-        const root = getAskUserNativeRoot(panel) || state?.root;
-        if (root) {
-          const draftInput = root.querySelector("[data-pi-enh-ask-freeform]");
-          if (draftInput && state) {
-            state.draft = draftInput.value;
-          }
-          if (state) {
-            state.disabled = true;
-            if (state.root === root) state.root = null;
-          }
-          if (panel.__pi_enh_root === root) panel.__pi_enh_root = null;
-          root.remove();
-        }
-        restoreAskUserNativeHost(panel);
-        activeAskUserPanels.delete(panel);
-      }
-    }
-
-    const elementsToClean = [];
-    if (isGlobal) {
-      elementsToClean.push(...document.querySelectorAll(".pi-enh-ask-native"));
-    } else if (scope?.querySelectorAll) {
-      elementsToClean.push(...scope.querySelectorAll(".pi-enh-ask-native"));
-    }
-    for (const element of elementsToClean) {
-      const panel = element.__pi_enh_panel
-        || (element.getAttribute?.("data-pi-enh-panel-id") && document.querySelector(`[data-pi-enh-panel-id="${element.getAttribute("data-pi-enh-panel-id")}"]`))
-        || element.closest?.('[role="dialog"]');
-      if (panel && !shouldCleanPanel(panel)) continue;
-      const state = panel && askUserNativeStates.get(panel);
-      if (state) {
-        if (state.submitWatchdog) {
-          clearTimeout(state.submitWatchdog);
-          state.submitWatchdog = null;
-        }
-        state.draft = element.querySelector("[data-pi-enh-ask-freeform]")?.value ?? state.draft ?? "";
-        state.disabled = true;
-        if (state.root === element) state.root = null;
-      }
-      if (panel && panel.__pi_enh_root === element) panel.__pi_enh_root = null;
-      element.remove();
-      if (panel && !getAskUserNativeRoot(panel)) restoreAskUserNativeHost(panel);
-    }
-  }
-
-  function showAskUserNextQuestionStatus(panel) {
-    const root = getAskUserNativeRoot(panel);
-    if (!root) return;
-    root.classList.add("is-submitting");
-    for (const button of root.querySelectorAll("button")) button.disabled = true;
-    let status = root.querySelector(".pi-enh-ask-progress");
-    if (!status) {
-      status = document.createElement("div");
-      status.className = "pi-enh-ask-progress";
-      root.appendChild(status);
-    }
-    status.textContent = "已选择，正在进入下一题…";
-  }
-
-  function renderAskUserWebNative(panel, data, state) {
-    const existing = getAskUserNativeRoot(panel);
-    const signature = data.signature + JSON.stringify([state.source || null, state.contextLoaded]);
-    if (existing && (state.submitting || existing.getAttribute("data-pi-enh-signature") === signature)) return;
-
-    if (existing && activeAskUserAnchor && (existing.contains(activeAskUserAnchor) || panel.contains(activeAskUserAnchor))) {
-      hideAskUserTooltip();
-    }
-
-    const mountTarget = getAskUserScrollMountTarget(panel);
-    if (mountTarget) {
-      styleAskUserNativeHost(panel);
-    } else {
-      // 无 scrollContainer 时的非遮挡回退：原生节点不搬迁，也不浮盖正文。
-      restoreAskUserNativeHost(panel);
-      panel.classList.add("pi-enh-ask-fallback-panel");
-      panel.parentElement?.classList.add("pi-enh-ask-fallback-host");
-      panel.parentElement?.parentElement?.classList.add("pi-enh-ask-dock-layout");
-    }
-
-    const oldInput = existing?.querySelector("[data-pi-enh-ask-freeform]");
-    const focused = oldInput && document.activeElement === oldInput;
-    const selection = focused ? [oldInput.selectionStart, oldInput.selectionEnd] : null;
-    if (oldInput) state.draft = oldInput.value;
-
-    const element = (tag, className, text) => {
-      const node = document.createElement(tag);
-      node.className = className;
-      if (text !== undefined) node.textContent = text;
-      return node;
-    };
-    const action = (label, handler, primary = false) => {
-      const button = element("button", "pi-enh-ask-action" + (primary ? " pi-enh-ask-action-primary" : ""), label);
-      button.type = "button";
-      button.addEventListener("click", handler);
-      return button;
-    };
-    const root = element("section", "pi-enh-ask-native");
-    root.setAttribute("data-pi-enh-signature", signature);
-    root.setAttribute("aria-label", "ask_user 网页原生选择器");
-    root.addEventListener("click", (event) => event.stopPropagation());
-    root.addEventListener("keydown", (event) => event.stopPropagation());
-
-    let panelId = panel.getAttribute("data-pi-enh-panel-id");
-    if (!panelId) {
-      panelId = "ask-panel-" + Math.random().toString(36).slice(2, 9);
-      panel.setAttribute("data-pi-enh-panel-id", panelId);
-    }
-    root.setAttribute("data-pi-enh-panel-id", panelId);
-    root.__pi_enh_panel = panel;
-    panel.__pi_enh_root = root;
-    state.root = root;
-    state.panel = panel;
-
-    const header = element("header", "pi-enh-ask-header");
-    const headerLeft = element("div", "pi-enh-ask-header-left");
-    headerLeft.appendChild(element("span", "pi-enh-ask-header-badge"));
-    headerLeft.appendChild(element("h2", "pi-enh-ask-native-title", "等待你的答复"));
-    header.appendChild(headerLeft);
-
-    const collapse = action("收起 · 查看对话", () => {
-      state.collapsed = !state.collapsed;
-      updateCollapse();
-    });
-    collapse.className = "pi-enh-ask-collapse-btn";
-    collapse.setAttribute("data-pi-enh-ask-collapse", "true");
-    const updateCollapse = () => {
-      root.classList.toggle("is-collapsed", Boolean(state.collapsed));
-      collapse.setAttribute("aria-expanded", String(!state.collapsed));
-      collapse.textContent = state.collapsed ? "展开 · 继续回答" : "收起 · 查看对话";
-    };
-    updateCollapse();
-    header.appendChild(collapse);
-    root.appendChild(header);
-
-    const body = element("div", "pi-enh-ask-body");
-    const displayQuestion = sanitizeAskUserText(state.source?.question || data.question);
-    body.appendChild(element("p", "pi-enh-ask-native-question", displayQuestion));
-
-    const rawContext = state.source?.context;
-    const cleanContext = sanitizeAskUserText(rawContext);
-    if (cleanContext) {
-      const details = element("details", "pi-enh-ask-context");
-      details.open = Boolean(state.contextOpen);
-      details.addEventListener("toggle", () => { state.contextOpen = details.open; });
-
-      const riskMatch = cleanContext.match(/(?:风险原因|Risk reason)[：:]\s*([^\n\r]+)/i);
-      const summaryText = riskMatch ? riskMatch[1].trim() : cleanContext.split(/\r?\n/)[0].trim().slice(0, 50);
-
-      const summary = element("summary", "");
-      summary.append(
-        element("span", "pi-enh-ask-context-summary-tag", riskMatch ? "风险原因" : "方案说明"),
-        element("span", "pi-enh-ask-context-summary-text", summaryText)
-      );
-      details.append(summary, element("div", "pi-enh-ask-context-text", cleanContext));
-      body.appendChild(details);
-    } else if (!state.contextLoaded) {
-      const skeleton = element("div", "pi-enh-ask-context-skeleton");
-      const summary = element("div", "pi-enh-ask-skeleton-summary", "▼ 方案与上下文");
-      const skeletonBody = element("div", "pi-enh-ask-skeleton-body");
-      skeletonBody.appendChild(element("div", "pi-enh-ask-skeleton-line"));
-      skeletonBody.appendChild(element("div", "pi-enh-ask-skeleton-line is-short"));
-      skeleton.append(summary, skeletonBody);
-      body.appendChild(skeleton);
-    } else {
-      const status = element("div", "pi-enh-ask-context-status", state.source
-        ? "本次提问未附方案正文。可收起查看前文，或在下方补充回答。"
-        : "未能核对完整方案。可收起查看前文，或展开下方原始提问。");
-      status.setAttribute("role", "status");
-      body.appendChild(status);
-    }
-
-    if (data.options.length > 0) {
-      const options = element("div", "pi-enh-ask-options");
-      for (const option of data.options) {
-        const original = state.source?.options?.[option.number - 1];
-        const rawLabel = typeof original === "string" ? original : original?.title || option.title;
-        const cleanLabel = sanitizeAskUserText(rawLabel);
-        const cleanDescription = sanitizeAskUserText(original?.description);
-
-        const row = element("div", "pi-enh-ask-option-row");
-        const button = element("button", `pi-enh-ask-option${option.checked ? " is-selected" : ""}`);
-        button.type = "button";
-        button.setAttribute("data-pi-enh-ask-option", String(option.number));
-        if (data.isMultiple) button.setAttribute("aria-pressed", String(option.checked));
-
-        const copy = element("span", "pi-enh-ask-option-label", cleanLabel);
-        button.append(
-          element("span", "pi-enh-ask-option-index", data.isMultiple ? (option.checked ? "✓" : "") : String(option.number)),
-          copy
-        );
-
-        button.addEventListener("click", () => {
-          if (state.submitting) return;
-          hideAskUserTooltip();
-          if (data.isMultiple) {
-            if (option.number <= 9) sendAskUserKeys(panel, [String(option.number)], null, state);
-            else moveAskUserCursor(panel, data, option.number - 1, " ", null, state);
-            return;
-          }
-          lockSubmission();
-          state.resolved = true;
-          const clearAttention = () => resolveCurrentAskUserStatus(state.sessionId);
-          if (option.number <= 9) sendAskUserKeys(panel, [String(option.number), "Enter"], clearAttention, state);
-          else moveAskUserCursor(panel, data, option.number - 1, "Enter", clearAttention, state);
-        });
-
-        let inlineDesc = null;
-        if (cleanDescription) {
-          button.addEventListener("mouseenter", () => {
-            isOverAskUserAnchor = true;
-            cancelHideAskUserTooltip();
-            showAskUserTooltip(button, cleanDescription);
-          });
-          button.addEventListener("mouseleave", () => {
-            isOverAskUserAnchor = false;
-            scheduleHideAskUserTooltip(200);
-          });
-          button.addEventListener("focus", () => {
-            if (inlineDesc && inlineDesc.style.display !== "none") return;
-            if (typeof window !== "undefined" && window.matchMedia && window.matchMedia("(hover: none)").matches) return;
-            showAskUserTooltip(button, cleanDescription);
-          });
-          button.addEventListener("blur", () => {
-            isOverAskUserAnchor = false;
-            scheduleHideAskUserTooltip(150);
-          });
-
-          const infoBtn = element("button", "pi-enh-ask-option-info-btn");
-          infoBtn.type = "button";
-          infoBtn.setAttribute("aria-label", `查看选项 ${option.number} 说明`);
-          infoBtn.setAttribute("title", "查看说明");
-          infoBtn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4"/><path d="M12 8h.01"/></svg>`;
-
-          inlineDesc = element("div", "pi-enh-ask-inline-desc", cleanDescription);
-          inlineDesc.style.display = "none";
-
-          infoBtn.addEventListener("click", (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            const isExpanded = inlineDesc.style.display !== "none";
-            hideAskUserTooltip();
-            if (isExpanded) {
-              inlineDesc.style.display = "none";
-              infoBtn.classList.remove("is-active");
-              infoBtn.setAttribute("aria-expanded", "false");
-            } else {
-              inlineDesc.style.display = "block";
-              infoBtn.classList.add("is-active");
-              infoBtn.setAttribute("aria-expanded", "true");
-            }
-          });
-
-          infoBtn.addEventListener("mouseenter", () => {
-            if (inlineDesc.style.display !== "none") return;
-            isOverAskUserAnchor = true;
-            cancelHideAskUserTooltip();
-            showAskUserTooltip(infoBtn, cleanDescription);
-          });
-          infoBtn.addEventListener("mouseleave", () => {
-            isOverAskUserAnchor = false;
-            scheduleHideAskUserTooltip(200);
-          });
-          infoBtn.addEventListener("focus", () => {
-            if (inlineDesc && inlineDesc.style.display !== "none") return;
-            if (typeof window !== "undefined" && window.matchMedia && window.matchMedia("(hover: none)").matches) return;
-            showAskUserTooltip(infoBtn, cleanDescription);
-          });
-          infoBtn.addEventListener("blur", () => {
-            isOverAskUserAnchor = false;
-            scheduleHideAskUserTooltip(150);
-          });
-
-          row.append(button, infoBtn);
-          options.appendChild(row);
-          options.appendChild(inlineDesc);
-        } else {
-          row.appendChild(button);
-          options.appendChild(row);
-        }
-      }
-      body.appendChild(options);
-    }
-
-    if (state.contextLoaded && !state.source) {
-      const raw = element("details", "pi-enh-ask-raw");
-      raw.append(element("summary", "", "原始提问内容（兼容视图）"), element("pre", "", sanitizeAskUserText(data.terminalText)));
-      body.appendChild(raw);
-    }
-    root.appendChild(body);
-
-    const footer = element("footer", "pi-enh-ask-footer");
-    const progress = element("div", "pi-enh-ask-progress");
-    progress.setAttribute("role", "status");
-    const unlockSubmission = (reason) => {
-      state.submitting = false;
-      state.resolved = false;
-      root.classList.remove("is-submitting");
-      root.removeAttribute("aria-busy");
-      for (const btn of root.querySelectorAll("button")) {
-        btn.disabled = false;
-      }
-      const input = root.querySelector("[data-pi-enh-ask-freeform]");
-      if (input) input.disabled = false;
-      progress.textContent = reason || "发送未响应，可点击重试";
-    };
-
-    const lockSubmission = () => {
-      state.submitting = true;
-      root.classList.add("is-submitting");
-      root.setAttribute("aria-busy", "true");
-      for (const btn of root.querySelectorAll("button")) {
-        if (btn !== collapse) btn.disabled = true;
-      }
-      const input = root.querySelector("[data-pi-enh-ask-freeform]");
-      if (input) input.disabled = true;
-      progress.textContent = "正在发送回答，请等待确认…";
-
-      // 4.5秒防卡死看门狗：如果后端未能完成答复闭环，自动恢复按钮可点击状态，允许用户点击重试
-      if (state.submitWatchdog) clearTimeout(state.submitWatchdog);
-      state.submitWatchdog = setTimeout(() => {
-        if (panel.isConnected && state.submitting && !state.disabled) {
-          unlockSubmission("发送未收到确认，点击选项可重新发送");
-        }
-      }, 4500);
-    };
-
-    if (data.hasFreeform) {
-      const form = element("div", "pi-enh-ask-freeform");
-      const row = element("div", "pi-enh-ask-freeform-row");
-      const textarea = element("textarea", "");
-      textarea.setAttribute("data-pi-enh-ask-freeform", "true");
-      textarea.setAttribute("aria-label", "自定义回答");
-      textarea.rows = 1;
-      textarea.value = state.draft || "";
-      textarea.placeholder = "补充意见，或输入其他回答…";
-      textarea.addEventListener("input", () => { state.draft = textarea.value; });
-      const submitFreeform = () => {
-        const value = textarea.value.trim();
-        if (!value || state.submitting) return;
-        hideAskUserTooltip();
-        lockSubmission();
-        beginAskUserFreeformSubmission(panel, data, state, value);
-      };
-      textarea.addEventListener("keydown", (event) => {
-        if (!event.isComposing && !event.repeat && event.key === "Enter" && (event.ctrlKey || event.metaKey)) {
-          event.preventDefault();
-          submitFreeform();
-        }
-      });
-      row.append(textarea, action("提交回答", submitFreeform, true));
-      form.appendChild(row);
-      footer.appendChild(form);
-    }
-
-    const actions = element("div", "pi-enh-ask-actions");
-    actions.appendChild(action("取消本次提问", () => {
-      if (state.submitting) return;
-      hideAskUserTooltip();
-      lockSubmission();
-      state.resolved = true;
-      sendAskUserKeys(panel, ["Escape"], () => resolveCurrentAskUserStatus(state.sessionId), state);
-    }));
-    actions.appendChild(element("span", "pi-enh-ask-hint", data.isMultiple ? "可多选，确认后提交" : "点选即提交 · 自定义回答 Ctrl/⌘ + Enter"));
-    if (data.isMultiple) actions.appendChild(action("确认选择", () => {
-      if (state.submitting) return;
-      hideAskUserTooltip();
-      lockSubmission();
-      state.resolved = true;
-      sendAskUserKeys(panel, ["Enter"], () => resolveCurrentAskUserStatus(state.sessionId), state);
-    }, true));
-
-    footer.append(actions, progress);
-    root.appendChild(footer);
-
-    const target = mountTarget || panel;
-    if (!mountTarget) {
-      root.classList.add("is-docked");
-    }
-
-    const scrollContainer = getAskUserScrollContainer(panel);
-    const prevScrollTop = scrollContainer ? scrollContainer.scrollTop : null;
-
-    if (existing && existing.parentElement === target) {
-      target.replaceChild(root, existing);
-    } else {
-      if (existing) existing.remove();
-      target.appendChild(root);
-    }
-
-    if (prevScrollTop !== null && scrollContainer && scrollContainer.scrollTop !== prevScrollTop) {
-      scrollContainer.scrollTop = prevScrollTop;
-    }
-
-    cleanAskUserCommentsInDOM(document.body);
-    if (focused) {
-      const input = root.querySelector("[data-pi-enh-ask-freeform]");
-      input?.focus({ preventScroll: true });
-      if (selection) input?.setSelectionRange(...selection);
-    }
-  }
-
-  function resolveDisconnectedAskUserPanels() {
-    for (const panel of activeAskUserPanels) {
-      if (panel.isConnected) continue;
-      const state = askUserNativeStates.get(panel);
-      if (state?.root) {
-        if (activeAskUserAnchor && (state.root.contains(activeAskUserAnchor) || panel.contains(activeAskUserAnchor))) {
-          hideAskUserTooltip();
-        }
-        state.root.remove();
-        state.root = null;
-      }
-      if (panel.__pi_enh_root) panel.__pi_enh_root = null;
-      restoreAskUserNativeHost(panel);
-      if (state?.submitWatchdog) {
-        clearTimeout(state.submitWatchdog);
-        state.submitWatchdog = null;
-      }
-      if (state && !state.resolved) {
-        state.resolved = true;
-        resolveCurrentAskUserStatus(state.sessionId);
-      }
-      activeAskUserPanels.delete(panel);
-    }
-  }
-
-  function syncAskUserWebNative() {
-    if (!isPluginEnabled("ask-user-web-native")) {
-      removeAskUserWebNative();
-      return;
-    }
-    cleanAskUserCommentsInDOM(document.body);
-    for (const panel of document.querySelectorAll('[role="dialog"]')) { 
-      const data = parseAskUserPanel(panel);
-      if (!data) {
-        const state = askUserNativeStates.get(panel);
-        if (state?.pendingFreeform) {
-          submitPendingAskUserFreeform(panel, state);
-        } else {
-          if (state && !state.resolved) {
-            state.resolved = true;
-            resolveCurrentAskUserStatus(state.sessionId);
-          }
-          if (state || activeAskUserPanels.has(panel)) {
-            removeAskUserWebNative(panel);
-          }
-        }
-        continue;
-      }
-      const state = askUserNativeStates.get(panel) || {
-        mode: data.options.length === 0 && data.hasFreeform ? "freeform" : "options",
-        readyAt: 0,
-        signature: data.signature,
-        identity: data.identity,
-        draft: "",
-        resolved: false,
-        sessionId: getSessionIdFromCurrentUrl(),
-      }; 
-      if (!state.submitting && state.identity !== data.identity) {
-        state.identity = data.identity;
-        state.signature = data.signature;
-        state.source = null;
-        state.contextLoaded = false;
-        state.contextLoading = false;
-        state.draft = "";
-        state.collapsed = false;
-        state.contextOpen = false;
-        state.submitting = false;
-        state.mode = data.options.length === 0 && data.hasFreeform ? "freeform" : "options";
-        state.readyAt = 0;
-        state.resolved = false;
-        state.sessionId = getSessionIdFromCurrentUrl();
-        state.pendingFreeform = false;
-        state.pendingFreeformValue = null;
-        state.freeformResponseSent = false;
-      }
-      state.disabled = false;
-      askUserNativeStates.set(panel, state);
-      activeAskUserPanels.add(panel);
-
-      // 0ms 同步提取缓存：在首次 renderAskUserWebNative 之前，尽可能立即补齐 source，杜绝初次渲染变形
-      if (!state.source && !state.contextLoaded && state.sessionId) {
-        const cachedMatch = tryExtractAskUserFromCache(state.sessionId, data);
-        if (cachedMatch) {
-          state.source = cachedMatch;
-          state.contextLoaded = true;
-          state.contextLoading = false;
-        }
-      }
-
-      const currentSessionId = getSessionIdFromCurrentUrl();
-      if (currentSessionId && !state.resolved && !state.submitting) {
-        markLocalActiveSessionAttention(currentSessionId);
-      }
-      if (!state.resolved && !state.submitting) {
-        updateProjectStatusTitle("attention");
-        syncProjectStatusAttentionFavicon("attention");
-        if (!state.attentionNotified) {
-          state.attentionNotified = true;
-          syncApprovalSound();
-          syncDesktopAttention();
-        }
-      }
-      renderAskUserWebNative(panel, data, state);
-      void hydrateAskUserContext(panel, data, state);
-    }
-    resolveDisconnectedAskUserPanels();
-  }
-
-  if (typeof window !== "undefined") {
-    window.__PI_ENH_SYNC_ASK_USER__ = syncAskUserWebNative;
-  }
-
-  // ==========================================
   // 2.6 Cross-project Session Status Indicator (跨项目会话状态提示)
   // ==========================================
   // Pure state model: transport, DOM and storage never decide whether a request closed.
@@ -19393,25 +18265,9 @@
   }
 
   function hasActiveAskUserOnScreen() {
-    if (typeof document === "undefined") return false;
-    for (const dialog of document.querySelectorAll('[role="dialog"]')) {
-      // 豁免设置弹窗与非提问普通弹窗
-      if (dialog.querySelector(".settings-general-container, .pi-enh-plugins-shell, .pi-enh-sync-card")) continue;
-      const state = typeof askUserNativeStates !== "undefined" ? askUserNativeStates.get(dialog) : null;
-      const nativePicker = (typeof getAskUserNativeRoot === "function" ? getAskUserNativeRoot(dialog) : dialog.querySelector(".pi-enh-ask-native")) || dialog.querySelector("[data-ask-user-picker]");
-      if (state?.resolved || state?.submitting || nativePicker?.classList.contains("is-submitting")
-        || nativePicker?.getAttribute("aria-busy") === "true") continue;
-      if (nativePicker) return true;
-    }
-    if (typeof activeAskUserPanels !== "undefined" && typeof askUserNativeStates !== "undefined") {
-      for (const panel of activeAskUserPanels) {
-        if (panel && panel.isConnected) {
-          const state = askUserNativeStates.get(panel);
-          if (state && !state.resolved && !state.submitting) return true;
-        }
-      }
-    }
-    return false;
+    // Visibility is a read-only hint; pending/closed request state stays server-owned.
+    const picker = document.querySelector('[data-ask-user-picker]');
+    return Boolean(picker && picker.getAttribute("aria-busy") !== "true");
   }
 
   function isCurrentSessionInAttention(sid = null) {
@@ -23396,6 +22252,99 @@
   let composerHostDragLeaveHandler = null;
   let composerHostDropHandler = null;
   let composerFileInputChangeHandler = null;
+  let composerDocumentPickerInput = null;
+  let composerDocumentPickerGeneration = 0;
+
+  function removeComposerDocumentPicker() {
+    composerDocumentPickerGeneration += 1;
+    composerDocumentPickerInput?.remove();
+    composerDocumentPickerInput = null;
+  }
+
+  function openComposerDocumentPicker(card) {
+    if (!isPluginEnabled("composer-file-paste")) {
+      showToast("请先启用文件附件功能", null, 2400);
+      return;
+    }
+    const textarea = findComposerTextarea();
+    if (!textarea || !card?.isConnected) return;
+    removeComposerDocumentPicker();
+    const generation = composerDocumentPickerGeneration;
+    const root = textarea.closest("fieldset") || textarea.closest("form");
+    const imageInput = root?.querySelector('input[type="file"]');
+    const isCurrent = () => generation === composerDocumentPickerGeneration
+      && card.isConnected && textarea.isConnected && findComposerTextarea() === textarea
+      && isPluginEnabled("composer-file-paste");
+    const consumeFiles = (files) => {
+      if (!isCurrent()) return;
+      const images = files.filter((file) => file.type.startsWith("image/") && !isVideoFile(file.name, file.type));
+      const attachments = files.filter((file) => !images.includes(file));
+      if (images.length) {
+        // Images still enter the existing native ChatInput handler, never a second image owner.
+        if (imageInput && typeof DataTransfer !== "undefined") {
+          const transfer = new DataTransfer();
+          images.forEach((file) => transfer.items.add(file));
+          imageInput.files = transfer.files;
+          imageInput.dispatchEvent(new Event("change", { bubbles: true }));
+        } else {
+          showToast("此浏览器请使用输入框图片按钮添加图片", null, 3000);
+        }
+      }
+      if (attachments.length) void processComposerFiles(attachments, textarea);
+    };
+    const openInputFallback = () => {
+      if (!isCurrent()) return;
+      // Independent enhancement-owned host: do not retarget React's media input.
+      const input = document.createElement("input");
+      input.type = "file";
+      input.multiple = true;
+      input.hidden = true;
+      input.setAttribute("data-pi-document-picker", "true");
+      const ua = navigator.userAgent;
+      // Chromium Android treats octet-stream as unrestricted GET_CONTENT and avoids media-only
+      // routing. Other browsers retain the standard accept-less arbitrary-file input.
+      if (/Android/i.test(ua) && /(?:Chrome|Chromium)\//i.test(ua)) {
+        input.accept = "application/octet-stream";
+      }
+      const cleanup = () => {
+        input.remove();
+        if (composerDocumentPickerInput === input) composerDocumentPickerInput = null;
+      };
+      input.addEventListener("cancel", cleanup, { once: true });
+      input.addEventListener("change", () => {
+        const files = Array.from(input.files || []);
+        cleanup();
+        consumeFiles(files);
+      }, { once: true });
+      document.body.appendChild(input);
+      composerDocumentPickerInput = input;
+      input.click();
+    };
+    // ACTION_OPEN_DOCUMENT on supporting Android browsers opens the actual document picker.
+    // Never rely on it on HTTP or unsupported Safari/Firefox, and never reopen after Cancel.
+    if (window.isSecureContext && typeof window.showOpenFilePicker === "function") {
+      let selection;
+      try {
+        selection = window.showOpenFilePicker({
+          id: "pi-web-attachments", multiple: true, excludeAcceptAllOption: false, startIn: "downloads",
+        });
+      } catch (_) {
+        openInputFallback();
+        return;
+      }
+      Promise.resolve(selection).then(async (handles) => {
+        if (!isCurrent()) return;
+        const files = await Promise.all(handles.map((handle) => handle.getFile()));
+        consumeFiles(files);
+      }).catch((error) => {
+        if (!isCurrent() || error?.name === "AbortError") return;
+        // User activation may have expired: request an explicit next click, not a hidden second picker.
+        showToast("文件选择未完成，请重试或使用浏览器的文件上传入口", null, 4000);
+      });
+    } else {
+      openInputFallback();
+    }
+  }
 
   const COMPOSER_EXTENDED_FILE_ACCEPT = "image/*,video/*";
 
@@ -23407,9 +22356,6 @@
     if (fileInput) {
       if (!fileInput.hasAttribute("data-pi-orig-accept")) {
         fileInput.setAttribute("data-pi-orig-accept", fileInput.getAttribute("accept") || "image/*");
-      }
-      if (fileInput.getAttribute("accept") !== COMPOSER_EXTENDED_FILE_ACCEPT) {
-        fileInput.setAttribute("accept", COMPOSER_EXTENDED_FILE_ACCEPT);
       }
       if (activeComposerFileInput !== fileInput || !fileInput.__piEnhFileInputBound) {
         if (activeComposerFileInput && composerFileInputChangeHandler) {
@@ -23464,6 +22410,15 @@
 
     const attachBtns = document.querySelectorAll?.('button[data-pi-attach-image]') || [];
     for (const btn of attachBtns) {
+      if (!btn.__piEnhAttachClickHandler) {
+        btn.__piEnhAttachClickHandler = () => {
+          const r = btn.closest("fieldset") || btn.closest("form") || document;
+          const fi = r.querySelector?.('input[type="file"]') ||
+            document.querySelector?.('fieldset input[type="file"], form input[type="file"]');
+          if (fi) fi.setAttribute("accept", "image/*,video/*");
+        };
+        btn.addEventListener("click", btn.__piEnhAttachClickHandler, true);
+      }
       if (!btn.hasAttribute("data-pi-orig-title")) {
         btn.setAttribute("data-pi-orig-title", btn.getAttribute("title") || "");
       }
@@ -23480,6 +22435,7 @@
   }
 
   function restoreComposerFileInputAndToolbar() {
+    removeComposerDocumentPicker();
     if (activeComposerFileInput) {
       if (composerFileInputChangeHandler) {
         activeComposerFileInput.removeEventListener("change", composerFileInputChangeHandler, true);
@@ -23498,6 +22454,10 @@
     }
     const attachBtns = document.querySelectorAll?.('button[data-pi-attach-image]') || [];
     for (const btn of attachBtns) {
+      if (btn.__piEnhAttachClickHandler) {
+        btn.removeEventListener("click", btn.__piEnhAttachClickHandler, true);
+        delete btn.__piEnhAttachClickHandler;
+      }
       if (btn.hasAttribute("data-pi-orig-title")) {
         const origTitle = btn.getAttribute("data-pi-orig-title");
         if (origTitle) btn.setAttribute("title", origTitle);
@@ -25874,23 +24834,10 @@
 
     const imageFiles = allClipboardFiles.filter((file) =>
       file.type?.startsWith("image/") && !isVideoFile(file.name, file.type));
-    if (imageFiles.length > 0) {
-      event.preventDefault();
-      event.stopPropagation();
-      const imageInput = textarea.closest("fieldset")?.querySelector('input[type="file"][accept*="image"]')
-        || document.querySelector('input[type="file"][accept*="image"]');
-      if (imageInput) {
-        try {
-          const transfer = new DataTransfer();
-          for (const imageFile of imageFiles) transfer.items.add(imageFile);
-          const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement?.prototype || {}, "files")?.set;
-          if (setter) setter.call(imageInput, transfer.files);
-          else imageInput.files = transfer.files;
-          imageInput.dispatchEvent(new Event("change", { bubbles: true }));
-        } catch (_) {}
-      }
-      return;
-    }
+    // Native ChatInput owns image paste. File-picker accept is mutable (the
+    // attachment plugin allows arbitrary files), so never consume or relay an
+    // image through a selector that can disappear after the first selection.
+    if (imageFiles.length > 0) return;
 
     if (html && hasSubstantialRichFormatting(html)) {
       const markdown = htmlToMarkdown(html);
@@ -26100,6 +25047,7 @@
   // SVG 计划：完整灯泡含底座与 5 短射线
   const SVG_PLAN_ICON = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="2" y1="11" x2="4.5" y2="11"></line><line x1="4.93" y1="4.93" x2="6.7" y2="6.7"></line><line x1="12" y1="1.5" x2="12" y2="4"></line><line x1="19.07" y1="4.93" x2="17.3" y2="6.7"></line><line x1="22" y1="11" x2="19.5" y2="11"></line><path d="M9 17h6M10 20h4M12 6a5.5 5.5 0 0 0-4.8 8.2c.9 1.4 1.8 2.3 1.8 2.8h6c0-.5.9-1.4 1.8-2.8A5.5 5.5 0 0 0 12 6z"></path></svg>`;
   const SVG_ATTACH_ICON = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"></path></svg>`;
+  const SVG_IMAGE_ICON = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><circle cx="8.5" cy="8.5" r="1.5"></circle><polyline points="21 15 16 10 5 21"></polyline></svg>`;
   const SVG_CHECK_ICON = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#22c55e" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>`;
 
   function parseExtensionStatus(data, key) {
@@ -26240,32 +25188,33 @@
     style.id = COMPOSER_MODES_STYLE_ID;
     style.textContent = `
       .pi-enh-composer-add-menu {
-        position: fixed !important; left: 0; width: 340px; box-sizing: border-box;
-        max-width: 90vw !important; background: var(--bg-panel, #1e1e20) !important;
-        border: 1px solid var(--border, #3f3f46) !important; border-radius: 12px !important;
-        box-shadow: 0 10px 30px rgba(0,0,0,.4), 0 2px 8px rgba(0,0,0,.2) !important;
-        padding: 6px !important; display: flex !important; flex-direction: column !important;
-        gap: 3px !important; z-index: 10040 !important; user-select: none !important;
+        position: fixed !important; left: 0; box-sizing: border-box !important;
+        width: max-content !important; min-width: 180px !important;
+        background: var(--bg-panel, #1e1e20) !important;
+        border: 1px solid var(--border, #3f3f46) !important; border-radius: 10px !important;
+        box-shadow: 0 8px 24px rgba(0,0,0,.35), 0 2px 6px rgba(0,0,0,.15) !important;
+        padding: 4px !important; display: flex !important; flex-direction: column !important;
+        gap: 2px !important; z-index: 10040 !important; user-select: none !important;
       }
       html[data-theme="light"] .pi-enh-composer-add-menu,
       [data-theme="light"] .pi-enh-composer-add-menu {
         background: var(--bg-panel, #fff) !important; border-color: var(--border, #e4e4e7) !important;
       }
       .pi-enh-composer-menu-item {
-        display: flex !important; align-items: center !important; gap: 10px !important;
-        padding: 8px 10px !important; border-radius: 8px !important; background: transparent !important;
+        display: flex !important; align-items: center !important; gap: 7px !important;
+        padding: 6px 8px !important; border-radius: 6px !important; background: transparent !important;
         border: none !important; color: var(--text, #f4f4f5) !important; cursor: pointer !important;
-        text-align: left !important; width: 100% !important; font-size: 13px !important;
+        text-align: left !important; width: 100% !important; font-size: 12.5px !important;
         font-weight: 500 !important; box-sizing: border-box !important;
       }
       .pi-enh-composer-menu-item:hover { background: color-mix(in srgb, var(--text, #fff) 8%, transparent) !important; }
       .pi-enh-composer-menu-item.active { background: color-mix(in srgb, var(--text, #fff) 12%, transparent) !important; }
-      .pi-enh-composer-menu-icon { display: inline-flex !important; align-items: center !important; justify-content: center !important; width: 20px !important; height: 20px !important; flex-shrink: 0 !important; }
+      .pi-enh-composer-menu-icon { display: inline-flex !important; align-items: center !important; justify-content: center !important; width: 18px !important; height: 18px !important; flex-shrink: 0 !important; }
       .pi-enh-composer-menu-label { display: flex !important; align-items: center !important; flex: 1 1 auto !important; min-width: 0 !important; }
-      .pi-enh-composer-menu-title { white-space: nowrap !important; font-size: 13px !important; }
-      .pi-enh-composer-menu-desc { font-size: 12px !important; color: var(--text-dim, #71717a) !important; margin-left: 8px !important; white-space: nowrap !important; overflow: hidden !important; text-overflow: ellipsis !important; }
-      .pi-enh-composer-menu-kbd { margin-left: auto !important; font-size: 11px !important; color: var(--text-dim, #71717a) !important; padding: 2px 5px !important; border-radius: 4px !important; border: 1px solid var(--border, #3f3f46) !important; line-height: 1 !important; flex-shrink: 0 !important; }
-      .pi-enh-composer-menu-check { margin-left: 6px !important; display: flex !important; align-items: center !important; color: #22c55e !important; flex-shrink: 0 !important; }
+      .pi-enh-composer-menu-title { white-space: nowrap !important; font-size: 12.5px !important; }
+      .pi-enh-composer-menu-desc { font-size: 11.5px !important; color: var(--text-dim, #71717a) !important; margin-left: 6px !important; white-space: nowrap !important; overflow: hidden !important; text-overflow: ellipsis !important; }
+      .pi-enh-composer-menu-kbd { margin-left: auto !important; font-size: 10px !important; color: var(--text-dim, #71717a) !important; padding: 1px 4px !important; border-radius: 3px !important; border: 1px solid var(--border, #3f3f46) !important; line-height: 1.2 !important; flex-shrink: 0 !important; }
+      .pi-enh-composer-menu-check { margin-left: 4px !important; display: flex !important; align-items: center !important; color: #22c55e !important; flex-shrink: 0 !important; }
       .pi-enh-composer-modes-disabled-notice { display: inline-flex !important; align-items: center !important; gap: 8px !important; padding: 4px 10px !important; margin: 4px 0 !important; border-radius: 6px !important; background: color-mix(in srgb, var(--warning, #f59e0b) 15%, transparent) !important; border: 1px solid color-mix(in srgb, var(--warning, #f59e0b) 40%, transparent) !important; color: var(--text, #f4f4f5) !important; font-size: 12px !important; }
       .pi-enh-composer-modes-disabled-notice button { background: color-mix(in srgb, var(--warning, #f59e0b) 30%, transparent) !important; border: 1px solid color-mix(in srgb, var(--warning, #f59e0b) 60%, transparent) !important; color: var(--text, #f4f4f5) !important; border-radius: 4px !important; padding: 2px 8px !important; font-size: 11px !important; cursor: pointer !important; }
       html[data-pi-composer-modes-active="true"] .extension-status-line[aria-label*='"version":1'] .extension-status-text,
@@ -26348,9 +25297,19 @@
       return;
     }
     const cardRect = card.getBoundingClientRect();
+    // 关键铁律约束：加号菜单宽度严禁超过下方输入框卡片的宽度！
+    const maxAllowedWidth = Math.max(160, Math.floor(cardRect.width));
+    composerAddMenuEl.style.maxWidth = `${maxAllowedWidth}px`;
+
     const menuRect = composerAddMenuEl.getBoundingClientRect();
-    composerAddMenuEl.style.left = Math.max(8, Math.min(cardRect.left, window.innerWidth - menuRect.width - 8)) + "px";
+    const finalLeft = Math.max(8, Math.min(cardRect.left, window.innerWidth - menuRect.width - 8));
+    composerAddMenuEl.style.left = finalLeft + "px";
     composerAddMenuEl.style.top = Math.max(8, cardRect.top >= menuRect.height + 16 ? cardRect.top - menuRect.height - 8 : Math.min(cardRect.bottom + 8, window.innerHeight - menuRect.height - 8)) + "px";
+
+    // 边界双重保险：若菜单右侧超出输入框右边缘，精确截断收紧
+    if (finalLeft + menuRect.width > cardRect.right) {
+      composerAddMenuEl.style.maxWidth = `${Math.max(160, Math.floor(cardRect.right - finalLeft))}px`;
+    }
   }
 
   function openComposerAddMenu(card, addBtn) {
@@ -26365,30 +25324,23 @@
     menu.setAttribute("role", "menu");
     menu.setAttribute("aria-label", "输入框模式与附件菜单");
 
-    // 1. 添加附件入口
-    const attachItem = document.createElement("button");
-    attachItem.type = "button";
-    attachItem.className = "pi-enh-composer-menu-item";
-    attachItem.innerHTML = `
+    // 1. 添加文件入口（支持任意类型：文档、代码、CAD模型与压缩包等）
+    const fileItem = document.createElement("button");
+    fileItem.type = "button";
+    fileItem.className = "pi-enh-composer-menu-item";
+    fileItem.innerHTML = `
       <span class="pi-enh-composer-menu-icon">${SVG_ATTACH_ICON}</span>
       <span class="pi-enh-composer-menu-label">
-        <span class="pi-enh-composer-menu-title">添加附件</span>
-        <span class="pi-enh-composer-menu-desc">图片与视频</span>
+        <span class="pi-enh-composer-menu-title">添加文件</span>
+        <span class="pi-enh-composer-menu-desc">任意类型文件</span>
       </span>
     `;
-    attachItem.addEventListener("click", (e) => {
+    fileItem.addEventListener("click", (e) => {
       e.stopPropagation();
       closeComposerAddMenu();
-      const fileInput = card.querySelector('input[type="file"]') ||
-        document.querySelector('fieldset input[type="file"]') ||
-        document.querySelector('input[type="file"]');
-      if (fileInput) {
-        fileInput.click();
-      } else {
-        showToast("未找到文件上传组件", null, 2000);
-      }
+      openComposerDocumentPicker(card);
     });
-    menu.appendChild(attachItem);
+    menu.appendChild(fileItem);
 
     // 2. 目标模式入口（按截图说明：‘设置要持续追求的目标’）
     const goalItem = document.createElement("button");
@@ -35165,7 +34117,6 @@
     { fn: syncQuickActionButtons, scope: "full" },
     { fn: syncEmptySendContinue, scope: "full" },
     { fn: syncBottomShortcutsBar, scope: "full" },
-    { fn: syncAskUserWebNative, scope: "full" },
     { fn: syncProjectStatusIndicators, scope: "full" },
     { fn: syncScrollbarPlugin, scope: "chat-text" },
     { fn: syncNativeMessageFont, scope: "full" },
@@ -37862,49 +36813,7 @@
     }
   }
 
-  instantDialogObserver = null;
-  function initInstantDialogObserver() {
-    if (instantDialogObserver || typeof MutationObserver !== "function" || typeof document === "undefined") return;
-    try {
-      instantDialogObserver = new MutationObserver((mutations) => {
-        if (isMutatingInternally || !isPluginEnabled("ask-user-web-native")) return;
-        let hasDialog = false;
-        for (let i = 0; i < mutations.length; i++) {
-          const m = mutations[i];
-          if (m.type === "childList" && m.addedNodes && m.addedNodes.length > 0) {
-            for (let j = 0; j < m.addedNodes.length; j++) {
-              const node = m.addedNodes[j];
-              if (node.nodeType === 1) {
-                if (node.getAttribute?.("role") === "dialog" || (typeof node.querySelector === "function" && node.querySelector('[role="dialog"]'))) {
-                  hasDialog = true;
-                  break;
-                }
-              }
-            }
-          }
-          if (hasDialog) break;
-        }
-        if (hasDialog) {
-          withMutationGuard(() => {
-            syncAskUserWebNative();
-          });
-        }
-      });
-      const root = document.documentElement || document.body;
-      if (root) {
-        instantDialogObserver.observe(root, { childList: true, subtree: true });
-        activeCleanups.push(() => {
-          if (instantDialogObserver) {
-            instantDialogObserver.disconnect();
-            instantDialogObserver = null;
-          }
-        });
-      }
-    } catch (e) {}
-  }
-
   initChatObserver();
-  initInstantDialogObserver();
 
   function syncSidebarRowsImmediate() {
     withMutationGuard(() => {
@@ -44154,7 +43063,6 @@ window.__PI_ENH_RENDER_USAGE_PANEL__ = renderUsagePanel;
       isProjectStatusMonitoringActive = false;
 
       // 4. Thorough DOM cleanup
-      removeAskUserWebNative();
       removeQuickActionButtons();
       removeScrollBottomButton();
       removeLocalPathLauncher();

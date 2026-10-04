@@ -9,6 +9,7 @@ import "./globals.css";
 import "./settings.css";
 import "./composer.css";
 import "./enhancements.css";
+import "./ask-user.css";
 
 const notoSansMono = Noto_Sans_Mono({
   subsets: ["latin", "cyrillic"],

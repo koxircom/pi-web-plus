@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { useI18n } from "@/hooks/useI18n";
+import { loadImagePreview, preloadImageCapabilities } from "@/lib/image-capabilities";
 
 interface ImagePreviewProps {
   src: string;
@@ -16,34 +17,27 @@ export function ImagePreview({ src, alt = "", children, className, style }: Imag
   const previewLabel = t("chat.previewImage");
   const triggerLabel = alt.trim() ? `${previewLabel}: ${alt}` : previewLabel;
   const [open, setOpen] = useState(false);
+  const [Dialog, setDialog] = useState<typeof import("./ImagePreviewDialog").ImagePreviewDialog | null>(null);
+  const [failed, setFailed] = useState(false);
   const triggerRef = useRef<HTMLButtonElement>(null);
-  const dialogRef = useRef<HTMLDialogElement>(null);
-  const closeButtonRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
-    if (!open) return;
-    const dialog = dialogRef.current;
-    if (!dialog) return;
-    const trigger = triggerRef.current;
-
-    const previousOverflow = document.body.style.overflow;
-    document.body.style.overflow = "hidden";
-    dialog.showModal();
-    closeButtonRef.current?.focus({ preventScroll: true });
-
-    return () => {
-      document.body.style.overflow = previousOverflow;
-      if (dialog.open) dialog.close();
-      if (trigger?.isConnected) {
-        trigger.focus({ preventScroll: true });
-      }
+    if (!open || Dialog) return;
+    let cancelled = false;
+    const cancelPending = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setOpen(false);
     };
-  }, [open]);
-
-  const closePreview = () => {
-    if (dialogRef.current?.open) dialogRef.current.close();
-    setOpen(false);
-  };
+    document.addEventListener("keydown", cancelPending);
+    loadImagePreview().then((module) => {
+      if (!cancelled) setDialog(() => module.ImagePreviewDialog);
+    }).catch(() => {
+      if (!cancelled) { setFailed(true); setOpen(false); }
+    });
+    return () => {
+      cancelled = true;
+      document.removeEventListener("keydown", cancelPending);
+    };
+  }, [open, Dialog]);
 
   return (
     <>
@@ -51,59 +45,18 @@ export function ImagePreview({ src, alt = "", children, className, style }: Imag
         ref={triggerRef}
         type="button"
         className={className}
-        style={{
-          display: "block",
-          padding: 0,
-          border: "none",
-          background: "none",
-          color: "inherit",
-          cursor: "zoom-in",
-          ...style,
-        }}
-        onClick={() => setOpen(true)}
+        style={{ display: "block", padding: 0, border: "none", background: "none", color: "inherit", cursor: "zoom-in", ...style }}
+        onClick={() => { setFailed(false); setOpen(true); preloadImageCapabilities(); }}
         aria-label={triggerLabel}
         aria-haspopup="dialog"
         aria-expanded={open}
+        aria-busy={open && !Dialog}
         title={previewLabel}
       >
         {children}
       </button>
-      {open && (
-        <dialog
-          ref={dialogRef}
-          className="image-preview-dialog"
-          aria-label={t("chat.previewImage")}
-          onCancel={(event) => {
-            event.preventDefault();
-            event.stopPropagation();
-            closePreview();
-          }}
-          onKeyDown={(event) => {
-            if (event.key !== "Escape") return;
-            event.preventDefault();
-            event.stopPropagation();
-            closePreview();
-          }}
-          onClick={(event) => {
-            if (event.target === event.currentTarget) closePreview();
-          }}
-        >
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img className="image-preview-image" src={src} alt={alt} />
-          <button
-            ref={closeButtonRef}
-            type="button"
-            className="image-preview-close"
-            onClick={closePreview}
-            aria-label={t("chat.close")}
-            title={t("chat.close")}
-          >
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" aria-hidden="true">
-              <path d="M6 6l12 12M18 6 6 18" />
-            </svg>
-          </button>
-        </dialog>
-      )}
+      {open && Dialog && <Dialog src={src} alt={alt} triggerRef={triggerRef} onClose={() => setOpen(false)} />}
+      {failed && <span role="alert">图片预览加载失败，请重试</span>}
     </>
   );
 }

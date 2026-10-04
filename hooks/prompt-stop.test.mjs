@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import vm from 'node:vm';
 import {readFileSync} from 'node:fs';
 import {stripTypeScriptTypes} from 'node:module';
+import {pendingSessionInfo} from '../lib/session-catalog-client.ts';
 const source=readFileSync(new URL('./useAgentSession.ts',import.meta.url),'utf8');
 const helper=readFileSync(new URL('../lib/prompt-preparation.ts',import.meta.url),'utf8').replace('export function','function');
 const extract=(a,b)=>source.slice(source.indexOf(a),source.indexOf(b,source.indexOf(a)));
@@ -10,8 +11,8 @@ const code=stripTypeScriptTypes(helper+'\n'+extract('  const handleSend = useCal
 const deferred=()=>{let resolve,reject;const promise=new Promise((a,b)=>{resolve=a;reject=b;});return{resolve,reject,promise};};
 const tick=()=>new Promise(r=>setImmediate(r));
 function harness(isNew=false){
- const newSession=deferred(),events=deferred(),command=deferred(),state={running:false,bash:false,messages:[],restored:[],notices:[],commands:[],stopping:false},ref=current=>({current});
- const scope={AbortController,DOMException,Promise,useCallback:f=>f,waitForPromptPreparation:undefined,isNew,newSessionCwd:'/test',newSessionModel:null,session:isNew?null:{id:'s'},composerDraftKey:'draft',
+ const newSession=deferred(),events=deferred(),command=deferred(),state={running:false,bash:false,messages:[],restored:[],notices:[],commands:[],stopping:false,sessionSubmissions:[]},ref=current=>({current});
+ const scope={AbortController,DOMException,Promise,useCallback:f=>f,waitForPromptPreparation:undefined,isNew,newSessionCwd:'/test',newSessionDraftKey:'new:draft:/test',newSessionModel:null,pendingSessionInfo,onSessionSubmissionChange:(...args)=>state.sessionSubmissions.push(args),session:isNew?null:{id:'s'},composerDraftKey:'draft',
   agentRunningRef:ref(false),bashRunningRef:ref(false),sessionIdRef:ref(isNew?null:'s'),ensuringNewSessionRef:ref(null),promptRunIdRef:ref(0),rpcPromptPendingRef:ref(false),optimisticUserMessageKeyRef:ref(null),pendingScrollToUserRef:ref(false),preparationRef:ref(null),stopInFlightRef:ref(null),executeBashRef:ref(null),
   ensureNewSession:()=>newSession.promise.then(s=>{scope.sessionIdRef.current=s;return s;}),ensureEventsConnected:()=>events.promise,
   sendAgentCommand:async(s,c)=>{state.commands.push(c);if(c.type==='abort')await command.promise;},
@@ -21,7 +22,10 @@ function harness(isNew=false){
 }
 for(const phase of ['create','events'])test(`Stop during ${phase} prevents later prompt dispatch and restores input`,async()=>{
  const h=harness(phase==='create'),sending=h.handleSend('keep me');await tick();
- assert.equal(h.state.running,true);await h.handleAbort();await sending;
+ assert.equal(h.state.running,true);
+ if(phase==='create') assert.equal(h.state.sessionSubmissions[0][1].firstMessage,'keep me');
+ await h.handleAbort();await sending;
+ if(phase==='create') assert.equal(h.state.sessionSubmissions.at(-1)[1],null);
  assert.equal(h.state.running,false);assert.equal(h.state.messages.length,0);assert.equal(h.state.restored[0][0],'keep me');assert.equal(h.state.notices.length,0);
  h.newSession.resolve('s');h.events.resolve();await tick();
  assert.equal(h.state.commands.some(c=>c.type==='prompt'),false);
@@ -35,4 +39,17 @@ test('normal preparation dispatches exactly once and repeated Stop shares acknow
  assert.equal(h.state.commands.filter(c=>c.type==='prompt').length,1);
  const first=h.handleAbort(),second=h.handleAbort();await tick();assert.equal(h.state.stopping,true);assert.equal(h.state.commands.filter(c=>c.type==='abort').length,1);
  h.command.resolve();await Promise.all([first,second]);
+});
+
+test('title and optimistic message appear before session creation and event connection', async()=>{
+ const h=harness(true), sending=h.handleSend('即时标题'); await tick();
+ assert.equal(h.state.sessionSubmissions[0][1].firstMessage,'即时标题');
+ assert.equal(h.state.messages[0].content,'即时标题');
+ assert.equal(h.state.commands.length,0);
+ h.newSession.resolve('real'); await tick();
+ assert.equal(h.state.sessionSubmissions.at(-1)[1].id,'real');
+ assert.equal(h.state.sessionSubmissions.at(-1)[1].firstMessage,'即时标题');
+ assert.equal(h.state.commands.length,0);
+ h.events.resolve(); await sending;
+ assert.equal(h.state.commands.filter(c=>c.type==='prompt').length,1);
 });

@@ -27,11 +27,13 @@ import { getMarkdownListContinuation } from "@/lib/markdown-list-continuation";
 import { isBareMcpCommand, isBuiltinMcpCommand } from "@/lib/mcp-command";
 import { FolderIcon, getFileIcon } from "./FileIcons";
 import { ImagePreview } from "./ImagePreview";
+import { preloadImageCapabilities } from "@/lib/image-capabilities";
 import { useIsMobile, focusEditable } from "@/hooks/useIsMobile";
 import { useI18n } from "@/hooks/useI18n";
 import { useChatAppearance } from "@/hooks/useChatAppearance";
 import { useComposerLayoutPreferences } from "@/hooks/useComposerLayoutPreferences";
 import type { ToolPreset } from "@/lib/tool-presets";
+import type { PromptSubmissionPreviewIdentity } from "@/lib/prompt-submissions";
 import { ModelSelector, type ModelSelectorOption } from "./ModelSelector";
 import { ThinkingSelector } from "./ThinkingSelector";
 
@@ -46,12 +48,14 @@ export interface AttachedImage {
 interface Props {
   onSend: (message: string, images?: AttachedImage[]) => void;
   onAbort: () => void;
-  onSteer?: (message: string, images?: AttachedImage[]) => void | Promise<void>;
-  onFollowUp?: (message: string, images?: AttachedImage[]) => void | Promise<void>;
-  onPromptWithStreamingBehavior?: (message: string, behavior: "steer" | "followUp", images?: AttachedImage[]) => void | Promise<void>;
+  onSteer?: (message: string, images?: AttachedImage[], onRegistered?: (identity: PromptSubmissionPreviewIdentity) => void) => void | Promise<void>;
+  onFollowUp?: (message: string, images?: AttachedImage[], onRegistered?: (identity: PromptSubmissionPreviewIdentity) => void) => void | Promise<void>;
+  onPromptWithStreamingBehavior?: (message: string, behavior: "steer" | "followUp", images?: AttachedImage[], onRegistered?: (identity: PromptSubmissionPreviewIdentity) => void) => void | Promise<void>;
   isStreaming: boolean;
   /** Text-only composer without the session controls or outer spacing. */
   compact?: boolean;
+  /** End rail measured by the owning chat viewport; compact composers ignore it. */
+  columnEndInset?: number;
   model?: { provider: string; modelId: string } | null;
   isAutoModelSelection?: boolean;
   modelNames?: Record<string, string>;
@@ -79,6 +83,7 @@ interface Props {
   queuedMessages?: QueuedMessages | null;
   inputHistory?: string[];
   onRecallQueue?: () => void;
+  onQueuePreviewChange?: (identity: PromptSubmissionPreviewIdentity | null) => void;
   slashCommands?: SlashCommandInfo[];
   slashCommandsLoading?: boolean;
   onLoadSlashCommands?: () => Promise<SlashCommandInfo[]> | SlashCommandInfo[];
@@ -796,7 +801,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   onSend, onAbort, onSteer, onFollowUp, isStreaming, model, isAutoModelSelection, modelNames, modelList, modelError, modelsLoading, modelScopeWarnings, onModelChange, modelSwitching,
   onCompact, onAbortCompaction, isCompacting, compactError, compactResult, toolPreset, onToolPresetChange,
   thinkingLevel, isAutoThinkingSelection = false, onThinkingLevelChange, availableThinkingLevels, thinkingLevelMap,
-  retryInfo, queuedMessages, inputHistory = [], onRecallQueue,
+  retryInfo, queuedMessages, inputHistory = [], onRecallQueue, onQueuePreviewChange,
   slashCommands, slashCommandsLoading, onLoadSlashCommands,
   onBuiltinCommand,
  onAudioUnlock,
@@ -804,6 +809,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   draftKey,
   cwd,
   compact = false,
+  columnEndInset,
 }: Props, ref) {
   const { t, locale } = useI18n();
   const { fontSize } = useChatAppearance();
@@ -863,6 +869,18 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const draftHydratedKeyRef = useRef<string | null>(null);
   const queuedSubmissionPendingRef = useRef(false);
   const [queuedSubmissionPending, setQueuedSubmissionPending] = useState(false);
+  const [queuedSubmissionPreview, setQueuedSubmissionPreview] = useState<{
+    token: object; identity: PromptSubmissionPreviewIdentity | null;
+    draftKey: string | undefined; text: string; kind: "steering" | "followUp";
+    baselineCount: number; images: { data: string; mimeType: string }[];
+  } | null>(null);
+  const queuedPreviewVisible = Boolean(queuedSubmissionPreview && queuedSubmissionPreview.draftKey === draftKey
+    && (queuedMessages?.[queuedSubmissionPreview.kind].filter((text) => text === queuedSubmissionPreview.text).length ?? 0) <= queuedSubmissionPreview.baselineCount);
+  const queuePreviewIdentity = queuedPreviewVisible ? queuedSubmissionPreview?.identity ?? null : null;
+  useLayoutEffect(() => {
+    onQueuePreviewChange?.(queuePreviewIdentity);
+    return () => onQueuePreviewChange?.(null);
+  }, [queuePreviewIdentity, onQueuePreviewChange]);
   valueRef.current = value;
   attachedImagesRef.current = attachedImages;
 
@@ -1050,6 +1068,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
       .filter((f) => f.type.startsWith("image/") && f.size <= MAX_ATTACHED_IMAGE_BYTES)
       .slice(0, remaining);
     if (!imageFiles.length) return;
+    preloadImageCapabilities();
     pendingImageCountRef.current += imageFiles.length;
     try {
       const newImages = await Promise.all(
@@ -1451,22 +1470,34 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     if (currentImageCount > MAX_ATTACHED_IMAGES) return;
     queuedSubmissionPendingRef.current = true;
     setQueuedSubmissionPending(true);
+    const kind: "steering" | "followUp" = mode === "steer" ? "steering" : "followUp";
+    const preview = {
+      token: {}, identity: null,
+      draftKey: draftKeyRef.current, text: submittedText, kind,
+      baselineCount: queuedMessages?.[kind].filter((text) => text === submittedText).length ?? 0,
+      images: images.map(({ data, mimeType }) => ({ data, mimeType })),
+    };
+    setQueuedSubmissionPreview(preview);
+    const onRegistered = (identity: PromptSubmissionPreviewIdentity) => {
+      setQueuedSubmissionPreview((current) => current?.token === preview.token ? { ...current, identity } : current);
+    };
     clearInput();
     try {
       const submittedImages = images.length ? images : undefined;
       if (submittedText.startsWith("/") && onPromptWithStreamingBehavior) {
-        await onPromptWithStreamingBehavior(submittedText, mode === "steer" ? "steer" : "followUp", submittedImages);
+        await onPromptWithStreamingBehavior(submittedText, mode === "steer" ? "steer" : "followUp", submittedImages, onRegistered);
       } else if (mode === "steer" && onSteer) {
-        await onSteer(submittedText, submittedImages);
+        await onSteer(submittedText, submittedImages, onRegistered);
       } else if (mode === "followup" && onFollowUp) {
-        await onFollowUp(submittedText, submittedImages);
+        await onFollowUp(submittedText, submittedImages, onRegistered);
       }
       submission?.commit();
     } finally {
       queuedSubmissionPendingRef.current = false;
       setQueuedSubmissionPending(false);
+      setQueuedSubmissionPreview((current) => current?.token === preview.token ? null : current);
     }
-  }, [value, attachedImages, onBuiltinCommand, onPromptWithStreamingBehavior, onSteer, onFollowUp, clearInput, onAudioUnlock, runBuiltinCommand]);
+  }, [value, attachedImages, queuedMessages, onBuiltinCommand, onPromptWithStreamingBehavior, onSteer, onFollowUp, clearInput, onAudioUnlock, runBuiltinCommand]);
 
   const getNextSlashIndex = useCallback((direction: "up" | "down" | "left" | "right") => {
     const lastIndex = displayedSlashCommands.length - 1;
@@ -2016,7 +2047,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
         border: 0,
         background: "transparent",
         padding: compact ? 0 : "0 16px 8px",
-        paddingRight: compact ? 0 : isMobile ? 16 : 52, // desktop: 16px base + 36px for ChatMinimap alignment
+        paddingRight: compact ? 0 : 16 + (columnEndInset ?? (isMobile ? 0 : 36)),
         opacity: builtinCommandPending ? 0.5 : 1,
         transition: "opacity 0.15s",
       }}
@@ -2069,6 +2100,22 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
         {queuedSubmissionPending && (
           <div className="chat-composer-submit-pending" role="status" style={{ color: "var(--text-dim)", fontSize: 12, marginBottom: 6 }}>
             {t("chat.submittingQueued")}
+          </div>
+        )}
+        {queuedSubmissionPreview && queuedPreviewVisible && (
+          <div data-pi-native-queue-submission="true" role="status" style={{ marginBottom: 8, padding: "8px 10px", border: "1px solid var(--border)", borderRadius: 8, background: "var(--bg-panel)", minWidth: 0 }}>
+            <div style={{ fontSize: 11, color: "var(--text-dim)", marginBottom: 4 }}>
+              {queuedSubmissionPreview.kind === "steering" ? "引导消息" : "排队消息"} · 发送中
+            </div>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center", minWidth: 0 }}>
+              {queuedSubmissionPreview.images.map((image, index) => (
+                <ImagePreview key={index} src={`data:${image.mimeType};base64,${image.data}`}>
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img alt={`图片 ${index + 1}`} src={`data:${image.mimeType};base64,${image.data}`} style={{ width: 40, height: 32, objectFit: "contain", borderRadius: 4, flexShrink: 0 }} />
+                </ImagePreview>
+              ))}
+              <span style={{ fontSize: 12, color: "var(--text-muted)", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{queuedSubmissionPreview.text || "图片消息"}</span>
+            </div>
           </div>
         )}
         {/* Queued steering / follow-up messages (delivered by pi on upcoming turns) */}

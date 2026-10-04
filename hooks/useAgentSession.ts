@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback, useRef, useEffect, useLayoutEffect, useMemo, useReducer } from "react";
+import { useState, useCallback, useRef, useEffect, useLayoutEffect, useMemo, useReducer, useSyncExternalStore } from "react";
 import type {
   AgentMessage,
   BlockingExtensionUiRequest,
@@ -14,7 +14,8 @@ import type {
 } from "@/lib/types";
 import { isBlockingExtensionUiRequest } from "@/lib/browser-notifications";
 import { normalizeToolCalls } from "@/lib/normalize";
-import { isPromptRejectedError, sendAgentCommand } from "@/lib/agent-client";
+import { isPromptRejectedError, readPromptReceipt, sendAgentCommand } from "@/lib/agent-client";
+import { getPendingPromptSubmissions, getServerPendingPromptSubmissions, subscribePendingPromptSubmissions, releasePromptSubmission, type PendingPromptSubmission, type PromptSubmissionPreviewIdentity } from "@/lib/prompt-submissions";
 import {
   clearSessionViewCache,
   deleteSessionViewSnapshot,
@@ -76,6 +77,7 @@ import {
   registerSessionReloadAliases,
 } from "@/lib/enhancement-chat-bridge";
 import { recallSessionQueue } from "@/lib/queue-recall-client";
+import { pendingSessionInfo } from "@/lib/session-catalog-client";
 
 export interface SessionData {
   sessionId: string;
@@ -199,6 +201,7 @@ export interface UseAgentSessionOptions {
   onAgentEnd?: () => void;
   onAttentionNeeded?: (request: BlockingExtensionUiRequest) => void;
   onSessionCreated?: (session: SessionInfo, sourceDraftKey: string) => void;
+  onSessionSubmissionChange?: (sourceDraftKey: string, session: SessionInfo | null) => void;
   onSessionForked?: (newSessionId: string) => void;
   modelsRefreshKey?: number;
   chatInputRef?: React.RefObject<ChatInputHandle | null>;
@@ -374,7 +377,7 @@ function getResidentSessionData(sessionId: string): SessionData | null {
 
 export function useAgentSession(opts: UseAgentSessionOptions) {
   const {
-    session, newSessionCwd, newSessionDraftKey, onAgentEnd, onAttentionNeeded, onSessionCreated, onSessionForked,
+    session, newSessionCwd, newSessionDraftKey, onAgentEnd, onAttentionNeeded, onSessionCreated, onSessionSubmissionChange, onSessionForked,
     modelsRefreshKey, onBranchDataChange, onSystemPromptChange, onSystemToolsChange, onSystemInfoLoaderChange, onSessionStatsPanelOpen,
     onOpenSettings,
   } = opts;
@@ -439,12 +442,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [extensionStatuses, setExtensionStatuses] = useState<ExtensionStatusItem[]>([]);
   const [extensionWidgets, setExtensionWidgets] = useState<ExtensionWidgetItem[]>([]);
   const [queuedMessages, setQueuedMessages] = useState<QueuedMessages>({ steering: [], followUp: [] });
+  const pendingSubmissions = useSyncExternalStore(subscribePendingPromptSubmissions, getPendingPromptSubmissions, getServerPendingPromptSubmissions);
 
   const eventConnectionRef = useRef<AgentEventConnection | null>(null);
   const eventStreamGraceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const eventStreamGraceGenerationRef = useRef(0);
   const eventStreamGraceActiveRef = useRef(false);
   const sessionIdRef = useRef<string | null>(session?.id ?? null);
+  const unconfirmedSubmissions = useMemo(() => pendingSubmissions.filter((row) => row.sessionId === (session?.id ?? sessionIdRef.current)), [pendingSubmissions, session?.id]);
   const sessionPropIdRef = useRef<string | null>(session?.id ?? null);
   // False while the session carries no tool selection of its own, so its loadout
   // follows settings.json defaultTools and the picker must say so rather than
@@ -583,7 +588,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
   const restoreSubmission = useCallback((
     text: string,
-    images: AttachedImage[] | undefined,
+    images: Array<{ data: string; mimeType: string }> | undefined,
     targetDraftKey: string | undefined,
   ) => {
     const draftImages = images?.map(({ data, mimeType }) => ({ data, mimeType }));
@@ -1159,7 +1164,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
   }, []);
 
-  const sendExtensionCustomInput = useCallback(async (request: ExtensionUiCustomRequest, data: string) => {
+  const sendExtensionCustomInput = useCallback(async (request: ExtensionUiCustomRequest, data: string | string[]) => {
     const sid = sessionIdRef.current;
     if (!sid) return;
     try {
@@ -1168,8 +1173,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         id: request.id,
         data,
       });
+      return true;
     } catch (e) {
       console.error("Failed to send extension custom UI input:", e);
+      return false;
     }
   }, []);
 
@@ -1781,6 +1788,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       return;
     }
 
+    const sourceDraftKey = isNew ? newSessionDraftKey : null;
+    if (sourceDraftKey && newSessionCwd) {
+      onSessionSubmissionChange?.(sourceDraftKey, pendingSessionInfo(sourceDraftKey, newSessionCwd, sourceDraftKey, message));
+    }
     if (sessionIdRef.current) bumpSessionEpoch(sessionIdRef.current);
     const promptRunId = promptRunIdRef.current + 1;
     cancelEventStreamGrace();
@@ -1821,6 +1832,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
         if (!sid) throw new Error("Unable to create a session for the prompt");
         sentSessionId = sid;
+        if (sourceDraftKey) onSessionSubmissionChange?.(sourceDraftKey, pendingSessionInfo(sourceDraftKey, newSessionCwd, sid, message));
         if (selectedModel) {
           setPendingModel(selectedModel);
           if (existingSid) {
@@ -1865,6 +1877,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         void waitForPromptSettlement(sentSessionId, promptRunId);
         return;
       }
+      if (sourceDraftKey) onSessionSubmissionChange?.(sourceDraftKey, null);
       rpcPromptPendingRef.current = false;
       setMessages((prev) => {
         const optimisticIndex = prev.lastIndexOf(userMsg);
@@ -1890,7 +1903,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } finally {
       if (preparationRef.current === preparation) preparationRef.current = null;
     }
-  }, [isNew, newSessionCwd, newSessionModel, session, ensureNewSession, ensureEventsConnected, promoteNewSession, waitForPromptSettlement, addNotice, cancelEventStreamGrace, closeEvents, composerDraftKey, reconcileAgentState, restoreSubmission]);
+  }, [isNew, newSessionCwd, newSessionDraftKey, newSessionModel, session, ensureNewSession, ensureEventsConnected, promoteNewSession, waitForPromptSettlement, addNotice, cancelEventStreamGrace, closeEvents, composerDraftKey, reconcileAgentState, restoreSubmission, onSessionSubmissionChange]);
 
   const executeBash = useCallback(async (command: string, excludeFromContext: boolean) => {
     if (agentRunningRef.current || bashRunningRef.current) return;
@@ -2282,6 +2295,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     message: string,
     behavior: "steer" | "followUp",
     images?: AttachedImage[],
+    onRegistered?: (identity: PromptSubmissionPreviewIdentity) => void,
   ) => {
     const sid = sessionIdRef.current;
     const restore = () => restoreSubmission(message, images, composerDraftKey);
@@ -2291,40 +2305,88 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       return;
     }
     const piImages = images?.map((img) => ({ type: "image" as const, data: img.data, mimeType: img.mimeType }));
+    let dispatched = false;
     try {
+      // A stale busy indicator can outlive the idle SSE grace window. Listen
+      // before submitting so an idle fallback run cannot become invisible.
+      await ensureEventsConnected(sid);
+      dispatched = true;
       await sendAgentCommand(sid, {
         type: "prompt",
         message,
         streamingBehavior: behavior,
         ...(piImages?.length ? { images: piImages } : {}),
-      });
+      }, { onPromptRegistered: (identity) => onRegistered?.({ ...identity, draftKey: composerDraftKey }) });
     } catch (e) {
       console.error("Failed to submit streaming prompt:", e);
       // A transport failure after dispatch is ambiguous: the server may have
       // accepted the queued prompt before the response was lost. Restoring in
       // that case would invite a duplicate turn.
-      if (isPromptRejectedError(e)) restore();
+      if (!dispatched || isPromptRejectedError(e)) restore();
       addNotice({
         type: "error",
         message: e instanceof Error ? e.message : String(e),
       });
     }
-  }, [addNotice, composerDraftKey, restoreSubmission]);
+  }, [addNotice, composerDraftKey, restoreSubmission, ensureEventsConnected]);
 
-  const handleSteer = useCallback(async (message: string, images?: AttachedImage[]) => {
-    await sendStreamingPrompt(message, "steer", images);
+  const confirmPendingSubmission = useCallback(async (row: PendingPromptSubmission) => {
+    try {
+      const receipt = await readPromptReceipt(row.sessionId, row.requestId);
+      if (!getPendingPromptSubmissions().some((item) => item.requestId === row.requestId)) return;
+      if (receipt.status === "accepted") {
+        releasePromptSubmission(row.requestId);
+        if (sessionHookMountedRef.current && sessionIdRef.current === row.sessionId) {
+          maintainEventsConnected(row.sessionId);
+          promoteNewSession(1, row.message);
+          void loadSession(row.sessionId);
+          void reconcileAgentState(row.sessionId);
+        }
+      } else if (receipt.status === "rejected") {
+        // Preserve the original owner even if this read returns after a switch.
+        restoreSubmission(row.message, row.images, row.sessionId);
+        releasePromptSubmission(row.requestId);
+        if (isNew && newSessionDraftKey && sessionIdRef.current === row.sessionId) onSessionSubmissionChange?.(newSessionDraftKey, null);
+        if (sessionIdRef.current === row.sessionId) addNotice({ type: "error", message: `消息未发送，已退回输入框：${receipt.error ?? "请求被拒绝"}` });
+      }
+    } catch { /* Original contents remain visible and durable until confirmed. */ }
+  }, [addNotice, loadSession, maintainEventsConnected, promoteNewSession, reconcileAgentState, restoreSubmission, isNew, newSessionDraftKey, onSessionSubmissionChange]);
+
+  useEffect(() => {
+    const uncertain = unconfirmedSubmissions.filter((row) => row.status === "uncertain");
+    if (!uncertain.length) return;
+    let active = true;
+    let checking = false;
+    const check = async () => {
+      if (!active || checking) return;
+      checking = true;
+      try { for (const row of uncertain) { if (!active) break; await confirmPendingSubmission(row); } }
+      finally { checking = false; }
+    };
+    void check();
+    const interval = setInterval(() => { if (document.visibilityState === "visible") void check(); }, 8000);
+    const onOnline = () => { void check(); };
+    const onVisible = () => { if (document.visibilityState === "visible") void check(); };
+    window.addEventListener("online", onOnline);
+    document.addEventListener("visibilitychange", onVisible);
+    return () => { active = false; clearInterval(interval); window.removeEventListener("online", onOnline); document.removeEventListener("visibilitychange", onVisible); };
+  }, [unconfirmedSubmissions, confirmPendingSubmission]);
+
+  const handleSteer = useCallback(async (message: string, images?: AttachedImage[], onRegistered?: (identity: PromptSubmissionPreviewIdentity) => void) => {
+    await sendStreamingPrompt(message, "steer", images, onRegistered);
   }, [sendStreamingPrompt]);
 
   const handlePromptWithStreamingBehavior = useCallback(async (
     message: string,
     behavior: "steer" | "followUp",
     images?: AttachedImage[],
+    onRegistered?: (identity: PromptSubmissionPreviewIdentity) => void,
   ) => {
-    await sendStreamingPrompt(message, behavior, images);
+    await sendStreamingPrompt(message, behavior, images, onRegistered);
   }, [sendStreamingPrompt]);
 
-  const handleFollowUp = useCallback(async (message: string, images?: AttachedImage[]) => {
-    await sendStreamingPrompt(message, "followUp", images);
+  const handleFollowUp = useCallback(async (message: string, images?: AttachedImage[], onRegistered?: (identity: PromptSubmissionPreviewIdentity) => void) => {
+    await sendStreamingPrompt(message, "followUp", images, onRegistered);
   }, [sendStreamingPrompt]);
 
   const handleAbortCompaction = useCallback(async () => {
@@ -2824,7 +2886,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     agentRunning, modelNames, modelList, modelError, modelsLoading, modelScopeWarnings, modelThinkingLevels, modelThinkingLevelMaps, newSessionModel, toolPreset, thinkingLevel,
     retryInfo, contextUsage, systemPrompt, forkingEntryId,
     isCompacting, compactError, compactResult, currentModel, displayModel, modelSwitching, sessionStats, autoCompactionEnabled,
-    slashCommands, slashCommandsLoading, queuedMessages,
+    slashCommands, slashCommandsLoading, queuedMessages, unconfirmedSubmissions, confirmPendingSubmission,
     notices: noticeState.visible, extensionDialog, waitingExtensionDialogCount, extensionCustomUi, waitingExtensionCustomUiCount, extensionStatuses, extensionWidgets, respondToExtensionUi, sendExtensionCustomInput,
     isAutoModelSelection: isNew && newSessionModel === null,
     isAutoThinkingSelection: isNew && newSessionThinkingLevel === null,

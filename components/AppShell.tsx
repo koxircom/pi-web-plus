@@ -127,8 +127,25 @@ export function AppShell() {
   }, [playDoneSound, soundEnabledRef]);
   const [selectedSession, setSelectedSession] = useState<SessionInfo | null>(null);
   const [sessionCatalog, setSessionCatalog] = useState<SessionInfo[]>([]);
+  const [localSessionSubmissions, setLocalSessionSubmissions] = useState<Record<string, SessionInfo>>({});
+  const localSessions = useMemo(() => Object.values(localSessionSubmissions), [localSessionSubmissions]);
+  const handleSessionSubmissionChange = useCallback((key: string, session: SessionInfo | null) => {
+    setLocalSessionSubmissions((current) => {
+      if (!session && !current[key]) return current;
+      const next = { ...current };
+      if (session) next[key] = session;
+      else delete next[key];
+      return next;
+    });
+  }, []);
   const handleSessionsChange = useCallback((sessions: SessionInfo[]) => {
     setSessionCatalog(sessions);
+    setLocalSessionSubmissions((current) => {
+      const remaining = Object.entries(current).filter(([, local]) =>
+        local.submissionPending || !sessions.some((session) => session.id === local.id && !session.transient),
+      );
+      return remaining.length === Object.keys(current).length ? current : Object.fromEntries(remaining);
+    });
     // The sidebar hydrates metadata after the selected session has already
     // mounted. Merge that update into the active session without changing the
     // ChatWindow key or restarting its history load.
@@ -874,7 +891,11 @@ export function AppShell() {
 
   // Called by ChatWindow when a new session gets its real id from pi
   const handleSessionCreated = useCallback((session: SessionInfo, sourceDraftKey: string) => {
-    if (activeNewSessionDraftKeyRef.current !== sourceDraftKey) return;
+    handleSessionSubmissionChange(sourceDraftKey, { ...session, name: session.name ?? (session.firstMessage ? undefined : "新会话") });
+    if (activeNewSessionDraftKeyRef.current !== sourceDraftKey) {
+      setRefreshKey((k) => k + 1);
+      return;
+    }
     setRefreshKey((k) => k + 1);
     invalidateWorkspaceRestore();
     activeNewSessionDraftKeyRef.current = null;
@@ -882,7 +903,7 @@ export function AppShell() {
     setSelectedSession(session);
     hydrateSelectedSession(session.id);
     replaceSessionUrl(`?session=${encodeURIComponent(session.id)}`);
-  }, [invalidateWorkspaceRestore, hydrateSelectedSession]);
+  }, [invalidateWorkspaceRestore, hydrateSelectedSession, handleSessionSubmissionChange]);
 
   const deliverSessionNotification = useCallback(({
     targetSession,
@@ -1250,6 +1271,7 @@ export function AppShell() {
         onBackgroundTaskDone={handleBackgroundTaskDone}
         onRunningSessionIdsChange={handleRunningSessionIdsChange}
         onSessionsChange={handleSessionsChange}
+        localSessions={localSessions}
       />
       <div data-pi-enh-shortcuts-host="true" style={{ padding: "8px", flexShrink: 0, display: "flex", justifyContent: "space-between", gap: 4 }}>
         {([
@@ -2374,6 +2396,7 @@ export function AppShell() {
               onAgentEnd={handleAgentEnd}
               onAttentionNeeded={handleAttentionNeeded}
               onSessionCreated={handleSessionCreated}
+              onSessionSubmissionChange={handleSessionSubmissionChange}
               onSessionForked={handleSessionForked}
               modelsRefreshKey={modelsRefreshKey}
               chatInputRef={chatInputRef}

@@ -127,7 +127,6 @@
     codeBlockScanObserver = null,
     lastObsidianViewerPath = null,
     cachedNativeOnOpenFile = null,
-    instantDialogObserver = null,
     sidebarObserver = null,
     activeTurnStartTime = null,
     activeTurnEntryId = null,

@@ -3,9 +3,11 @@
 import { useEffect, useLayoutEffect, useRef, useState, useCallback, useMemo, type RefObject } from "react";
 import { isMessageGroupAnchor } from "@/lib/message-display";
 import type { AgentMessage, TextContent, UserMessage } from "@/lib/types";
+import { useMinimapBookmarks } from "@/hooks/useMinimapBookmarks";
 import styles from "./ChatMinimap.module.css";
 
 interface Props {
+  sessionId: string | null;
   messages: AgentMessage[];
   streamingMessage: Partial<AgentMessage> | null;
   scrollContainer: RefObject<HTMLDivElement | null>;
@@ -26,6 +28,7 @@ export interface TurnInfo {
   scrollTop: number | null;
   element?: HTMLDivElement | null;
   entryId?: string;
+  bookmarkEntryId?: string;
 }
 
 export interface NodeInfo {
@@ -181,12 +184,14 @@ function waitForCommitFrames(): Promise<void> {
 }
 
 export function ChatMinimap({
+  sessionId,
   messages,
   streamingMessage,
   scrollContainer,
   messageRefs,
   onRevealHistory,
 }: Props) {
+  const { bookmarks, toggle: toggleBookmark } = useMinimapBookmarks(sessionId);
   const currentSessionIdRef = useRef<string | null>(null);
   const sessionGenerationRef = useRef(0);
   const closedByUserRef = useRef(false);
@@ -329,15 +334,16 @@ export function ChatMinimap({
         // Only genuine user messages become minimap navigation nodes
         if (message.role === "user") {
           const elementRect = element?.getBoundingClientRect();
-          const entryId = element?.getAttribute("data-entry-id") ||
+          const bookmarkEntryId = element?.getAttribute("data-entry-id") ||
             (message as any).entryId ||
-            (message as any).id ||
-            `user-${refIndex}`;
+            (message as any).id || undefined;
+          const entryId = bookmarkEntryId || `user-${refIndex}`;
           turns.push({
             userTurnNumber: 0,
             userMessage: message as UserMessage,
             element,
             entryId,
+            bookmarkEntryId,
             scrollTop: elementRect && elementRect.height > 0 && element?.getClientRects().length
               ? elementRect.top - containerRect.top + scrollEl.scrollTop
               : null,
@@ -1279,11 +1285,13 @@ export function ChatMinimap({
       {positionedNodes.map((node) => {
         const isNearest = minimapHovered && nearestNode?.index === node.index;
         const isActive = activeIndex === node.index;
+        const isBookmarked = !!node.targetTurn.bookmarkEntryId && bookmarks.has(node.targetTurn.bookmarkEntryId);
 
         return (
           <div
             key={node.index}
             data-minimap-node-index={node.index}
+            data-minimap-node-bookmarked={isBookmarked ? "true" : undefined}
             data-minimap-node-active={isActive ? "" : undefined}
             style={{
               position: "absolute",
@@ -1304,8 +1312,8 @@ export function ChatMinimap({
                 width: 8,
                 height: 8,
                 borderRadius: 2,
-                background: isActive ? "var(--accent, #a4c2f4)" : "rgba(128,128,128,0.16)",
-                border: `1.5px solid ${isActive ? "var(--accent, #a4c2f4)" : "rgba(128,128,128,0.58)"}`,
+                background: isBookmarked ? "#fff" : isActive ? "var(--accent, #a4c2f4)" : "rgba(128,128,128,0.16)",
+                border: `1.5px solid ${isBookmarked ? "#fff" : isActive ? "var(--accent, #a4c2f4)" : "rgba(128,128,128,0.58)"}`,
                 boxShadow: isActive ? "0 0 0 2px var(--bg-panel), 0 0 8px color-mix(in srgb, var(--accent, #a4c2f4) 55%, transparent)" : "none",
                 transition: "transform 0.1s, background 0.1s",
                 transform: isNearest ? "scale(1.25)" : "scale(1)",
@@ -1428,6 +1436,25 @@ export function ChatMinimap({
                         {getUserPreview(node.targetTurn.userMessage)}
                       </span>
                     </button>
+                    {sessionId && node.targetTurn.bookmarkEntryId && (
+                      <button
+                        type="button"
+                        className={styles.bookmark}
+                        data-minimap-bookmark-entry={node.targetTurn.bookmarkEntryId}
+                        aria-pressed={bookmarks.has(node.targetTurn.bookmarkEntryId)}
+                        aria-label={`${bookmarks.has(node.targetTurn.bookmarkEntryId) ? "取消标记" : "标记"}第 ${node.targetTurn.userTurnNumber} 轮`}
+                        title={bookmarks.has(node.targetTurn.bookmarkEntryId) ? "取消书签" : "添加书签"}
+                        onPointerDown={(event) => event.stopPropagation()}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          toggleBookmark(node.targetTurn.bookmarkEntryId!);
+                        }}
+                      >
+                        <svg width="16" height="18" viewBox="0 0 16 20" fill={bookmarks.has(node.targetTurn.bookmarkEntryId) ? "currentColor" : "none"} stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round" aria-hidden="true">
+                          <path d="M3 1.5h10a1 1 0 0 1 1 1v15l-6-4-6 4v-15a1 1 0 0 1 1-1Z" />
+                        </svg>
+                      </button>
+                    )}
                   </div>
                 </div>
               );

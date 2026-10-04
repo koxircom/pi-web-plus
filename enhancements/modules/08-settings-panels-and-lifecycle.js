@@ -4823,7 +4823,6 @@ window.__PI_ENH_RENDER_USAGE_PANEL__ = renderUsagePanel;
       isProjectStatusMonitoringActive = false;
 
       // 4. Thorough DOM cleanup
-      removeAskUserWebNative();
       removeQuickActionButtons();
       removeScrollBottomButton();
       removeLocalPathLauncher();

@@ -4423,7 +4423,6 @@
     { fn: syncQuickActionButtons, scope: "full" },
     { fn: syncEmptySendContinue, scope: "full" },
     { fn: syncBottomShortcutsBar, scope: "full" },
-    { fn: syncAskUserWebNative, scope: "full" },
     { fn: syncProjectStatusIndicators, scope: "full" },
     { fn: syncScrollbarPlugin, scope: "chat-text" },
     { fn: syncNativeMessageFont, scope: "full" },

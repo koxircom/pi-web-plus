@@ -188,49 +188,7 @@
     }
   }
 
-  instantDialogObserver = null;
-  function initInstantDialogObserver() {
-    if (instantDialogObserver || typeof MutationObserver !== "function" || typeof document === "undefined") return;
-    try {
-      instantDialogObserver = new MutationObserver((mutations) => {
-        if (isMutatingInternally || !isPluginEnabled("ask-user-web-native")) return;
-        let hasDialog = false;
-        for (let i = 0; i < mutations.length; i++) {
-          const m = mutations[i];
-          if (m.type === "childList" && m.addedNodes && m.addedNodes.length > 0) {
-            for (let j = 0; j < m.addedNodes.length; j++) {
-              const node = m.addedNodes[j];
-              if (node.nodeType === 1) {
-                if (node.getAttribute?.("role") === "dialog" || (typeof node.querySelector === "function" && node.querySelector('[role="dialog"]'))) {
-                  hasDialog = true;
-                  break;
-                }
-              }
-            }
-          }
-          if (hasDialog) break;
-        }
-        if (hasDialog) {
-          withMutationGuard(() => {
-            syncAskUserWebNative();
-          });
-        }
-      });
-      const root = document.documentElement || document.body;
-      if (root) {
-        instantDialogObserver.observe(root, { childList: true, subtree: true });
-        activeCleanups.push(() => {
-          if (instantDialogObserver) {
-            instantDialogObserver.disconnect();
-            instantDialogObserver = null;
-          }
-        });
-      }
-    } catch (e) {}
-  }
-
   initChatObserver();
-  initInstantDialogObserver();
 
   function syncSidebarRowsImmediate() {
     withMutationGuard(() => {

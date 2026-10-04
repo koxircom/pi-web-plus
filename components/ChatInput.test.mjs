@@ -561,6 +561,7 @@ function chatInputCallback(name, context) {
   }).outputText).runInNewContext({
     attachedImagesRef: {current: context.attachedImages ?? []},
     queuedSubmissionPendingRef: {current: false},
+    draftKeyRef: {current: 'fixture'}, queuedMessages: {steering: [], followUp: []}, setQueuedSubmissionPreview(){},
     setQueuedSubmissionPending(){}, MAX_ATTACHED_IMAGES: 10,
     offersBuiltinSlashCommandWhileStreaming,
     ...context,
@@ -1200,10 +1201,10 @@ test("over-limit draft (>10 images) renders all previews and warning banner, blo
 test("queued submission immediately shows pending, clears once and blocks duplicate until acknowledgement", async () => {
  const source=ts.createSourceFile("ChatInput.tsx",readFileSync(new URL("./ChatInput.tsx",import.meta.url),"utf8"),ts.ScriptTarget.Latest,true,ts.ScriptKind.TSX);
  let callback;function visit(n){if(ts.isVariableDeclaration(n)&&n.name.getText(source)==="sendQueued")callback=n.initializer.arguments[0];ts.forEachChild(n,visit);}visit(source);assert(callback);
- let release;const held=new Promise(r=>release=r),pending=[],ref={current:false};let cleared=0,sends=0;
- const run=new Script(ts.transpileModule(callback.getText(source),{compilerOptions:{target:ts.ScriptTarget.ES2020}}).outputText).runInNewContext({value:"引导内容",attachedImages:[],attachedImagesRef:{current:[]},MAX_ATTACHED_IMAGES:10,queuedSubmissionPendingRef:ref,setQueuedSubmissionPending:v=>pending.push(v),onAudioUnlock:undefined,onBuiltinCommand:undefined,onPromptWithStreamingBehavior:undefined,clearInput:()=>cleared++,onSteer:()=>{sends++;return held;},onFollowUp:undefined});
- const first=run("steer");assert.deepEqual(pending,[true]);assert.equal(cleared,1);assert.equal(sends,1);
- await run("steer");assert.equal(sends,1);release();await first;assert.deepEqual(pending,[true,false]);assert.equal(ref.current,false);
+ let release;const held=new Promise(r=>release=r),pending=[],ref={current:false};let cleared=0,sends=0,preview=null;
+ const run=new Script(ts.transpileModule(callback.getText(source),{compilerOptions:{target:ts.ScriptTarget.ES2020}}).outputText).runInNewContext({draftKeyRef:{current:'fixture'},queuedMessages:{steering:[],followUp:[]},setQueuedSubmissionPreview:value=>preview=typeof value==='function'?value(preview):value,value:"引导内容",attachedImages:[],attachedImagesRef:{current:[]},MAX_ATTACHED_IMAGES:10,queuedSubmissionPendingRef:ref,setQueuedSubmissionPending:v=>pending.push(v),onAudioUnlock:undefined,onBuiltinCommand:undefined,onPromptWithStreamingBehavior:undefined,clearInput:()=>cleared++,onSteer:()=>{sends++;return held;},onFollowUp:undefined});
+ const first=run("steer");assert.equal(preview.text,'引导内容');assert.equal(preview.draftKey,'fixture');assert.equal(preview.kind,'steering');assert.deepEqual(pending,[true]);assert.equal(cleared,1);assert.equal(sends,1);
+ await run("steer");assert.equal(sends,1);release();await first;assert.deepEqual(pending,[true,false]);assert.equal(ref.current,false);assert.equal(preview,null);
 });
 
 

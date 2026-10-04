@@ -2832,6 +2832,99 @@
   let composerHostDragLeaveHandler = null;
   let composerHostDropHandler = null;
   let composerFileInputChangeHandler = null;
+  let composerDocumentPickerInput = null;
+  let composerDocumentPickerGeneration = 0;
+
+  function removeComposerDocumentPicker() {
+    composerDocumentPickerGeneration += 1;
+    composerDocumentPickerInput?.remove();
+    composerDocumentPickerInput = null;
+  }
+
+  function openComposerDocumentPicker(card) {
+    if (!isPluginEnabled("composer-file-paste")) {
+      showToast("请先启用文件附件功能", null, 2400);
+      return;
+    }
+    const textarea = findComposerTextarea();
+    if (!textarea || !card?.isConnected) return;
+    removeComposerDocumentPicker();
+    const generation = composerDocumentPickerGeneration;
+    const root = textarea.closest("fieldset") || textarea.closest("form");
+    const imageInput = root?.querySelector('input[type="file"]');
+    const isCurrent = () => generation === composerDocumentPickerGeneration
+      && card.isConnected && textarea.isConnected && findComposerTextarea() === textarea
+      && isPluginEnabled("composer-file-paste");
+    const consumeFiles = (files) => {
+      if (!isCurrent()) return;
+      const images = files.filter((file) => file.type.startsWith("image/") && !isVideoFile(file.name, file.type));
+      const attachments = files.filter((file) => !images.includes(file));
+      if (images.length) {
+        // Images still enter the existing native ChatInput handler, never a second image owner.
+        if (imageInput && typeof DataTransfer !== "undefined") {
+          const transfer = new DataTransfer();
+          images.forEach((file) => transfer.items.add(file));
+          imageInput.files = transfer.files;
+          imageInput.dispatchEvent(new Event("change", { bubbles: true }));
+        } else {
+          showToast("此浏览器请使用输入框图片按钮添加图片", null, 3000);
+        }
+      }
+      if (attachments.length) void processComposerFiles(attachments, textarea);
+    };
+    const openInputFallback = () => {
+      if (!isCurrent()) return;
+      // Independent enhancement-owned host: do not retarget React's media input.
+      const input = document.createElement("input");
+      input.type = "file";
+      input.multiple = true;
+      input.hidden = true;
+      input.setAttribute("data-pi-document-picker", "true");
+      const ua = navigator.userAgent;
+      // Chromium Android treats octet-stream as unrestricted GET_CONTENT and avoids media-only
+      // routing. Other browsers retain the standard accept-less arbitrary-file input.
+      if (/Android/i.test(ua) && /(?:Chrome|Chromium)\//i.test(ua)) {
+        input.accept = "application/octet-stream";
+      }
+      const cleanup = () => {
+        input.remove();
+        if (composerDocumentPickerInput === input) composerDocumentPickerInput = null;
+      };
+      input.addEventListener("cancel", cleanup, { once: true });
+      input.addEventListener("change", () => {
+        const files = Array.from(input.files || []);
+        cleanup();
+        consumeFiles(files);
+      }, { once: true });
+      document.body.appendChild(input);
+      composerDocumentPickerInput = input;
+      input.click();
+    };
+    // ACTION_OPEN_DOCUMENT on supporting Android browsers opens the actual document picker.
+    // Never rely on it on HTTP or unsupported Safari/Firefox, and never reopen after Cancel.
+    if (window.isSecureContext && typeof window.showOpenFilePicker === "function") {
+      let selection;
+      try {
+        selection = window.showOpenFilePicker({
+          id: "pi-web-attachments", multiple: true, excludeAcceptAllOption: false, startIn: "downloads",
+        });
+      } catch (_) {
+        openInputFallback();
+        return;
+      }
+      Promise.resolve(selection).then(async (handles) => {
+        if (!isCurrent()) return;
+        const files = await Promise.all(handles.map((handle) => handle.getFile()));
+        consumeFiles(files);
+      }).catch((error) => {
+        if (!isCurrent() || error?.name === "AbortError") return;
+        // User activation may have expired: request an explicit next click, not a hidden second picker.
+        showToast("文件选择未完成，请重试或使用浏览器的文件上传入口", null, 4000);
+      });
+    } else {
+      openInputFallback();
+    }
+  }
 
   const COMPOSER_EXTENDED_FILE_ACCEPT = "image/*,video/*";
 
@@ -2843,9 +2936,6 @@
     if (fileInput) {
       if (!fileInput.hasAttribute("data-pi-orig-accept")) {
         fileInput.setAttribute("data-pi-orig-accept", fileInput.getAttribute("accept") || "image/*");
-      }
-      if (fileInput.getAttribute("accept") !== COMPOSER_EXTENDED_FILE_ACCEPT) {
-        fileInput.setAttribute("accept", COMPOSER_EXTENDED_FILE_ACCEPT);
       }
       if (activeComposerFileInput !== fileInput || !fileInput.__piEnhFileInputBound) {
         if (activeComposerFileInput && composerFileInputChangeHandler) {
@@ -2900,6 +2990,15 @@
 
     const attachBtns = document.querySelectorAll?.('button[data-pi-attach-image]') || [];
     for (const btn of attachBtns) {
+      if (!btn.__piEnhAttachClickHandler) {
+        btn.__piEnhAttachClickHandler = () => {
+          const r = btn.closest("fieldset") || btn.closest("form") || document;
+          const fi = r.querySelector?.('input[type="file"]') ||
+            document.querySelector?.('fieldset input[type="file"], form input[type="file"]');
+          if (fi) fi.setAttribute("accept", "image/*,video/*");
+        };
+        btn.addEventListener("click", btn.__piEnhAttachClickHandler, true);
+      }
       if (!btn.hasAttribute("data-pi-orig-title")) {
         btn.setAttribute("data-pi-orig-title", btn.getAttribute("title") || "");
       }
@@ -2916,6 +3015,7 @@
   }
 
   function restoreComposerFileInputAndToolbar() {
+    removeComposerDocumentPicker();
     if (activeComposerFileInput) {
       if (composerFileInputChangeHandler) {
         activeComposerFileInput.removeEventListener("change", composerFileInputChangeHandler, true);
@@ -2934,6 +3034,10 @@
     }
     const attachBtns = document.querySelectorAll?.('button[data-pi-attach-image]') || [];
     for (const btn of attachBtns) {
+      if (btn.__piEnhAttachClickHandler) {
+        btn.removeEventListener("click", btn.__piEnhAttachClickHandler, true);
+        delete btn.__piEnhAttachClickHandler;
+      }
       if (btn.hasAttribute("data-pi-orig-title")) {
         const origTitle = btn.getAttribute("data-pi-orig-title");
         if (origTitle) btn.setAttribute("title", origTitle);
@@ -5310,23 +5414,10 @@
 
     const imageFiles = allClipboardFiles.filter((file) =>
       file.type?.startsWith("image/") && !isVideoFile(file.name, file.type));
-    if (imageFiles.length > 0) {
-      event.preventDefault();
-      event.stopPropagation();
-      const imageInput = textarea.closest("fieldset")?.querySelector('input[type="file"][accept*="image"]')
-        || document.querySelector('input[type="file"][accept*="image"]');
-      if (imageInput) {
-        try {
-          const transfer = new DataTransfer();
-          for (const imageFile of imageFiles) transfer.items.add(imageFile);
-          const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement?.prototype || {}, "files")?.set;
-          if (setter) setter.call(imageInput, transfer.files);
-          else imageInput.files = transfer.files;
-          imageInput.dispatchEvent(new Event("change", { bubbles: true }));
-        } catch (_) {}
-      }
-      return;
-    }
+    // Native ChatInput owns image paste. File-picker accept is mutable (the
+    // attachment plugin allows arbitrary files), so never consume or relay an
+    // image through a selector that can disappear after the first selection.
+    if (imageFiles.length > 0) return;
 
     if (html && hasSubstantialRichFormatting(html)) {
       const markdown = htmlToMarkdown(html);
@@ -5536,6 +5627,7 @@
   // SVG 计划：完整灯泡含底座与 5 短射线
   const SVG_PLAN_ICON = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="2" y1="11" x2="4.5" y2="11"></line><line x1="4.93" y1="4.93" x2="6.7" y2="6.7"></line><line x1="12" y1="1.5" x2="12" y2="4"></line><line x1="19.07" y1="4.93" x2="17.3" y2="6.7"></line><line x1="22" y1="11" x2="19.5" y2="11"></line><path d="M9 17h6M10 20h4M12 6a5.5 5.5 0 0 0-4.8 8.2c.9 1.4 1.8 2.3 1.8 2.8h6c0-.5.9-1.4 1.8-2.8A5.5 5.5 0 0 0 12 6z"></path></svg>`;
   const SVG_ATTACH_ICON = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"></path></svg>`;
+  const SVG_IMAGE_ICON = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><circle cx="8.5" cy="8.5" r="1.5"></circle><polyline points="21 15 16 10 5 21"></polyline></svg>`;
   const SVG_CHECK_ICON = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#22c55e" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>`;
 
   function parseExtensionStatus(data, key) {
@@ -5676,32 +5768,33 @@
     style.id = COMPOSER_MODES_STYLE_ID;
     style.textContent = `
       .pi-enh-composer-add-menu {
-        position: fixed !important; left: 0; width: 340px; box-sizing: border-box;
-        max-width: 90vw !important; background: var(--bg-panel, #1e1e20) !important;
-        border: 1px solid var(--border, #3f3f46) !important; border-radius: 12px !important;
-        box-shadow: 0 10px 30px rgba(0,0,0,.4), 0 2px 8px rgba(0,0,0,.2) !important;
-        padding: 6px !important; display: flex !important; flex-direction: column !important;
-        gap: 3px !important; z-index: 10040 !important; user-select: none !important;
+        position: fixed !important; left: 0; box-sizing: border-box !important;
+        width: max-content !important; min-width: 180px !important;
+        background: var(--bg-panel, #1e1e20) !important;
+        border: 1px solid var(--border, #3f3f46) !important; border-radius: 10px !important;
+        box-shadow: 0 8px 24px rgba(0,0,0,.35), 0 2px 6px rgba(0,0,0,.15) !important;
+        padding: 4px !important; display: flex !important; flex-direction: column !important;
+        gap: 2px !important; z-index: 10040 !important; user-select: none !important;
       }
       html[data-theme="light"] .pi-enh-composer-add-menu,
       [data-theme="light"] .pi-enh-composer-add-menu {
         background: var(--bg-panel, #fff) !important; border-color: var(--border, #e4e4e7) !important;
       }
       .pi-enh-composer-menu-item {
-        display: flex !important; align-items: center !important; gap: 10px !important;
-        padding: 8px 10px !important; border-radius: 8px !important; background: transparent !important;
+        display: flex !important; align-items: center !important; gap: 7px !important;
+        padding: 6px 8px !important; border-radius: 6px !important; background: transparent !important;
         border: none !important; color: var(--text, #f4f4f5) !important; cursor: pointer !important;
-        text-align: left !important; width: 100% !important; font-size: 13px !important;
+        text-align: left !important; width: 100% !important; font-size: 12.5px !important;
         font-weight: 500 !important; box-sizing: border-box !important;
       }
       .pi-enh-composer-menu-item:hover { background: color-mix(in srgb, var(--text, #fff) 8%, transparent) !important; }
       .pi-enh-composer-menu-item.active { background: color-mix(in srgb, var(--text, #fff) 12%, transparent) !important; }
-      .pi-enh-composer-menu-icon { display: inline-flex !important; align-items: center !important; justify-content: center !important; width: 20px !important; height: 20px !important; flex-shrink: 0 !important; }
+      .pi-enh-composer-menu-icon { display: inline-flex !important; align-items: center !important; justify-content: center !important; width: 18px !important; height: 18px !important; flex-shrink: 0 !important; }
       .pi-enh-composer-menu-label { display: flex !important; align-items: center !important; flex: 1 1 auto !important; min-width: 0 !important; }
-      .pi-enh-composer-menu-title { white-space: nowrap !important; font-size: 13px !important; }
-      .pi-enh-composer-menu-desc { font-size: 12px !important; color: var(--text-dim, #71717a) !important; margin-left: 8px !important; white-space: nowrap !important; overflow: hidden !important; text-overflow: ellipsis !important; }
-      .pi-enh-composer-menu-kbd { margin-left: auto !important; font-size: 11px !important; color: var(--text-dim, #71717a) !important; padding: 2px 5px !important; border-radius: 4px !important; border: 1px solid var(--border, #3f3f46) !important; line-height: 1 !important; flex-shrink: 0 !important; }
-      .pi-enh-composer-menu-check { margin-left: 6px !important; display: flex !important; align-items: center !important; color: #22c55e !important; flex-shrink: 0 !important; }
+      .pi-enh-composer-menu-title { white-space: nowrap !important; font-size: 12.5px !important; }
+      .pi-enh-composer-menu-desc { font-size: 11.5px !important; color: var(--text-dim, #71717a) !important; margin-left: 6px !important; white-space: nowrap !important; overflow: hidden !important; text-overflow: ellipsis !important; }
+      .pi-enh-composer-menu-kbd { margin-left: auto !important; font-size: 10px !important; color: var(--text-dim, #71717a) !important; padding: 1px 4px !important; border-radius: 3px !important; border: 1px solid var(--border, #3f3f46) !important; line-height: 1.2 !important; flex-shrink: 0 !important; }
+      .pi-enh-composer-menu-check { margin-left: 4px !important; display: flex !important; align-items: center !important; color: #22c55e !important; flex-shrink: 0 !important; }
       .pi-enh-composer-modes-disabled-notice { display: inline-flex !important; align-items: center !important; gap: 8px !important; padding: 4px 10px !important; margin: 4px 0 !important; border-radius: 6px !important; background: color-mix(in srgb, var(--warning, #f59e0b) 15%, transparent) !important; border: 1px solid color-mix(in srgb, var(--warning, #f59e0b) 40%, transparent) !important; color: var(--text, #f4f4f5) !important; font-size: 12px !important; }
       .pi-enh-composer-modes-disabled-notice button { background: color-mix(in srgb, var(--warning, #f59e0b) 30%, transparent) !important; border: 1px solid color-mix(in srgb, var(--warning, #f59e0b) 60%, transparent) !important; color: var(--text, #f4f4f5) !important; border-radius: 4px !important; padding: 2px 8px !important; font-size: 11px !important; cursor: pointer !important; }
       html[data-pi-composer-modes-active="true"] .extension-status-line[aria-label*='"version":1'] .extension-status-text,
@@ -5784,9 +5877,19 @@
       return;
     }
     const cardRect = card.getBoundingClientRect();
+    // 关键铁律约束：加号菜单宽度严禁超过下方输入框卡片的宽度！
+    const maxAllowedWidth = Math.max(160, Math.floor(cardRect.width));
+    composerAddMenuEl.style.maxWidth = `${maxAllowedWidth}px`;
+
     const menuRect = composerAddMenuEl.getBoundingClientRect();
-    composerAddMenuEl.style.left = Math.max(8, Math.min(cardRect.left, window.innerWidth - menuRect.width - 8)) + "px";
+    const finalLeft = Math.max(8, Math.min(cardRect.left, window.innerWidth - menuRect.width - 8));
+    composerAddMenuEl.style.left = finalLeft + "px";
     composerAddMenuEl.style.top = Math.max(8, cardRect.top >= menuRect.height + 16 ? cardRect.top - menuRect.height - 8 : Math.min(cardRect.bottom + 8, window.innerHeight - menuRect.height - 8)) + "px";
+
+    // 边界双重保险：若菜单右侧超出输入框右边缘，精确截断收紧
+    if (finalLeft + menuRect.width > cardRect.right) {
+      composerAddMenuEl.style.maxWidth = `${Math.max(160, Math.floor(cardRect.right - finalLeft))}px`;
+    }
   }
 
   function openComposerAddMenu(card, addBtn) {
@@ -5801,30 +5904,23 @@
     menu.setAttribute("role", "menu");
     menu.setAttribute("aria-label", "输入框模式与附件菜单");
 
-    // 1. 添加附件入口
-    const attachItem = document.createElement("button");
-    attachItem.type = "button";
-    attachItem.className = "pi-enh-composer-menu-item";
-    attachItem.innerHTML = `
+    // 1. 添加文件入口（支持任意类型：文档、代码、CAD模型与压缩包等）
+    const fileItem = document.createElement("button");
+    fileItem.type = "button";
+    fileItem.className = "pi-enh-composer-menu-item";
+    fileItem.innerHTML = `
       <span class="pi-enh-composer-menu-icon">${SVG_ATTACH_ICON}</span>
       <span class="pi-enh-composer-menu-label">
-        <span class="pi-enh-composer-menu-title">添加附件</span>
-        <span class="pi-enh-composer-menu-desc">图片与视频</span>
+        <span class="pi-enh-composer-menu-title">添加文件</span>
+        <span class="pi-enh-composer-menu-desc">任意类型文件</span>
       </span>
     `;
-    attachItem.addEventListener("click", (e) => {
+    fileItem.addEventListener("click", (e) => {
       e.stopPropagation();
       closeComposerAddMenu();
-      const fileInput = card.querySelector('input[type="file"]') ||
-        document.querySelector('fieldset input[type="file"]') ||
-        document.querySelector('input[type="file"]');
-      if (fileInput) {
-        fileInput.click();
-      } else {
-        showToast("未找到文件上传组件", null, 2000);
-      }
+      openComposerDocumentPicker(card);
     });
-    menu.appendChild(attachItem);
+    menu.appendChild(fileItem);
 
     // 2. 目标模式入口（按截图说明：‘设置要持续追求的目标’）
     const goalItem = document.createElement("button");

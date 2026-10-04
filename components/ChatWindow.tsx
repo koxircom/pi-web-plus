@@ -15,11 +15,13 @@ import { ChatInput, type ChatInputHandle } from "./ChatInput";
 import { ChatMinimap, useMessageRefs } from "./ChatMinimap";
 import { ExtensionStatusBar } from "./ExtensionStatusBar";
 import { AnsiText } from "./AnsiText";
+import { AskUserSurface } from "./AskUserPanel";
 import { NewSessionBrandHeader } from "./NewSessionBrandHeader";
 import { useI18n } from "@/hooks/useI18n";
 import { useAgentSession, type AgentPhase, type NoticeItem } from "@/hooks/useAgentSession";
 import { useDragDrop } from "@/hooks/useDragDrop";
 import { useIsMobile, allowsAutomaticEditableFocus, focusEditable } from "@/hooks/useIsMobile";
+import { useChatColumnInset } from "@/hooks/useChatColumnInset";
 import { useScrollbarVisibility } from "@/hooks/useScrollbarVisibility";
 import type { SessionStatsInfo } from "@/lib/pi-types";
 import type { ToolEntry } from "@/lib/tool-presets";
@@ -57,6 +59,7 @@ interface Props {
   onAgentEnd?: () => void;
   onAttentionNeeded?: (request: BlockingExtensionUiRequest) => void;
   onSessionCreated?: (session: SessionInfo, sourceDraftKey: string) => void;
+  onSessionSubmissionChange?: (sourceDraftKey: string, session: SessionInfo | null) => void;
   onSessionForked?: (newSessionId: string) => void;
   modelsRefreshKey?: number;
   chatInputRef?: React.RefObject<ChatInputHandle | null>;
@@ -110,8 +113,8 @@ function getUserInputText(message: AgentMessage): string | null {
   return text.length > 0 ? text : null;
 }
 
-function ProcessDetailsGroup({ toolStates, defaultExpanded = false, reveal = false, children, t }: { toolStates: { running: number; success: number; failure: number }; defaultExpanded?: boolean; reveal?: boolean; children: ReactNode; t: (key: string, params?: Record<string, string | number>) => string }) {
-  const [expanded, setExpanded] = useState(defaultExpanded);
+function ProcessDetailsGroup({ toolStates, reveal = false, children, t }: { toolStates: { running: number; success: number; failure: number }; reveal?: boolean; children: ReactNode; t: (key: string, params?: Record<string, string | number>) => string }) {
+  const [expanded, setExpanded] = useState(false);
   useLayoutEffect(() => {
     if (reveal) setExpanded(true);
   }, [reveal]);
@@ -158,7 +161,7 @@ function ProcessDetailsGroup({ toolStates, defaultExpanded = false, reveal = fal
   );
 }
 
-export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initialScrollPosition, onScrollPositionChange, sessionRunning, newSessionCwd, newSessionDraftKey, onAgentEnd, onAttentionNeeded, onSessionCreated, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSystemToolsChange, onSystemInfoLoaderChange, onSessionStatsChange, onSessionStatsPanelOpen, onOpenSettings, onContextUsageChange, onOpenFile, onOpenSession, onAskInNewChat, quoteSelectionEnabled = false, initialPrompt, onInitialPromptConsumed, soundEnabled = true, onSoundToggle, playDoneSound = () => {}, unlockAudio }: Props) {
+export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initialScrollPosition, onScrollPositionChange, sessionRunning, newSessionCwd, newSessionDraftKey, onAgentEnd, onAttentionNeeded, onSessionCreated, onSessionSubmissionChange, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSystemToolsChange, onSystemInfoLoaderChange, onSessionStatsChange, onSessionStatsPanelOpen, onOpenSettings, onContextUsageChange, onOpenFile, onOpenSession, onAskInNewChat, quoteSelectionEnabled = false, initialPrompt, onInitialPromptConsumed, soundEnabled = true, onSoundToggle, playDoneSound = () => {}, unlockAudio }: Props) {
   const { t } = useI18n();
   const isMobile = useIsMobile();
   useEffect(() => {
@@ -216,7 +219,7 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
     loadContext, activeLeafId, scrollToBottom, scrollToMessage,
     retryLoadSession,
   } = useAgentSession({
-    session, sessionRunning, newSessionCwd, newSessionDraftKey, onAgentEnd: wrappedOnAgentEnd, onAttentionNeeded, onSessionCreated, onSessionForked,
+    session, sessionRunning, newSessionCwd, newSessionDraftKey, onAgentEnd: wrappedOnAgentEnd, onAttentionNeeded, onSessionCreated, onSessionSubmissionChange, onSessionForked,
     modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSystemToolsChange, onSystemInfoLoaderChange, onSessionStatsPanelOpen,
     onOpenSettings,
     deferInitialScroll: Boolean(pendingScrollRestore),
@@ -954,6 +957,7 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
   }, [scrollContainerRef, session?.id, sessionIdRef]);
 
   const isEmptyNew = isNew && messages.length === 0 && !streamState.isStreaming && !sessionBusy;
+  const columnEndInset = useChatColumnInset(scrollContainerRef, !loading && !error && !isEmptyNew, isMobile ? 0 : CHAT_MINIMAP_WIDTH);
   useScrollbarVisibility(scrollContainerRef, Boolean(session?.id) || !isEmptyNew);
   const hasStreamingContent = Boolean(streamState.streamingMessage?.content.length);
   const messageCwd = session?.cwd ?? newSessionCwd ?? undefined;
@@ -1064,8 +1068,10 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
     : null;
 
   const chatInputElement = (
+    <>
     <ChatInput
       ref={chatInputRef}
+      columnEndInset={columnEndInset}
       onSend={handleSend}
       onAbort={handleAbort}
       onSteer={agentRunning ? handleSteer : undefined}
@@ -1107,6 +1113,7 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
       draftKey={session?.id ?? newSessionDraftKey ?? undefined}
       cwd={session?.cwd ?? newSessionCwd}
     />
+    </>
   );
 
   if (loading) {
@@ -1336,7 +1343,7 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
           <ExtensionDialog key={extensionDialog.id} request={extensionDialog} onRespond={respondToExtensionUi} />
         )}
         {extensionCustomUi && (
-          <ExtensionCustomPanel key={extensionCustomUi.id} request={extensionCustomUi} onInput={sendExtensionCustomInput} />
+          <AskUserSurface key={extensionCustomUi.id} request={extensionCustomUi} onInput={sendExtensionCustomInput} fallback={<ExtensionCustomPanel request={extensionCustomUi} onInput={sendExtensionCustomInput} />} />
         )}
         {!isEmptyNew && <>
         <div
@@ -1351,7 +1358,7 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
           style={{ visibility: pendingScrollRestore ? "hidden" : undefined }}
         >
           <div style={{ minWidth: 0, padding: `0 ${CHAT_COLUMN_PADDING}px` }}>
-            <div ref={messageContentRef} style={{ width: "100%", minWidth: 0, maxWidth: "var(--chat-content-max-width, 820px)", margin: "0 auto" }}>
+            <div ref={messageContentRef} data-pi-native-message-column="true" style={{ width: "100%", minWidth: 0, maxWidth: "var(--chat-content-max-width, 820px)", margin: "0 auto" }}>
             {(() => {
               // Keep the grouping/index pass lightweight; only the selected
               // render window below is allowed to allocate React message nodes.
@@ -1392,7 +1399,6 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
                 toolStates: { running: number; success: number; failure: number };
                 refIndex?: number;
                 reveal: boolean;
-                defaultExpanded: boolean;
               };
               type RenderPlan = MessagePlan | ProcessPlan;
               const plans: RenderPlan[] = [];
@@ -1405,22 +1411,7 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
                 } else if (displayMessages[i].role === "assistant") lastAssistant = i;
               }
               if (lastAssistant >= 0) finalAssistantIndices.add(lastAssistant);
-              const finalAssistantByMessage = new Map<number, number>();
-              let nextFinalAssistant: number | null = null;
-              for (let idx = displayMessages.length - 1; idx >= 0; idx -= 1) {
-                const message = displayMessages[idx];
-                if (isMessageGroupAnchor(message)) {
-                  nextFinalAssistant = null;
-                  continue;
-                }
-                if (message.role === "assistant" && finalAssistantIndices.has(idx)) nextFinalAssistant = idx;
-                if (message.role === "assistant" && nextFinalAssistant !== null) {
-                  finalAssistantByMessage.set(idx, nextFinalAssistant);
-                }
-              }
-
               let processPlan: ProcessPlan | null = null;
-              const finalAnswerAssistantIndices = new Set<number>();
               const flushProcess = () => {
                 if (!processPlan || processPlan.parts.length === 0) return;
                 plans.push(processPlan);
@@ -1455,7 +1446,6 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
                   // stream commits and as older source messages are prepended.
                   const key = `${idx}-${run.message.displayBlockIndices?.[0] ?? runIndex}`;
                   if (run.kind === "public") {
-                    if (finalInTurn) finalAnswerAssistantIndices.add(idx);
                     flushProcess();
                     plans.push(makeMessagePlan(idx, {
                       keyPrefix: `public-${runIndex}`,
@@ -1475,7 +1465,6 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
                       toolStates: { running: 0, success: 0, failure: 0 },
                       refIndex: visibleRefIndexByMessage.get(idx),
                       reveal: false,
-                      defaultExpanded: false,
                     };
                   }
                   processPlan.reveal ||= Boolean(pendingSearchScroll && entryIds[idx] === pendingSearchScroll.entryId && (!searchBlock || run.message.content.includes(searchBlock)));
@@ -1486,13 +1475,6 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
                 });
               }
               flushProcess();
-              for (const plan of plans) {
-                if (plan.kind !== "process") continue;
-                const finalAssistantIndex = finalAssistantByMessage.get(plan.parts[0]?.idx ?? -1);
-                plan.defaultExpanded = finalAssistantIndex !== undefined
-                  && finalAssistantIndex < messages.length
-                  && !finalAnswerAssistantIndices.has(finalAssistantIndex);
-              }
 
               const renderMessage = (plan: MessagePlan, attachRef = true): ReactNode => {
                 const { idx } = plan;
@@ -1572,7 +1554,7 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
                     ? renderMessage(plan)
                     : (
                       <div key={plan.key} ref={plan.refIndex === undefined ? undefined : (el) => { messageRefs.current[plan.refIndex!] = el; }}>
-                        <ProcessDetailsGroup toolStates={plan.toolStates} defaultExpanded={plan.defaultExpanded} reveal={plan.reveal} t={t}>
+                        <ProcessDetailsGroup toolStates={plan.toolStates} reveal={plan.reveal} t={t}>
                           {plan.parts.map((part) => renderMessage({
                             kind: "message",
                             key: `${part.keyPrefix}-${messageKeyFor(part.idx)}`,
@@ -1618,8 +1600,12 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
             </div>
           </div>
         </div>
-        {pendingScrollRestore ? null : (
+        {pendingScrollRestore ? (
+          <div aria-hidden="true" style={{ width: CHAT_MINIMAP_WIDTH, flexShrink: 0 }} />
+        ) : (
           <ChatMinimap
+            key={session?.id ?? sessionIdRef.current ?? "new"}
+            sessionId={session?.id ?? sessionIdRef.current ?? null}
             messages={messages}
             streamingMessage={streamState.streamingMessage}
             scrollContainer={scrollContainerRef}

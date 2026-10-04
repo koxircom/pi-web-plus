@@ -75,7 +75,9 @@ test("exposes the polled running-session set to the shell", () => {
 
 test("exposes the loaded session catalog to the shell", () => {
   assert.match(source, /onSessionsChange\?: \(sessions: SessionInfo\[\]\) => void/);
-  assert.match(source, /onSessionsChange\?\.\(allSessions\)/);
+  assert.match(source, /onSessionsChange\?\.\(serverSessions\)/);
+  assert.match(source, /updateSessionPreloadCatalog\(allSessions\.filter\(\(session\) => !session\.submissionPending\)/);
+  assert.match(source, /getRawSessions:.*filter\(\(session\) => !session\.submissionPending\)/);
 });
 
 test("subagent completion stays silent and never becomes unread", () => {
