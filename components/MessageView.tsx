@@ -14,6 +14,7 @@ import { applyPatchPreviewToFiles, getApplyPatchInputText, parseApplyPatchInput 
 import { isApplyPatchToolName, isEditToolName } from "@/lib/tool-names";
 import { isToolCallExpanded, setToolCallExpanded } from "@/lib/tool-call-expansion";
 import { isThinkingExpandedByDefault, THINKING_EXPANDED_EVENT } from "@/lib/thinking-expansion-preference";
+import { loadToolResultContent } from "@/lib/tool-result-content";
 import { getToolPublicCategoryKey, getToolPublicStatus } from "@/lib/tool-public-status";
 import { TurnWrittenFiles } from "./TurnWrittenFiles";
 import type { WrittenFile } from "@/lib/turn-written-files";
@@ -314,6 +315,10 @@ export const MessageView = memo(function MessageView({ message, isStreaming, too
     && prev.sessionId === next.sessionId;
 });
 
+export function stripSerializedAnnotationBlocks(content: string): string {
+  return content.replace(/<pi_annotations>[\s\S]*?<\/pi_annotations>\s*/g, "");
+}
+
 function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, onNavigate, onEditContent }: {
   message: UserMessage;
   cwd?: string;
@@ -329,13 +334,14 @@ function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, o
   const [copied, setCopied] = useState(false);
   const [expanded, setExpanded] = useState(false);
 
-  const content =
+  const sourceContent =
     typeof message.content === "string"
       ? message.content
       : message.content
           .filter((b): b is TextContent => b.type === "text")
           .map((b) => b.text)
           .join("\n");
+  const content = stripSerializedAnnotationBlocks(sourceContent);
 
   const imageBlocks: ImageContent[] =
     typeof message.content === "string"
@@ -393,6 +399,7 @@ function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, o
 
   return (
     <div
+      data-message-role="user"
       style={{ marginBottom: 16, display: "flex", flexDirection: "column", alignItems: "flex-end" }}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
@@ -914,7 +921,7 @@ function BlockView({ block, searchTarget, toolResults, isStreaming, streamingDur
     const tc = block as ToolCallContent;
     const result = toolResults?.get(tc.toolCallId);
     const duration = toolCallDurations?.get(tc.toolCallId);
-    return <ToolCallBlock block={tc} result={result} duration={duration} onOpenSession={onOpenSession} />;
+    return <ToolCallBlock block={tc} result={result} duration={duration} onOpenSession={onOpenSession} sessionId={sessionId} />;
   }
   return null;
 }
@@ -1044,9 +1051,25 @@ function isSubagentToolDetails(value: unknown): value is SubagentToolDetails {
   return details.kind === "pi-web-subagent" && typeof details.sessionId === "string";
 }
 
-function ToolCallBlock({ block, result, duration, onOpenSession }: { block: ToolCallContent; result?: ToolResultMessage; duration?: number; onOpenSession?: (sessionId: string) => void }) {
+function ToolCallBlock({ block, result: initialResult, duration, onOpenSession, sessionId }: { block: ToolCallContent; result?: ToolResultMessage; duration?: number; onOpenSession?: (sessionId: string) => void; sessionId?: string }) {
   const { t } = useI18n();
   const [expanded, setExpanded] = useState(() => isToolCallExpanded(block.toolCallId));
+  const ref = initialResult?.deferredResult;
+  const identity = ref ? JSON.stringify([sessionId, ref.entryId, ref.revision, block.toolCallId]) : null;
+  const [loaded, setLoaded] = useState<{ identity: string; result: ToolResultMessage } | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const result = identity && loaded?.identity === identity ? loaded.result : initialResult;
+  const awaitingBody = Boolean(identity && loaded?.identity !== identity);
+  useEffect(() => {
+    if (!expanded || !ref || !identity || loaded?.identity === identity) return;
+    let cancelled = false;
+    setLoadError(null);
+    if (!sessionId) { setLoadError("无法读取工具详情，请重新打开会话。"); return; }
+    loadToolResultContent(sessionId, ref, block.toolCallId).then(value => {
+      if (!cancelled) setLoaded({ identity, result: value });
+    }).catch(() => { if (!cancelled) setLoadError("读取工具结果失败，请收起后重新展开重试。"); });
+    return () => { cancelled = true; };
+  }, [expanded, identity, loaded?.identity, sessionId, ref, block.toolCallId]);
   const toggleExpanded = () => {
     const next = !expanded;
     setToolCallExpanded(block.toolCallId, next);
@@ -1063,7 +1086,7 @@ function ToolCallBlock({ block, result, duration, onOpenSession }: { block: Tool
       : t("chat.toolStatus.failure");
   const isError = status === "failure";
   const resultDiff = expanded && result && !isError ? getResultDiff(result) : null;
-  const patchFiles = expanded ? getApplyPatchFiles(block, result) : null;
+  const patchFiles = expanded && !awaitingBody ? getApplyPatchFiles(block, result) : null;
   const inputStr = expanded && (isStreamingInput || !isEditTool) && !patchFiles
     ? getToolCallInputText(block)
     : null;
@@ -1158,6 +1181,12 @@ function ToolCallBlock({ block, result, duration, onOpenSession }: { block: Tool
       {/* ── Result images — always visible, independent of the collapsed details ── */}
       {resultImages.length > 0 && <ResultImages images={resultImages} isError={isError} />}
 
+      {expanded && awaitingBody && (
+        <div role="status" style={{ padding: "8px 10px", color: loadError ? "#f87171" : "var(--text-muted)", borderTop: "1px solid var(--border)" }}>
+          {loadError ?? "正在读取工具结果…"}
+        </div>
+      )}
+
       {/* ── Expanded: applied-patch split diff ── */}
       {expanded && patchFiles && (
         <div style={{ borderTop: "1px solid rgba(34,197,94,0.15)", background: "var(--bg)" }}>
@@ -1173,7 +1202,7 @@ function ToolCallBlock({ block, result, duration, onOpenSession }: { block: Tool
           isError={isError}
         />
       )}
-      {expanded && result && !patchFiles && (
+      {expanded && result && !awaitingBody && !patchFiles && (
         resultDiff ? (
           <PairedDiffResult
             diff={resultDiff}

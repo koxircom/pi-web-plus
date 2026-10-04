@@ -33,13 +33,56 @@ test("context route parses ?tail and ?before, excluding the boundary on paging",
     assert.equal(captured.options.deferToolResultImages,true);
   }
   const entries=[{id:"root",parentId:null,type:"message",message:{role:"user",content:"root"}}];
+  const active = {isAlive:()=>true,isRunning:()=>true,inner:{sessionManager:{getEntries:()=>entries,getLeafId:()=>"root"}}};
   const response=await handleSessionContextRequest(
     new Request("http://localhost/api/sessions/s/context?before=root&leafId=ignored"),{id:"s"},{
-      getRpc:()=>({isAlive:()=>true,inner:{sessionManager:{getEntries:()=>entries,getLeafId:()=>"root"}}}),
+      getRpc:()=>active,
       resolvePath:async()=>{throw Error("Live context must not scan disk");},
     });
   assert.equal(response.status,200);
   assert.deepEqual((await response.json()).context.entryIds,[]);
+});
+
+test("idle retained wrappers use the disk worker for history pages", async () => {
+  const idle = { isAlive: () => true, isRunning: () => false };
+  let captured;
+  const response = await handleSessionContextRequest(
+    new Request("http://localhost/api/sessions/s/context?tail=4"),
+    { id: "s" },
+    {
+      getRpc: () => idle,
+      resolvePath: async () => "/disk/session.jsonl",
+      pool: {
+        queryContext: async (file, options) => {
+          captured = { file, options };
+          return JSON.stringify({ context: { messages: [], entryIds: [] }, tail: options.tail, before: null });
+        },
+      },
+    },
+  );
+
+  assert.equal(response.status, 200);
+  assert.equal(captured.file, "/disk/session.jsonl");
+  assert.equal(captured.options.tail, 4);
+});
+
+test("a new writer during a disk page read invalidates the snapshot", async () => {
+  const idle = { isAlive: () => true, isRunning: () => false };
+  const running = { isAlive: () => true, isRunning: () => true };
+  let reads = 0;
+  const response = await handleSessionContextRequest(
+    new Request("http://localhost/api/sessions/s/context"),
+    { id: "s" },
+    {
+      getRpc: () => ++reads === 1 ? idle : running,
+      resolvePath: async () => "/disk/session.jsonl",
+      pool: {
+        queryContext: async () => JSON.stringify({ context: { messages: [], entryIds: [] }, tail: 50, before: null }),
+      },
+    },
+  );
+
+  assert.equal(response.status, 409);
 });
 
 test("context route: ?before pages upward without duplicating the boundary", () => {

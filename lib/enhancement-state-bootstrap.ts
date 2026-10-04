@@ -22,6 +22,8 @@ export interface ScriptElementLike {
   id: string;
   src: string;
   async: boolean;
+  integrity?: string;
+  crossOrigin?: string;
   onerror: (() => void) | null;
   remove?: () => void;
 }
@@ -269,6 +271,7 @@ export function ensureEnhancementsRuntime(
     options?.setTimeout
     ?? (typeof win.setTimeout === "function" ? win.setTimeout.bind(win) : globalThis.setTimeout.bind(globalThis));
 
+  let firstScriptLoad = true;
   let retryCount = 0;
   const maxRetries = 3;
 
@@ -281,7 +284,15 @@ export function ensureEnhancementsRuntime(
     const script = doc.createElement("script");
     script.id = "pi-web-enhancements-script";
     const assetBuild = win.__PI_ENH_ASSET_BUILD__ || `koxir-${standaloneVersion}`;
-    script.src = `/pi-web-enhancements.js?v=${encodeURIComponent(assetBuild)}${forceBust ? `&t=${Date.now()}` : ""}`;
+    // Only the first insertion belongs to this compiled build. Hot reloads must
+    // discover current compatibility bytes, not replay a previous build's hash.
+    const immutablePath = firstScriptLoad && !forceBust ? process.env.NEXT_PUBLIC_PI_ENHANCEMENT_ASSET_PATH : "";
+    firstScriptLoad = false;
+    script.src = immutablePath || `/pi-web-enhancements.js?v=${encodeURIComponent(assetBuild)}${forceBust ? `&t=${Date.now()}` : ""}`;
+    if (immutablePath && process.env.NEXT_PUBLIC_PI_ENHANCEMENT_ASSET_INTEGRITY) {
+      script.integrity = process.env.NEXT_PUBLIC_PI_ENHANCEMENT_ASSET_INTEGRITY;
+      script.crossOrigin = "anonymous";
+    }
     script.async = true;
     script.onerror = () => {
       if (retryCount < maxRetries) {

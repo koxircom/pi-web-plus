@@ -15,6 +15,7 @@ const {
   getTokenEstimateText,
   getToolCallInputText,
   replaceUserMessageText,
+  stripSerializedAnnotationBlocks,
 } = await jiti.import("./MessageView.tsx");
 const { I18nProvider } = await jiti.import("@/hooks/useI18n");
 const { splitFinalAssistantBlocks } = await jiti.import("@/lib/message-display");
@@ -28,6 +29,11 @@ function renderMessage(message, props = {}) {
     ),
   );
 }
+
+test("hides serialized annotation blocks from rendered user text", () => {
+  const serialized = "Question\n<pi_annotations>internal quote payload</pi_annotations>\nFollow-up";
+  assert.equal(stripSerializedAnnotationBlocks(serialized), "Question\nFollow-up");
+});
 
 test("updates a reused message when its written files change", () => {
   const props = { message: { role: "assistant", content: [] } };

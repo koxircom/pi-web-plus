@@ -1195,7 +1195,7 @@
     closeMenu();
 
     // 长按/右键菜单弹出时，立即清空任何残留的文本选区并隐藏引用工具条
-    hideQuoteBar(true);
+    closeNativeQuoteSelectionToolbar();
     try {
       const sel = window.getSelection();
       if (sel && sel.rangeCount > 0) {
@@ -1719,11 +1719,7 @@
       closeMenu();
       overlayClosed = true;
     }
-    const isQuoteBarVisible = Boolean(quoteBar && quoteBar.style.display !== "none" && quoteBar.isConnected);
-    if (isQuoteBarVisible) {
-      hideQuoteBar(true);
-      overlayClosed = true;
-    }
+    if (closeNativeQuoteSelectionToolbar()) overlayClosed = true;
     const hadTooltips = Boolean(
       (durationTooltip && durationTooltip.parentNode) ||
       (usageTooltip && usageTooltip.parentNode) ||
@@ -1819,6 +1815,11 @@
   }
   addManagedListener(document, "keydown", handleGlobalShortcuts, true);
 
+  function closeNativeQuoteSelectionToolbar() {
+    const close = window.__PI_WEB_CLOSE_NATIVE_QUOTE_SELECTION__;
+    return typeof close === "function" ? Boolean(close()) : false;
+  }
+
   // ==========================================
   // 2. Quick Action Quote Toolbar (快捷引用工具条)
   // ==========================================
@@ -1827,6 +1828,7 @@
   let annotationItems = [];
   const annotationAnchors = new Map();
   let annotationDraftMarker = null;
+  let lastAnnotationSubmissionState = null;
 
   function getAnnotationSessionId() {
     try {
@@ -1879,6 +1881,13 @@
     return annotationItems.map((item) => ({ ...item }));
   }
 
+  function notifyAnnotationSubmissionState() {
+    const hasAnnotations = isPluginEnabled("quick-quote") && annotationItems.length > 0;
+    if (lastAnnotationSubmissionState === hasAnnotations) return;
+    lastAnnotationSubmissionState = hasAnnotations;
+    window.dispatchEvent(new Event("pi-enh-composer-submission-state-change"));
+  }
+
   function addAnnotation(quote, comment) {
     ensureAnnotationSession();
     const normalizedQuote = normalizeAnnotationText(quote);
@@ -1890,6 +1899,7 @@
       createdAt: Date.now(),
     });
     persistAnnotations();
+    notifyAnnotationSubmissionState();
     return listAnnotations();
   }
 
@@ -1898,9 +1908,10 @@
     annotationItems = annotationItems.filter((item) => item.id !== id);
     annotationAnchors.delete(id);
     document.querySelector(`.pi-enh-annotation-marker[data-annotation-id="${id}"]`)?.remove();
-    clearQuoteSelection();
+    closeNativeQuoteSelectionToolbar();
     persistAnnotations();
     syncAnnotationMarkers();
+    notifyAnnotationSubmissionState();
     return listAnnotations();
   }
 
@@ -1912,6 +1923,7 @@
     item.quote = normalizedQuote;
     item.comment = normalizeAnnotationText(comment);
     persistAnnotations();
+    notifyAnnotationSubmissionState();
     return listAnnotations();
   }
 
@@ -1920,8 +1932,9 @@
     annotationItems = [];
     annotationAnchors.clear();
     removeAnnotationMarkers();
-    clearQuoteSelection();
+    closeNativeQuoteSelectionToolbar();
     persistAnnotations();
+    notifyAnnotationSubmissionState();
     return [];
   }
 
@@ -2025,57 +2038,19 @@
       try { rail.remove(); } catch {}
     }
     annotationRail = null;
-    const textarea = getComposerTextarea();
-    if (textarea) syncAnnotationSendButtons(textarea, false);
-    restoreSerializedAnnotationBlocks();
-  }
-
-  function getAnnotationSendButtons(textarea) {
-    const composerRoot = textarea?.closest?.("fieldset");
-    if (!composerRoot) return [];
-    return Array.from(composerRoot.querySelectorAll("button"))
-      .filter((button) => determineSendKindFromButton(button) !== null);
-  }
-
-  function isNativeComposerUsableForAnnotationSend(textarea) {
-    if (!textarea) return false;
-    const fieldset = textarea.closest?.("fieldset");
-    if (fieldset && fieldset.disabled) return false;
-    const native = readNativeComposerDraft();
-    return Boolean(native && native.textarea === textarea && textarea.isConnected
-      && native.keyRef.current === native.key && !native.fieldset.disabled
-      && native.pendingRef.current === 0);
-  }
-
-  function syncAnnotationSendButtons(textarea, hasAnnotations) {
-    const native = readNativeComposerDraft();
-    const annotationOnly = hasAnnotations && isNativeComposerUsableForAnnotationSend(textarea)
-      && !composerSubmissionInFlight && !native.valueRef.current.trim() && !native.imagesRef.current.length;
-    for (const button of getAnnotationSendButtons(textarea)) {
-      const props = getReactProps(button);
-      if (!props || typeof props.onClick !== "function") continue;
-      if (annotationOnly) {
-        // Enable the empty-input affordance only. The staged payload must still
-        // pass the real React button/fieldset guards at actual dispatch time.
-        button.setAttribute("data-pi-enh-annotation-enabled", "true");
-        button.disabled = false;
-      } else if (button.hasAttribute("data-pi-enh-annotation-enabled")) {
-        button.removeAttribute("data-pi-enh-annotation-enabled");
-        button.disabled = Boolean(props.disabled);
-      }
-    }
+    closeNativeQuoteSelectionToolbar();
   }
 
   let annotationBatchSelectChecked = false;
 
   function syncAnnotationComposer() {
+    notifyAnnotationSubmissionState();
     if (!isPluginEnabled("quick-quote")) {
       removeAnnotationUi();
       return;
     }
     const textarea = getComposerTextarea();
     const items = listAnnotations();
-    if (textarea) syncAnnotationSendButtons(textarea, items.length > 0);
     if (!textarea || !items.length) {
       closeAnnotationList();
       if (annotationBadge) {
@@ -2638,7 +2613,7 @@
     // 模态弹窗（设置弹窗等）打开时，清理页面引用浮层
     const isModalOpen = Boolean(document.querySelector(".settings-dialog-backdrop, .config-panel-root.is-modal, dialog[open]:not(.pi-enh-image-zoom-dialog)"));
     if (isModalOpen) {
-      hideQuoteBar(true);
+      closeNativeQuoteSelectionToolbar();
       if (annotationEditor) closeAnnotationEditor();
       removeAnnotationMarkers();
       return;
@@ -2646,7 +2621,7 @@
 
     // 移动端侧边栏抽屉打开时，避免浮层在抽屉下方或遮挡侧边栏
     if (typeof isSessionSidebarOpen === "function" && isSessionSidebarOpen() && typeof isMobileDrawerMode === "function" && isMobileDrawerMode()) {
-      hideQuoteBar(true);
+      closeNativeQuoteSelectionToolbar();
       if (annotationEditor) closeAnnotationEditor();
       removeAnnotationMarkers();
       return;
@@ -2674,25 +2649,6 @@
     // 2. 刷新同步所有已保存的 marker
     syncAnnotationMarkers();
 
-    // 3. 如果快捷工具条 quoteBar 正在显示，更新其位置（若选区滚出视口则隐藏）
-    if (quoteBar && quoteBar.style.display !== "none" && !quoteBarInteracting) {
-      const sel = window.getSelection();
-      if (sel && !sel.isCollapsed && sel.rangeCount > 0) {
-        try {
-          const range = sel.getRangeAt(0);
-          const rect = range.getBoundingClientRect();
-          if (!rect || !isAnnotationRectVisible(rect, range.startContainer)) {
-            hideQuoteBar();
-          } else {
-            handleSelectionChange();
-          }
-        } catch {
-          hideQuoteBar();
-        }
-      } else {
-        hideQuoteBar();
-      }
-    }
   }
 
   function resizeAnnotationComment(textarea) {
@@ -2771,6 +2727,12 @@
     activeAnnotationSaveHandler = saveAnnotation;
     annotationEditorOpenedAt = Date.now();
     comment.addEventListener("keydown", (event) => {
+      if (event.key === "Escape" && !event.isComposing) {
+        event.preventDefault();
+        event.stopPropagation();
+        closeAnnotationEditor();
+        return;
+      }
       if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
         event.preventDefault();
         event.stopPropagation();
@@ -2928,162 +2890,20 @@
     syncAnnotationMarkers();
   }
 
-  function determineSendKindFromButton(button) {
-    if (!button || button.hasAttribute("data-pi-enh-quick-reply")
-      || /pi-enh-quick-/.test(button.className || "")) return null;
-    const labels = [button.getAttribute("aria-label"), button.getAttribute("title"), button.textContent]
-      .map((value) => String(value || "").trim());
-    for (const [kind, pattern] of [
-      ["steer", /^(?:引导|steer)(?:\s|[（(]|$)/i],
-      ["followup", /^(?:后续消息|follow[ -]?up)(?:\s|[（(]|$)/i],
-      ["send", /^(?:发送(?:消息)?|send(?: message)?)(?:\s|[（(]|$)/i],
-    ]) {
-      if (button.classList.contains(`pi-enh-cursor-${kind}`) || labels.some((label) => pattern.test(label))) return kind;
-    }
-    return null;
+  function prepareNativeComposerSubmission(kind, body) {
+    if (!isPluginEnabled("quick-quote")) return null;
+    const snapshot = listAnnotations();
+    if (!snapshot.length) return null;
+    const sessionId = getAnnotationSessionId();
+    return {
+      text: serializeAnnotations(body),
+      commit() {
+        if (getAnnotationSessionId() !== sessionId) return;
+        consumeAnnotationSnapshot(snapshot, sessionId);
+      },
+      kind,
+    };
   }
-
-  function handoffAnnotationsToNativeSend(preferredButton, requestedKind) {
-    const textarea = getComposerTextarea();
-    if (composerSubmissionInFlight || !isNativeComposerUsableForAnnotationSend(textarea)) return false;
-    const annotationSnapshot = listAnnotations();
-    if (!annotationSnapshot.length) return false;
-    const native = readNativeComposerDraft();
-    const formatted = activeFormattedComposer;
-    const body = formatted?.__boundTextarea === textarea && formatted.style.display !== "none"
-      ? extractMarkdownFromFormattedComposer(formatted) : textarea.value || "";
-    // Never guess which part of user text is an earlier quote. Rollback uses
-    // the exact body captured for this intent, not a destructive text pattern.
-    return dispatchComposerNativeSubmission({
-      kind: requestedKind || determineSendKindFromButton(preferredButton) || "send",
-      textarea,
-      expectedOwner: native.key,
-      expectedText: serializeAnnotations(body),
-      annotationSnapshot,
-      annotationBody: body,
-      annotationSession: getAnnotationSessionId(),
-    });
-  }
-
-  function installAnnotationSendBridge() {
-    addManagedListener(document, "click", (event) => {
-      if (nativeComposerSubmissionDispatching) return;
-      const button = event.target?.closest?.("button");
-      const textarea = getComposerTextarea();
-      if (!getAnnotationSendButtons(textarea).includes(button)) return;
-      const hasQuotes = isPluginEnabled("quick-quote") && listAnnotations().length > 0;
-      if (!hasQuotes && !composerSubmissionInFlight) return;
-      event.preventDefault();
-      event.stopPropagation();
-      event.stopImmediatePropagation();
-      if (hasQuotes) handoffAnnotationsToNativeSend(button);
-    }, true);
-
-    addManagedListener(document, "keydown", (event) => {
-      if (!isPluginEnabled("quick-quote") || event.key !== "Enter" || event.shiftKey
-        || event.isComposing || event.keyCode === 229 || isComposingInput || !listAnnotations().length) return;
-      const textarea = getComposerTextarea();
-      const rich = event.target?.closest?.(".pi-enh-formatted-composer");
-      if (!textarea || (event.target !== textarea && rich?.__boundTextarea !== textarea)) return;
-      const running = getAnnotationSendButtons(textarea).some((b) => determineSendKindFromButton(b) === "followup");
-      event.preventDefault();
-      event.stopPropagation();
-      event.stopImmediatePropagation();
-      handoffAnnotationsToNativeSend(null, running ? (event.ctrlKey || event.metaKey ? "steer" : "followup") : "send");
-    }, true);
-  }
-
-  let hiddenAnnotationRecords = [];
-
-  function restoreSerializedAnnotationBlocks() {
-    for (const entry of hiddenAnnotationRecords) {
-      const { messageEl, records } = entry;
-      if (messageEl && messageEl.isConnected) {
-        for (const rec of records) {
-          const { node, originalValue, hiddenValue } = rec;
-          // Restore only text still owned by this transformation, never a newer React value.
-          if (node && node.isConnected && messageEl.contains(node) && node.nodeValue === hiddenValue) {
-            node.nodeValue = originalValue;
-          }
-        }
-        messageEl.removeAttribute("data-pi-enh-annotations-hidden");
-      }
-    }
-    hiddenAnnotationRecords = [];
-  }
-
-  function hideSerializedAnnotationBlocks() {
-    hiddenAnnotationRecords = hiddenAnnotationRecords.filter(entry => entry.messageEl?.isConnected);
-    if (!isPluginEnabled("quick-quote")) {
-      restoreSerializedAnnotationBlocks();
-      return;
-    }
-
-    for (const message of document.querySelectorAll('[data-message-role="user"]')) {
-      if (message.getAttribute("data-pi-enh-annotations-hidden") === "true") continue;
-
-      const walker = document.createTreeWalker(message, NodeFilter.SHOW_TEXT, {
-        acceptNode(node) {
-          if (node.parentElement && node.parentElement.closest(".pi-enh-attachment-card, .pi-enh-duration-badge, .pi-enh-usage-badge")) {
-            return NodeFilter.FILTER_REJECT;
-          }
-          return NodeFilter.FILTER_ACCEPT;
-        }
-      });
-      const textNodes = [];
-      let currentNode = walker.nextNode();
-      while (currentNode) {
-        textNodes.push(currentNode);
-        currentNode = walker.nextNode();
-      }
-      if (textNodes.length === 0) continue;
-
-      let fullText = "";
-      const nodeSpans = [];
-      for (const node of textNodes) {
-        const val = node.nodeValue || "";
-        const start = fullText.length;
-        fullText += val;
-        nodeSpans.push({ node, start, end: fullText.length, originalValue: val });
-      }
-
-      const regex = /<pi_annotations>[\s\S]*?<\/pi_annotations>\s*/g;
-      const matches = [];
-      let match;
-      while ((match = regex.exec(fullText)) !== null) {
-        matches.push({ start: match.index, end: match.index + match[0].length });
-      }
-      if (matches.length === 0) continue;
-
-      const nodeModifications = [];
-      for (const span of nodeSpans) {
-        const { node, start, originalValue } = span;
-        if (!originalValue) continue;
-
-        let newVal = "";
-        for (let i = 0; i < originalValue.length; i++) {
-          const absPos = start + i;
-          const isCovered = matches.some((m) => absPos >= m.start && absPos < m.end);
-          if (!isCovered) {
-            newVal += originalValue[i];
-          }
-        }
-
-        if (newVal !== originalValue) {
-          nodeModifications.push({ node, originalValue, hiddenValue: newVal });
-          node.nodeValue = newVal;
-        }
-      }
-
-      if (nodeModifications.length > 0) {
-        hiddenAnnotationRecords.push({ messageEl: message, records: nodeModifications });
-        message.setAttribute("data-pi-enh-annotations-hidden", "true");
-      }
-    }
-  }
-
-  window.__PI_ENH_RESTORE_SERIALIZED_ANNOTATIONS__ = restoreSerializedAnnotationBlocks;
-  window.__PI_ENH_HIDE_SERIALIZED_ANNOTATION_BLOCKS__ = hideSerializedAnnotationBlocks;
 
   window.__PI_ENH_ANNOTATIONS__ = {
     list: listAnnotations,
@@ -3097,40 +2917,15 @@
     openEditor: openAnnotationEditor,
   };
   window.__PI_ENH_OPEN_ANNOTATION_EDITOR__ = openAnnotationEditor;
-  installAnnotationSendBridge();
-  addManagedInterval(() => {
+  window.__PI_ENH_PREPARE_ANNOTATION_SUBMISSION__ = prepareNativeComposerSubmission;
+  const syncAnnotationUi = () => {
     syncAnnotationComposer();
     syncAnnotationMarkers();
-    hideSerializedAnnotationBlocks();
-  }, 750);
-
-  quoteBar = null;
-  let currentSelectedText = "";
-  let currentSelectedRange = null;
-  let currentSelectedRect = null;
-  quoteBarInteracting = false;
-  let quoteBarInteractingTimer = null;
-  let selectionChangeDebounceTimer = null;
-
-  function markQuoteBarInteracting(duration = 320) {
-    quoteBarInteracting = true;
-    if (quoteBarInteractingTimer) clearManagedTimeout(quoteBarInteractingTimer);
-    quoteBarInteractingTimer = addManagedTimeout(() => {
-      quoteBarInteracting = false;
-      quoteBarInteractingTimer = null;
-    }, duration);
-  }
-
-  function scheduleSelectionChange(delay = 80) {
-    if (selectionChangeDebounceTimer) {
-      clearManagedTimeout(selectionChangeDebounceTimer);
-      selectionChangeDebounceTimer = null;
-    }
-    selectionChangeDebounceTimer = addManagedTimeout(() => {
-      selectionChangeDebounceTimer = null;
-      handleSelectionChange();
-    }, delay);
-  }
+  };
+  addManagedListener(window, "pi-native-composer-mounted", syncAnnotationUi);
+  addManagedListener(window, "pi-native-composer-unmounted", syncAnnotationUi);
+  addManagedListener(window, "pi-native-chat-messages-changed", syncAnnotationUi);
+  syncAnnotationUi();
 
   async function copySelectionToClipboard(text) {
     const raw = String(text || "").trim();
@@ -3165,178 +2960,20 @@
     if (sel) sel.removeAllRanges();
   }
 
-  function getQuoteBar() {
-    if (!quoteBar) {
-      quoteBar = document.createElement("div");
-      quoteBar.className = "pi-enh-quote-bar";
-      quoteBar.style.display = "none";
-      quoteBar.innerHTML = `
-        <button class="pi-enh-quote-copy-btn" data-action="copy" title="复制选中文本到剪贴板">复制</button>
-        <div class="pi-enh-quote-divider"></div>
-        <button class="pi-enh-quote-btn" data-action="quote" title="打开引用注释编辑框">引用</button>
-      `;
-      document.body.appendChild(quoteBar);
-
-      quoteBar.addEventListener("mousedown", (e) => {
-        markQuoteBarInteracting(300);
-        e.preventDefault();
-      });
-
-      quoteBar.addEventListener("touchstart", (e) => {
-        markQuoteBarInteracting(400);
-        e.stopPropagation();
-      }, { passive: true });
-
-      quoteBar.addEventListener("pointerdown", (e) => {
-        markQuoteBarInteracting(300);
-        e.stopPropagation();
-      });
-
-      quoteBar.addEventListener("click", (e) => {
-        markQuoteBarInteracting(300);
-        const targetBtn = e.target.closest("button[data-action]");
-        if (!targetBtn) {
-          quoteBarInteracting = false;
-          return;
-        }
-        e.preventDefault();
-        e.stopPropagation();
-        const action = targetBtn.dataset.action;
-        const textToUse = currentSelectedText;
-        if (action === "copy") {
-          quoteBarInteracting = false;
-          hideQuoteBar(true);
-          copySelectionToClipboard(textToUse);
-          return;
-        }
-        if (action === "quote") {
-          openAnnotationEditor(currentSelectedText, null, currentSelectedRect, currentSelectedRange);
-        }
-        quoteBarInteracting = false;
-        hideQuoteBar(true);
-      });
-    }
-    return quoteBar;
-  }
-
-  function hideQuoteBar(force = false) {
-    if (force) {
-      if (quoteBarInteractingTimer) clearManagedTimeout(quoteBarInteractingTimer);
-      quoteBarInteractingTimer = null;
-      quoteBarInteracting = false;
-    }
-    if (quoteBarInteracting && !force) return;
-    if (quoteBar) quoteBar.style.display = "none";
-    currentSelectedText = "";
-    currentSelectedRange = null;
-    currentSelectedRect = null;
-  }
-
-  function clearQuoteSelection() {
-    if (selectionChangeDebounceTimer) {
-      clearManagedTimeout(selectionChangeDebounceTimer);
-      selectionChangeDebounceTimer = null;
-    }
-    hideQuoteBar(true);
-  }
-
-  function handleSelectionChange() {
-    if (!isPluginEnabled("quick-quote")) {
-      hideQuoteBar();
-      return;
-    }
-    const selection = window.getSelection();
-    if (!selection || selection.isCollapsed) {
-      hideQuoteBar();
-      return;
-    }
-
-    const text = selection.toString().trim();
-    if (!text || text.length < 2) {
-      hideQuoteBar();
-      return;
-    }
-
-    const anchorNode = selection.anchorNode;
-    const element = anchorNode?.nodeType === Node.ELEMENT_NODE ? anchorNode : anchorNode?.parentElement;
-    if (!element) {
-      hideQuoteBar();
-      return;
-    }
-
-    if (element.closest("textarea, input, [contenteditable='true'], .pi-enh-menu, .pi-enh-quote-bar, .pi-enh-tooltip, .pi-enh-annotation-editor, .pi-enh-annotation-list, #session-sidebar, .sidebar-container, .pi-enh-session-row-host, [data-pi-enh-session-id], aside, nav, .settings-dialog-backdrop, [role='dialog']")) {
-      hideQuoteBar();
-      return;
-    }
-
-    currentSelectedText = text;
-
-    try {
-      const range = selection.getRangeAt(0).cloneRange();
-      const rect = range.getBoundingClientRect();
-      if (!rect || (rect.width === 0 && rect.height === 0)) {
-        hideQuoteBar();
-        return;
-      }
-      currentSelectedRange = range;
-      currentSelectedRect = rect;
-      const bar = getQuoteBar();
-      bar.style.display = "inline-flex";
-      const barWidth = Math.max(230, bar.getBoundingClientRect?.().width || 0);
-      const barHeight = Math.max(32, bar.getBoundingClientRect?.().height || 0);
-
-      const isMobile = typeof isMobileEnvironment === "function" ? isMobileEnvironment() : (window.innerWidth <= 768 || (window.matchMedia && window.matchMedia("(pointer: coarse)").matches));
-      let top;
-      let left = rect.left + rect.width / 2 - barWidth / 2;
-
-      if (isMobile) {
-        // 移动端：Android/iOS 原生 Action Mode（复制/分享）默认显示在选区上方
-        // 为确保增强插件工具条清晰可见且优先级突出，默认定位于选区下方避让原生菜单
-        top = rect.bottom + 10;
-        const composerEl = typeof getComposerTextarea === "function" ? getComposerTextarea() : document.querySelector("textarea");
-        const composerTop = composerEl ? composerEl.getBoundingClientRect().top : window.innerHeight;
-        const maxBottom = Math.min(window.innerHeight - 20, composerTop - 8);
-
-        if (top + barHeight > maxBottom) {
-          // 下方空间受限时向上避让（为上方可能存在的原生菜单预留约 48px 安全高度）
-          const topAboveNative = rect.top - barHeight - 48;
-          if (topAboveNative >= 10) {
-            top = topAboveNative;
-          } else if (rect.top - barHeight - 8 >= 10) {
-            top = rect.top - barHeight - 8;
-          } else {
-            top = Math.max(10, maxBottom - barHeight);
-          }
-        }
-      } else {
-        // 桌面端：优先置于选区上方
-        top = rect.top - barHeight - 8;
-        if (top < 10) top = rect.bottom + 8;
-      }
-
-      const chatBounds = getChatViewBoundary();
-      const horizontalMargin = isMobile ? 8 : 10;
-      const minBarLeft = chatBounds.left + horizontalMargin;
-      const maxBarLeft = Math.max(minBarLeft, chatBounds.right - barWidth - horizontalMargin);
-      if (left < minBarLeft) left = minBarLeft;
-      if (left > maxBarLeft) left = maxBarLeft;
-
-      bar.style.top = `${Math.round(top)}px`;
-      bar.style.left = `${Math.round(left)}px`;
-    } catch {
-      hideQuoteBar();
-    }
-  }
-
-  addManagedListener(document, "mouseup", (event) => {
-    if (event.target?.closest?.(".pi-enh-annotation-editor, .pi-enh-annotation-list, .pi-enh-annotation-marker, .pi-enh-annotation-badge, .pi-enh-quote-bar")) return;
-    addManagedTimeout(handleSelectionChange, 20);
+  let nativeSelectionSnapshot = null;
+  addManagedListener(window, "pi-web:native-selection-change", (event) => {
+    nativeSelectionSnapshot = event.detail || null;
   });
-  addManagedListener(document, "touchend", (event) => {
-    if (event.target?.closest?.(".pi-enh-annotation-editor, .pi-enh-annotation-list, .pi-enh-annotation-marker, .pi-enh-annotation-badge, .pi-enh-quote-bar")) return;
-    // 移动端手指抬起，立即触发选区定位
-    addManagedTimeout(handleSelectionChange, 30);
+  addManagedListener(window, "pi-web:native-selection-action", (event) => {
+    if (!isPluginEnabled("quick-quote")) return;
+    const selection = event.detail || nativeSelectionSnapshot;
+    if (!selection?.text) return;
+    if (selection.action === "copy") copySelectionToClipboard(selection.text);
+    if (selection.action === "quote") {
+      openAnnotationEditor(selection.text, null, selection.rect, selection.range);
+    }
   });
+
   addManagedListener(document, "mousedown", (event) => {
     if (!annotationEditor || !activeAnnotationSaveHandler) return;
     const target = event.target;
@@ -3351,40 +2988,6 @@
     addManagedListener(window.visualViewport, "resize", scheduleAnnotationReposition);
     addManagedListener(window.visualViewport, "scroll", scheduleAnnotationReposition);
   }
-
-  addManagedListener(document, "selectionchange", () => {
-    const sel = window.getSelection();
-    if (!sel || sel.isCollapsed) {
-      if (selectionChangeDebounceTimer) {
-        clearManagedTimeout(selectionChangeDebounceTimer);
-        selectionChangeDebounceTimer = null;
-      }
-      hideQuoteBar();
-    } else {
-      scheduleSelectionChange(90);
-    }
-  });
-
-  addManagedListener(document, "contextmenu", (event) => {
-    if (event.target?.closest?.("textarea, input, [contenteditable='true']")) {
-      return;
-    }
-    if (event.target?.closest?.(".pi-enh-quote-bar, .pi-enh-annotation-editor, .pi-enh-annotation-list, .pi-enh-menu")) {
-      return;
-    }
-
-    const sel = window.getSelection();
-    const hasSelection = sel && !sel.isCollapsed && sel.toString().trim().length > 0;
-    const isMobile = typeof isMobileEnvironment === "function" ? isMobileEnvironment() : (window.innerWidth <= 768 || (window.matchMedia && window.matchMedia("(pointer: coarse)").matches));
-
-    if (isMobile || hasSelection) {
-      event.preventDefault();
-    }
-
-    if (sel && !sel.isCollapsed) {
-      addManagedTimeout(handleSelectionChange, 20);
-    }
-  }, true);
 
   // ==========================================
   // 2.5 ask_user Web-native Picker (网页原生选择器)

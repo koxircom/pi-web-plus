@@ -11,12 +11,20 @@ try {
   piVersion = (JSON.parse(readFileSync(piPkgPath, "utf8")) as { version: string }).version;
 } catch { /* package not found, use default */ }
 
+let enhancementAsset: { path: string; integrity: string } | undefined;
+try {
+  const manifest = JSON.parse(readFileSync(join(configDir, "enhancements/modules/manifest.json"), "utf8"));
+  if (manifest.version === version && /^\/pi-web-assets\/enhancements-[a-f0-9]{16}\.js$/.test(manifest.runtimeAsset?.path)) {
+    enhancementAsset = manifest.runtimeAsset;
+  }
+} catch { /* development before prebuild retains the compatibility loader */ }
+
 const gfmAutolinkEmailLoader = join(configDir, "lib/gfm-autolink-email-loader.cjs");
 
 const nextConfig: NextConfig = {
   outputFileTracingRoot: configDir,
   outputFileTracingIncludes: {
-    "/api/sessions/**/context": ["./bin/session-history-worker.cjs"],
+    "/api/sessions/**": ["./bin/session-history-worker.cjs"],
   },
   experimental: {
     // proxy.ts matches /api/:path*, and Next buffers the request body whenever
@@ -108,6 +116,8 @@ const nextConfig: NextConfig = {
   env: {
     NEXT_PUBLIC_APP_VERSION: version,
     NEXT_PUBLIC_PI_VERSION: piVersion,
+    NEXT_PUBLIC_PI_ENHANCEMENT_ASSET_PATH: enhancementAsset?.path ?? "",
+    NEXT_PUBLIC_PI_ENHANCEMENT_ASSET_INTEGRITY: enhancementAsset?.integrity ?? "",
   },
 };
 

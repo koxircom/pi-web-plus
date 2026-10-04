@@ -18,6 +18,7 @@ export interface SessionSyncScope {
   tail: number;
   deferThinking: boolean;
   deferMedia: boolean;
+  deferToolResults?: boolean;
 }
 
 export function computeSyncScopeKey(scope: SessionSyncScope): string {
@@ -28,6 +29,7 @@ export function computeSyncScopeKey(scope: SessionSyncScope): string {
     `tail:${scope.tail}`,
     `dt:${scope.deferThinking ? 1 : 0}`,
     `dm:${scope.deferMedia ? 1 : 0}`,
+    `dtr:${scope.deferToolResults ? 1 : 0}`,
   ].join(";");
 }
 

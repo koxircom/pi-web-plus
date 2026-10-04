@@ -1,7 +1,7 @@
 "use client";
 import { getToolPublicStatus } from "@/lib/tool-public-status";
 import { registerAbortHandler } from "@/hooks/useKeyboardShortcuts";
-import { isValidElement, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import type { AgentMessage, AssistantContentBlock, AssistantMessage, BashExecutionMessage, BlockingExtensionUiRequest, ExtensionUiRequest, SessionInfo, SessionTreeNode, ToolResultMessage, UserMessage } from "@/lib/types";
 import { normalizeCustomPanelLines } from "@/lib/ansi";
@@ -196,7 +196,7 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
 
   const {
     loading, error, messages, activeToolResults, entryIds, historyCursor, hasEarlierMessages, streamState,
-    agentRunning, bashRunning, pendingBash, modelNames, modelList, modelError, modelScopeWarnings, modelThinkingLevels, modelThinkingLevelMaps, toolPreset, thinkingLevel,
+    agentRunning, bashRunning, pendingBash, modelNames, modelList, modelError, modelsLoading, modelScopeWarnings, modelThinkingLevels, modelThinkingLevelMaps, toolPreset, thinkingLevel,
     retryInfo, contextUsage, forkingEntryId,
     isCompacting, compactError, compactResult, displayModel: displayModelValue, modelSwitching, sessionStats,
     slashCommands, slashCommandsLoading, queuedMessages,
@@ -226,17 +226,44 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
     text: string;
     top: number;
     left: number;
+    quickQuote: boolean;
+    nativeQuote: boolean;
     sourceEntryId?: string;
   } | null>(null);
+  const quotedRangeRef = useRef<Range | null>(null);
   const [quoteInputOpen, setQuoteInputOpen] = useState(false);
   const [quoteSubmitting, setQuoteSubmitting] = useState(false);
   const [quoteError, setQuoteError] = useState<string | null>(null);
   const quotePopoverRef = useRef<HTMLDivElement | null>(null);
   const quoteChatInputRef = useRef<ChatInputHandle | null>(null);
+  const quickQuoteToolbar = Boolean(quotedSelection?.quickQuote && !quoteInputOpen);
   const closeQuotedSelection = useCallback(() => {
+    quotedRangeRef.current = null;
+    if (typeof window !== "undefined") {
+      window.dispatchEvent(new CustomEvent("pi-web:native-selection-change", { detail: null }));
+    }
     setQuotedSelection(null);
     setQuoteInputOpen(false);
     setQuoteError(null);
+  }, []);
+
+  const closeQuotedSelectionRef = useRef(closeQuotedSelection);
+  closeQuotedSelectionRef.current = closeQuotedSelection;
+  useEffect(() => {
+    const bridgeWindow = window as Window & {
+      __PI_WEB_CLOSE_NATIVE_QUOTE_SELECTION__?: () => boolean;
+    };
+    const closeFromEnhancement = () => {
+      if (!quotedRangeRef.current) return false;
+      closeQuotedSelectionRef.current();
+      return true;
+    };
+    bridgeWindow.__PI_WEB_CLOSE_NATIVE_QUOTE_SELECTION__ = closeFromEnhancement;
+    return () => {
+      if (bridgeWindow.__PI_WEB_CLOSE_NATIVE_QUOTE_SELECTION__ === closeFromEnhancement) {
+        delete bridgeWindow.__PI_WEB_CLOSE_NATIVE_QUOTE_SELECTION__;
+      }
+    };
   }, []);
 
   useEffect(() => {
@@ -244,20 +271,45 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
   }, [quoteSelectionEnabled, closeQuotedSelection]);
 
   const captureQuotedSelection = useCallback(() => {
-    if (!quoteSelectionEnabled || quoteInputOpen) return;
+    if (quoteInputOpen) return;
     const selection = window.getSelection();
     const range = selection?.rangeCount ? selection.getRangeAt(0) : null;
     const root = messageContentRef.current;
     if (!selection || selection.isCollapsed || !range || !root || !root.contains(range.commonAncestorContainer)) {
+      quotedRangeRef.current = null;
+      window.dispatchEvent(new CustomEvent("pi-web:native-selection-change", { detail: null }));
       setQuotedSelection(null);
       return;
     }
     const text = selection.toString().trim();
-    if (!text) {
+    const rect = range.getBoundingClientRect();
+    if (!text || (!rect.width && !rect.height)) {
+      quotedRangeRef.current = null;
+      window.dispatchEvent(new CustomEvent("pi-web:native-selection-change", { detail: null }));
       setQuotedSelection(null);
       return;
     }
-    const rect = range.getBoundingClientRect();
+    const selectedElement = range.commonAncestorContainer.nodeType === Node.ELEMENT_NODE
+      ? range.commonAncestorContainer as Element
+      : range.commonAncestorContainer.parentElement;
+    if (selectedElement?.closest("input, textarea, [contenteditable='true'], .pi-enh-annotation-editor, .pi-enh-annotation-list")) {
+      quotedRangeRef.current = null;
+      window.dispatchEvent(new CustomEvent("pi-web:native-selection-change", { detail: null }));
+      setQuotedSelection(null);
+      return;
+    }
+    const enhancer = window as Window & {
+      __PI_ENH_IS_PLUGIN_ENABLED__?: (pluginId: string) => boolean;
+    };
+    const quickQuote = Boolean(enhancer.__PI_ENH_IS_PLUGIN_ENABLED__?.("quick-quote"));
+    if (!quickQuote && !quoteSelectionEnabled) {
+      quotedRangeRef.current = null;
+      window.dispatchEvent(new CustomEvent("pi-web:native-selection-change", { detail: null }));
+      setQuotedSelection(null);
+      return;
+    }
+    const clonedRange = range.cloneRange();
+    quotedRangeRef.current = clonedRange;
     const ancestor = range.commonAncestorContainer.nodeType === Node.ELEMENT_NODE
       ? range.commonAncestorContainer as Element
       : range.commonAncestorContainer.parentElement;
@@ -270,27 +322,43 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
     const sourceEntryId = [ancestor, start, end]
       .map((element) => element?.closest<HTMLElement>("[data-message-role=\"assistant\"]")?.dataset.entryId)
       .find((entryId): entryId is string => Boolean(entryId));
+    const detail = { text, range: clonedRange, rect, sourceEntryId };
+    window.dispatchEvent(new CustomEvent("pi-web:native-selection-change", { detail }));
     setQuotedSelection({
       text,
-      top: Math.min(window.innerHeight - 44, rect.bottom + 8),
-      left: Math.max(64, Math.min(window.innerWidth - 64, rect.left + rect.width / 2)),
+      top: rect.top,
+      left: rect.left + rect.width / 2,
+      quickQuote,
+      nativeQuote: quoteSelectionEnabled,
       sourceEntryId,
     });
   }, [quoteSelectionEnabled, quoteInputOpen]);
 
   useEffect(() => {
-    if (!quoteSelectionEnabled) return;
-    // Selection handles, keyboard selection and cancelled pointers need not
-    // emit pointerup; the browser selection is the authoritative state.
+    // This component is the sole owner of text-selection observation. Pointer
+    // completion supplements selectionchange for mobile action-mode timing.
+    const onContextMenu = (event: MouseEvent) => {
+      if (event.target instanceof Element && event.target.closest("input, textarea, [contenteditable='true'], .pi-enh-annotation-editor, .pi-enh-annotation-list, .pi-enh-menu")) return;
+      const enhancer = window as Window & { __PI_ENH_IS_MOBILE_ENV__?: () => boolean; __PI_ENH_IS_PLUGIN_ENABLED__?: (pluginId: string) => boolean };
+      if (!quoteSelectionEnabled && !enhancer.__PI_ENH_IS_PLUGIN_ENABLED__?.("quick-quote")) return;
+      const selection = window.getSelection();
+      const hasSelection = Boolean(selection && !selection.isCollapsed && selection.toString().trim());
+      if ((enhancer.__PI_ENH_IS_MOBILE_ENV__?.() ?? isMobile) || hasSelection) event.preventDefault();
+      if (hasSelection) captureQuotedSelection();
+    };
     document.addEventListener("selectionchange", captureQuotedSelection);
-    // A cancelled touch/pen gesture can retain the existing range without a
-    // new selectionchange. Reconcile that range through this same owner.
+    document.addEventListener("pointerup", captureQuotedSelection);
+    document.addEventListener("touchend", captureQuotedSelection, { passive: true });
     document.addEventListener("pointercancel", captureQuotedSelection);
+    document.addEventListener("contextmenu", onContextMenu, true);
     return () => {
       document.removeEventListener("selectionchange", captureQuotedSelection);
+      document.removeEventListener("pointerup", captureQuotedSelection);
+      document.removeEventListener("touchend", captureQuotedSelection);
       document.removeEventListener("pointercancel", captureQuotedSelection);
+      document.removeEventListener("contextmenu", onContextMenu, true);
     };
-  }, [quoteSelectionEnabled, captureQuotedSelection]);
+  }, [captureQuotedSelection, isMobile, quoteSelectionEnabled]);
 
   useEffect(() => {
     if (!quoteInputOpen || !quotedSelection) return;
@@ -305,12 +373,44 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
     const popover = quotePopoverRef.current;
     if (!popover || !quotedSelection) return;
     const viewport = window.visualViewport;
+    const enhancer = window as Window & { __PI_ENH_IS_MOBILE_ENV__?: () => boolean };
+    const mobile = enhancer.__PI_ENH_IS_MOBILE_ENV__?.() ?? isMobile;
+    const range = quotedRangeRef.current;
     const position = () => {
       const rect = popover.getBoundingClientRect();
-      const top = viewport?.offsetTop ?? 0;
-      const left = viewport?.offsetLeft ?? 0;
-      popover.style.top = `${Math.max(top + 8, Math.min(quotedSelection.top, top + (viewport?.height ?? window.innerHeight) - rect.height - 8))}px`;
-      popover.style.left = `${Math.max(left + 8, Math.min(quotedSelection.left - rect.width / 2, left + (viewport?.width ?? window.innerWidth) - rect.width - 8))}px`;
+      const viewportTop = viewport?.offsetTop ?? 0;
+      const viewportLeft = viewport?.offsetLeft ?? 0;
+      const viewportBottom = viewportTop + (viewport?.height ?? window.innerHeight);
+      const viewportRight = viewportLeft + (viewport?.width ?? window.innerWidth);
+      const anchor = range?.startContainer.isConnected ? range.getBoundingClientRect() : null;
+      const selectionTop = anchor?.top ?? quotedSelection.top;
+      const selectionBottom = anchor?.bottom ?? quotedSelection.top;
+      const selectionLeft = anchor ? anchor.left + anchor.width / 2 : quotedSelection.left;
+      let top: number;
+      if (quoteInputOpen) {
+        top = Math.max(viewportTop + 8, Math.min(quotedSelection.top, viewportBottom - rect.height - 8));
+      } else if (mobile) {
+        const composer = document.querySelector<HTMLElement>("textarea.chat-input-textarea");
+        const maxBottom = Math.min(viewportBottom - 20, composer?.getBoundingClientRect().top ?? viewportBottom);
+        top = selectionBottom + 10;
+        if (top + rect.height > maxBottom) {
+          const aboveNativeMenu = selectionTop - rect.height - 48;
+          top = aboveNativeMenu >= viewportTop + 10 ? aboveNativeMenu
+            : selectionTop - rect.height - 8 >= viewportTop + 10 ? selectionTop - rect.height - 8
+              : Math.max(viewportTop + 10, maxBottom - rect.height);
+        }
+      } else {
+        top = selectionTop - rect.height - 8;
+        if (top < viewportTop + 10) top = selectionBottom + 8;
+      }
+      const chatBounds = messageContentRef.current?.getBoundingClientRect();
+      const margin = mobile ? 8 : 10;
+      const minLeft = Math.max(viewportLeft + margin, (chatBounds?.left ?? viewportLeft) + margin);
+      const maxLeft = Math.max(minLeft, Math.min(viewportRight - rect.width - margin, (chatBounds?.right ?? viewportRight) - rect.width - margin));
+      const desiredLeft = quoteInputOpen ? quotedSelection.left - rect.width / 2 : selectionLeft - rect.width / 2;
+      const left = Math.max(minLeft, Math.min(maxLeft, desiredLeft));
+      popover.style.top = `${Math.round(Math.max(viewportTop + 8, Math.min(viewportBottom - rect.height - 8, top)))}px`;
+      popover.style.left = `${Math.round(left)}px`;
     };
     position();
     const observer = new ResizeObserver(position);
@@ -324,7 +424,7 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
       viewport?.removeEventListener("resize", position);
       viewport?.removeEventListener("scroll", position);
     };
-  }, [quotedSelection, quoteInputOpen, quoteError]);
+  }, [quotedSelection, quoteInputOpen, quoteError, isMobile]);
 
   useEffect(() => {
     if (!quotedSelection) return;
@@ -338,10 +438,10 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
       if (!quoteSubmitting) closeQuotedSelection();
     };
     document.addEventListener("pointerdown", onPointerDown);
-    document.addEventListener("keydown", onKeyDown);
+    document.addEventListener("keydown", onKeyDown, true);
     return () => {
       document.removeEventListener("pointerdown", onPointerDown);
-      document.removeEventListener("keydown", onKeyDown);
+      document.removeEventListener("keydown", onKeyDown, true);
     };
   }, [quotedSelection, quoteInputOpen, quoteSubmitting, closeQuotedSelection]);
 
@@ -355,6 +455,16 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
     window.getSelection()?.removeAllRanges();
     closeQuotedSelection();
   }, [chatInputRef, quotedSelection, closeQuotedSelection, t]);
+
+  const runQuickQuoteAction = useCallback((action: "copy" | "quote") => {
+    if (!quotedSelection) return;
+    const range = quotedRangeRef.current;
+    const rect = range?.startContainer.isConnected ? range.getBoundingClientRect() : null;
+    window.dispatchEvent(new CustomEvent("pi-web:native-selection-action", {
+      detail: { action, text: quotedSelection.text, range, rect },
+    }));
+    closeQuotedSelection();
+  }, [quotedSelection, closeQuotedSelection]);
 
   const askSelectionInNewChat = useCallback(async (prompt: string) => {
     const sourceSessionId = sessionIdRef.current ?? session?.id;
@@ -414,6 +524,9 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
   const restoredVisibleCountRef = useRef(visibleCount);
   const visibleCountRef = useRef(visibleCount);
   visibleCountRef.current = visibleCount;
+  useEffect(() => {
+    window.dispatchEvent(new Event("pi-native-chat-messages-changed"));
+  }, [session?.id, messages.length, messages[0], messages[messages.length - 1], entryIds[0], entryIds[entryIds.length - 1], visibleCount]);
   const pendingHistoryVisibleCountRef = useRef<number | null>(null);
   const messageContentRef = useRef<HTMLDivElement | null>(null);
   const prevScrollDistanceRef = useRef<number | null>(null);
@@ -964,6 +1077,7 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
       modelNames={modelNames}
       modelList={modelList}
       modelError={modelError}
+          modelsLoading={modelsLoading}
       modelScopeWarnings={modelScopeWarnings}
       onModelChange={handleModelChange}
       modelSwitching={modelSwitching}
@@ -1239,19 +1353,15 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
           <div style={{ minWidth: 0, padding: `0 ${CHAT_COLUMN_PADDING}px` }}>
             <div ref={messageContentRef} style={{ width: "100%", minWidth: 0, maxWidth: "var(--chat-content-max-width, 820px)", margin: "0 auto" }}>
             {(() => {
-              // Streamed blocks use the same disclosure owner as committed history.
-              // Appending the live message here preserves the process group through
-              // message_end instead of briefly rendering technical cards outside it.
+              // Keep the grouping/index pass lightweight; only the selected
+              // render window below is allowed to allocate React message nodes.
               const displayMessages = streamState.isStreaming && hasStreamingContent && streamState.streamingMessage
                 ? [...messages, streamState.streamingMessage]
                 : messages;
               let lastUserIdx = -1;
-              for (let i = messages.length - 1; i >= 0; i--) {
+              for (let i = messages.length - 1; i >= 0; i -= 1) {
                 if (messages[i].role === "user") { lastUserIdx = i; break; }
               }
-              // Anchor for live-tail detection. A compaction summary or subagent
-              // completion can sit after the last user message and own the
-              // still-streaming segment. lastUserIdx stays the scroll target.
               const visibleRefIndexByMessage = new Map<number, number>();
               let refIdx = 0;
               messages.forEach((msg, idx) => {
@@ -1265,30 +1375,145 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
                 if (idx === lastUserIdx) { (lastUserMsgRef as { current: HTMLDivElement | null }).current = el; }
               };
 
-              const renderMessage = (idx: number, options: { attachRef?: boolean; keyPrefix?: string; messageOverride?: AgentMessage; showTimestamp?: boolean; writtenFiles?: WrittenFile[] } = {}): ReactNode => {
-                const msg = options.messageOverride ?? displayMessages[idx];
+              type MessagePlan = {
+                kind: "message";
+                key: string;
+                idx: number;
+                keyPrefix: string;
+                messageOverride?: AgentMessage;
+                showTimestamp?: boolean;
+                writtenFilesTarget?: boolean;
+              };
+              type ProcessPlan = {
+                kind: "process";
+                key: string;
+                processKey: string;
+                parts: Array<{ idx: number; keyPrefix: string; messageOverride: AgentMessage }>;
+                toolStates: { running: number; success: number; failure: number };
+                refIndex?: number;
+                reveal: boolean;
+                defaultExpanded: boolean;
+              };
+              type RenderPlan = MessagePlan | ProcessPlan;
+              const plans: RenderPlan[] = [];
+              const finalAssistantIndices = new Set<number>();
+              let lastAssistant = -1;
+              for (let i = 0; i < displayMessages.length; i += 1) {
+                if (isMessageGroupAnchor(displayMessages[i])) {
+                  if (lastAssistant >= 0) finalAssistantIndices.add(lastAssistant);
+                  lastAssistant = -1;
+                } else if (displayMessages[i].role === "assistant") lastAssistant = i;
+              }
+              if (lastAssistant >= 0) finalAssistantIndices.add(lastAssistant);
+              const finalAssistantByMessage = new Map<number, number>();
+              let nextFinalAssistant: number | null = null;
+              for (let idx = displayMessages.length - 1; idx >= 0; idx -= 1) {
+                const message = displayMessages[idx];
+                if (isMessageGroupAnchor(message)) {
+                  nextFinalAssistant = null;
+                  continue;
+                }
+                if (message.role === "assistant" && finalAssistantIndices.has(idx)) nextFinalAssistant = idx;
+                if (message.role === "assistant" && nextFinalAssistant !== null) {
+                  finalAssistantByMessage.set(idx, nextFinalAssistant);
+                }
+              }
+
+              let processPlan: ProcessPlan | null = null;
+              const finalAnswerAssistantIndices = new Set<number>();
+              const flushProcess = () => {
+                if (!processPlan || processPlan.parts.length === 0) return;
+                plans.push(processPlan);
+                processPlan = null;
+              };
+              const messageKeyFor = (idx: number) => entryIds[idx] ?? idx;
+              const makeMessagePlan = (idx: number, options: Partial<Omit<MessagePlan, "kind" | "key" | "idx">> = {}): MessagePlan => {
+                const keyPrefix = options.keyPrefix ?? "message";
+                const messageKey = messageKeyFor(idx);
+                return {
+                  kind: "message",
+                  key: `${keyPrefix}-${messageKey}`,
+                  idx,
+                  ...options,
+                  keyPrefix,
+                };
+              };
+
+              for (let idx = 0; idx < displayMessages.length; idx += 1) {
+                const message = displayMessages[idx];
+                if (message.role !== "assistant") {
+                  if (message.role === "toolResult") continue;
+                  flushProcess();
+                  plans.push(makeMessagePlan(idx));
+                  continue;
+                }
+
+                const finalInTurn = finalAssistantIndices.has(idx);
+                const runs = splitAssistantDisplayRuns(message);
+                runs.forEach((run, runIndex) => {
+                  // This source-message/run identity remains stable as the live
+                  // stream commits and as older source messages are prepended.
+                  const key = `${idx}-${run.message.displayBlockIndices?.[0] ?? runIndex}`;
+                  if (run.kind === "public") {
+                    if (finalInTurn) finalAnswerAssistantIndices.add(idx);
+                    flushProcess();
+                    plans.push(makeMessagePlan(idx, {
+                      keyPrefix: `public-${runIndex}`,
+                      messageOverride: run.message,
+                      showTimestamp: finalInTurn && runIndex === runs.length - 1,
+                      writtenFilesTarget: finalInTurn && idx < messages.length && runIndex === runs.length - 1,
+                    }));
+                    return;
+                  }
+
+                  if (!processPlan) {
+                    processPlan = {
+                      kind: "process",
+                      key: `process-${key}`,
+                      processKey: key,
+                      parts: [],
+                      toolStates: { running: 0, success: 0, failure: 0 },
+                      refIndex: visibleRefIndexByMessage.get(idx),
+                      reveal: false,
+                      defaultExpanded: false,
+                    };
+                  }
+                  processPlan.reveal ||= Boolean(pendingSearchScroll && entryIds[idx] === pendingSearchScroll.entryId && (!searchBlock || run.message.content.includes(searchBlock)));
+                  for (const block of run.message.content) {
+                    if (block.type === "toolCall") processPlan.toolStates[getToolPublicStatus(block, toolResultsMap.get(block.toolCallId))]++;
+                  }
+                  processPlan.parts.push({ idx, keyPrefix: `technical-${runIndex}`, messageOverride: run.message });
+                });
+              }
+              flushProcess();
+              for (const plan of plans) {
+                if (plan.kind !== "process") continue;
+                const finalAssistantIndex = finalAssistantByMessage.get(plan.parts[0]?.idx ?? -1);
+                plan.defaultExpanded = finalAssistantIndex !== undefined
+                  && finalAssistantIndex < messages.length
+                  && !finalAnswerAssistantIndices.has(finalAssistantIndex);
+              }
+
+              const renderMessage = (plan: MessagePlan, attachRef = true): ReactNode => {
+                const { idx } = plan;
+                const msg = plan.messageOverride ?? displayMessages[idx];
                 const isStreaming = idx === messages.length && displayMessages !== messages;
                 const isVisible = isMessageGroupAnchor(msg) || msg.role === "assistant";
                 const currentRefIdx = visibleRefIndexByMessage.get(idx);
-                const keyPrefix = options.keyPrefix ?? "message";
-                const messageKey = entryIds[idx] ?? idx;
-                let showTimestamp = false;
-                if (msg.role === "assistant") {
-                  showTimestamp = true;
-                  for (let j = idx + 1; j < displayMessages.length; j++) {
-                    const r = displayMessages[j].role;
-                    if (r === "user") break;
-                    if (r === "assistant") { showTimestamp = false; break; }
+                const messageKey = messageKeyFor(idx);
+                let writtenFiles: WrittenFile[] | undefined;
+                if (plan.writtenFilesTarget) {
+                  const turnContent: AssistantContentBlock[] = [];
+                  let start = idx;
+                  while (start > 0 && !isMessageGroupAnchor(displayMessages[start - 1])) start -= 1;
+                  for (let i = start; i <= idx; i += 1) {
+                    if (displayMessages[i].role === "assistant") turnContent.push(...(displayMessages[i] as AssistantMessage).content);
                   }
-                  // Hide on the currently-streaming tail (the streaming bubble owns the live timestamp)
-                  if (showTimestamp && isStreaming) {
-                    showTimestamp = false;
-                  }
+                  writtenFiles = extractTurnWrittenFiles(turnContent, toolResultsMap, messageCwd);
                 }
-                if (options.showTimestamp !== undefined) showTimestamp = options.showTimestamp;
                 const view = (
                   <MessageView
-                    key={`${keyPrefix}-view-${messageKey}`}
+                    key={`${plan.keyPrefix}-view-${messageKey}`}
                     message={msg}
                     isStreaming={isStreaming}
                     toolResults={toolResultsMap}
@@ -1302,99 +1527,33 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
                     forking={forkingEntryId === entryIds[idx]}
                     onNavigate={sessionBusy ? undefined : handleNavigate}
                     onEditContent={handleEditContent}
-                    showTimestamp={showTimestamp}
+                    showTimestamp={plan.showTimestamp ?? (msg.role === "assistant")}
                     prevTimestamp={idx > 0 ? (messages[idx - 1] as AgentMessage & { timestamp?: number }).timestamp : undefined}
                     sessionId={session?.id ?? sessionIdRef.current ?? undefined}
-                    writtenFiles={options.writtenFiles}
+                    writtenFiles={writtenFiles}
                   />
                 );
                 if (!isVisible || currentRefIdx === undefined) return view;
                 return (
-                  <div key={`${keyPrefix}-${messageKey}`} data-entry-id={entryIds[idx]} data-scroll-anchor={`${keyPrefix}-${messageKey}`} ref={options.attachRef === false ? undefined : attachVisibleRef(idx, currentRefIdx)}>
+                  <div key={plan.key} data-entry-id={entryIds[idx]} data-scroll-anchor={`${plan.keyPrefix}-${messageKey}`} ref={attachRef ? attachVisibleRef(idx, currentRefIdx) : undefined}>
                     {view}
                   </div>
                 );
               };
 
-              const rendered: ReactNode[] = [];
-              let processViews: ReactNode[] = [];
-              let toolStates = { running: 0, success: 0, failure: 0 };
-              let processKey = "";
-              let processRefIdx: number | undefined;
-              let revealProcess = false;
-              const flushProcess = () => {
-                if (!processViews.length) return;
-                const refIndex = processRefIdx;
-                rendered.push(
-                  <div key={`process-${processKey}`} ref={refIndex === undefined ? undefined : (el) => { messageRefs.current[refIndex] = el; }}>
-                    <ProcessDetailsGroup toolStates={toolStates} reveal={revealProcess} t={t}>{processViews}</ProcessDetailsGroup>
-                  </div>,
-                );
-                processViews = [];
-                toolStates = { running: 0, success: 0, failure: 0 };
-                processKey = "";
-                processRefIdx = undefined;
-                revealProcess = false;
-              };
-              const finalAssistantIndices = new Set<number>();
-              let lastAssistant = -1;
-              for (let i = 0; i < displayMessages.length; i++) {
-                if (isMessageGroupAnchor(displayMessages[i])) {
-                  if (lastAssistant >= 0) finalAssistantIndices.add(lastAssistant);
-                  lastAssistant = -1;
-                } else if (displayMessages[i].role === "assistant") lastAssistant = i;
-              }
-              if (lastAssistant >= 0) finalAssistantIndices.add(lastAssistant);
-              for (let idx = 0; idx < displayMessages.length; idx++) {
-                const message = displayMessages[idx];
-                if (message.role !== "assistant") {
-                  // Tool results belong to their paired calls, not separate public text.
-                  if (message.role === "toolResult") continue;
-                  flushProcess();
-                  rendered.push(renderMessage(idx));
-                  continue;
-                }
-                const finalInTurn = finalAssistantIndices.has(idx);
-                const turnContent: AssistantContentBlock[] = [];
-                if (finalInTurn && idx < messages.length) {
-                  let start = idx;
-                  while (start > 0 && !isMessageGroupAnchor(displayMessages[start - 1])) start--;
-                  for (let i = start; i <= idx; i++) if (displayMessages[i].role === "assistant") turnContent.push(...(displayMessages[i] as AssistantMessage).content);
-                }
-                const writtenFiles = finalInTurn && idx < messages.length ? extractTurnWrittenFiles(turnContent, toolResultsMap, messageCwd) : undefined;
-                const runs = splitAssistantDisplayRuns(message);
-                runs.forEach((run, runIndex) => {
-                  // Entry IDs arrive only at commit; keep disclosure identity stable
-                  // so a user's explicit expansion survives the stream handoff.
-                  const key = `${idx}-${run.message.displayBlockIndices?.[0] ?? runIndex}`;
-                  if (run.kind === "public") {
-                    flushProcess();
-                    rendered.push(renderMessage(idx, { keyPrefix: `public-${runIndex}`, messageOverride: run.message, showTimestamp: finalInTurn && runIndex === runs.length - 1, writtenFiles: runIndex === runs.length - 1 ? writtenFiles : undefined }));
-                  } else {
-                    processKey ||= key;
-                    processRefIdx ??= visibleRefIndexByMessage.get(idx);
-                    revealProcess ||= Boolean(pendingSearchScroll && entryIds[idx] === pendingSearchScroll.entryId && (!searchBlock || run.message.content.includes(searchBlock)));
-                    for (const block of run.message.content) if (block.type === "toolCall") toolStates[getToolPublicStatus(block, toolResultsMap.get(block.toolCallId))]++;
-                    processViews.push(renderMessage(idx, { attachRef: false, keyPrefix: `technical-${runIndex}`, messageOverride: run.message, showTimestamp: false }));
-                  }
-                });
-              }
-              flushProcess();
-              const anchorIndex = pendingScrollRestore ? rendered.findIndex((node) => (
-                isValidElement<{ "data-entry-id"?: string; "data-scroll-anchor"?: string }>(node)
+              const anchorIndex = pendingScrollRestore ? plans.findIndex((plan) => (
+                plan.kind === "message"
                 && (pendingScrollRestore.anchorKey
-                  ? node.props["data-scroll-anchor"] === pendingScrollRestore.anchorKey
-                  : node.props["data-entry-id"] === pendingScrollRestore.anchorEntryId)
+                  ? `${plan.keyPrefix}-${messageKeyFor(plan.idx)}` === pendingScrollRestore.anchorKey
+                  : entryIds[plan.idx] === pendingScrollRestore.anchorEntryId)
               )) : -1;
-              // New output widens the mounted window; it must not evict history
-              // that the user already revealed. Keys also survive prepended pages.
-              const retainedStartIndex = visibleStartKeyRef.current === null ? -1 : rendered.findIndex((node) => (
-                isValidElement(node) && node.key === visibleStartKeyRef.current
-              ));
-              const { startIndex } = getVisibleRenderWindow(rendered.length, visibleCount, anchorIndex >= 0 ? anchorIndex : retainedStartIndex);
-              const firstVisibleNode = rendered[startIndex];
-              visibleStartKeyRef.current = isValidElement(firstVisibleNode) ? firstVisibleNode.key : null;
-              restoredVisibleCountRef.current = rendered.length - startIndex;
+              const retainedStartIndex = visibleStartKeyRef.current === null
+                ? -1
+                : plans.findIndex((plan) => plan.key === visibleStartKeyRef.current);
+              const { startIndex } = getVisibleRenderWindow(plans.length, visibleCount, anchorIndex >= 0 ? anchorIndex : retainedStartIndex);
+              const firstVisiblePlan = plans[startIndex];
+              visibleStartKeyRef.current = firstVisiblePlan?.key ?? null;
+              restoredVisibleCountRef.current = plans.length - startIndex;
               visibleStartIndexRef.current = startIndex;
               const hasMore = startIndex > 0 || hasEarlierMessages;
               return (
@@ -1409,7 +1568,22 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
                       {t("chat.loadEarlier")}
                     </button>
                   )}
-                  {rendered.slice(startIndex)}
+                  {plans.slice(startIndex).map((plan) => plan.kind === "message"
+                    ? renderMessage(plan)
+                    : (
+                      <div key={plan.key} ref={plan.refIndex === undefined ? undefined : (el) => { messageRefs.current[plan.refIndex!] = el; }}>
+                        <ProcessDetailsGroup toolStates={plan.toolStates} defaultExpanded={plan.defaultExpanded} reveal={plan.reveal} t={t}>
+                          {plan.parts.map((part) => renderMessage({
+                            kind: "message",
+                            key: `${part.keyPrefix}-${messageKeyFor(part.idx)}`,
+                            idx: part.idx,
+                            keyPrefix: part.keyPrefix,
+                            messageOverride: part.messageOverride,
+                            showTimestamp: false,
+                          }, false))}
+                        </ProcessDetailsGroup>
+                      </div>
+                    ))}
                 </>
               );
             })()}
@@ -1456,9 +1630,11 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
         </>}
       </div>
 
-      {quoteSelectionEnabled && quotedSelection && createPortal(
+      {quotedSelection && (quotedSelection.nativeQuote || quotedSelection.quickQuote) && createPortal(
         <div
           ref={quotePopoverRef}
+          className="pi-enh-quote-bar"
+          data-pi-native-selection-toolbar="true"
           role={quoteInputOpen ? "dialog" : "toolbar"}
           aria-label={t(quoteInputOpen ? "chat.newQuoteChat" : "chat.askSelection")}
           style={{
@@ -1466,18 +1642,24 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
             top: quotedSelection.top,
             left: quotedSelection.left,
             zIndex: 260,
-            display: "flex",
-            flexWrap: "wrap",
-            gap: 3,
-            width: quoteInputOpen ? "min(420px, calc(100vw - 16px))" : undefined,
-            maxWidth: "calc(100vw - 16px)",
-            maxHeight: "calc(var(--app-viewport-height, 100dvh) - 16px)",
-            overflowY: "auto",
-            padding: quoteInputOpen ? 12 : 3,
-            border: "1px solid var(--border)",
-            borderRadius: 6,
-            background: "var(--bg)",
-            boxShadow: "0 2px 10px rgba(0,0,0,0.12)",
+            ...(quickQuoteToolbar ? {
+              maxWidth: "calc(100vw - 16px)",
+              maxHeight: "calc(var(--app-viewport-height, 100dvh) - 16px)",
+              overflowY: "auto" as const,
+            } : {
+              display: "flex",
+              flexWrap: "wrap" as const,
+              gap: 3,
+              width: quoteInputOpen ? "min(420px, calc(100vw - 16px))" : undefined,
+              maxWidth: "calc(100vw - 16px)",
+              maxHeight: "calc(var(--app-viewport-height, 100dvh) - 16px)",
+              overflowY: "auto" as const,
+              padding: quoteInputOpen ? 12 : 3,
+              border: "1px solid var(--border)",
+              borderRadius: 6,
+              background: "var(--bg)",
+              boxShadow: "0 2px 10px rgba(0,0,0,0.12)",
+            }),
           }}
         >
           {quoteInputOpen ? (
@@ -1502,34 +1684,58 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
               {quoteError && <div role="alert" style={{ color: "#dc2626", fontSize: 12, overflowWrap: "anywhere" }}>{quoteError}</div>}
             </fieldset>
           ) : <>
-          <button
-            type="button"
-            className="file-viewer-icon-button"
-            title={t("chat.askInCurrent")}
-            aria-label={t("chat.askInCurrent")}
-            onPointerDown={(event) => event.preventDefault()}
-            onClick={askSelectionHere}
-            style={{ width: "auto", height: 35, flex: "0 0 auto", gap: 5, padding: "0 10px", border: "none", fontSize: 12, fontWeight: 500 }}
-          >
-            <span aria-hidden="true" style={{ fontSize: 15 }}>@</span>
-            <span>{t("chat.askInCurrent")}</span>
-          </button>
-          {onAskInNewChat && quotedSelection.sourceEntryId && !bashRunning && (
-            <button
-              type="button"
-              className="file-viewer-icon-button"
-              title={t("chat.askInNewChat")}
-              aria-label={t("chat.askInNewChat")}
-              onPointerDown={(event) => event.preventDefault()}
-              onClick={() => { setQuoteInputOpen(true); window.getSelection()?.removeAllRanges(); }}
-              style={{ width: "auto", height: 35, flex: "0 0 auto", gap: 5, padding: "0 10px", border: "none", fontSize: 12, fontWeight: 500 }}
-            >
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                <path d="M6 3v12M18 9a9 9 0 0 1-9 9" /><circle cx="18" cy="6" r="3" /><circle cx="6" cy="18" r="3" />
-              </svg>
-              <span>{t("chat.askInNewChat")}</span>
-            </button>
-          )}
+            {quotedSelection.quickQuote && (
+              <>
+                <button
+                  type="button"
+                  className="pi-enh-quote-copy-btn"
+                  title="复制选中文本到剪贴板"
+                  aria-label="复制选中文本"
+                  onPointerDown={(event) => event.preventDefault()}
+                  onClick={() => runQuickQuoteAction("copy")}
+                >复制</button>
+                <div className="pi-enh-quote-divider" />
+                <button
+                  type="button"
+                  className="pi-enh-quote-btn"
+                  title="打开引用注释编辑框"
+                  aria-label="添加引用注释"
+                  onPointerDown={(event) => event.preventDefault()}
+                  onClick={() => runQuickQuoteAction("quote")}
+                >引用</button>
+              </>
+            )}
+            {quotedSelection.quickQuote && quotedSelection.nativeQuote && <div className="pi-enh-quote-divider" />}
+            {quotedSelection.nativeQuote && (
+              <button
+                type="button"
+                className="file-viewer-icon-button pi-enh-quote-btn"
+                title={t("chat.askInCurrent")}
+                aria-label={t("chat.askInCurrent")}
+                onPointerDown={(event) => event.preventDefault()}
+                onClick={askSelectionHere}
+                style={{ width: "auto", height: 35, flex: "0 0 auto", gap: 5, padding: "0 10px", border: "none", fontSize: 12, fontWeight: 500 }}
+              >
+                <span aria-hidden="true" style={{ fontSize: 15 }}>@</span>
+                <span>{t("chat.askInCurrent")}</span>
+              </button>
+            )}
+            {quotedSelection.nativeQuote && onAskInNewChat && quotedSelection.sourceEntryId && !bashRunning && (
+              <button
+                type="button"
+                className="file-viewer-icon-button pi-enh-quote-btn"
+                title={t("chat.askInNewChat")}
+                aria-label={t("chat.askInNewChat")}
+                onPointerDown={(event) => event.preventDefault()}
+                onClick={() => { setQuoteInputOpen(true); window.getSelection()?.removeAllRanges(); }}
+                style={{ width: "auto", height: 35, flex: "0 0 auto", gap: 5, padding: "0 10px", border: "none", fontSize: 12, fontWeight: 500 }}
+              >
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                  <path d="M6 3v12M18 9a9 9 0 0 1-9 9" /><circle cx="18" cy="6" r="3" /><circle cx="6" cy="18" r="3" />
+                </svg>
+                <span>{t("chat.askInNewChat")}</span>
+              </button>
+            )}
           </>}
         </div>,
         document.body,

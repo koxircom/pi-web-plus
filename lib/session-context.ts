@@ -1,10 +1,12 @@
 import type { AgentMessage, ImageContent, SessionEntry, SessionContext } from "./types";
+import { deferLargeToolResult } from "./session-tool-result";
 import { normalizeToolCalls } from "./normalize";
 import { getThinkingPreview } from "./message-display";
 import { MAX_TOOL_RESULT_IMAGE_BYTES, TOOL_RESULT_IMAGE_MIMES } from "./tool-result-images";
 
 export interface BuildSessionContextOptions {
   deferThinking?: boolean;
+  deferToolResults?: boolean;
   deferToolResultImages?: boolean;
   tail?: number;
   excludeLeaf?: boolean;
@@ -406,6 +408,9 @@ export function entryToUiMessage(
       let message = options.deferToolResultImages
         ? deferToolResultBase64Images(normalizeToolCalls(entry.message), options.sessionId, entry.id)
         : normalizeToolCalls(entry.message);
+      if (options.deferToolResults && options.sessionId && message.role === "toolResult") {
+        message = deferLargeToolResult(message, entry.id);
+      }
       const legacyContent = message.role === "assistant" ? (message as { content: unknown }).content : undefined;
       if (typeof legacyContent === "string") {
         message = { ...message, content: [{ type: "text", text: legacyContent }] } as AgentMessage;

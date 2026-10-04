@@ -1,14 +1,21 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, mkdir, writeFile, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, mkdir, writeFile, readFile, rm, open as openFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { createJiti } from 'jiti';
+import fsPromises from 'node:fs/promises';
+import {syncBuiltinESMExports} from 'node:module';
 const jiti = createJiti(import.meta.url, { alias: { '@': process.cwd() }, interopDefault: true });
 const { POST } = await jiti.import('./route.ts');
 const { cacheSessionPath, invalidateSessionListCache, invalidateSessionPathCache } = await jiti.import('../../../../lib/session-reader.ts');
 const { loadUsageDeleteGuard } = await jiti.import('../../../../lib/usage-delete-guard.ts');
-const post = ids => POST(new Request('http://localhost/api/sessions/batch-delete', { method: 'POST', body: JSON.stringify({ ids }) }));
+const requestFor = ids => new Request('http://localhost/api/sessions/batch-delete', { method: 'POST', body: JSON.stringify({ ids }) });
+const post = ids => POST(requestFor(ids));
+async function postWithFreshImports(ids) {
+ const fresh=createJiti(import.meta.url,{alias:{'@':process.cwd()},interopDefault:true,moduleCache:false});
+ const route=await fresh.import('./route.ts');return route.POST(requestFor(ids));
+}
 async function fixture(t) {
  const root = await mkdtemp(join(tmpdir(), 'pi-batch-delete-'));
  const dir = join(root,'sessions','fixture-workspace'); await mkdir(dir,{recursive:true});
@@ -55,6 +62,26 @@ test('batch handles selected ancestors/descendants and reattaches surviving fork
  for(const id of ['parent','fork','agent','agent-child'])await assert.rejects(readFile(f.paths.get(id)),{code:'ENOENT'});
  const header=JSON.parse((await readFile(f.paths.get('leaf'),'utf8')).split('\n')[0]);assert.equal(header.parentSession,f.paths.get('grandparent'));
 });
+test('bounded session headers survive short reads across multiple chunks',async t=>{
+ const f=await fixture(t);await f.add('grandparent');await f.add('parent','grandparent');await f.add('fork','parent');
+ const probe=await openFile(f.paths.get('parent'),'r');const handlePrototype=Object.getPrototypeOf(probe);await probe.close();
+ const originalRead=handlePrototype.read;
+ handlePrototype.read=function(buffer,offset,length,position){return originalRead.call(this,buffer,offset,Math.min(length,3),position)};
+ t.after(()=>{handlePrototype.read=originalRead});
+ const payload=await(await post(['parent'])).json();assert(payload.results[0].ok,JSON.stringify(payload));
+ const header=JSON.parse((await readFile(f.paths.get('fork'),'utf8')).split('\n')[0]);assert.equal(header.parentSession,f.paths.get('grandparent'));
+});
+test('an active surviving child blocks reparent and preserves the parent file',async t=>{
+ const f=await fixture(t);await f.add('parent');await f.add('fork','parent');
+ const previousRegistry=globalThis.__piSessions;const registry=new Map(previousRegistry??[]);
+ registry.set('fork',{isAlive:()=>true,isRunning:()=>true});globalThis.__piSessions=registry;
+ t.after(()=>globalThis.__piSessions=previousRegistry);
+ const guard=loadUsageDeleteGuard(),original=guard.sealAndDeleteSync;let calls=0;
+ guard.sealAndDeleteSync=(...args)=>{calls++;return original(...args)};t.after(()=>guard.sealAndDeleteSync=original);
+ const payload=await(await post(['parent'])).json();assert.equal(payload.results.length,1);assert.equal(payload.results[0].ok,false);
+ assert.equal(calls,0);assert((await readFile(f.paths.get('parent'))).length>0);
+ const forkHeader=JSON.parse((await readFile(f.paths.get('fork'),'utf8')).split('\n')[0]);assert.equal(forkHeader.parentSession,f.paths.get('parent'));
+});
 test('sealing failure reports failure and preserves every target',async t=>{
  const f=await fixture(t);await f.add('keep-a');await f.add('keep-b');
  const guard=loadUsageDeleteGuard(),original=guard.sealAndDeleteSync;guard.sealAndDeleteSync=()=>{throw Error('isolated seal failure')};t.after(()=>guard.sealAndDeleteSync=original);
@@ -63,4 +90,38 @@ test('sealing failure reports failure and preserves every target',async t=>{
 });
 test('invalid batches are rejected before disk mutation',async()=>{
  for(const ids of [[],['../escape'],[null],Array(101).fill('a')])assert.equal((await post(ids)).status,400);
+});
+
+test('partial temporary write fails closed and leaves original child and parent intact',async t=>{
+ const f=await fixture(t);await f.add('grandparent');await f.add('parent','grandparent');const child=await f.add('fork','parent');
+ const before=await readFile(child);const probe=await openFile(child,'r');const proto=Object.getPrototypeOf(probe);await probe.close();
+ const original=proto.writeFile;
+ proto.writeFile=async function(contents,...args){await original.call(this,contents.slice(0,17),...args);throw Object.assign(Error('isolated partial write'),{code:'EIO'});};
+ t.after(()=>proto.writeFile=original);
+ const payload=await(await post(['parent'])).json();assert.equal(payload.results[0].ok,false);assert.deepEqual(payload.deletedSessionIds,[]);
+ assert.deepEqual(await readFile(child),before);assert((await readFile(f.paths.get('parent'))).length>0);
+ assert(!(await fsPromises.readdir(f.dir)).some(name=>name.endsWith('.tmp')),'temporary partial file cleaned');
+});
+test('directory permission failure cannot skip child checks and delete the parent',async t=>{
+ const f=await fixture(t);await f.add('parent');const child=await f.add('fork','parent');const before=await readFile(child);
+ const original=fsPromises.readdir;let injectedCalls=0;
+ fsPromises.readdir=async function(dir,...args){if(String(dir)===f.dir){injectedCalls++;throw Object.assign(Error('isolated directory denied'),{code:'EACCES'});}return original.call(this,dir,...args);};syncBuiltinESMExports();
+ t.after(()=>{fsPromises.readdir=original;syncBuiltinESMExports();});
+ const payload=await(await postWithFreshImports(['parent'])).json();assert(injectedCalls>0,'directory fault reached backend');assert.equal(payload.results[0].ok,false);assert.deepEqual(payload.deletedSessionIds,[]);
+ assert.deepEqual(await readFile(child),before);assert((await readFile(f.paths.get('parent'))).length>0);
+});
+test('rename failure cannot truncate a surviving child or remove its parent',async t=>{
+ const f=await fixture(t);await f.add('grandparent');await f.add('parent','grandparent');const child=await f.add('fork','parent');const before=await readFile(child);
+ const original=fsPromises.rename;let injectedCalls=0;
+ fsPromises.rename=async function(src,dest){if(String(dest)===child){injectedCalls++;throw Object.assign(Error('isolated rename failure'),{code:'EIO'});}return original.call(this,src,dest);};syncBuiltinESMExports();
+ t.after(()=>{fsPromises.rename=original;syncBuiltinESMExports();});
+ const payload=await(await postWithFreshImports(['parent'])).json();assert(injectedCalls>0,'rename fault reached backend');assert.equal(payload.results[0].ok,false);assert.deepEqual(payload.deletedSessionIds,[]);
+ assert.deepEqual(await readFile(child),before);assert((await readFile(f.paths.get('parent'))).length>0);
+ assert(!(await fsPromises.readdir(f.dir)).some(name=>name.endsWith('.tmp')));
+});
+test('a missing grandparent does not leave surviving forks linked to a nonexistent file',async t=>{
+ const f=await fixture(t);await f.add('grandparent');await f.add('parent','grandparent');const child=await f.add('fork','parent');
+ await rm(f.paths.get('grandparent'));invalidateSessionListCache();
+ const payload=await(await post(['parent'])).json();assert.equal(payload.results[0].ok,true,JSON.stringify(payload));
+ const header=JSON.parse((await readFile(child,'utf8')).split('\n')[0]);assert.equal(header.parentSession,undefined);
 });

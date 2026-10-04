@@ -83,6 +83,8 @@ export interface AssistantMessage {
 }
 
 export interface ToolResultMessage {
+  /** Historical large body fetched only when details are expanded. */
+  deferredResult?: { entryId: string; revision: string };
   /** Client-only partial execution output; it does not establish tool success. */
   inProgress?: boolean;
   role: "toolResult";

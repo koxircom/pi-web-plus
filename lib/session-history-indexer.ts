@@ -11,6 +11,9 @@ import {
   sessionEntryToMetadata,
 } from "./session-context";
 
+type SessionManagerModule = typeof import("@earendil-works/pi-coding-agent");
+const importSessionManagerNative = new Function("specifier", "return import(specifier)") as (specifier: string) => Promise<SessionManagerModule>;
+
 export class HistoryConflictError extends Error {
   statusCode = 409;
   retryable = true;
@@ -421,6 +424,7 @@ export class SessionHistoryIndexer {
     filePath: string,
     options: {
       leafId?: string | null;
+      onlyEntry?: boolean;
       tail?: number;
       before?: string | null;
       deferThinking?: boolean;
@@ -503,14 +507,15 @@ export class SessionHistoryIndexer {
         }
       }
 
-      const { SessionManager } = await import("@earendil-works/pi-coding-agent");
+      const { SessionManager } = await importSessionManagerNative("@earendil-works/pi-coding-agent");
       const sm = SessionManager.inMemory(index.headerCwd || process.cwd(), undefined, rawEntries as never);
       const entries = sm.getEntries() as unknown as SessionEntry[];
       const cursor = options.before ?? options.leafId;
       if (options.requireCursor && cursor && !entries.some((entry) => entry.id === cursor)) {
         throw new CursorNotFoundError(cursor);
       }
-      const context = buildSessionContext(entries, options.leafId, {
+      const contextEntries = options.onlyEntry ? entries.filter(entry => entry.id === options.leafId) : entries;
+      const context = buildSessionContext(contextEntries, options.leafId, {
         tail: options.tail,
         excludeLeaf: Boolean(options.before),
         before: options.before,
@@ -550,7 +555,7 @@ export class SessionHistoryIndexer {
     );
 
     // 2. Traverse ancestor chain for page entries using shared function
-    const pageMetaChain = effectiveCursor === null ? [] : traverseAncestorChain(
+    const pageMetaChain = options.onlyEntry ? (startNode ? [startNode] : []) : effectiveCursor === null ? [] : traverseAncestorChain(
       startNode,
       (node) => (node.parentId ? byId.get(node.parentId) : undefined),
       tail,

@@ -9,6 +9,7 @@ const SOURCE_FILES = Object.freeze({
   settingsPanel: "components/SettingsPanel.tsx",
   chatMinimap: "components/ChatMinimap.tsx",
   brand: "components/PiWebBrand.tsx",
+  module04: "enhancements/modules/04-sidebar-and-session-management.js",
   module05: "enhancements/modules/05-composer-and-input-workflow.js",
   module06: "enhancements/modules/06-chat-view-and-tool-cards.js",
   module07: "enhancements/modules/07-kernel-scheduler-and-observers.js",
@@ -85,6 +86,7 @@ function checkReleaseOwnership(sources) {
   }
 
   const chatInput = sources.chatInput;
+  const module04 = sources.module04;
   const module05 = sources.module05;
   const settings = sources.settingsPanel;
   const minimap = sources.chatMinimap;
@@ -120,6 +122,18 @@ function checkReleaseOwnership(sources) {
   const composerAdapterOk =
     composerSelectors[0] === "textarea.chat-input-textarea" &&
     alternateEditorPatterns.every((pattern) => !pattern.test(module05));
+
+  const nativeSubmissionOwnerOk =
+    !/\bsyncComposerAttachmentSendability\s*\(/.test(module05 + module07) &&
+    chatInput.includes("__PI_ENH_PREPARE_COMPOSER_SUBMISSION__") &&
+    chatInput.includes("pi-enh-composer-submission-state-change") &&
+    module05.includes("__PI_ENH_GET_COMPOSER_SUBMISSION_STATE__") &&
+    !/function (?:queueNativeComposerSubmission|invokeNativeComposerSubmit|installAnnotationSendBridge|handoffAnnotationsToNativeSend|syncAnnotationSendButtons)\(/.test(module04 + module05) &&
+    !/__reactProps|getReactProps\(/.test(module05) &&
+    ["function replaceButtonSendText(", "function restoreButtonSendText("].every((signature) => {
+      const body = functionBody(module05, signature);
+      return body === null || !/\.disabled\s*=/.test(body);
+    });
 
   const sectionIds = nativeSettingsSectionIds(settings);
   const settingsNavOk =
@@ -189,6 +203,14 @@ function checkReleaseOwnership(sources) {
       "module05 优先绑定 React textarea，现有附件、快捷操作等增强可继续保留。",
       "module05 必须先查找 textarea.chat-input-textarea，且不能创建第二个 textarea、contentEditable 编辑器或 textbox。",
       [SOURCE_FILES.module05],
+    ),
+    createCheck(
+      "composer-native-submission-owner",
+      "原生输入框统一拥有发送状态和提交入口",
+      nativeSubmissionOwnerOk,
+      "增强仅准备 payload 和通知状态；ChatInput 执行普通、引导与后续提交。",
+      "禁止恢复旧捕获提交、React 私有属性调用或增强直接修改原生发送按钮 disabled；使用原生提交与状态桥。",
+      [SOURCE_FILES.chatInput, SOURCE_FILES.module04, SOURCE_FILES.module05],
     ),
     createCheck(
       "settings-single-navigation",

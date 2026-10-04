@@ -6,7 +6,7 @@ import * as fs from "fs";
 export class HistoryQueueFullError extends Error {
   statusCode = 503;
   retryAfter = 1;
-  constructor(message = "Session history worker pool queue is full") {
+  constructor(message = "会话历史读取繁忙，请稍后重试。") {
     super(message);
     this.name = "HistoryQueueFullError";
   }
@@ -14,7 +14,7 @@ export class HistoryQueueFullError extends Error {
 
 export class HistoryTimeoutError extends Error {
   statusCode = 504;
-  constructor(message = "Session history worker query timed out after 30s") {
+  constructor(message = "会话历史读取超过 30 秒，已终止。") {
     super(message);
     this.name = "HistoryTimeoutError";
   }
@@ -22,7 +22,7 @@ export class HistoryTimeoutError extends Error {
 
 export class HistoryAbortedError extends Error {
   statusCode = 499;
-  constructor(message = "Session history query aborted by client") {
+  constructor(message = "会话历史读取已取消。") {
     super(message);
     this.name = "HistoryAbortedError";
   }
@@ -49,6 +49,8 @@ export interface QueryContextWorkerOptions {
   tail?: number;
   before?: string | null;
   deferThinking?: boolean;
+  /** Internal exact-entry lookup; never exposed by the context URL. */
+  onlyEntry?: boolean;
   deferToolResultImages?: boolean;
   sessionId?: string;
   requireCursor?: boolean;
@@ -57,15 +59,25 @@ export interface QueryContextWorkerOptions {
   signal?: AbortSignal;
 }
 
+export interface QuerySessionDetailWorkerOptions {
+  sessionId: string;
+  sourceId: string;
+  summaryTree: boolean;
+  deferThinking: boolean;
+  deferToolResults?: boolean;
+  deferToolResultImages: boolean;
+  tail: number;
+  signal?: AbortSignal;
+}
+
 export interface HistoryContextReadResult {
   jsonString: string;
   fingerprint: string | null;
 }
 
-interface PendingTask {
+interface PendingTaskBase {
   id: number;
   filePath: string;
-  options: QueryContextWorkerOptions;
   preferredSlot: number;
   deadline: number;
   resolve: (result: HistoryContextReadResult) => void;
@@ -74,6 +86,11 @@ interface PendingTask {
   queueTimer?: NodeJS.Timeout;
   signalListener?: () => void;
 }
+
+type PendingTask = PendingTaskBase & (
+  | { type: "queryContext"; options: QueryContextWorkerOptions }
+  | { type: "querySessionDetail"; options: QuerySessionDetailWorkerOptions }
+);
 
 interface WorkerSlot {
   worker: Worker;
@@ -93,6 +110,7 @@ export interface SessionHistoryPoolOptions {
 const DEFAULT_MAX_QUEUE_SIZE = 16;
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 const DEFAULT_IDLE_TIMEOUT_MS = 60_000;
+const MAX_DETAIL_MANAGER_CACHE_BYTES = 64 * 1024 * 1024;
 
 export class SessionHistoryPool {
   private maxWorkers: number;
@@ -176,7 +194,11 @@ export class SessionHistoryPool {
       throw new Error(`Worker script not found at ${this.workerScriptPath}. Run prebuild/predev first.`);
     }
 
-    const worker = new Worker(this.workerScriptPath);
+    const worker = new Worker(this.workerScriptPath, {
+      workerData: {
+        detailManagerCacheBudgetBytes: Math.floor(MAX_DETAIL_MANAGER_CACHE_BYTES / this.maxWorkers),
+      },
+    });
     worker.unref();
 
     const slot: WorkerSlot = {
@@ -350,7 +372,7 @@ export class SessionHistoryPool {
     task.timer.unref();
 
     if (task.options.signal) {
-      task.signalListener = () => {
+      const onAbort = () => {
         if (slot.activeTask === task) {
           this.cleanupTaskListeners(task);
           task.reject(new HistoryAbortedError());
@@ -366,27 +388,48 @@ export class SessionHistoryPool {
           this.scheduleNext();
         }
       };
-      task.options.signal.addEventListener("abort", task.signalListener, { once: true });
+      task.signalListener = onAbort;
+      task.options.signal.addEventListener("abort", onAbort, { once: true });
+      // Close the race between the initial enqueue check and listener setup.
+      if (task.options.signal.aborted) onAbort();
+      if (slot.activeTask !== task) return;
     }
 
     this.updateWorkerRef();
 
     try {
+      let wireOptions: Record<string, unknown>;
+      if (task.type === "queryContext") {
+        const options = task.options;
+        wireOptions = {
+          leafId: options.leafId,
+          onlyEntry: options.onlyEntry,
+          tail: options.tail,
+          before: options.before,
+          deferThinking: options.deferThinking,
+          deferToolResultImages: options.deferToolResultImages,
+          sessionId: options.sessionId,
+          requireCursor: options.requireCursor,
+          includeFingerprint: options.includeFingerprint,
+          fingerprintOnly: options.fingerprintOnly,
+        };
+      } else {
+        const options = task.options;
+        wireOptions = {
+          sessionId: options.sessionId,
+          sourceId: options.sourceId,
+          summaryTree: options.summaryTree,
+          deferToolResults: options.deferToolResults,
+          deferThinking: options.deferThinking,
+          deferToolResultImages: options.deferToolResultImages,
+          tail: options.tail,
+        };
+      }
       slot.worker.postMessage({
         id: task.id,
-        type: "queryContext",
+        type: task.type,
         filePath: task.filePath,
-        options: {
-          leafId: task.options.leafId,
-          tail: task.options.tail,
-          before: task.options.before,
-          deferThinking: task.options.deferThinking,
-          deferToolResultImages: task.options.deferToolResultImages,
-          sessionId: task.options.sessionId,
-          requireCursor: task.options.requireCursor,
-          includeFingerprint: task.options.includeFingerprint,
-          fingerprintOnly: task.options.fingerprintOnly,
-        },
+        options: wireOptions,
       });
     } catch (postErr: unknown) {
       slot.isTerminating = true;
@@ -412,6 +455,25 @@ export class SessionHistoryPool {
     filePath: string,
     options: QueryContextWorkerOptions = {},
   ): Promise<HistoryContextReadResult> {
+    return this.enqueueTask("queryContext", filePath, options);
+  }
+
+  public querySessionDetail(filePath: string, options: QuerySessionDetailWorkerOptions): Promise<string> {
+    return this.querySessionDetailResult(filePath, options).then(result => result.jsonString);
+  }
+
+  public querySessionDetailResult(
+    filePath: string,
+    options: QuerySessionDetailWorkerOptions,
+  ): Promise<HistoryContextReadResult> {
+    return this.enqueueTask("querySessionDetail", filePath, options);
+  }
+
+  private enqueueTask(
+    type: PendingTask["type"],
+    filePath: string,
+    options: QueryContextWorkerOptions | QuerySessionDetailWorkerOptions,
+  ): Promise<HistoryContextReadResult> {
     if (options.signal?.aborted) {
       return Promise.reject(new HistoryAbortedError());
     }
@@ -420,15 +482,17 @@ export class SessionHistoryPool {
     const requestId = this.nextRequestId++;
 
     return new Promise<HistoryContextReadResult>((resolve, reject) => {
-      const task: PendingTask = {
+      const common = {
         id: requestId,
         filePath,
-        options,
         preferredSlot,
         deadline: performance.now() + this.requestTimeoutMs,
         resolve,
         reject,
       };
+      const task: PendingTask = type === "queryContext"
+        ? { ...common, type, options: options as QueryContextWorkerOptions }
+        : { ...common, type, options: options as QuerySessionDetailWorkerOptions };
 
       const prefSlotInstance = this.slots[preferredSlot];
       if (!prefSlotInstance || (!prefSlotInstance.activeTask && !prefSlotInstance.isTerminating)) {
@@ -441,13 +505,13 @@ export class SessionHistoryPool {
         return;
       }
 
-      // Queue timer for bounded wait time (same request timeout)
+      // Queue wait shares the same bounded deadline as worker execution.
       task.queueTimer = setTimeout(() => {
         const idx = this.queue.indexOf(task);
         if (idx !== -1) {
           this.queue.splice(idx, 1);
           this.cleanupTaskListeners(task);
-          task.reject(new HistoryTimeoutError("Session history query queue wait timed out"));
+          task.reject(new HistoryTimeoutError("会话历史读取排队超时。"));
           this.updateWorkerRef();
         }
       }, this.requestTimeoutMs);

@@ -397,6 +397,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [modelNames, setModelNames] = useState<Record<string, string>>({});
   const [modelList, setModelList] = useState<ModelEntry[]>([]);
   const [modelError, setModelError] = useState<string | null>(null);
+  const [modelsLoading, setModelsLoading] = useState(true);
   const [modelScopeWarnings, setModelScopeWarnings] = useState<string[]>([]);
   const [modelThinkingLevels, setModelThinkingLevels] = useState<Record<string, string[]>>({});
   const [modelThinkingLevelMaps, setModelThinkingLevelMaps] = useState<Record<string, Record<string, string | null>>>({});
@@ -2083,7 +2084,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     const modelsUrl = modelCwd ? `/api/models?cwd=${encodeURIComponent(modelCwd)}` : "/api/models";
     let d: ModelsResponse;
     try {
-      const res = await fetch(modelsUrl, signal ? { signal } : undefined);
+      const timeoutSignal = AbortSignal.timeout(12_000);
+      const requestSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
+      const res = await fetch(modelsUrl, { signal: requestSignal });
       if (!res.ok) {
         let detail = "";
         try {
@@ -2095,13 +2098,18 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           if (e instanceof DOMException && e.name === "AbortError") throw e;
           // Non-JSON error responses fall back to the HTTP status.
         }
-        throw new Error(detail || `Failed to load models (HTTP ${res.status})`);
+        throw new Error(detail || `暂时无法获取模型（HTTP ${res.status}），请稍后重试。`);
       }
       d = await res.json() as ModelsResponse;
       signal?.throwIfAborted();
+      // Older servers returned an empty failure catalog with HTTP 200.
+      // Do not erase usable models or treat that response as recovery.
+      if (d.modelError && !(d.modelList?.length || Object.keys(d.models ?? {}).length)) {
+        throw new Error(d.modelError);
+      }
     } catch (e) {
-      if (!signal?.aborted && !(e instanceof DOMException && e.name === "AbortError")) {
-        setModelError(e instanceof Error ? e.message : String(e));
+      if (!signal && !(e instanceof DOMException && e.name === "AbortError")) {
+        setModelError("暂时无法获取模型，请稍后重试。");
       }
       throw e;
     }
@@ -2714,18 +2722,24 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
   }, [messages.length, agentRunning, scrollToBottom, scrollUserMsgToTop, opts.deferInitialScroll]);
 
-  // Load the model list with bounded retries; loadModels exposes each failure.
+  // Keep transient failures out of the composer while bounded recovery runs.
   useEffect(() => {
     const controller = new AbortController();
+    setModelsLoading(true);
     (async () => {
       for (let attempt = 0; ; attempt++) {
         try {
           await loadModels(controller.signal);
+          setModelsLoading(false);
           return;
         } catch (e) {
           if (controller.signal.aborted) return;
           if (e instanceof DOMException && e.name === "AbortError") return;
-          if (attempt >= MODELS_RETRY_DELAYS_MS.length) return;
+          if (attempt >= MODELS_RETRY_DELAYS_MS.length) {
+            setModelError("暂时无法获取模型，请稍后重试。");
+            setModelsLoading(false);
+            return;
+          }
           await delay(MODELS_RETRY_DELAYS_MS[attempt]);
           if (controller.signal.aborted) return;
         }
@@ -2807,7 +2821,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   return {
     // State
     data, loading, error, activeLeafId, messages, activeToolResults, entryIds, historyCursor, hasEarlierMessages, streamState,
-    agentRunning, modelNames, modelList, modelError, modelScopeWarnings, modelThinkingLevels, modelThinkingLevelMaps, newSessionModel, toolPreset, thinkingLevel,
+    agentRunning, modelNames, modelList, modelError, modelsLoading, modelScopeWarnings, modelThinkingLevels, modelThinkingLevelMaps, newSessionModel, toolPreset, thinkingLevel,
     retryInfo, contextUsage, systemPrompt, forkingEntryId,
     isCompacting, compactError, compactResult, currentModel, displayModel, modelSwitching, sessionStats, autoCompactionEnabled,
     slashCommands, slashCommandsLoading, queuedMessages,

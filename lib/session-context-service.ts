@@ -3,6 +3,7 @@ import { NextResponse } from "next/server";
 import { resolveSessionPath, buildSessionContext } from "./session-reader";
 import { getRpcSession } from "./rpc-manager";
 import { getSessionHistoryPool, SessionHistoryPool } from "./session-history-pool";
+import { isSessionReadStable, selectSessionReadRuntime } from "./session-read-source";
 import {
   HISTORY_CACHE_PROTOCOL_HEADER,
   HISTORY_FINGERPRINT_HEADER,
@@ -52,8 +53,9 @@ export async function handleSessionContextRequest(
 
   try {
     if (req.signal.aborted) return new Response(null, { status: 499 });
-    const rpc = (deps.getRpc ?? getRpcSession)(id);
-    const liveRpc = rpc?.isAlive() ? rpc : undefined;
+    const getRpc = deps.getRpc ?? getRpcSession;
+    const initialRpc = getRpc(id);
+    const liveRpc = selectSessionReadRuntime(initialRpc);
 
     // A live Agent already owns parsed history. Re-reading its growing JSONL
     // adds cold scans, snapshot races and latency without reducing its memory.
@@ -78,6 +80,12 @@ export async function handleSessionContextRequest(
         before: before ?? null,
         sessionId: id,
       });
+      const currentRpc = getRpc(id);
+      if (currentRpc !== liveRpc || !liveRpc.isAlive() || !liveRpc.isRunning()) {
+        const error = new Error("读取会话历史时运行中的写入状态发生变化，请重试。") as Error & { statusCode?: number };
+        error.statusCode = 409;
+        throw error;
+      }
       jsonString = JSON.stringify({ context, tail, before: before ?? null });
     } else {
       // Closed sessions use byte-offset metadata instead of full parsed managers.
@@ -109,6 +117,11 @@ export async function handleSessionContextRequest(
       } else {
         // Dependency-injected legacy pools retain the old string-only contract.
         jsonString = await pool.queryContext(filePath, queryOptions);
+      }
+      if (!isSessionReadStable(initialRpc, getRpc(id))) {
+        const error = new Error("读取会话历史时运行中的写入状态发生变化，请重试。") as Error & { statusCode?: number };
+        error.statusCode = 409;
+        throw error;
       }
     }
 

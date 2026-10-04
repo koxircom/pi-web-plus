@@ -11,7 +11,8 @@ const jiti = createJiti(import.meta.url, {
 });
 const React = await jiti.import("react");
 const { renderToStaticMarkup } = await jiti.import("react-dom/server");
-const { ChatInput, ModelErrorBanner, ModelScopeWarningBanner, canClearBuiltinCommandInput, canRestoreUserMessage, canRunBuiltinSlashCommandWhileStreaming, compressImageFile, cycleListIndex, draftImagesToAttachedImages, filterModelOptions, getTooManyImagesNotice, getUpwardMenuMaxHeight, getUserMessageText, getUserMessageDraftImages, isExactSlashCommand, modelSupportsImageInput, replaceLinksWithMarkdown, shouldCompressImageFile } = await jiti.import("./ChatInput.tsx");
+const { ChatInput, ModelErrorBanner, ModelScopeWarningBanner, canClearBuiltinCommandInput, canRestoreUserMessage, canRunBuiltinSlashCommandWhileStreaming, compressImageFile, cycleListIndex, draftImagesToAttachedImages, filterModelOptions, getTooManyImagesNotice, getUpwardMenuMaxHeight, getUserMessageText, getUserMessageDraftImages, isExactSlashCommand, modelSupportsImageInput, offersBuiltinSlashCommandWhileStreaming, replaceLinksWithMarkdown, shouldCompressImageFile, submitsSlashCommandOnEnter } = await jiti.import("./ChatInput.tsx");
+const { isBareMcpCommand } = await jiti.import("@/lib/mcp-command.ts");
 const { ModelSelector } = await jiti.import("./ModelSelector.tsx");
 const { clearDraft, getDraft, mergeRestoredSubmissionDraft, mergeRestoredSubmissionText, rekeyDraft, setDraft } = await jiti.import("@/lib/draft-store.ts");
 const { I18nProvider } = await jiti.import("@/hooks/useI18n");
@@ -88,7 +89,7 @@ test("follow-up shortcuts preserve newline, IME, mobile and completion behavior"
       onSteer() {}, onFollowUp() {},
       sendQueued(mode) { action = mode; }, handleSend() { action = "send"; },
       applySlashCommand() { action = "slash"; },
-      submitsSlashCommandOnEnter, value: "", setSlashMenuOpen() {},
+      submitsSlashCommandOnEnter, isBareMcpCommand, value: "", setSlashMenuOpen() {},
       applyAtCompletion() { action = "file"; },
       applyHistoryInput() { action = "history"; },
       ...state,
@@ -543,7 +544,7 @@ test("Enter on pi's built-in /mcp submits it at once; other extension commands s
   assert.equal(submitsSlashCommandOnEnter("/co", copy, false), false);
 
   const sourceText = readFileSync(new URL("./ChatInput.tsx", import.meta.url), "utf8");
-  assert.match(sourceText, /if \(sendShortcut && submitsSlashCommandOnEnter\(value, selectedCommand, isStreaming\)\) \{/);
+  assert.match(sourceText, /if \(submitsSlashCommandOnEnter\(value, selectedCommand, isStreaming\)\) \{/);
 });
 
 function chatInputCallback(name, context) {
@@ -557,7 +558,13 @@ function chatInputCallback(name, context) {
   }
   return new Script(ts.transpileModule(findCallback(source).getText(source), {
     compilerOptions: { target: ts.ScriptTarget.ES2020 },
-  }).outputText).runInNewContext(context);
+  }).outputText).runInNewContext({
+    attachedImagesRef: {current: context.attachedImages ?? []},
+    queuedSubmissionPendingRef: {current: false},
+    setQueuedSubmissionPending(){}, MAX_ATTACHED_IMAGES: 10,
+    offersBuiltinSlashCommandWhileStreaming,
+    ...context,
+  });
 }
 
 test("while a run streams, a bare /mcp opens Settings or is queued as before", async () => {
@@ -1197,4 +1204,20 @@ test("queued submission immediately shows pending, clears once and blocks duplic
  const run=new Script(ts.transpileModule(callback.getText(source),{compilerOptions:{target:ts.ScriptTarget.ES2020}}).outputText).runInNewContext({value:"引导内容",attachedImages:[],attachedImagesRef:{current:[]},MAX_ATTACHED_IMAGES:10,queuedSubmissionPendingRef:ref,setQueuedSubmissionPending:v=>pending.push(v),onAudioUnlock:undefined,onBuiltinCommand:undefined,onPromptWithStreamingBehavior:undefined,clearInput:()=>cleared++,onSteer:()=>{sends++;return held;},onFollowUp:undefined});
  const first=run("steer");assert.deepEqual(pending,[true]);assert.equal(cleared,1);assert.equal(sends,1);
  await run("steer");assert.equal(sends,1);release();await first;assert.deepEqual(pending,[true,false]);assert.equal(ref.current,false);
+});
+
+
+test("native extension payload sends once and clears through the native callback", async () => {
+  const calls=[];let commits=0,clears=0;
+  const window={__PI_ENH_PREPARE_COMPOSER_SUBMISSION__(kind,body){assert.equal(kind,"send");assert.equal(body,"");return {text:"annotation and attachment payload",commit(){commits++;}};}};
+  const send=chatInputCallback("handleSend",{window,value:"",attachedImages:[],isStreaming:false,runBuiltinCommand:async()=>false,onAudioUnlock(){},clearInput(){clears++;},onSend(text){calls.push(text);}});
+  await send();assert.deepEqual(calls,["annotation and attachment payload"]);assert.equal(clears,1);assert.equal(commits,1);
+});
+test("native queued extension payload commits only after acceptance, preserving rejected payload", async () => {
+  for(const rejected of [false,true]){
+    let commits=0,seen;const window={__PI_ENH_PREPARE_COMPOSER_SUBMISSION__(kind){assert.equal(kind,"followup");return {text:"queued annotation",commit(){commits++;}};}};
+    const send=chatInputCallback("sendQueued",{window,value:"",attachedImages:[],onBuiltinCommand:null,onAudioUnlock(){},clearInput(){},onFollowUp:async text=>{seen=text;if(rejected)throw new Error("rejected");}});
+    if(rejected)await assert.rejects(send("followup"),/rejected/);else await send("followup");
+    assert.equal(seen,"queued annotation");assert.equal(commits,rejected?0:1);
+  }
 });

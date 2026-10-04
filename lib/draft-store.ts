@@ -45,6 +45,16 @@ function isNewSessionDraftOwnerKey(key: string): boolean {
 
 function getDraftCwdFromOwnerKey(key: string): string {
   if (key.startsWith("new:")) {
+    // AppShell's refresh ID includes the cwd; the owner also appends it.
+    // Decode that existing format without treating the ID's colon as a cwd.
+    if (key.startsWith("new:initial:")) {
+      const tail = key.slice("new:initial:".length);
+      const middle = (tail.length - 1) / 2;
+      if (Number.isInteger(middle) && tail[middle] === ":"
+        && tail.slice(0, middle) === tail.slice(middle + 1)) {
+        return tail.slice(0, middle);
+      }
+    }
     const parts = key.split(":");
     if (parts.length >= 3) return parts.slice(2).join(":");
     if (parts.length === 2) return parts[1];
@@ -146,23 +156,30 @@ function readPersistedDraft(key: string): ChatDraft | null {
 
   try {
     const raw = storage.getItem(draftStorageKey(key));
+    let exact: PersistedChatDraft | null = null;
     if (raw) {
       const persisted: unknown = JSON.parse(raw);
       if (validPersistedDraft(persisted) && persisted.ownerKey === key) {
-        return { value: persisted.value, images: persisted.images };
+        exact = persisted;
       }
     }
 
-    if (!isNewSessionDraftOwnerKey(key)) return null;
+    if (!isNewSessionDraftOwnerKey(key)) return exact ? cloneDraft(exact) : null;
     const scopedRaw = storage.getItem(scopedDraftStorageKey(getDraftCwdFromOwnerKey(key)));
-    if (!scopedRaw) return null;
+    if (!scopedRaw) return exact ? cloneDraft(exact) : null;
     const scoped: unknown = JSON.parse(scopedRaw);
-    if (!validPersistedDraft(scoped)) return null;
+    if (!validPersistedDraft(scoped)
+      || !isNewSessionDraftOwnerKey(scoped.ownerKey)
+      || getDraftCwdFromOwnerKey(scoped.ownerKey) !== getDraftCwdFromOwnerKey(key)) {
+      return exact ? cloneDraft(exact) : null;
+    }
     const isNonEmpty = Boolean(scoped.value || scoped.images.length);
     const isRecent = !scoped.updatedAt || Date.now() - scoped.updatedAt < NEW_DRAFT_MAX_AGE_MS;
-    return isNonEmpty && isRecent
-      ? { value: scoped.value, images: scoped.images }
-      : null;
+    // A temporary new-session owner may be newer than the refresh owner's
+    // previous value. Never resurrect that older exact draft ahead of it.
+    const current = isNonEmpty && isRecent && (!exact || scoped.updatedAt > exact.updatedAt)
+      ? scoped : exact;
+    return current ? cloneDraft(current) : null;
   } catch {
     return null;
   }

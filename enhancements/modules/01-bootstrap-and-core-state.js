@@ -109,7 +109,6 @@
     composerQueuePanel,
     activeFormattedComposer,
     isComposingInput,
-    composerSubmissionInFlight,
     composerModesStateMap,
     pendingNewComposerMode,
     isSessionBatchMode,
@@ -355,7 +354,6 @@
   const activeCleanups = [];
   const managedTimeoutCleanups = new Map();
   let usageDashboardModal = null;
-  let nativeComposerSubmissionDispatching = false;
 
   function clearManagedTimeout(id) {
     if (id == null) return;

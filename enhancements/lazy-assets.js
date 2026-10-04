@@ -3,11 +3,22 @@
   "use strict";
   const assets = __PI_OPTIONAL_ASSET_MANIFEST__;
   const pending = new Map();
-  function read(name) {
-    if (name === "xlsx-engine" && root.XLSX && typeof root.XLSX.read === "function") return root.XLSX;
-    if (name === "usage-panel" && root.PiUsagePanel && typeof root.PiUsagePanel.render === "function") return root.PiUsagePanel;
-    return null;
+  // Hot reloads may change an optional asset while keeping the same window.
+  // Reuse only an export stamped with this exact content-addressed path.
+  const versions = root.__PI_OPTIONAL_LOADED_ASSETS__ instanceof Map
+    ? root.__PI_OPTIONAL_LOADED_ASSETS__ : (root.__PI_OPTIONAL_LOADED_ASSETS__ = new Map());
+  function read(name, fromLoad = false) {
+    let value = null;
+    if (name === "xlsx-engine" && typeof root.XLSX?.read === "function") value = root.XLSX;
+    if (name === "usage-panel" && typeof root.PiUsagePanel?.render === "function") value = root.PiUsagePanel;
+    if (name === "image-editor" && typeof root.PiImageEditor?.create === "function") value = root.PiImageEditor;
+    if (!value) return null;
+    const path = assets[name]?.path;
+    if (fromLoad) versions.set(name, { path, value });
+    const loaded = versions.get(name);
+    return loaded?.path === path && loaded.value === value ? value : null;
   }
+
   root.__PI_ENH_LOAD_OPTIONAL__ = function (name) {
     const asset = assets[name];
     if (!asset) return Promise.reject(new Error("未知的可选组件"));
@@ -24,7 +35,7 @@
       const finish = error => {
         clearTimeout(timer);
         script.onload = script.onerror = null;
-        const value = read(name);
+        const value = error ? null : read(name, true);
         if (error || !value) {
           script.remove();
           reject(error || new Error("可选组件初始化失败"));

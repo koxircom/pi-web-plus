@@ -17,7 +17,10 @@ function fixture() {
   ];
 
   return {
+    module04: `function prepareAnnotationSubmission() {}`,
     chatInput: `
+      window.__PI_ENH_PREPARE_COMPOSER_SUBMISSION__;
+      window.addEventListener("pi-enh-composer-submission-state-change", refresh);
       <input type="file" />
       <div data-pi-native-composer-layout="true">
         <textarea ref={textareaRef} className="chat-input-textarea" value={value} />
@@ -27,7 +30,7 @@ function fixture() {
       const enabledExtensions = LEGACY_SETTINGS_EXTENSIONS.filter((ext) => isExtensionEnabled(ext));
       const nativeSections = [
         { id: "general" }, { id: "models" }, { id: "skills" },
-        { id: "agents" }, { id: "plugins" },
+        { id: "agents" }, { id: "plugins" }, { id: "mcp" },
       ];
       const sections = useMemo(() => {
         return [ ...nativeSections, ...enabledExtensions.map((ext) => ({ id: ext.id })) ];
@@ -47,6 +50,7 @@ function fixture() {
       return <svg />;
     `,
     module05: `
+      window.__PI_ENH_GET_COMPOSER_SUBMISSION_STATE__;
       function findComposerTextarea() {
         return document.querySelector("textarea.chat-input-textarea") ||
           document.querySelector("textarea");
@@ -150,4 +154,21 @@ test("发现 bundle 构建从覆盖写改为追加写", () => {
     "fs.appendFileSync(PRIMARY_BUNDLE_PATH, combinedBuffer);",
   );
   failingCheck(checkReleaseOwnership(sources), "bundle-deterministic-overwrite");
+});
+
+
+test("拒绝旧捕获提交桥重新进入主包", () => {
+  const sources=fixture(); sources.module04 += "\nfunction installAnnotationSendBridge() {}";
+  failingCheck(checkReleaseOwnership(sources),"composer-native-submission-owner");
+});
+test("拒绝增强改写原生按钮 disabled 或调用私有 React props", () => {
+  for(const extra of ["\nfunction replaceButtonSendText(button) {\n  button.disabled = false;\n}","\ngetReactProps(sendButton).onClick();"]){
+    const sources=fixture();sources.module05+=extra;
+    failingCheck(checkReleaseOwnership(sources),"composer-native-submission-owner");
+  }
+});
+
+test("拒绝调度器继续调用已退役的附件按钮覆盖函数", () => {
+  const sources=fixture();sources.module07+="\nsyncComposerAttachmentSendability(card, textarea);";
+  failingCheck(checkReleaseOwnership(sources),"composer-native-submission-owner");
 });

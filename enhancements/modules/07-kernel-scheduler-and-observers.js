@@ -169,9 +169,6 @@
                 syncComposerModes();
                 syncComposerQueuePanel();
                 syncComposerCleanPlaceholder();
-                const textarea = findComposerTextarea();
-                const card = textarea?.closest('fieldset > div[style*="max-width"]');
-                if (card && textarea) syncComposerAttachmentSendability(card, textarea);
               });
             }
           }

@@ -9,26 +9,26 @@ import {
   resolveSessionIdByPath,
   invalidateSessionListCache,
   invalidateSessionManagerCache,
-  buildSessionContext,
   getSessionFileFingerprint,
 } from "@/lib/session-reader";
 import { getRpcSession } from "@/lib/rpc-manager";
-import { projectTreeForResponse, toSummaryTree } from "@/lib/project-tree";
-import { computeSessionTotalActiveMs } from "@/lib/session-timing";
-import { computeSessionStats } from "@/lib/session-stats";
 import { startServerPerf } from "@/lib/perf";
-import { computeSessionRevision } from "@/lib/session-revision";
-import type { SessionEntry } from "@/lib/types";
-import { readSubagentRun, readSubagentSessionResources } from "@/lib/subagents";
-import { readSessionToolSelection } from "@/lib/session-tool-selection";
 import { jsonResponse } from "@/lib/json-response";
 import { negotiateSessionSync, type SessionSyncScope } from "@/lib/session-sync-server";
+import { getSessionHistoryPool, HistoryAbortedError } from "@/lib/session-history-pool";
+import { buildSessionDetailSnapshot, type SessionDetailSnapshot } from "@/lib/session-detail-snapshot";
 import {
   GUARD_VERSION,
   ensureSessionWriteGuardInstalled,
 } from "@/lib/usage-delete-guard";
 
 ensureSessionWriteGuardInstalled();
+
+function sessionSnapshotChanged(message: string): Error & { statusCode: number } {
+  const error = new Error(message) as Error & { statusCode: number };
+  error.statusCode = 409;
+  return error;
+}
 
 export async function GET(
   req: Request,
@@ -63,60 +63,72 @@ export async function GET(
 
     const filePath = liveRpc?.sessionFile || resolvedPath || "";
     const summaryTree = searchParams.get("tree") === "summary";
+    const deferToolResults = searchParams.get("deferTools") === "1";
     const deferThinking = searchParams.has("deferThinking");
     const deferToolResultImages = searchParams.has("deferMedia");
     const rawTail = Number(searchParams.get("tail"));
     const tail = Number.isFinite(rawTail) && rawTail > 0 ? Math.min(rawTail, 1000) : 50;
 
     const buildSnapshot = async () => {
-      const sm = liveRpc?.inner.sessionManager ?? openSessionManager(resolvedPath!);
-      perf?.span("open");
-      const actualFilePath = liveRpc?.sessionFile || sm.getSessionFile() || resolvedPath || "";
-      const entries = sm.getEntries();
-      const leafId = sm.getLeafId();
-      const tree = summaryTree
-        ? toSummaryTree(projectTreeForResponse(sm.getTree()))
-        : projectTreeForResponse(sm.getTree());
+      if (req.signal.aborted) throw new HistoryAbortedError();
+      const actualFilePath = liveRpc?.sessionFile
+        || liveRpc?.inner.sessionManager.getSessionFile()
+        || resolvedPath
+        || "";
+      let diskFingerprint: string | undefined;
+      let snapshot: SessionDetailSnapshot;
+      if (liveRpc) {
+        perf?.span("open");
+        snapshot = buildSessionDetailSnapshot(liveRpc.inner.sessionManager, {
+          filePath: actualFilePath,
+          sessionId: id,
+          sourceId: `runtime:${String(liveRpc.inner.sessionId)}`,
+          summaryTree,
+          deferThinking,
+          deferToolResults,
+          deferToolResultImages,
+          tail,
+        });
+        // The live writer remains the authoritative source; reject a snapshot
+        // if that wrapper was replaced or stopped while its data was projected.
+        const currentRpc = getRpcSession(id);
+        if (currentRpc !== liveRpc || !liveRpc.isAlive() || !liveRpc.isRunning()) {
+          throw sessionSnapshotChanged("构建会话详情期间，运行中的写入状态发生变化，请重试。");
+        }
+      } else {
+        const pool = getSessionHistoryPool();
+        const result = await pool.querySessionDetailResult(actualFilePath, {
+          sessionId: id,
+          sourceId: "disk",
+          summaryTree,
+          deferThinking,
+          deferToolResults,
+          deferToolResultImages,
+          tail,
+          signal: req.signal,
+        });
+        if (typeof result.fingerprint !== "string") {
+          throw sessionSnapshotChanged("读取会话详情时无法验证文件版本，请重试。");
+        }
+        diskFingerprint = result.fingerprint;
+        if (req.signal.aborted) throw new HistoryAbortedError();
+        if (!isSessionReadStable(liveWrapper, getRpcSession(id))) {
+          throw sessionSnapshotChanged("读取会话详情期间，运行中的写入状态发生变化，请重试。");
+        }
+        snapshot = JSON.parse(result.jsonString) as SessionDetailSnapshot;
+        perf?.span("open");
+      }
+      if (req.signal.aborted) throw new HistoryAbortedError();
       perf?.span("tree");
-      const context = buildSessionContext(entries as never, leafId, {
-        deferThinking,
-        deferToolResultImages,
-        tail,
-        sessionId: id, // local: lazy URLs for historical tool-result images
-      });
       perf?.span("context");
-      const totalActiveMs = computeSessionTotalActiveMs(entries);
-      // Cumulative usage over ALL entries, including history compacted away —
-      // the same aggregation the SDK's getSessionStats() uses. Lets the client
-      // keep monotonic token/cost counters across compaction and page reloads.
-      const stats = computeSessionStats(entries as unknown as SessionEntry[]);
       perf?.span("stats");
-      // Opaque freshness token for the session view cache. Derived from the
-      // disk fingerprint and the actual read source; null tells the client the
-      // snapshot is unstable and must not be cached as fresh.
-      const latestEntry = entries[entries.length - 1] as { id?: string } | undefined;
-      const snapshotRevision = computeSessionRevision({
-        filePath: actualFilePath,
-        sourceId: liveRpc ? `runtime:${String(liveRpc.inner.sessionId)}` : "disk",
-        entryCount: entries.length,
-        latestEntryId: typeof latestEntry?.id === "string" ? latestEntry.id : null,
-        leafId: leafId ?? null,
-      });
-      const sessionName = sm.getSessionName();
-      const firstUserEntry = entries.find((entry) => entry.type === "message" && entry.message.role === "user");
-      const firstUserMessage = firstUserEntry?.type === "message" ? firstUserEntry.message : undefined;
-
-      const header = sm.getHeader();
+      const { leafId, tree, context, totalActiveMs, stats, snapshotRevision, sessionName, header, subagent, toolNames } = snapshot;
       let modified = header?.timestamp ?? new Date().toISOString();
       try { modified = statSync(actualFilePath).mtime.toISOString(); } catch { /* use header timestamp */ }
       const parentSessionId = header?.parentSession
         ? await resolveSessionIdByPath(header.parentSession)
         : undefined;
-      const subagent = header
-        ? readSubagentRun(entries as never, header.id, actualFilePath)
-        : null;
-      const toolNames = readSubagentSessionResources(entries as never)?.tools
-        ?? readSessionToolSelection(entries as never);
+      if (req.signal.aborted) throw new HistoryAbortedError();
       const info = header ? (await attachSessionProjectInfo([{
         path: actualFilePath,
         id: header.id,
@@ -125,12 +137,7 @@ export async function GET(
         created: header.timestamp,
         modified,
         messageCount: stats.totalMessages,
-        firstMessage: firstUserMessage
-          ? (() => {
-              const c = (firstUserMessage as { content: unknown }).content;
-              return typeof c === "string" ? c : (Array.isArray(c) ? (c.find((b: { type: string }) => b.type === "text") as { text: string } | undefined)?.text ?? "" : "") || "(no messages)";
-            })()
-          : "(no messages)",
+        firstMessage: snapshot.firstMessage,
         parentSessionId,
         ...(subagent
           ? { relation: { kind: "subagent" as const, parentSessionId: subagent.parentSessionId, profile: subagent.profile, description: subagent.description, status: liveRpc?.isRunning() ? "running" as const : subagent.status } }
@@ -139,6 +146,23 @@ export async function GET(
             : {}),
         transient: !actualFilePath || !existsSync(actualFilePath),
       }]))[0] : null;
+      if (req.signal.aborted) throw new HistoryAbortedError();
+      // attachSessionProjectInfo is asynchronous. Revalidate after it completes,
+      // because a writer/runtime can replace the selected source while project
+      // metadata is being resolved even when the initial snapshot was stable.
+      const finalRpc = getRpcSession(id);
+      if (liveRpc) {
+        if (finalRpc !== liveRpc || !liveRpc.isAlive() || !liveRpc.isRunning()) {
+          throw sessionSnapshotChanged("读取会话详情期间，运行中的写入状态发生变化，请重试。");
+        }
+      } else {
+        if (!isSessionReadStable(liveWrapper, finalRpc)) {
+          throw sessionSnapshotChanged("读取会话详情期间，运行中的写入状态发生变化，请重试。");
+        }
+        if (diskFingerprint && getSessionFileFingerprint(actualFilePath) !== diskFingerprint) {
+          throw sessionSnapshotChanged("读取会话详情期间，会话文件发生变化，请重试。");
+        }
+      }
 
       return {
         sessionId: id,
@@ -166,6 +190,7 @@ export async function GET(
         tail,
         deferThinking,
         deferMedia: deferToolResultImages,
+        deferToolResults,
       };
       const initialRpc = liveWrapper;
       const syncResponse = await negotiateSessionSync({
@@ -182,6 +207,7 @@ export async function GET(
           return isSessionReadStable(initialRpc, currentRpc);
         },
       });
+      if (req.signal.aborted) throw new HistoryAbortedError();
       const res = jsonResponse(req, syncResponse, {
         headers: {
           "Cache-Control": "private, no-store",
@@ -192,9 +218,13 @@ export async function GET(
     }
 
     const responseData = await buildSnapshot();
+    if (req.signal.aborted) throw new HistoryAbortedError();
     return perf?.attach(jsonResponse(req, responseData)) ?? jsonResponse(req, responseData);
   } catch (error) {
-    return NextResponse.json({ error: String(error) }, { status: 500 });
+    const err = error as { name?: string; statusCode?: number; message?: string };
+    const status = req.signal.aborted || err?.name === "HistoryAbortedError" ? 499 : (err?.statusCode ?? 500);
+    const headers = status === 503 ? { "Retry-After": "1" } : undefined;
+    return NextResponse.json({ error: err?.message || String(error) }, { status, headers });
   }
 }
 

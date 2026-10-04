@@ -412,49 +412,9 @@
   }
 
   function findUserMessages() {
-    const res = [];
-    const seen = new Set();
-    function pushNode(node) {
-      if (!node || seen.has(node)) return;
-      seen.add(node);
-      res.push(node);
-    }
-
-    if (document.querySelectorAll) {
-      const userBubbles = document.querySelectorAll('div[style*="var(--user-bg)"], div[style*="var(--bg-user)"]');
-      for (let i = 0; i < userBubbles.length; i++) {
-        const bubble = userBubbles[i];
-        const msgContainer = bubble.closest?.('[data-entry-id]') ||
-                             bubble.closest?.('div[style*="align-items: flex-end"]') ||
-                             bubble.parentElement;
-        if (msgContainer) {
-          if (!msgContainer.hasAttribute("data-message-role")) {
-            msgContainer.setAttribute("data-message-role", "user");
-          }
-          msgContainer.setAttribute("data-pi-enh-role", "user");
-          pushNode(msgContainer);
-        }
-      }
-
-      const explicit = document.querySelectorAll('[data-message-role="user"], [data-pi-enh-role="user"]');
-      for (let i = 0; i < explicit.length; i++) pushNode(explicit[i]);
-    }
-
-    const deduped = res.length > 1
-      ? res.filter((node) => !res.some((other) => other !== node && typeof other.contains === "function" && other.contains(node)))
-      : res;
-
-    if (deduped.length > 1) {
-      deduped.sort((a, b) => {
-        if (a === b || typeof a?.compareDocumentPosition !== "function") return 0;
-        const pos = a.compareDocumentPosition(b);
-        if (pos & 4) return -1;
-        if (pos & 2) return 1;
-        return 0;
-      });
-    }
-
-    return deduped;
+    return document.querySelectorAll
+      ? Array.from(document.querySelectorAll('[data-message-role="user"]'))
+      : [];
   }
 
   function insertDurationBadge(msg, totalSec, queueSec = 0, toolCounts = {}, uTime = 0, aTime = 0, activeSec = null, pausedSec = 0, steerCount = 0, interruptCount = 0) {
@@ -6970,4 +6930,3 @@
       }
     }
   });
-

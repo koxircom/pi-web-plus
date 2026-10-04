@@ -4,8 +4,11 @@ function buildOptionalAssets(enhancementsDir = __dirname, { write = false } = {}
   const output = path.join(enhancementsDir, "..", "public", "pi-web-assets");
   if (write) fs.mkdirSync(output, { recursive: true });
   const manifest = {};
-  for (const [id, source] of [["xlsx-engine", "assets/xlsx-engine.js"], ["usage-panel", "pi-usage-panel.js"]]) {
-    const bytes = fs.readFileSync(path.join(enhancementsDir, source));
+  for (const [id, source] of [["xlsx-engine", "assets/xlsx-engine.js"], ["usage-panel", "pi-usage-panel.js"], ["image-editor", "assets/image-editor.js"]]) {
+    const raw = fs.readFileSync(path.join(enhancementsDir, source));
+    const bytes = id === "image-editor" ? Buffer.from(require("esbuild").transformSync(raw.toString("utf8"), {
+      loader: "js", target: "es2020", minifyWhitespace: true, minifySyntax: true, legalComments: "eof",
+    }).code) : raw;
     new vm.Script(bytes.toString("utf8"), { filename: source });
     const hash = crypto.createHash("sha256").update(bytes).digest();
     const name = `${id}-${hash.toString("hex").slice(0, 16)}.js`;

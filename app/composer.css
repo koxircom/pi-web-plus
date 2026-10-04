@@ -234,7 +234,7 @@ body:has(.settings-dialog-backdrop, .settings-dialog-surface, [role="dialog"][ar
   background: var(--bg-hover);
 }
 
-/* One real flex capsule owns model/reasoning geometry, background and hover. */
+/* One shared control owns stable geometry; show its capsule only during interaction. */
 .chat-composer-card .chat-composer-model-controls {
   grid-column: -3;
   grid-row: 3;
@@ -247,8 +247,8 @@ body:has(.settings-dialog-backdrop, .settings-dialog-surface, [role="dialog"][ar
   height: 24px;
   box-sizing: border-box;
   padding: 0 2px;
-  background: color-mix(in srgb, var(--text-muted) 10%, var(--bg-panel));
-  border: 1px solid color-mix(in srgb, var(--border) 65%, transparent);
+  background: transparent;
+  border: 1px solid transparent;
   border-radius: 999px;
   transition: background-color 0.12s, border-color 0.12s;
 }
@@ -284,7 +284,7 @@ body:has(.settings-dialog-backdrop, .settings-dialog-surface, [role="dialog"][ar
 .chat-composer-card .chat-composer-model-controls button[aria-expanded="true"] {
   color: var(--text) !important;
 }
-.chat-composer-card .chat-composer-model-controls .model-selector > button { max-width: 180px; width: auto !important; color: var(--text) !important; font-weight: 600; }
+.chat-composer-card .chat-composer-model-controls .model-selector > button { max-width: 180px; width: auto !important; color: var(--text) !important; font-weight: 400; }
 [data-theme="dark"] .chat-composer-card .chat-composer-model-controls .model-selector > button { color: #fff !important; }
 .chat-composer-card .chat-composer-model-controls .thinking-selector { display: inline-flex; flex: 0 0 auto; }
 .thinking-selector-menu {

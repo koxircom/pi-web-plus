@@ -127,6 +127,7 @@ export async function GET(req: Request) {
   try {
     return Response.json(await loadModelsWithCache(cwd, () => loadModels(cwd)));
   } catch {
-    return Response.json(withSafeModelLoadFailure(EMPTY_MODELS));
+    const failure = withSafeModelLoadFailure(EMPTY_MODELS);
+    return Response.json({ ...failure, error: failure.modelError }, { status: 503 });
   }
 }

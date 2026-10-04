@@ -170,6 +170,23 @@ function buildPublicBundle(bundleBuffer, writeAssets = false) {
   return Buffer.concat([prefix, bundleBuffer]);
 }
 
+// This is a normal source build transform; the reviewable raw closure remains
+// available for compatibility reloads, while first load uses immutable bytes.
+function buildRuntimeAsset(publicBuffer, write = false) {
+  const transformed = require("esbuild").transformSync(publicBuffer.toString("utf8"), {
+    loader: "js", target: "es2020", minifyWhitespace: true, minifySyntax: true,
+    minifyIdentifiers: false, legalComments: "eof",
+  });
+  const bytes = Buffer.from(transformed.code);
+  validateSyntaxGate(transformed.code, "enhancements-runtime.js");
+  const hash = crypto.createHash("sha256").update(bytes).digest();
+  const assetPath = `/pi-web-assets/enhancements-${hash.toString("hex").slice(0,16)}.js`;
+  const target = path.join(__dirname, "..", "public", assetPath.slice(1));
+  if (write) { fs.mkdirSync(path.dirname(target), {recursive:true}); fs.writeFileSync(target, bytes); }
+  else if (!fs.existsSync(target) || !fs.readFileSync(target).equals(bytes)) throw new Error("首屏增强资源漂移：" + assetPath);
+  return { path: assetPath, sha256: hash.toString("hex"), integrity: `sha256-${hash.toString("base64")}`, bytes: bytes.length };
+}
+
 function syncMirrorBundle(bundleBuffer) {
   fs.mkdirSync(path.dirname(MIRROR_BUNDLE_PATH), { recursive: true });
   fs.writeFileSync(MIRROR_BUNDLE_PATH, buildPublicBundle(bundleBuffer, true));
@@ -257,6 +274,7 @@ function runSplit() {
     });
   }
 
+  syncMirrorBundle(rawBuffer);
   const manifest = {
     schemaVersion: 1,
     edition: `koxir-standalone-${PACKAGE_VERSION}`,
@@ -266,11 +284,12 @@ function runSplit() {
     totalLines: lineChunks.length,
     totalBytes: rawBuffer.length,
     bundleSha256: sha256Hex(rawBuffer),
+    publicSha256: sha256Hex(fs.readFileSync(MIRROR_BUNDLE_PATH)),
+    runtimeAsset: buildRuntimeAsset(fs.readFileSync(MIRROR_BUNDLE_PATH), true),
     modules: manifestModules,
   };
 
   fs.writeFileSync(MANIFEST_PATH, JSON.stringify(manifest, null, 2) + "\n", "utf8");
-  syncMirrorBundle(rawBuffer);
 
   console.log(
     `[build-pi-web-enhancements] Split complete: ${manifestModules.length} modules (${manifest.totalLines} lines, ${manifest.totalBytes} bytes, sha256=${manifest.bundleSha256.slice(0, 12)}...).`
@@ -329,6 +348,8 @@ function runBuild() {
     totalLines: currentLine - 1,
     totalBytes: combinedBuffer.length,
     bundleSha256: sha256Hex(combinedBuffer),
+    publicSha256: sha256Hex(fs.readFileSync(MIRROR_BUNDLE_PATH)),
+    runtimeAsset: buildRuntimeAsset(fs.readFileSync(MIRROR_BUNDLE_PATH), true),
     modules: manifestModules,
   };
   fs.writeFileSync(MANIFEST_PATH, JSON.stringify(manifest, null, 2) + "\n", "utf8");
@@ -391,6 +412,7 @@ function runVerify() {
     );
   }
 
+  if (!fs.existsSync(MIRROR_BUNDLE_PATH)) throw new Error("缺少正式增强资源镜像");
   if (fs.existsSync(MIRROR_BUNDLE_PATH)) {
     const mirrorBuffer = fs.readFileSync(MIRROR_BUNDLE_PATH);
     const expectedPublic = buildPublicBundle(combinedBuffer);
@@ -401,6 +423,10 @@ function runVerify() {
       throw new Error(`Public prefix/raw closure mismatch: ${MIRROR_BUNDLE_PATH}`);
     }
     validateSyntaxGate(mirrorBuffer.toString("utf8"), MIRROR_BUNDLE_PATH);
+    if (manifest.version !== PACKAGE_VERSION || manifest.publicSha256 !== sha256Hex(mirrorBuffer)
+        || JSON.stringify(manifest.runtimeAsset) !== JSON.stringify(buildRuntimeAsset(mirrorBuffer))) {
+      throw new Error("版本/正式资源来源指纹不匹配");
+    }
   }
 
   const combinedSha = sha256Hex(combinedBuffer);

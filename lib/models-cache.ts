@@ -26,7 +26,7 @@ declare global {
 const MODELS_CACHE_TTL_MS = 60_000;
 const MAX_MODELS_CACHE_ENTRIES = 32;
 // Never interpolate the caught error here; SDK errors can contain paths and provider details.
-const SAFE_MODEL_LOAD_FAILURE_MESSAGE = "Model list is temporarily unavailable. Check your configuration and try again.";
+const SAFE_MODEL_LOAD_FAILURE_MESSAGE = "暂时无法获取模型，请稍后重试。";
 
 function getModelsCacheState(): ModelsCacheState {
   if (!globalThis.__piModelsCacheState) {
@@ -69,7 +69,7 @@ export function loadModelsWithCache(cwd: string, loader: () => Promise<ModelsDat
   const loadPromise: Promise<ModelsData> = Promise.resolve()
     .then(loader)
     .then((data) => {
-      if (state.generation === generation && state.inFlight.get(cwd) === loadPromise) {
+      if (!data.modelError && state.generation === generation && state.inFlight.get(cwd) === loadPromise) {
         const now = Date.now();
         for (const [key, entry] of state.entries) {
           if (entry.expiresAt <= now) state.entries.delete(key);

@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react"
 import { createPortal } from "react-dom";
 import { useI18n } from "@/hooks/useI18n";
 import { useIsMobile } from "@/hooks/useIsMobile";
+import { composerModelLabel } from "@/lib/composer-model-label";
 
 export interface ModelSelectorOption {
   provider: string;
@@ -18,6 +19,7 @@ interface ModelSelectorProps {
   onClear?: () => void;
   emptyLabel?: string;
   selectedLabel?: string;
+  loading?: boolean;
   disabled?: boolean;
   busy?: boolean;
   isAutoSelection?: boolean;
@@ -53,6 +55,7 @@ export function ModelSelector({
   onClear,
   emptyLabel,
   selectedLabel,
+  loading = false,
   disabled = false,
   busy = false,
   isAutoSelection = false,
@@ -80,9 +83,10 @@ export function ModelSelector({
     else modelsByProvider.push({ provider: option.provider, options: [option] });
   }
 
-  const currentName = selectedLabel ?? (value
+  const rawName = selectedLabel ?? (value
     ? sortedOptions.find((option) => option.modelId === value.modelId && option.provider === value.provider)?.name ?? value.modelId
-    : emptyLabel ?? (sortedOptions.length > 0 ? t("chat.selectModel") : t("chat.noAvailableModels")));
+    : emptyLabel ?? (loading ? "加载模型…" : sortedOptions.length > 0 ? t("chat.selectModel") : t("chat.noAvailableModels")));
+  const currentName = variant === "toolbar" && value && !selectedLabel ? composerModelLabel(rawName) : rawName;
 
   useEffect(() => {
     const handleOutsideClick = (event: MouseEvent) => {

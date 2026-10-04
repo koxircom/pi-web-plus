@@ -24,6 +24,7 @@ const {
   invalidateSessionPathCache,
   invalidateSessionListCache,
 } = await jiti.import("../../../lib/session-reader.ts");
+const { getSessionHistoryPool } = await jiti.import("../../../lib/session-history-pool.ts");
 const { SessionManager } = await jiti.import("@earendil-works/pi-coding-agent");
 
 test("list versions expose idle session creation, rename and deletion to other windows", async (t) => {
@@ -185,7 +186,8 @@ test("session reads prefer active writers while context delegates to its read se
   assert.ok(liveLookup >= 0);
   assert.ok(detailRoute.indexOf("resolveSessionPath(id)") > liveLookup);
   assert.match(detailRoute, /selectSessionReadRuntime\(liveWrapper\)/);
-  assert.match(detailRoute, /liveRpc\?\.inner.sessionManager \?\? openSessionManager\(/);
+  assert.match(detailRoute, /buildSessionDetailSnapshot\(liveRpc\.inner\.sessionManager/);
+  assert.match(detailRoute, /pool\.querySessionDetailResult\(actualFilePath/);
   assert.match(contextRoute, /return handleSessionContextRequest\(req, \{ id \}\)/);
 });
 
@@ -343,6 +345,57 @@ test("live detail and state routes work without a persisted JSONL file", async (
     runtimeAlive: true,
     state: { isStreaming: true },
   });
+});
+
+test("disk session detail uses the worker and preserves summary, info and usage fields", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "pi-web-disk-detail-worker-"));
+  const previousAgentDir = process.env.PI_CODING_AGENT_DIR;
+  const previousSessionsDir = process.env.PI_SESSIONS_DIR;
+  const previousRegistry = globalThis.__piSessions;
+  process.env.PI_CODING_AGENT_DIR = dir;
+  process.env.PI_SESSIONS_DIR = dir;
+  globalThis.__piSessions = new Map();
+
+  const manager = SessionManager.create(dir);
+  const firstMessage = "worker detail fixture";
+  manager.appendMessage({ role: "user", content: firstMessage, timestamp: Date.now() });
+  manager.appendMessage({ role: "assistant", content: [{ type: "text", text: "worker detail answer" }], timestamp: Date.now() });
+  const id = manager.getSessionId();
+  const leafId = manager.getLeafId();
+  cacheSessionPath(id, manager.getSessionFile());
+  invalidateSessionListCache();
+
+  t.after(async () => {
+    if (previousAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = previousAgentDir;
+    if (previousSessionsDir === undefined) delete process.env.PI_SESSIONS_DIR;
+    else process.env.PI_SESSIONS_DIR = previousSessionsDir;
+    globalThis.__piSessions = previousRegistry;
+    invalidateSessionPathCache(id);
+    invalidateSessionListCache();
+    await getSessionHistoryPool().closeAll();
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  const response = await getSessionDetail(
+    new Request(`http://localhost/api/sessions/${id}?tree=summary&tail=1`),
+    { params: Promise.resolve({ id }) },
+  );
+  const detail = await response.json();
+
+  assert.equal(response.status, 200);
+  assert.equal(detail.sessionId, id);
+  assert.equal(detail.info.id, id);
+  assert.equal(detail.info.firstMessage, firstMessage);
+  assert.equal(detail.info.projectRoot, dir);
+  assert.equal(typeof detail.info.projectKey, "string");
+  assert.equal(detail.leafId, leafId);
+  assert.deepEqual(detail.context.entryIds, [leafId]);
+  assert.equal(detail.stats.totalMessages, 2);
+  assert.equal(typeof detail.totalActiveMs, "number");
+  assert.equal(detail.treeFormat, "summary");
+  assert.equal(typeof detail.snapshotRevision, "string");
+  assert.ok(detail.usageDeleteGuard);
 });
 
 test("session detail returns a gzip-compressed response when the client accepts it", async (t) => {

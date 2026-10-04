@@ -1,10 +1,11 @@
+import { clearToolResultContentCache, deleteToolResultContentCache } from "./tool-result-content.ts";
 // Bounded in-memory snapshot of settled session history. The view snapshot and
 // sync wire baseline share one resident-session LRU and one byte budget.
 // Streaming state, queued messages and SSE objects stay in their live owners.
 
 import type { AgentMessage } from "./types";
 import type { SessionData } from "../hooks/useAgentSession";
-import { deleteSessionWireDisk, writeSessionWireDisk } from "./session-sync-storage.ts";
+import { deleteSessionWireDisk, writeSessionWireDisk, prepareSessionWireDisk } from "./session-sync-storage.ts";
 import { deleteSessionHistoryPages, clearAllSessionHistoryPages } from "./session-history-page-client.ts";
 
 export type SessionViewCachePriority = "normal" | "completed-unread" | "running" | "attention";
@@ -111,6 +112,9 @@ function snapshotBytes(snapshot: unknown): number {
 		if (cached !== undefined) return cached;
 	}
 	try {
+		const wire = snapshot as SessionWireBaseline;
+		const record = wire?.data ? prepareSessionWireDisk(wire) : null;
+		if (record) { if (cacheKey) byteSizes.set(cacheKey, record.bytes); return record.bytes; }
 		const serialized = JSON.stringify(snapshot);
 		const bytes = typeof serialized === "string"
 			? new TextEncoder().encode(serialized).byteLength
@@ -235,6 +239,7 @@ export function setSessionViewSnapshot(snapshot: Omit<SessionViewSnapshot, "save
 }
 
 export function deleteSessionViewSnapshot(sessionId: string, options: { preserveHistoryPages?: boolean } = {}): void {
+  deleteToolResultContentCache(sessionId);
 	cache().delete(sessionId);
 	wireCache().delete(sessionId);
 	lruOrder.delete(sessionId);
@@ -245,6 +250,7 @@ export function deleteSessionViewSnapshot(sessionId: string, options: { preserve
 }
 
 export function clearSessionViewCache(): void {
+  clearToolResultContentCache();
 	cache().clear();
 	wireCache().clear();
 	lruOrder.clear();

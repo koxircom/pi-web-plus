@@ -23,8 +23,9 @@ var __toESM = (mod, isNodeMode, target) => (target = mod != null ? __create(__ge
 ));
 
 // lib/session-history-worker-entry.ts
-var import_worker_threads = require("worker_threads");
-var import_node_crypto = require("node:crypto");
+var import_node_worker_threads = require("node:worker_threads");
+var import_node_crypto2 = require("node:crypto");
+var import_node_fs = require("node:fs");
 
 // lib/session-history-page-cache.ts
 var HISTORY_CACHE_SCOPE = "pi-history-page-cache:v1:";
@@ -32,8 +33,51 @@ var MAX_PAGE_BYTES = 16 * 1024 * 1024;
 var MAX_TOTAL_BYTES = 32 * 1024 * 1024;
 var MAX_AGE_MS = 24 * 60 * 60 * 1e3;
 
-// lib/session-history-indexer.ts
-var fs = __toESM(require("fs"));
+// lib/session-revision.ts
+var import_crypto = require("crypto");
+var import_fs = require("fs");
+function fileFingerprint(filePath) {
+  try {
+    const stats = (0, import_fs.statSync)(filePath);
+    return `${stats.dev}:${stats.ino}:${stats.size}:${stats.mtimeMs}:${stats.ctimeMs}`;
+  } catch {
+    return "missing";
+  }
+}
+function computeSessionRevision(parts) {
+  if (parts.unstable) return null;
+  try {
+    const fp = parts.fingerprint ?? fileFingerprint(parts.filePath);
+    if (fp === "missing" && !parts.sourceId.startsWith("runtime:")) {
+      return null;
+    }
+    return (0, import_crypto.createHash)("sha1").update(JSON.stringify({
+      fp,
+      source: parts.sourceId,
+      entries: parts.entryCount,
+      latest: parts.latestEntryId,
+      leaf: parts.leafId,
+      gen: parts.generation,
+      scope: parts.scopeKey
+    })).digest("base64url").slice(0, 22);
+  } catch {
+    return null;
+  }
+}
+
+// lib/session-tool-result.ts
+var import_node_crypto = require("node:crypto");
+var DEFERRED_TOOL_RESULT_MIN_BYTES = 4096;
+function deferLargeToolResult(message, entryId) {
+  if (message.inProgress || message.details?.kind === "pi-web-subagent") return message;
+  const body = JSON.stringify([message.content, message.details ?? null]);
+  if (Buffer.byteLength(JSON.stringify(message.content)) < DEFERRED_TOOL_RESULT_MIN_BYTES) return message;
+  return {
+    ...message,
+    content: message.content.filter((block) => block.type === "image"),
+    deferredResult: { entryId, revision: (0, import_node_crypto.createHash)("sha256").update(body).digest("hex") }
+  };
+}
 
 // lib/normalize.ts
 function isObject(val) {
@@ -333,6 +377,9 @@ function entryToUiMessage(entry, options) {
     case "message": {
       if (entry.message.role === "system") return null;
       let message = options.deferToolResultImages ? deferToolResultBase64Images(normalizeToolCalls(entry.message), options.sessionId, entry.id) : normalizeToolCalls(entry.message);
+      if (options.deferToolResults && options.sessionId && message.role === "toolResult") {
+        message = deferLargeToolResult(message, entry.id);
+      }
       const legacyContent = message.role === "assistant" ? message.content : void 0;
       if (typeof legacyContent === "string") {
         message = { ...message, content: [{ type: "text", text: legacyContent }] };
@@ -385,7 +432,420 @@ ${entry.summary}`,
   }
 }
 
+// lib/project-tree.ts
+var MAX_PROJECTED_TREE_DEPTH = 200;
+var MAX_BRANCH_PREVIEW_LENGTH = 40;
+function toSummaryTree(nodes) {
+  const summaryRoots = [];
+  const stack = [];
+  for (let i = nodes.length - 1; i >= 0; i--) stack.push({ input: nodes[i], into: summaryRoots });
+  while (stack.length > 0) {
+    const frame = stack.pop();
+    const { input } = frame;
+    const summary = {
+      entry: {
+        id: input.entry.id,
+        parentId: input.entry.parentId ?? null,
+        type: input.entry.type,
+        timestamp: input.entry.timestamp ?? ""
+      },
+      children: [],
+      ...input.compressedEntryIds?.length ? { compressedEntryIds: input.compressedEntryIds } : {},
+      ...input.branchPreview ? { branchPreview: input.branchPreview } : {}
+    };
+    frame.into.push(summary);
+    for (let i = input.children.length - 1; i >= 0; i--) {
+      stack.push({ input: input.children[i], into: summary.children });
+    }
+  }
+  return summaryRoots;
+}
+function isRecord2(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+function appendPreviewText(current, value) {
+  if (typeof value !== "string" || current.length > MAX_BRANCH_PREVIEW_LENGTH) return current;
+  const normalized = value.replace(/\s+/g, " ").trim();
+  if (!normalized) return current;
+  const separator = current ? " " : "";
+  const prefix = current + separator;
+  if (prefix.length >= MAX_BRANCH_PREVIEW_LENGTH + 1) {
+    return prefix.slice(0, MAX_BRANCH_PREVIEW_LENGTH + 1);
+  }
+  const remaining = MAX_BRANCH_PREVIEW_LENGTH + 1 - prefix.length;
+  return prefix + normalized.slice(0, remaining);
+}
+function previewForEntry(entry) {
+  if (entry.type !== "message" || !isRecord2(entry.message) || typeof entry.message.role !== "string") {
+    return void 0;
+  }
+  if (entry.message.role === "system") return void 0;
+  const content = entry.message.content;
+  let text = "";
+  let hasImage = false;
+  if (typeof content === "string") {
+    text = appendPreviewText(text, content);
+  } else if (Array.isArray(content)) {
+    for (const block of content) {
+      if (!isRecord2(block)) continue;
+      if (block.type === "image") hasImage = true;
+      if (block.type === "text") text = appendPreviewText(text, block.text);
+      if (text.length > MAX_BRANCH_PREVIEW_LENGTH) break;
+    }
+  }
+  if (text.length > MAX_BRANCH_PREVIEW_LENGTH) {
+    text = text.slice(0, MAX_BRANCH_PREVIEW_LENGTH) + "\u2026";
+  } else if (!text) {
+    text = hasImage ? "[image]" : entry.message.role === "assistant" ? "[assistant]" : "message";
+  }
+  const role = entry.message.role === "user" || entry.message.role === "assistant" ? entry.message.role : void 0;
+  return { ...role ? { role } : {}, text };
+}
+function projectTreeForResponse(nodes) {
+  const keep = /* @__PURE__ */ new Set();
+  const roots = new Set(nodes);
+  const seen = /* @__PURE__ */ new Set();
+  const stack = [...nodes];
+  while (stack.length > 0) {
+    const node = stack.pop();
+    if (seen.has(node)) continue;
+    seen.add(node);
+    if (roots.has(node) || node.children.length !== 1) {
+      keep.add(node);
+    }
+    for (const child of node.children) {
+      stack.push(child);
+    }
+  }
+  const cloneNode = (node, compressedEntryIds, branchPreview) => ({
+    ...node,
+    children: [],
+    ...compressedEntryIds?.length ? { compressedEntryIds } : {},
+    ...branchPreview ? { branchPreview } : {}
+  });
+  const projectedRoots = nodes.map((node) => cloneNode(node, void 0, previewForEntry(node.entry)));
+  const tasks = nodes.map((source, index) => ({
+    source,
+    projected: projectedRoots[index],
+    depth: 1
+  }));
+  const appendFlattenedKeptDescendants = (source, projectedParent) => {
+    const pending = [{
+      node: source,
+      compressedEntryIds: [],
+      branchPreview: void 0
+    }];
+    const flattenedSeen = /* @__PURE__ */ new Set();
+    while (pending.length > 0) {
+      const { node, compressedEntryIds, branchPreview } = pending.pop();
+      if (flattenedSeen.has(node)) continue;
+      flattenedSeen.add(node);
+      const nextPreview = branchPreview ?? previewForEntry(node.entry);
+      if (keep.has(node)) {
+        projectedParent.children.push(cloneNode(node, compressedEntryIds, nextPreview));
+      }
+      for (let i = node.children.length - 1; i >= 0; i--) {
+        pending.push({
+          node: node.children[i],
+          compressedEntryIds: keep.has(node) ? [] : [...compressedEntryIds, node.entry.id],
+          branchPreview: keep.has(node) ? void 0 : nextPreview
+        });
+      }
+    }
+  };
+  while (tasks.length > 0) {
+    const { source, projected, depth } = tasks.pop();
+    for (const sourceChild of source.children) {
+      let child = sourceChild;
+      if (depth >= MAX_PROJECTED_TREE_DEPTH) {
+        appendFlattenedKeptDescendants(child, projected);
+        continue;
+      }
+      const compressedEntryIds = [];
+      let branchPreview = previewForEntry(child.entry);
+      while (!keep.has(child) && child.children.length === 1) {
+        compressedEntryIds.push(child.entry.id);
+        child = child.children[0];
+        branchPreview ??= previewForEntry(child.entry);
+      }
+      if (!keep.has(child)) {
+        continue;
+      }
+      const projectedChild = cloneNode(child, compressedEntryIds, branchPreview);
+      projected.children.push(projectedChild);
+      tasks.push({ source: child, projected: projectedChild, depth: depth + 1 });
+    }
+  }
+  return projectedRoots;
+}
+
+// lib/session-timing.ts
+function computeSessionTotalActiveMs(entries) {
+  let totalActiveMs = 0;
+  let previousTimestamp;
+  for (const entry of entries) {
+    if (!isTimingEntry(entry.type)) continue;
+    const timestamp = Date.parse(entry.timestamp);
+    if (!Number.isFinite(timestamp)) continue;
+    const role = entry.type === "message" ? entry.message?.role : void 0;
+    if (role === "user" || role === "bashExecution") {
+      previousTimestamp = timestamp;
+      continue;
+    }
+    if (previousTimestamp !== void 0 && timestamp > previousTimestamp) {
+      totalActiveMs += timestamp - previousTimestamp;
+    }
+    previousTimestamp = timestamp;
+  }
+  return totalActiveMs;
+}
+function isTimingEntry(type) {
+  return type === "message" || type === "compaction" || type === "branch_summary" || type === "custom_message";
+}
+
+// lib/session-stats.ts
+function emptyStats() {
+  return {
+    userMessages: 0,
+    assistantMessages: 0,
+    toolCalls: 0,
+    toolResults: 0,
+    totalMessages: 0,
+    tokens: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+    cost: 0
+  };
+}
+function addUsage(stats, usage) {
+  if (!usage) return;
+  stats.tokens.input += usage.input ?? 0;
+  stats.tokens.output += usage.output ?? 0;
+  stats.tokens.cacheRead += usage.cacheRead ?? 0;
+  stats.tokens.cacheWrite += usage.cacheWrite ?? 0;
+  stats.cost += usage.cost?.total ?? 0;
+}
+function addMessage(stats, message) {
+  stats.totalMessages += 1;
+  if (message.role === "user") {
+    stats.userMessages += 1;
+  } else if (message.role === "toolResult") {
+    stats.toolResults += 1;
+    addUsage(stats, message.usage);
+  } else if (message.role === "assistant") {
+    stats.assistantMessages += 1;
+    if (Array.isArray(message.content)) {
+      stats.toolCalls += message.content.filter((c) => c.type === "toolCall").length;
+    }
+    addUsage(stats, message.usage);
+  }
+}
+function finishStats(stats) {
+  stats.tokens.total = stats.tokens.input + stats.tokens.output + stats.tokens.cacheRead + stats.tokens.cacheWrite;
+  return stats;
+}
+function computeSessionStats(entries) {
+  const stats = emptyStats();
+  for (const entry of entries) {
+    if (entry.type === "compaction" || entry.type === "branch_summary" || entry.type === "usage") {
+      addUsage(stats, entry.usage);
+      continue;
+    }
+    if (entry.type !== "message") continue;
+    addMessage(stats, entry.message);
+  }
+  return finishStats(stats);
+}
+
+// lib/subagent-session-snapshot.ts
+var SUBAGENT_META_TYPE = "pi-web:subagent";
+var SUBAGENT_STATUS_TYPE = "pi-web:subagent-status";
+var SUBAGENT_RESULT_TYPE = "pi-web:subagent-result";
+var SUBAGENT_CONTROL_TOOL_NAMES = ["Agent", "get_subagent_result", "steer_subagent"];
+var SUBAGENT_BUILTIN_TOOL_NAMES = ["read", "bash", "edit", "write", "grep", "find", "ls"];
+var BUILTIN_TOOLS = new Set(SUBAGENT_BUILTIN_TOOL_NAMES);
+var SUBAGENT_CONTROL_TOOLS = new Set(SUBAGENT_CONTROL_TOOL_NAMES);
+function isRecord3(value) {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+function subagentMetadataData(entries) {
+  const metaEntry = entries.find((entry) => entry.type === "custom" && entry.customType === SUBAGENT_META_TYPE);
+  if (!metaEntry || metaEntry.type !== "custom" || !isRecord3(metaEntry.data)) return null;
+  const data = metaEntry.data;
+  if (data.version !== 1 || typeof data.parentSessionId !== "string" || typeof data.parentSessionPath !== "string") return null;
+  return data;
+}
+function readSubagentSessionResources(entries) {
+  const data = subagentMetadataData(entries);
+  if (!data) return null;
+  const snapshot = data.resourceSnapshot;
+  const loadSkills = isRecord3(snapshot) && snapshot.loadSkills === true;
+  const loadExtensions = isRecord3(snapshot) && snapshot.loadExtensions === true;
+  if (isRecord3(snapshot) && snapshot.version === 1 && Array.isArray(snapshot.appendSystemPrompt) && snapshot.appendSystemPrompt.every((item) => typeof item === "string") && Array.isArray(snapshot.tools) && snapshot.tools.every(
+    (item) => typeof item === "string" && item.length > 0 && !SUBAGENT_CONTROL_TOOLS.has(item) && (BUILTIN_TOOLS.has(item) || loadExtensions)
+  )) {
+    return {
+      appendSystemPrompt: [...snapshot.appendSystemPrompt],
+      tools: [...new Set(snapshot.tools)],
+      loadSkills,
+      loadExtensions,
+      ...typeof snapshot.exactSystemPrompt === "string" ? { exactSystemPrompt: snapshot.exactSystemPrompt } : {}
+    };
+  }
+  return null;
+}
+function readSubagentRun(entries, sessionId, sessionPath) {
+  const data = subagentMetadataData(entries);
+  if (!data) return null;
+  const lifecycleEntry = [...entries].reverse().find(
+    (entry) => entry.type === "custom" && (entry.customType === SUBAGENT_RESULT_TYPE || entry.customType === SUBAGENT_STATUS_TYPE)
+  );
+  const resultEntry = lifecycleEntry?.type === "custom" && lifecycleEntry.customType === SUBAGENT_RESULT_TYPE ? lifecycleEntry : void 0;
+  const result = resultEntry?.type === "custom" && isRecord3(resultEntry.data) ? resultEntry.data : void 0;
+  const statusEntry = lifecycleEntry?.type === "custom" && lifecycleEntry.customType === SUBAGENT_STATUS_TYPE ? lifecycleEntry : void 0;
+  const statusData = statusEntry?.type === "custom" && isRecord3(statusEntry.data) ? statusEntry.data : void 0;
+  const persistedStatus = result && (result.status === "completed" || result.status === "failed" || result.status === "aborted") ? result.status : statusData?.version === 1 && (statusData.status === "queued" || statusData.status === "running") ? statusData.status : "interrupted";
+  return {
+    sessionId,
+    sessionPath,
+    parentSessionId: data.parentSessionId,
+    parentToolCallId: typeof data.parentToolCallId === "string" ? data.parentToolCallId : "",
+    profile: typeof data.profile === "string" ? data.profile : "general-purpose",
+    description: typeof data.description === "string" ? data.description : "Subagent",
+    task: typeof data.task === "string" ? data.task : "",
+    runInBackground: data.runInBackground === true,
+    status: persistedStatus,
+    createdAt: typeof data.createdAt === "string" ? data.createdAt : "",
+    ...result && typeof result.completedAt === "string" ? { completedAt: result.completedAt } : {},
+    ...result && typeof result.result === "string" ? { result: result.result } : {},
+    ...result && typeof result.error === "string" ? { error: result.error } : {},
+    ...typeof data.worktreePath === "string" ? { worktreePath: data.worktreePath } : {},
+    ...typeof data.worktreeBranch === "string" ? { worktreeBranch: data.worktreeBranch } : {},
+    ...result && typeof result.worktreeCleanupError === "string" ? { worktreeCleanupError: result.worktreeCleanupError } : {}
+  };
+}
+
+// lib/tool-presets.ts
+var PRESET_FULL = ["bash", "read", "edit", "write", "grep", "find", "ls"];
+var BUILTIN_TOOL_NAMES = /* @__PURE__ */ new Set([...PRESET_FULL, "powershell"]);
+
+// lib/session-tool-selection.ts
+var TOOL_SELECTION_TYPE = "pi-web:tool-selection";
+var BUILTIN_TOOL_NAMES2 = new Set(PRESET_FULL);
+var CLEARED = /* @__PURE__ */ Symbol("cleared-tool-selection");
+function parseToolSelectionData(data) {
+  if (typeof data !== "object" || data === null || Array.isArray(data)) return void 0;
+  const candidate = data;
+  if (candidate.version !== 1) return void 0;
+  if (candidate.cleared === true) return CLEARED;
+  if (!Array.isArray(candidate.tools) || candidate.tools.some((tool) => typeof tool !== "string" || !BUILTIN_TOOL_NAMES2.has(tool))) return void 0;
+  return [...new Set(candidate.tools)];
+}
+function readSessionToolSelection(entries) {
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
+    const entry = entries[index];
+    if (entry.type !== "custom" || entry.customType !== TOOL_SELECTION_TYPE) continue;
+    const tools = parseToolSelectionData(entry.data);
+    if (tools === void 0) continue;
+    return tools === CLEARED ? void 0 : tools;
+  }
+  return void 0;
+}
+
+// lib/session-detail-snapshot.ts
+function buildSessionDetailSnapshot(sessionManager, options) {
+  const entries = sessionManager.getEntries();
+  const leafId = sessionManager.getLeafId();
+  const projectedTree = projectTreeForResponse(sessionManager.getTree());
+  const tree = options.summaryTree ? toSummaryTree(projectedTree) : projectedTree;
+  const context = buildSessionContext(entries, leafId, {
+    deferThinking: options.deferThinking,
+    deferToolResults: options.deferToolResults,
+    deferToolResultImages: options.deferToolResultImages,
+    tail: options.tail,
+    sessionId: options.sessionId
+  });
+  const totalActiveMs = computeSessionTotalActiveMs(entries);
+  const stats = computeSessionStats(entries);
+  const latestEntry = entries[entries.length - 1];
+  const snapshotRevision = computeSessionRevision({
+    filePath: options.filePath,
+    sourceId: options.sourceId,
+    entryCount: entries.length,
+    latestEntryId: typeof latestEntry?.id === "string" ? latestEntry.id : null,
+    leafId: leafId ?? null,
+    ...options.fingerprint ? { fingerprint: options.fingerprint } : {}
+  });
+  const firstUserEntry = entries.find((entry) => entry.type === "message" && entry.message.role === "user");
+  const firstUserMessage = firstUserEntry?.type === "message" ? firstUserEntry.message : void 0;
+  const firstMessage = firstUserMessage?.role === "user" ? (() => {
+    const content = firstUserMessage.content;
+    return typeof content === "string" ? content : (Array.isArray(content) ? content.find((block) => block.type === "text")?.text ?? "" : "") || "(no messages)";
+  })() : "(no messages)";
+  const header = sessionManager.getHeader();
+  const subagent = header ? readSubagentRun(entries, header.id, options.filePath) : null;
+  const toolNames = readSubagentSessionResources(entries)?.tools ?? readSessionToolSelection(entries);
+  return {
+    leafId,
+    tree,
+    context,
+    stats,
+    totalActiveMs,
+    snapshotRevision,
+    header,
+    sessionName: sessionManager.getSessionName(),
+    firstMessage,
+    subagent,
+    toolNames
+  };
+}
+
+// lib/session-detail-manager-cache.ts
+var SessionDetailManagerCache = class {
+  constructor(limits) {
+    this.limits = limits;
+    this.entries = /* @__PURE__ */ new Map();
+    this.totalBytes = 0;
+  }
+  get(filePath, fingerprint, bytes) {
+    const cached = this.entries.get(filePath);
+    if (!cached) return void 0;
+    if (cached.fingerprint !== fingerprint || cached.bytes !== bytes) {
+      this.delete(filePath);
+      return void 0;
+    }
+    this.entries.delete(filePath);
+    this.entries.set(filePath, cached);
+    return cached.manager;
+  }
+  set(filePath, fingerprint, bytes, manager) {
+    this.delete(filePath);
+    if (!Number.isFinite(bytes) || bytes < 0 || bytes > this.limits.maxFileBytes || bytes > this.limits.maxTotalBytes || this.limits.maxEntries <= 0 || this.limits.maxTotalBytes <= 0) {
+      return;
+    }
+    this.entries.set(filePath, { fingerprint, bytes, manager });
+    this.totalBytes += bytes;
+    while (this.entries.size > this.limits.maxEntries || this.totalBytes > this.limits.maxTotalBytes) {
+      const oldestPath = this.entries.keys().next().value;
+      if (oldestPath === void 0) break;
+      this.delete(oldestPath);
+    }
+  }
+  delete(filePath) {
+    const cached = this.entries.get(filePath);
+    if (!cached) return;
+    this.entries.delete(filePath);
+    this.totalBytes -= cached.bytes;
+  }
+  getSize() {
+    return this.entries.size;
+  }
+  getTotalBytes() {
+    return this.totalBytes;
+  }
+};
+
 // lib/session-history-indexer.ts
+var fs = __toESM(require("fs"));
+var importSessionManagerNative = new Function("specifier", "return import(specifier)");
 var HistoryConflictError = class extends Error {
   constructor(message) {
     super(message);
@@ -754,14 +1214,15 @@ var SessionHistoryIndexer = class _SessionHistoryIndexer {
         } catch {
         }
       }
-      const { SessionManager } = await import("@earendil-works/pi-coding-agent");
+      const { SessionManager } = await importSessionManagerNative("@earendil-works/pi-coding-agent");
       const sm = SessionManager.inMemory(index.headerCwd || process.cwd(), void 0, rawEntries);
       const entries = sm.getEntries();
       const cursor = options.before ?? options.leafId;
       if (options.requireCursor && cursor && !entries.some((entry) => entry.id === cursor)) {
         throw new CursorNotFoundError(cursor);
       }
-      const context2 = buildSessionContext(entries, options.leafId, {
+      const contextEntries = options.onlyEntry ? entries.filter((entry) => entry.id === options.leafId) : entries;
+      const context2 = buildSessionContext(contextEntries, options.leafId, {
         tail: options.tail,
         excludeLeaf: Boolean(options.before),
         before: options.before,
@@ -786,7 +1247,7 @@ var SessionHistoryIndexer = class _SessionHistoryIndexer {
       startNode,
       (node) => node.parentId ? byId.get(node.parentId) : void 0
     );
-    const pageMetaChain = effectiveCursor === null ? [] : traverseAncestorChain(
+    const pageMetaChain = options.onlyEntry ? startNode ? [startNode] : [] : effectiveCursor === null ? [] : traverseAncestorChain(
       startNode,
       (node) => node.parentId ? byId.get(node.parentId) : void 0,
       tail,
@@ -899,37 +1360,111 @@ var SessionHistoryIndexer = class _SessionHistoryIndexer {
 };
 
 // lib/session-history-worker-entry.ts
-if (!import_worker_threads.parentPort) {
+if (!import_node_worker_threads.parentPort) {
   throw new Error("session-history-worker must be run inside a Worker thread.");
 }
+var MAX_DETAIL_MANAGER_CACHE_BYTES = 64 * 1024 * 1024;
+var cacheBudgetFromPool = Number(import_node_worker_threads.workerData?.detailManagerCacheBudgetBytes);
+var detailManagerCache = new SessionDetailManagerCache({
+  maxEntries: 12,
+  maxTotalBytes: Number.isFinite(cacheBudgetFromPool) ? Math.min(MAX_DETAIL_MANAGER_CACHE_BYTES, Math.max(0, cacheBudgetFromPool)) : 0,
+  maxFileBytes: MAX_DETAIL_MANAGER_CACHE_BYTES
+});
 var indexer = new SessionHistoryIndexer();
 var cancelledIds = /* @__PURE__ */ new Set();
-import_worker_threads.parentPort.on("message", async (msg) => {
+var queryInFlight = false;
+var nativeImport = new Function("specifier", "return import(specifier)");
+var sessionManagerModulePromise;
+function loadSessionManagerModule() {
+  if (!sessionManagerModulePromise) {
+    let loading;
+    loading = nativeImport("@earendil-works/pi-coding-agent").catch((error) => {
+      if (sessionManagerModulePromise === loading) sessionManagerModulePromise = void 0;
+      throw error;
+    });
+    sessionManagerModulePromise = loading;
+  }
+  return sessionManagerModulePromise;
+}
+import_node_worker_threads.parentPort.on("message", async (msg) => {
   if (!msg || typeof msg.id !== "number") return;
   if (msg.type === "cancel") {
     cancelledIds.add(msg.id);
     return;
   }
-  if (msg.type === "queryContext" && msg.filePath) {
+  if ((msg.type === "queryContext" || msg.type === "querySessionDetail") && msg.filePath) {
     if (cancelledIds.has(msg.id)) {
       cancelledIds.delete(msg.id);
       return;
     }
+    if (queryInFlight) {
+      const response = {
+        id: msg.id,
+        success: false,
+        error: {
+          message: "\u4F1A\u8BDD\u5386\u53F2 Worker \u5DF2\u6709\u6B63\u5728\u5904\u7406\u7684\u8BF7\u6C42\u3002",
+          statusCode: 503,
+          retryable: true
+        }
+      };
+      import_node_worker_threads.parentPort.postMessage(response);
+      return;
+    }
+    queryInFlight = true;
     try {
-      const jsonString = await indexer.queryContext(msg.filePath, msg.options || {});
+      let jsonString;
+      let detailFingerprint = null;
+      if (msg.type === "queryContext") {
+        jsonString = await indexer.queryContext(msg.filePath, msg.options || {});
+      } else {
+        const options = msg.options;
+        const { SessionManager } = await loadSessionManagerModule();
+        if (cancelledIds.has(msg.id)) {
+          cancelledIds.delete(msg.id);
+          return;
+        }
+        const fingerprint = fileFingerprint(msg.filePath);
+        let fileBytes;
+        try {
+          fileBytes = (0, import_node_fs.statSync)(msg.filePath).size;
+        } catch (error) {
+          detailManagerCache.delete(msg.filePath);
+          throw error;
+        }
+        const sessionManager = detailManagerCache.get(msg.filePath, fingerprint, fileBytes) ?? SessionManager.open(msg.filePath);
+        const snapshot = buildSessionDetailSnapshot(sessionManager, {
+          filePath: msg.filePath,
+          sessionId: options.sessionId,
+          sourceId: options.sourceId,
+          summaryTree: options.summaryTree,
+          deferToolResults: options.deferToolResults,
+          deferThinking: options.deferThinking,
+          deferToolResultImages: options.deferToolResultImages,
+          tail: options.tail,
+          fingerprint
+        });
+        if (fingerprint !== fileFingerprint(msg.filePath)) {
+          detailManagerCache.delete(msg.filePath);
+          throw new HistoryConflictError("\u6784\u5EFA\u4F1A\u8BDD\u8BE6\u60C5\u671F\u95F4\uFF0C\u4F1A\u8BDD\u6587\u4EF6\u53D1\u751F\u53D8\u5316\uFF0C\u8BF7\u91CD\u8BD5\u3002");
+        }
+        detailFingerprint = fingerprint;
+        detailManagerCache.set(msg.filePath, fingerprint, fileBytes, sessionManager);
+        jsonString = JSON.stringify(snapshot);
+      }
       if (cancelledIds.has(msg.id)) {
         cancelledIds.delete(msg.id);
         return;
       }
-      const fingerprint = msg.options?.includeFingerprint && Buffer.byteLength(jsonString, "utf8") <= MAX_PAGE_BYTES ? (0, import_node_crypto.createHash)("sha256").update(HISTORY_CACHE_SCOPE).update(jsonString, "utf8").digest("hex") : null;
+      const contextOptions = msg.type === "queryContext" ? msg.options : void 0;
+      const responseFingerprint = contextOptions?.includeFingerprint && Buffer.byteLength(jsonString, "utf8") <= MAX_PAGE_BYTES ? (0, import_node_crypto2.createHash)("sha256").update(HISTORY_CACHE_SCOPE).update(jsonString, "utf8").digest("hex") : detailFingerprint;
       const response = {
         id: msg.id,
         success: true,
         // A HEAD never transfers the multi-MiB body back onto the main thread.
-        jsonString: msg.options?.fingerprintOnly ? "" : jsonString,
-        fingerprint
+        jsonString: contextOptions?.fingerprintOnly ? "" : jsonString,
+        fingerprint: responseFingerprint
       };
-      import_worker_threads.parentPort.postMessage(response);
+      import_node_worker_threads.parentPort.postMessage(response);
     } catch (rawErr) {
       if (cancelledIds.has(msg.id)) {
         cancelledIds.delete(msg.id);
@@ -955,7 +1490,9 @@ import_worker_threads.parentPort.on("message", async (msg) => {
           code: err?.code
         }
       };
-      import_worker_threads.parentPort.postMessage(response);
+      import_node_worker_threads.parentPort.postMessage(response);
+    } finally {
+      queryInFlight = false;
     }
   }
 });

@@ -4,7 +4,7 @@ const root=path.resolve(__dirname,'..');
 function fixture(){
  const nodes=[],timers=new Map();let next=0;
  const context={Map,Promise,Error,setTimeout:cb=>{timers.set(++next,cb);return next;},clearTimeout:id=>timers.delete(id),document:{createElement:()=>({dataset:{},remove(){this.removed=true;}}),head:{appendChild:n=>nodes.push(n)}}};context.window=context;
- const assets={'xlsx-engine':{path:'/pi-web-assets/xlsx-engine-owned.js',integrity:'sha256-owned'},'usage-panel':{path:'/pi-web-assets/usage-panel-owned.js',integrity:'sha256-panel'}};
+ const assets={'xlsx-engine':{path:'/pi-web-assets/xlsx-engine-owned.js',integrity:'sha256-owned'},'usage-panel':{path:'/pi-web-assets/usage-panel-owned.js',integrity:'sha256-panel'},'image-editor':{path:'/pi-web-assets/image-editor-owned.js',integrity:'sha256-editor'}};
  vm.runInNewContext(fs.readFileSync(root+'/lazy-assets.js','utf8').replace('__PI_OPTIONAL_ASSET_MANIFEST__',JSON.stringify(assets)),context);
  return{context,nodes,timers,load:context.__PI_ENH_LOAD_OPTIONAL__};
 }
@@ -28,4 +28,13 @@ test('extracted unchanged workbook engine preserves Chinese sheets, merges, numb
  const context={console,ArrayBuffer,Uint8Array,TextDecoder,TextEncoder};context.window=context;vm.runInNewContext(asset.toString(),context);const x=context.XLSX;assert.equal(x.version,'0.20.3');
  const book=x.utils.book_new(),sheet=x.utils.aoa_to_sheet([['验收表',''],['产品','数量'],['中文商品',12.5]]);sheet['!merges']=[{s:{r:0,c:0},e:{r:0,c:1}}];x.utils.book_append_sheet(book,sheet,'中文工作表');x.utils.book_append_sheet(book,x.utils.aoa_to_sheet([['第二页']]),'第二工作表');
  const bytes=x.write(book,{type:'array',bookType:'xlsx'}),parsed=x.read(bytes,{type:'array'});assert.deepEqual(Array.from(parsed.SheetNames),['中文工作表','第二工作表']);assert.equal(parsed.Sheets['中文工作表'].A3.v,'中文商品');assert.equal(parsed.Sheets['中文工作表'].B3.v,12.5);assert.equal(parsed.Sheets['中文工作表']['!merges'][0].e.c,1);
+});
+
+test('image editor uses one optional request and refuses an unstamped previous export',async()=>{
+ const f=fixture();f.context.PiImageEditor={create:()=> 'old'};
+ const a=f.load('image-editor'),b=f.load('image-editor');assert.equal(a,b);assert.equal(f.nodes.length,1);
+ assert.equal(f.nodes[0].integrity,'sha256-editor');
+ const current={create:()=> 'current'};f.context.PiImageEditor=current;f.nodes[0].onload();
+ assert.equal(await a,current);assert.equal(await f.load('image-editor'),current);assert.equal(f.nodes.length,1);
+ f.context.PiImageEditor={create:()=> 'replaced'};const reload=f.load('image-editor');assert.equal(f.nodes.length,2);f.nodes[1].onload();await reload;
 });

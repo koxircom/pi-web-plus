@@ -57,6 +57,7 @@ interface Props {
   modelNames?: Record<string, string>;
   modelList?: { id: string; name: string; provider: string; input?: string[] }[];
   modelError?: string | null;
+  modelsLoading?: boolean;
   /** Diagnostics from resolving `enabledModels`, e.g. a pattern that matched nothing. */
   modelScopeWarnings?: string[];
   onModelChange?: (provider: string, modelId: string) => void;
@@ -792,7 +793,7 @@ export function ModelScopeWarningBanner({ warnings }: { warnings?: string[] }) {
 }
 
 export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
-  onSend, onAbort, onSteer, onFollowUp, isStreaming, model, isAutoModelSelection, modelNames, modelList, modelError, modelScopeWarnings, onModelChange, modelSwitching,
+  onSend, onAbort, onSteer, onFollowUp, isStreaming, model, isAutoModelSelection, modelNames, modelList, modelError, modelsLoading, modelScopeWarnings, onModelChange, modelSwitching,
   onCompact, onAbortCompaction, isCompacting, compactError, compactResult, toolPreset, onToolPresetChange,
   thinkingLevel, isAutoThinkingSelection = false, onThinkingLevelChange, availableThinkingLevels, thinkingLevelMap,
   retryInfo, queuedMessages, inputHistory = [], onRecallQueue,
@@ -808,6 +809,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const { fontSize } = useChatAppearance();
   const isMobile = useIsMobile();
   const [value, setValue] = useState(() => (draftKey ? getDraftInMemory(draftKey)?.value ?? "" : ""));
+  const [hasEnhancedSubmissionPayload, setHasEnhancedSubmissionPayload] = useState(false);
   const [toolDropdownOpen, setToolDropdownOpen] = useState(false);
   const [controlsMenuOpen, setControlsMenuOpen] = useState(false);
   const [attachedImages, setAttachedImages] = useState<AttachedImage[]>(() => (
@@ -1182,14 +1184,20 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const handleSend = useCallback(async () => {
     const msg = value.trim();
     const currentImageCount = Math.max(attachedImages.length, attachedImagesRef.current.length);
-    if (!msg && !currentImageCount) return;
-    if (currentImageCount > MAX_ATTACHED_IMAGES) return;
-    onAudioUnlock?.();
     const builtinAllowed = !isStreaming || offersBuiltinSlashCommandWhileStreaming(msg);
     if (builtinAllowed && await runBuiltinCommand(msg)) return;
     if (isStreaming) return;
+    const enhancementWindow = typeof window !== "undefined" ? window as Window & {
+      __PI_ENH_PREPARE_COMPOSER_SUBMISSION__?: (kind: "send" | "steer" | "followup", body: string) => { text: string; commit: () => void } | null;
+    } : null;
+    const submission = enhancementWindow?.__PI_ENH_PREPARE_COMPOSER_SUBMISSION__?.("send", msg) ?? null;
+    const submittedText = submission?.text ?? msg;
+    if (!submittedText && !currentImageCount) return;
+    if (currentImageCount > MAX_ATTACHED_IMAGES) return;
+    onAudioUnlock?.();
     clearInput();
-    onSend(msg, attachedImages.length ? attachedImages : undefined);
+    onSend(submittedText, attachedImages.length ? attachedImages : undefined);
+    submission?.commit();
   }, [value, attachedImages, isStreaming, runBuiltinCommand, onSend, clearInput, onAudioUnlock]);
 
   const slashQuery = !compact && value.startsWith("/") && !/\s/.test(value.slice(1))
@@ -1226,8 +1234,8 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     : t(slashQuery ? "chat.matches" : "chat.commands", { count: filteredSlashCommands.length });
   const hasInputText = Boolean(value.trim());
   const tooManyImagesNotice = getTooManyImagesNotice(attachedImages.length, MAX_ATTACHED_IMAGES, locale);
-  const canSendMessage = (hasInputText || attachedImages.length > 0) && !tooManyImagesNotice;
-  const canQueueStreamingMessage = (hasInputText || attachedImages.length > 0) && !tooManyImagesNotice && !queuedSubmissionPending;
+  const canSendMessage = (hasInputText || attachedImages.length > 0 || hasEnhancedSubmissionPayload) && !tooManyImagesNotice;
+  const canQueueStreamingMessage = (hasInputText || attachedImages.length > 0 || hasEnhancedSubmissionPayload) && !tooManyImagesNotice && !queuedSubmissionPending;
   // Warn when images are attached but the selected model is known not to accept
   // image input (#584), including a resolved default. Unknown models stay silent.
   const showImageUnsupportedWarning = (
@@ -1430,24 +1438,30 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     const msg = value.trim();
     const images = attachedImagesRef.current;
     const currentImageCount = Math.max(attachedImages.length, images.length);
-    if (!msg && !currentImageCount) return;
-    if (currentImageCount > MAX_ATTACHED_IMAGES) return;
     onAudioUnlock?.();
     if (!currentImageCount && onBuiltinCommand && offersBuiltinSlashCommandWhileStreaming(msg)) {
       if (await runBuiltinCommand(msg)) return;
     }
+    const enhancementWindow = typeof window !== "undefined" ? window as Window & {
+      __PI_ENH_PREPARE_COMPOSER_SUBMISSION__?: (kind: "send" | "steer" | "followup", body: string) => { text: string; commit: () => void } | null;
+    } : null;
+    const submission = enhancementWindow?.__PI_ENH_PREPARE_COMPOSER_SUBMISSION__?.(mode, msg) ?? null;
+    const submittedText = submission?.text ?? msg;
+    if (!submittedText && !currentImageCount) return;
+    if (currentImageCount > MAX_ATTACHED_IMAGES) return;
     queuedSubmissionPendingRef.current = true;
     setQueuedSubmissionPending(true);
     clearInput();
     try {
       const submittedImages = images.length ? images : undefined;
-      if (msg.startsWith("/") && onPromptWithStreamingBehavior) {
-        await onPromptWithStreamingBehavior(msg, mode === "steer" ? "steer" : "followUp", submittedImages);
+      if (submittedText.startsWith("/") && onPromptWithStreamingBehavior) {
+        await onPromptWithStreamingBehavior(submittedText, mode === "steer" ? "steer" : "followUp", submittedImages);
       } else if (mode === "steer" && onSteer) {
-        await onSteer(msg, submittedImages);
+        await onSteer(submittedText, submittedImages);
       } else if (mode === "followup" && onFollowUp) {
-        await onFollowUp(msg, submittedImages);
+        await onFollowUp(submittedText, submittedImages);
       }
+      submission?.commit();
     } finally {
       queuedSubmissionPendingRef.current = false;
       setQueuedSubmissionPending(false);
@@ -1500,7 +1514,18 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const handleKeyDown = useCallback(
     (e: KeyboardEvent<HTMLTextAreaElement>) => {
       const nativeEvent = e.nativeEvent;
-      const sendShortcut = e.key === "Enter" && !e.shiftKey && (!isMobile || e.ctrlKey || e.metaKey);
+      const enhancementWindow = typeof window !== "undefined" ? window as Window & {
+        __PI_ENH_IS_MOBILE_ENV__?: () => boolean;
+        __PI_ENH_IS_PLUGIN_ENABLED__?: (pluginId: string) => boolean;
+        __PI_ENH_GET_ACTIVE_AT_MENTION_MENU__?: (textarea: HTMLTextAreaElement) => { count: number } | null;
+        __PI_ENH_MOVE_ACTIVE_AT_MENTION__?: (delta: number) => void;
+        __PI_ENH_APPLY_ACTIVE_AT_MENTION__?: () => boolean;
+        __PI_ENH_CLOSE_AT_MENTION_MENU__?: () => void;
+      } : null;
+      const mobileEnterEnabled = enhancementWindow?.__PI_ENH_IS_PLUGIN_ENABLED__?.("mobile-enter-newline") ?? true;
+      const mobileEnterNewline = mobileEnterEnabled
+        && (enhancementWindow?.__PI_ENH_IS_MOBILE_ENV__?.() ?? isMobile);
+      const sendShortcut = e.key === "Enter" && !e.shiftKey && (!mobileEnterNewline || e.ctrlKey || e.metaKey);
       const recentlyComposed = Date.now() - lastCompositionEndAtRef.current < COMPOSITION_END_ENTER_GRACE_MS;
       const isComposing =
         isComposingRef.current ||
@@ -1510,6 +1535,36 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
       if (sendShortcut && (isComposing || recentlyComposed)) {
         if (recentlyComposed) e.preventDefault();
         return;
+      }
+
+      // The optional plugin candidate list is rendered by its enhancement,
+      // while this native handler remains the sole owner of composer keys.
+      const enhancedAtMenu = enhancementWindow?.__PI_ENH_GET_ACTIVE_AT_MENTION_MENU__?.(e.currentTarget) ?? null;
+      if (enhancedAtMenu && !isComposing) {
+        if (e.key === "ArrowDown" && enhancedAtMenu.count > 0) {
+          e.preventDefault();
+          e.stopPropagation();
+          enhancementWindow?.__PI_ENH_MOVE_ACTIVE_AT_MENTION__?.(1);
+          return;
+        }
+        if (e.key === "ArrowUp" && enhancedAtMenu.count > 0) {
+          e.preventDefault();
+          e.stopPropagation();
+          enhancementWindow?.__PI_ENH_MOVE_ACTIVE_AT_MENTION__?.(-1);
+          return;
+        }
+        if (e.key === "Escape") {
+          e.preventDefault();
+          e.stopPropagation();
+          enhancementWindow?.__PI_ENH_CLOSE_AT_MENTION_MENU__?.();
+          return;
+        }
+        if ((e.key === "Tab" || e.key === "Enter") && enhancedAtMenu.count > 0) {
+          e.preventDefault();
+          e.stopPropagation();
+          enhancementWindow?.__PI_ENH_APPLY_ACTIVE_AT_MENTION__?.();
+          return;
+        }
       }
 
       if (historyMenuOpen && !isComposing) {
@@ -1631,6 +1686,29 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     },
     [isMobile, isStreaming, onSteer, onFollowUp, onAbort, slashMenuOpen, slashQuery, displayedSlashCommands, slashActiveIndex, applySlashCommand, sendQueued, handleSend, getNextSlashIndex, atMenuOpen, atQuery, atMatches, atActiveIndex, applyAtCompletion, historyMenuOpen, inputHistory, historyActiveIndex, applyHistoryInput, value]
   );
+
+  useEffect(() => {
+    const refreshSubmissionState = () => {
+      const enhancementWindow = window as Window & {
+        __PI_ENH_GET_COMPOSER_SUBMISSION_STATE__?: () => {
+          hasAnnotations?: boolean;
+          hasAttachments?: boolean;
+          hasQuickReply?: boolean;
+        } | null;
+      };
+      const state = enhancementWindow.__PI_ENH_GET_COMPOSER_SUBMISSION_STATE__?.();
+      setHasEnhancedSubmissionPayload(state?.hasAnnotations === true || state?.hasAttachments === true || state?.hasQuickReply === true);
+    };
+    refreshSubmissionState();
+    window.addEventListener("pi-enh-composer-submission-state-change", refreshSubmissionState);
+    return () => window.removeEventListener("pi-enh-composer-submission-state-change", refreshSubmissionState);
+  }, []);
+
+  useEffect(() => {
+    if (!textareaRef.current) return;
+    window.dispatchEvent(new Event("pi-native-composer-mounted"));
+    return () => { window.dispatchEvent(new Event("pi-native-composer-unmounted")); };
+  }, []);
 
   useEffect(() => {
     const ta = textareaRef.current;
@@ -2655,15 +2733,15 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                 alignSelf: "flex-end",
                 display: "flex", alignItems: "center", gap: 6,
                 padding: "7px 14px",
-                background: (value.trim() || attachedImages.length) ? "var(--accent)" : "var(--bg-panel)",
+                background: canSendMessage ? "var(--accent)" : "var(--bg-panel)",
                 border: "none",
                 borderRadius: 8,
-                color: (value.trim() || attachedImages.length) ? "var(--accent-contrast)" : "var(--text-dim)",
-                cursor: (value.trim() || attachedImages.length) ? "pointer" : "not-allowed",
+                color: canSendMessage ? "var(--accent-contrast)" : "var(--text-dim)",
+                cursor: canSendMessage ? "pointer" : "not-allowed",
                 fontSize: 13,
                 fontWeight: 600,
                 letterSpacing: "-0.01em",
-                boxShadow: (value.trim() || attachedImages.length) ? "0 1px 3px color-mix(in srgb, var(--accent) 25%, transparent)" : "none",
+                boxShadow: canSendMessage ? "0 1px 3px color-mix(in srgb, var(--accent) 25%, transparent)" : "none",
                 transition: "background 0.15s, box-shadow 0.15s",
               }}
             >
@@ -2747,9 +2825,10 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
               </svg>
             </button>
             {/* 经典模式下模型选择器留在左侧 */}
-            {!isCodexActive && (modelOptions.length > 0 || model || modelError) && onModelChange && (
+            {!isCodexActive && (modelsLoading || modelOptions.length > 0 || model || modelError) && onModelChange && (
               <ModelSelector
                 options={modelOptions}
+                loading={modelsLoading}
                 value={model}
                 onChange={onModelChange}
                 // SDK refreshes the selected model at the next request boundary.
@@ -2777,9 +2856,10 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
           >
             <div className={isCodexActive ? "chat-composer-model-controls" : undefined} style={!isCodexActive ? { display: "flex", alignItems: "center", gap: 2 } : undefined}>
             {/* Codex 模式下模型选择器位于 Row 3 倒数第 4 列 */}
-            {isCodexActive && (modelOptions.length > 0 || model || modelError) && onModelChange && (
+            {isCodexActive && (modelsLoading || modelOptions.length > 0 || model || modelError) && onModelChange && (
               <ModelSelector
                 options={modelOptions}
+                loading={modelsLoading}
                 value={model}
                 onChange={onModelChange}
                 // SDK refreshes the selected model at the next request boundary.

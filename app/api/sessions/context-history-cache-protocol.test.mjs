@@ -29,9 +29,10 @@ function buildChainEntries(count) {
 }
 
 test("context service: a missing live cursor is 404, never a certified empty terminal page", async () => {
-  const deps = { getRpc: () => ({ isAlive: () => true, inner: { sessionManager: {
+  const liveRpc = { isAlive: () => true, isRunning: () => true, inner: { sessionManager: {
     getEntries: () => buildChainEntries(3), getLeafId: () => "e2",
-  } } }) };
+  } } };
+  const deps = { getRpc: () => liveRpc };
   for (const method of ["GET", "HEAD"]) {
     const res = await handleSessionContextRequest(new Request("http://localhost/api/sessions/s/context?before=missing", {method}), {id:"s"}, deps);
     assert.equal(res.status, 404);
@@ -42,16 +43,13 @@ test("context service: a missing live cursor is 404, never a certified empty ter
 
 test("context service: HEAD has zero body and identical fingerprint to GET", async () => {
   const entries = buildChainEntries(20);
+  const liveRpc = {
+    isAlive: () => true,
+    isRunning: () => true,
+    inner: { sessionManager: { getEntries: () => entries, getLeafId: () => "e19" } },
+  };
   const mockDeps = {
-    getRpc: () => ({
-      isAlive: () => true,
-      inner: {
-        sessionManager: {
-          getEntries: () => entries,
-          getLeafId: () => "e19",
-        },
-      },
-    }),
+    getRpc: () => liveRpc,
     resolvePath: async () => {
       throw new Error("Live context must not access disk");
     },
@@ -91,16 +89,18 @@ test("context service: HEAD has zero body and identical fingerprint to GET", asy
 
 test("context service: appending tail messages preserves stable ancestor page fingerprint", async () => {
   let entries = buildChainEntries(10); // e0 .. e9
-  const mockDeps = {
-    getRpc: () => ({
-      isAlive: () => true,
-      inner: {
-        sessionManager: {
-          getEntries: () => entries,
-          getLeafId: () => entries[entries.length - 1].id,
-        },
+  const liveRpc = {
+    isAlive: () => true,
+    isRunning: () => true,
+    inner: {
+      sessionManager: {
+        getEntries: () => entries,
+        getLeafId: () => entries[entries.length - 1].id,
       },
-    }),
+    },
+  };
+  const mockDeps = {
+    getRpc: () => liveRpc,
   };
 
   // Request page before e8
@@ -121,16 +121,13 @@ test("context service: appending tail messages preserves stable ancestor page fi
 
 test("context service: isolates parameters and branches", async () => {
   const entries = buildChainEntries(20);
+  const liveRpc = {
+    isAlive: () => true,
+    isRunning: () => true,
+    inner: { sessionManager: { getEntries: () => entries, getLeafId: () => "e19" } },
+  };
   const mockDeps = {
-    getRpc: () => ({
-      isAlive: () => true,
-      inner: {
-        sessionManager: {
-          getEntries: () => entries,
-          getLeafId: () => "e19",
-        },
-      },
-    }),
+    getRpc: () => liveRpc,
   };
 
   // Query A
@@ -158,6 +155,24 @@ test("context service: isolates parameters and branches", async () => {
 
   assert.notEqual(fpA, fpDiffTail);
   assert.notEqual(fpA, fpDiffBefore);
+});
+
+test("context service: replacing a live writer during projection returns 409", async () => {
+  const entries = buildChainEntries(3);
+  const makeRpc = () => ({
+    isAlive: () => true,
+    isRunning: () => true,
+    inner: { sessionManager: { getEntries: () => entries, getLeafId: () => "e2" } },
+  });
+  const original = makeRpc();
+  const replacement = makeRpc();
+  let reads = 0;
+  const response = await handleSessionContextRequest(
+    new Request("http://localhost/api/sessions/s1/context?tail=3"),
+    { id: "s1" },
+    { getRpc: () => ++reads === 1 ? original : replacement },
+  );
+  assert.equal(response.status, 409);
 });
 
 test("context service: retains 404, 499 errors without cache headers", async () => {

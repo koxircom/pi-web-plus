@@ -24,7 +24,7 @@ export function buildSessionSyncUrl(options: {
   sessionId: string; baseRevision?: string | null; force?: boolean; syncEnabled?: boolean;
   treeFormat?: "summary" | "full"; additionalParams?: Record<string, string>;
 }): string {
-  const params = new URLSearchParams({ deferThinking: "1", deferMedia: "1", tree: options.treeFormat ?? "summary", ...options.additionalParams });
+  const params = new URLSearchParams({ deferThinking: "1", deferMedia: "1", deferTools: "1", tree: options.treeFormat ?? "summary", ...options.additionalParams });
   if (options.force) params.set("force", "1");
   if (options.syncEnabled !== false) {
     params.set("sync", "1");
