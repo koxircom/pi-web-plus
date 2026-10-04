@@ -1,12 +1,12 @@
-> **Pi Web Plus v1.3.8** 基于 Pi Coding Agent 1.0.2。通过 [GitHub Releases](https://github.com/koxircom/pi-web-plus/releases/tag/v1.3.8) 安装预构建包；本地服务默认只监听 `127.0.0.1`。
+> **PI Web Plus v1.3.8** 基于 Pi Coding Agent 1.0.2。通过 [GitHub Releases](https://github.com/koxircom/pi-web-plus/releases/tag/v1.3.8) 安装预构建包；本地服务默认只监听 `127.0.0.1`。
 
-# Pi Web Plus
+# PI Web Plus
 
 [简体中文说明](./README.zh-CN.md) | [日本語](./README.ja.md) | [Русский](./README.ru.md)
 
-Pi Web Plus 是 [Pi Coding Agent](https://github.com/earendil-works/pi) 的本地浏览器工作台，基于 [agegr/pi-web](https://github.com/agegr/pi-web) 开源项目持续维护。它与 pi 共用本机配置和会话文件，让你在浏览器中继续对话、运行智能体、管理模型，并查看项目文件。
+PI Web Plus 是 [Pi Coding Agent](https://github.com/earendil-works/pi) 的本地浏览器工作台，基于 [agegr/pi-web](https://github.com/agegr/pi-web) 开源项目持续维护。它与 pi 共用本机配置和会话文件，让你在浏览器中继续对话、运行智能体、管理模型，并查看项目文件。
 
-## Pi Web Plus 的特色
+## PI Web Plus 的特色
 
 - **手机图片编辑**：点开输入框里的图片即可裁剪，或用画笔、矩形标注；保存时可替换当前附件，也可将标注图下载到本地。编辑工具适配手机触控。
 - **会话分组与标签**：会话按项目和 worktree 归集；可置顶、归档、标记未读，并添加多维彩色标签，便于整理长期任务。
@@ -16,18 +16,18 @@ Pi Web Plus 是 [Pi Coding Agent](https://github.com/earendil-works/pi) 的本�
 - **轻量引用与过程阅读**：选中文字即可复制或引用，给引用添加带序号的可选评论；工具结果集中折叠，便于连续阅读任务说明和回复。
 - **本地项目工作区**：浏览和上传项目文件、查看 Git diff、预览常见文本与媒体文件，并通过 Git worktree 切换工作目录。模型、Provider 登录、插件包和技能也可从网页管理。
 
-Pi Web Plus 保留并扩展 agegr 的 pi-web 开源项目，许可证及原版权声明见 [MIT License](./LICENSE)。本项目使用 [Pi Coding Agent](https://github.com/earendil-works/pi)。
+PI Web Plus 保留并扩展 agegr 的 pi-web 开源项目，许可证及原版权声明见 [MIT License](./LICENSE)。本项目使用 [Pi Coding Agent](https://github.com/earendil-works/pi)。
 
 ## Quick Start
 
-Pi Web Plus requires Node.js 22.19.0 or newer (`node >=22.19`). Check your version with `node --version`, then install the prebuilt release tarball from [`koxircom/pi-web-plus` GitHub Releases](https://github.com/koxircom/pi-web-plus/releases) and start `pi-web`:
+PI Web Plus requires Node.js 22.19.0 or newer (`node >=22.19`). Check your version with `node --version`, then install the prebuilt release tarball from [`koxircom/pi-web-plus` GitHub Releases](https://github.com/koxircom/pi-web-plus/releases) and start `pi-web`:
 
 ```bash
-npm install -g https://github.com/koxircom/pi-web-plus/releases/download/v1.3.8/pi-web-standalone-1.3.8.tgz
+npm install -g https://github.com/koxircom/pi-web-plus/releases/download/v1.3.8/pi-web-plus-1.3.8.tgz
 pi-web
 ```
 
-> **Important**: The package name in `package.json` remains `@agegr/pi-web` for compatibility, but Pi Web Plus is distributed exclusively through [`koxircom/pi-web-plus` GitHub Releases](https://github.com/koxircom/pi-web-plus/releases). Do **not** pull or install `@agegr/pi-web` from the public npm registry; that is the legacy upstream package, not the Pi Web Plus release.
+> **Important**: The package name in `package.json` remains `@agegr/pi-web` for compatibility, but PI Web Plus is distributed exclusively through [`koxircom/pi-web-plus` GitHub Releases](https://github.com/koxircom/pi-web-plus/releases). Do **not** pull or install `@agegr/pi-web` from the public npm registry; that is the legacy upstream package, not the PI Web Plus release.
 
 The CLI opens a browser after the server is ready. If it does not, open [http://127.0.0.1:30141](http://127.0.0.1:30141). Pi Web listens only on `127.0.0.1` by default.
 
@@ -36,7 +36,7 @@ If no model provider is configured yet, open the **Models** panel to sign in or 
 The command above installs v1.3.8. To install or upgrade to another release, stop the running process with `Ctrl+C`, replace `v1.3.8` and `1.3.8` in the URL with the target `<version>` from [GitHub Releases](https://github.com/koxircom/pi-web-plus/releases), and run the install command again:
 
 ```bash
-npm install -g https://github.com/koxircom/pi-web-plus/releases/download/v<version>/pi-web-standalone-<version>.tgz
+npm install -g https://github.com/koxircom/pi-web-plus/releases/download/v<version>/pi-web-plus-<version>.tgz
 ```
 
 To uninstall, run `npm uninstall -g @agegr/pi-web`.
@@ -77,10 +77,10 @@ Password authentication does not encrypt the connection. Do not expose Pi Web ov
 
 Server-side model and API requests honor the standard `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY` environment variables.
 
-On macOS or Linux (after installing the [GitHub Release tarball](https://github.com/koxircom/pi-web-plus/releases/download/v1.3.8/pi-web-standalone-1.3.8.tgz)):
+On macOS or Linux (after installing the [GitHub Release tarball](https://github.com/koxircom/pi-web-plus/releases/download/v1.3.8/pi-web-plus-1.3.8.tgz)):
 
 ```bash
-npm install -g https://github.com/koxircom/pi-web-plus/releases/download/v1.3.8/pi-web-standalone-1.3.8.tgz
+npm install -g https://github.com/koxircom/pi-web-plus/releases/download/v1.3.8/pi-web-plus-1.3.8.tgz
 HTTP_PROXY=http://127.0.0.1:7890 \
 HTTPS_PROXY=http://127.0.0.1:7890 \
 NO_PROXY=localhost,127.0.0.1 \
@@ -90,7 +90,7 @@ pi-web
 On Windows PowerShell:
 
 ```powershell
-npm install -g https://github.com/koxircom/pi-web-plus/releases/download/v1.3.8/pi-web-standalone-1.3.8.tgz
+npm install -g https://github.com/koxircom/pi-web-plus/releases/download/v1.3.8/pi-web-plus-1.3.8.tgz
 $env:HTTP_PROXY = "http://127.0.0.1:7890"
 $env:HTTPS_PROXY = "http://127.0.0.1:7890"
 $env:NO_PROXY = "localhost,127.0.0.1"

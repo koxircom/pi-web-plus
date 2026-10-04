@@ -1,4 +1,4 @@
-# Pi Web Plus 1.3.8
+# PI Web Plus 1.3.8
 
 内核升级到 Pi Coding Agent 1.0.2，保留现有紧凑聊天界面。
 
@@ -14,7 +14,7 @@
 ## 安装
 
 ```bash
-npm install -g https://github.com/koxircom/pi-web-plus/releases/download/v1.3.8/pi-web-standalone-1.3.8.tgz
+npm install -g https://github.com/koxircom/pi-web-plus/releases/download/v1.3.8/pi-web-plus-1.3.8.tgz
 pi-web
 ```
 
