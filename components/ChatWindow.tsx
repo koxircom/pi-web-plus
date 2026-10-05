@@ -1,5 +1,5 @@
 "use client";
-import { getToolPublicStatus } from "@/lib/tool-public-status";
+import { createToolProcessSummary, getToolProcessSummaryLabel, includeToolInProcessSummary, type ToolProcessSummary } from "@/lib/tool-public-status";
 import { registerAbortHandler } from "@/hooks/useKeyboardShortcuts";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
@@ -15,7 +15,8 @@ import { ChatInput, type ChatInputHandle } from "./ChatInput";
 import { ChatMinimap, useMessageRefs } from "./ChatMinimap";
 import { ExtensionStatusBar } from "./ExtensionStatusBar";
 import { AnsiText } from "./AnsiText";
-import { AskUserSurface } from "./AskUserPanel";
+import { AskUserSurface, AskUserTextPanel } from "./AskUserPanel";
+import { ChatScrollToBottom } from "./ChatScrollToBottom";
 import { NewSessionBrandHeader } from "./NewSessionBrandHeader";
 import { useI18n } from "@/hooks/useI18n";
 import { useAgentSession, type AgentPhase, type NoticeItem } from "@/hooks/useAgentSession";
@@ -113,18 +114,15 @@ function getUserInputText(message: AgentMessage): string | null {
   return text.length > 0 ? text : null;
 }
 
-function ProcessDetailsGroup({ toolStates, reveal = false, children, t }: { toolStates: { running: number; success: number; failure: number }; reveal?: boolean; children: ReactNode; t: (key: string, params?: Record<string, string | number>) => string }) {
+function ProcessDetailsGroup({ toolStates, streamingThinking = false, reveal = false, children, t }: { toolStates: ToolProcessSummary; streamingThinking?: boolean; reveal?: boolean; children: ReactNode; t: (key: string, params?: Record<string, string | number>) => string }) {
   const [expanded, setExpanded] = useState(false);
   useLayoutEffect(() => {
     if (reveal) setExpanded(true);
   }, [reveal]);
-  const parts = [t("chat.processDetails")];
-  if (toolStates.running) parts.push(t("chat.toolStatusRunningCount", { count: toolStates.running }));
-  if (toolStates.success) parts.push(t("chat.toolStatusSuccessCount", { count: toolStates.success }));
-  if (toolStates.failure) parts.push(t("chat.toolStatusFailureCount", { count: toolStates.failure }));
+  const label = getToolProcessSummaryLabel(toolStates, t, streamingThinking);
 
   return (
-    <div data-pi-native-tool-summary="true" data-pi-enh-native-process="true" style={{ marginBottom: 14 }}>
+    <div data-pi-native-tool-summary="true" data-pi-enh-native-process="true" style={{ marginBottom: 12 }}>
       <button
         type="button"
         aria-expanded={expanded || reveal}
@@ -133,7 +131,8 @@ function ProcessDetailsGroup({ toolStates, reveal = false, children, t }: { tool
           display: "flex",
           alignItems: "center",
           gap: 8,
-          width: "auto",
+          width: "100%",
+          minWidth: 0,
           minHeight: 24,
           padding: "2px 0",
           border: "none",
@@ -143,13 +142,13 @@ function ProcessDetailsGroup({ toolStates, reveal = false, children, t }: { tool
           fontSize: 12,
           textAlign: "left",
         }}
-        title={expanded ? t("chat.collapseProcess") : t("chat.expandProcess")}
+        title={`${label} · ${expanded || reveal ? t("chat.collapseProcess") : t("chat.expandProcess")}`}
       >
         <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0, transform: expanded ? "rotate(90deg)" : "none", transition: "transform 0.15s" }}>
           <polyline points="4 2.5 7.5 6 4 9.5" />
         </svg>
         <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-          {parts.join(" · ")}
+          {label}
         </span>
       </button>
       {(expanded || reveal) && (
@@ -1339,12 +1338,6 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
       </div>
 
       <div key="main-chat-viewport" className="relative flex min-h-0 min-w-0 flex-1 overflow-hidden">
-        {extensionDialog && (
-          <ExtensionDialog key={extensionDialog.id} request={extensionDialog} onRespond={respondToExtensionUi} />
-        )}
-        {extensionCustomUi && (
-          <AskUserSurface key={extensionCustomUi.id} request={extensionCustomUi} onInput={sendExtensionCustomInput} fallback={<ExtensionCustomPanel request={extensionCustomUi} onInput={sendExtensionCustomInput} />} />
-        )}
         {!isEmptyNew && <>
         <div
           ref={scrollContainerRef}
@@ -1396,7 +1389,8 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
                 key: string;
                 processKey: string;
                 parts: Array<{ idx: number; keyPrefix: string; messageOverride: AgentMessage }>;
-                toolStates: { running: number; success: number; failure: number };
+                toolStates: ToolProcessSummary;
+                streamingThinking: boolean;
                 refIndex?: number;
                 reveal: boolean;
               };
@@ -1462,14 +1456,16 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
                       key: `process-${key}`,
                       processKey: key,
                       parts: [],
-                      toolStates: { running: 0, success: 0, failure: 0 },
+                      toolStates: createToolProcessSummary(),
+                      streamingThinking: false,
                       refIndex: visibleRefIndexByMessage.get(idx),
                       reveal: false,
                     };
                   }
                   processPlan.reveal ||= Boolean(pendingSearchScroll && entryIds[idx] === pendingSearchScroll.entryId && (!searchBlock || run.message.content.includes(searchBlock)));
                   for (const block of run.message.content) {
-                    if (block.type === "toolCall") processPlan.toolStates[getToolPublicStatus(block, toolResultsMap.get(block.toolCallId))]++;
+                    if (block.type === "toolCall") includeToolInProcessSummary(processPlan.toolStates, block, toolResultsMap.get(block.toolCallId));
+                    if (block.type === "thinking" && idx === messages.length && streamState.isStreaming) processPlan.streamingThinking = true;
                   }
                   processPlan.parts.push({ idx, keyPrefix: `technical-${runIndex}`, messageOverride: run.message });
                 });
@@ -1509,6 +1505,7 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
                     forking={forkingEntryId === entryIds[idx]}
                     onNavigate={sessionBusy ? undefined : handleNavigate}
                     onEditContent={handleEditContent}
+                    compactProgress={plan.keyPrefix?.startsWith("public-") === true && plan.showTimestamp === false}
                     showTimestamp={plan.showTimestamp ?? (msg.role === "assistant")}
                     prevTimestamp={idx > 0 ? (messages[idx - 1] as AgentMessage & { timestamp?: number }).timestamp : undefined}
                     sessionId={session?.id ?? sessionIdRef.current ?? undefined}
@@ -1554,7 +1551,7 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
                     ? renderMessage(plan)
                     : (
                       <div key={plan.key} ref={plan.refIndex === undefined ? undefined : (el) => { messageRefs.current[plan.refIndex!] = el; }}>
-                        <ProcessDetailsGroup toolStates={plan.toolStates} reveal={plan.reveal} t={t}>
+                        <ProcessDetailsGroup toolStates={plan.toolStates} streamingThinking={plan.streamingThinking} reveal={plan.reveal} t={t}>
                           {plan.parts.map((part) => renderMessage({
                             kind: "message",
                             key: `${part.keyPrefix}-${messageKeyFor(part.idx)}`,
@@ -1728,13 +1725,23 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
       )}
 
       <div className="chat-composer-footer relative shrink-0" key="chat-input-container">
+        {(extensionDialog || extensionCustomUi) && (
+          <div className="pi-native-extension-dock" style={{ paddingRight: 16 + columnEndInset }}>
+            <div className="pi-native-extension-column">
+              {extensionDialog && (extensionDialog.method === "input" || extensionDialog.method === "editor"
+                ? <AskUserTextPanel key={extensionDialog.id} request={extensionDialog} onRespond={respondToExtensionUi} />
+                : <ExtensionDialog key={extensionDialog.id} request={extensionDialog} onRespond={respondToExtensionUi} />)}
+              {extensionCustomUi && <AskUserSurface key={extensionCustomUi.id} request={extensionCustomUi} onInput={sendExtensionCustomInput} fallback={<ExtensionCustomPanel request={extensionCustomUi} onInput={sendExtensionCustomInput} />} />}
+            </div>
+          </div>
+        )}
         {!isEmptyNew && (
           <div
             style={{
               position: "absolute",
               bottom: "100%",
               left: 0,
-              right: isMobile ? 0 : CHAT_MINIMAP_WIDTH,
+              right: columnEndInset,
               display: "flex",
               justifyContent: "center",
               paddingBottom: 10,
@@ -1742,17 +1749,12 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
               zIndex: 20,
             }}
           >
-            <button
-              type="button"
-              className={`chat-scroll-to-bottom${showScrollToBottom && !pendingScrollRestore ? " is-visible" : ""}`}
-              title={t("chat.scrollToLatest")}
-              aria-label={t("chat.scrollToLatest")}
-              onClick={() => scrollToBottom("smooth")}
-            >
-              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                <path d="M12 5v14M5 12l7 7 7-7" />
-              </svg>
-            </button>
+            <ChatScrollToBottom
+              visible={showScrollToBottom && !pendingScrollRestore}
+              sessionId={session?.id ?? null}
+              containerRef={scrollContainerRef}
+              label={t("chat.scrollToLatest")}
+            />
           </div>
         )}
         {isEmptyNew && (
@@ -1887,11 +1889,10 @@ function ExtensionDialog({
   request,
   onRespond,
 }: {
-  request: ExtensionDialogRequest;
+  request: Extract<ExtensionDialogRequest, { method: "select" | "confirm" }>;
   onRespond: (request: ExtensionDialogRequest, response: { value: string } | { confirmed: boolean } | { cancelled: true }) => void;
 }) {
   const { t } = useI18n();
-  const [value, setValue] = useState(request.method === "editor" ? request.prefill ?? "" : "");
   const [collapsed, setCollapsed] = useState(false);
   const [now, setNow] = useState(() => Date.now());
   const focusFirstOption = useCallback((element: HTMLDivElement | null) => element?.focus(), []);
@@ -1913,13 +1914,7 @@ function ExtensionDialog({
     </span>
   );
 
-  const submitValue = () => {
-    if (request.method === "confirm") {
-      onRespond(request, { confirmed: true });
-    } else {
-      onRespond(request, { value });
-    }
-  };
+  const submitValue = () => onRespond(request, { confirmed: true });
 
   return (
     <div
@@ -1929,16 +1924,7 @@ function ExtensionDialog({
         event.stopPropagation();
         onRespond(request, { cancelled: true });
       }}
-      style={{
-        position: "absolute",
-        inset: 0,
-        zIndex: 90,
-        display: "flex",
-        alignItems: collapsed ? "flex-start" : "center",
-        justifyContent: "center",
-        padding: 20,
-        pointerEvents: "none",
-      }}
+      className="pi-native-extension-host"
     >
       {collapsed ? (
         <button
@@ -1950,7 +1936,7 @@ function ExtensionDialog({
             display: "flex",
             alignItems: "center",
             gap: 10,
-            maxWidth: "min(560px, 100%)",
+            maxWidth: "100%",
             width: "100%",
             padding: "10px 12px",
             border: "1px solid var(--border)",
@@ -1984,8 +1970,8 @@ function ExtensionDialog({
         aria-label={request.title}
         style={{
           pointerEvents: "auto",
-          width: "min(560px, 100%)",
-          maxHeight: "min(760px, 100%)",
+          width: "100%",
+          maxHeight: "min(360px, 42dvh)",
           display: "flex",
           flexDirection: "column",
           border: "1px solid var(--border)",
@@ -1995,13 +1981,12 @@ function ExtensionDialog({
           overflow: "hidden",
         }}
       >
-        <div style={{ flexShrink: 0, display: "flex", alignItems: "flex-start", gap: 8, padding: "12px 14px", borderBottom: "1px solid var(--border)", maxHeight: "50%", overflowY: "auto" }}>
+        <div style={{ flexShrink: 0, display: "flex", alignItems: "flex-start", gap: 8, padding: "12px 14px", borderBottom: "1px solid var(--border)", maxHeight: "min(100px, 14dvh)", overflowY: "auto" }}>
           <div style={{ flex: 1, minWidth: 0 }}>
             {/* Pi's TUI shows the title verbatim, newlines included; select/input have no
                 separate message field, so extensions put multi-line text here. */}
             <div style={{ color: "var(--text)", fontSize: 14, fontWeight: 650, lineHeight: 1.45, whiteSpace: "pre-wrap", overflowWrap: "anywhere" }}>{request.title}</div>
             <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginTop: 3, color: "var(--text-dim)", fontSize: 11, fontFamily: "var(--font-mono)" }}>
-              <span>{t("chat.extensionRequest")}</span>
               {countdown}
             </div>
           </div>
@@ -2093,51 +2078,7 @@ function ExtensionDialog({
               ))}
             </div>
           )}
-          {request.method === "input" && (
-            <input
-              autoFocus={allowsAutomaticEditableFocus()}
-              value={value}
-              placeholder={request.placeholder}
-              onChange={(e) => setValue(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" && !e.nativeEvent.isComposing) submitValue();
-              }}
-              style={{
-                width: "100%",
-                padding: "9px 10px",
-                borderRadius: 7,
-                border: "1px solid var(--border)",
-                background: "var(--bg-panel)",
-                color: "var(--text)",
-                outline: "none",
-                fontSize: 13,
-              }}
-            />
-          )}
-          {request.method === "editor" && (
-            <textarea
-              autoFocus={allowsAutomaticEditableFocus()}
-              value={value}
-              onChange={(e) => setValue(e.target.value)}
-              onKeyDown={(e) => {
-                if ((e.metaKey || e.ctrlKey) && e.key === "Enter" && !e.nativeEvent.isComposing) submitValue();
-              }}
-              style={{
-                width: "100%",
-                minHeight: 220,
-                padding: 10,
-                borderRadius: 7,
-                border: "1px solid var(--border)",
-                background: "var(--bg-panel)",
-                color: "var(--text)",
-                outline: "none",
-                resize: "vertical",
-                fontSize: 13,
-                lineHeight: 1.55,
-                fontFamily: "var(--font-mono)",
-              }}
-            />
-          )}
+
         </div>
 
         <div style={{ flexShrink: 0, display: "flex", justifyContent: "flex-end", gap: 8, padding: "10px 14px", borderTop: "1px solid var(--border)", background: "var(--bg-panel)" }}>
@@ -2168,20 +2109,6 @@ function ExtensionDialog({
               }}
             >
                {t("chat.confirm")}
-            </button>
-          ) : request.method !== "select" ? (
-            <button
-              onClick={submitValue}
-              style={{
-                padding: "6px 10px",
-                borderRadius: 6,
-                border: "1px solid var(--accent)",
-                background: "var(--accent)",
-                color: "var(--accent-contrast)",
-                cursor: "pointer",
-              }}
-            >
-               {t("chat.submit")}
             </button>
           ) : null}
         </div>
@@ -2215,16 +2142,7 @@ function ExtensionCustomPanel({
 
   return (
     <div
-      style={{
-        position: "absolute",
-        inset: 0,
-        zIndex: 95,
-        display: "flex",
-        alignItems: collapsed ? "flex-start" : "center",
-        justifyContent: "center",
-        padding: 20,
-        pointerEvents: "none",
-      }}
+      className="pi-native-extension-host"
     >
       {collapsed ? (
         <button
@@ -2236,7 +2154,7 @@ function ExtensionCustomPanel({
             display: "flex",
             alignItems: "center",
             gap: 10,
-            maxWidth: "min(920px, 100%)",
+            maxWidth: "100%",
             width: "100%",
             padding: "10px 12px",
             border: "1px solid var(--border)",
@@ -2272,8 +2190,8 @@ function ExtensionCustomPanel({
         style={{
           pointerEvents: "auto",
           position: "relative",
-          width: "min(920px, 100%)",
-          maxHeight: "min(760px, 100%)",
+          width: "100%",
+          maxHeight: "min(360px, 42dvh)",
           display: "flex",
           flexDirection: "column",
           border: "1px solid var(--border)",

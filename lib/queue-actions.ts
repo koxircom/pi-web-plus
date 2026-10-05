@@ -27,6 +27,7 @@ export interface QueueActionSnapshotItem {
 
 export interface QueueActionsSnapshot {
   version: 2;
+  reorder?: true;
   steering: QueueActionSnapshotItem[];
   followUp: QueueActionSnapshotItem[];
 }
@@ -348,6 +349,40 @@ function safeEmitQueueUpdate(session: InternalQueueSession): void {
 }
 
 /**
+ * Pi 1.0.2 consumes image-only user messages from the agent queue, but skips
+ * its text mirror cleanup because contentText is empty. Reconcile only this
+ * confirmed delivery event, never an arbitrary queue mismatch or user action.
+ */
+export function reconcileDeliveredImageOnlyMessage(session: unknown, message: unknown): boolean {
+  if (!session || typeof session !== "object" || !message || typeof message !== "object") return false;
+  const delivered = message as RawQueuedMessage;
+  if (delivered.role !== "user" || extractMessageText(delivered) !== "" || countMessageImages(delivered) === 0) return false;
+  const candidate = session as InternalQueueSession;
+  const queues = [
+    [candidate._steeringMessages, candidate.agent?.steeringQueue?.messages],
+    [candidate._followUpMessages, candidate.agent?.followUpQueue?.messages],
+  ] as const;
+  let consumed: { texts: string[]; index: number } | undefined;
+  for (const [texts, raw] of queues) {
+    if (!Array.isArray(texts) || !Array.isArray(raw)) return false;
+    // A still-queued image must remain editable, recallable and deletable.
+    if (raw.includes(delivered)) return false;
+    if (texts.length === raw.length) {
+      if (texts.some((text, i) => text !== extractMessageText(raw[i]))) return false;
+      continue;
+    }
+    if (consumed || texts.length !== raw.length + 1) return false;
+    const index = texts.indexOf("");
+    if (index < 0 || texts.some((text, i) => i !== index && text !== extractMessageText(raw[i < index ? i : i - 1]))) return false;
+    consumed = { texts, index };
+  }
+  if (!consumed) return false;
+  consumed.texts.splice(consumed.index, 1);
+  safeEmitQueueUpdate(candidate);
+  return true;
+}
+
+/**
  * Snapshot steering and follow-up queue messages with stable UUID tokens and attachment counts.
  * Strictly read-only with respect to session queue state.
  */
@@ -385,6 +420,7 @@ export function snapshot(session: unknown): QueueActionsSnapshot {
 
   return {
     version: 2,
+    reorder: true,
     steering,
     followUp,
   };
@@ -664,4 +700,31 @@ export function recallAll(session: unknown, expectedTokens: unknown): RecallAllQ
     version: 2,
     entries: currentEntries,
   };
+}
+
+/** Reorder within one execution class, synchronously and against the full token
+ * snapshot. Preserve raw objects, attachments and steering priority. */
+export function reorderQueued(session: unknown, expectedTokens: unknown, token: unknown, beforeToken: unknown): PromoteQueuedMessageResult {
+  validateQueueConsistency(session);
+  const registry = getSessionRegistry(session);
+  const raw = [...session.agent.steeringQueue.messages, ...session.agent.followUpQueue.messages];
+  const tokens = raw.map(message => registry.getOrCreateToken(message));
+  if (!Array.isArray(expectedTokens) || tokens.length !== expectedTokens.length
+    || tokens.some((value, i) => value !== expectedTokens[i])) throw new Error("Queue state changed concurrently: expectedTokens mismatch");
+  const from = tokens.indexOf(token as string);
+  const to = tokens.indexOf(beforeToken as string);
+  const split = session._steeringMessages.length;
+  if (from < 0 || to < 0 || (from < split) !== (to < split)) throw new Error("Invalid reorder: messages must belong to the same queue");
+  if (from !== to) {
+    const messages = from < split ? session.agent.steeringQueue.messages : session.agent.followUpQueue.messages;
+    const texts = from < split ? session._steeringMessages : session._followUpMessages;
+    const a = from < split ? from : from - split;
+    const z = to < split ? to : to - split;
+    const [message] = messages.splice(a, 1);
+    const [text] = texts.splice(a, 1);
+    messages.splice(z, 0, message);
+    texts.splice(z, 0, text);
+    safeEmitQueueUpdate(session);
+  }
+  return {version: 2, queuedMessages: {steering: [...session._steeringMessages], followUp: [...session._followUpMessages]}};
 }

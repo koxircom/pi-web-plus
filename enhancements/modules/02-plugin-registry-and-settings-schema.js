@@ -1124,8 +1124,7 @@
     } else if (id === "minimap-full-nav") {
       syncMinimapEnhancements();
     } else if (id === "scroll-to-bottom") {
-      if (!enabled) removeScrollBottomButton();
-      else syncScrollBottomButton();
+      syncScrollBottomPreferences();
     } else if (id === "local-path-launcher") {
       if (!enabled) removeLocalPathLauncher();
       else syncLocalPathLauncher();

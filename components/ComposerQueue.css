@@ -1,0 +1,63 @@
+.pi-enh-queue-panel { max-width: var(--chat-content-max-width, 820px); margin: 0 auto 6px; padding: 0 10px; box-sizing: border-box; color: var(--text-muted); }
+.pi-enh-queue-panel[hidden] { display: none; }
+.pi-enh-queue-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 0 8px 3px; font-size: 11px; color: var(--text-dim); }
+.pi-enh-queue-list { display: grid; gap: 4px; max-height: 180px; overflow-y: auto; }
+.pi-enh-queue-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; min-height: 42px; padding: 5px 10px; border: 1px solid color-mix(in srgb, var(--border) 65%, transparent); border-radius: 16px; background: var(--bg-panel); box-sizing: border-box; }
+.pi-enh-queue-row-target { border-color: var(--text-muted); background: color-mix(in srgb, var(--bg-panel) 94%, var(--text)); }
+.pi-enh-queue-panel button { display: inline-flex; align-items: center; justify-content: center; border: 0; border-radius: 6px; background: transparent; color: var(--text-muted); cursor: pointer; flex-shrink: 0; box-sizing: border-box; font: inherit; }
+.pi-enh-queue-panel button:hover:not(:disabled) { color: var(--text); background: color-mix(in srgb, var(--text) 6%, transparent); }
+.pi-enh-queue-panel button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.pi-enh-queue-panel button:disabled { cursor: default; }
+.pi-enh-queue-panel .pi-enh-queue-text { flex: 1 1 0; min-width: 0; display: block; text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); font-size: 13px; padding: 4px 0; }
+.pi-enh-queue-actions { display: flex; align-items: center; gap: 3px; flex-shrink: 0; }
+.pi-enh-queue-sort, .pi-enh-queue-delete, .pi-enh-queue-more { width: 28px; height: 28px; padding: 0; }
+.pi-enh-queue-panel .pi-enh-queue-sort { cursor: grab; touch-action: none; }
+.pi-enh-queue-panel .pi-enh-queue-sort:active:not(:disabled) { cursor: grabbing; }
+.pi-enh-queue-panel .pi-enh-queue-sort:disabled { cursor: default; color: var(--text-dim); }
+.pi-enh-queue-promote { height: 28px; padding: 0 5px; gap: 5px; white-space: nowrap; }
+.pi-enh-queue-actions button:disabled { opacity: .5; }
+.pi-enh-queue-panel .pi-enh-queue-delete:hover:not(:disabled), .pi-enh-queue-panel .pi-enh-queue-delete-confirming { color: #ef4444; background: color-mix(in srgb, #ef4444 12%, transparent); }
+.pi-enh-queue-panel .pi-enh-queue-image-badge { position: relative; width: 28px; height: 28px; padding: 0; border: 1px solid var(--border); border-radius: 5px; overflow: hidden; }
+.pi-enh-queue-thumb { width: 100%; height: 100%; object-fit: contain; background: color-mix(in srgb, var(--bg-panel) 75%, black); display: block; }
+.pi-enh-queue-image-count { position: absolute; right: 0; bottom: 0; font-size: 9px; line-height: 12px; padding: 0 2px; color: white; background: #303030; }
+.pi-enh-queue-menu { display: flex; flex-basis: 100%; justify-content: flex-end; gap: 4px; border-top: 1px solid var(--border); padding-top: 5px; font-size: 12px; }
+.pi-enh-queue-menu button { padding: 4px 8px; }
+.pi-enh-queue-menu button:disabled { opacity: .4; }
+.pi-enh-queue-recall { gap: 4px; height: 24px; padding: 0 6px; font-size: 11px; }
+dialog[data-pi-queue-gallery] .pi-enh-zoom-toolbar { white-space: nowrap; }
+dialog[data-pi-queue-gallery] .pi-enh-zoom-btn { flex-shrink: 0; min-width: max-content; white-space: nowrap; }
+@media (max-width: 480px) {
+  .pi-enh-queue-panel { padding: 0 6px; }
+  .pi-enh-queue-row { gap: 4px; padding: 5px 6px; border-radius: 13px; }
+  .pi-enh-queue-promote span { display: none; }
+}
+        /* 鼠标悬停大图卡片预览浮层 */
+        .pi-enh-queue-hover-preview {
+          position: fixed;
+          z-index: 1000;
+          background: color-mix(in srgb, var(--bg-panel, #1e1e24) 95%, black);
+          border: 1px solid color-mix(in srgb, var(--border, #3f3f46) 75%, transparent);
+          border-radius: 10px;
+          padding: 6px;
+          box-shadow: 0 12px 32px rgba(0, 0, 0, 0.6);
+          pointer-events: none;
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          gap: 4px;
+          backdrop-filter: blur(12px);
+          max-width: 240px;
+          animation: pi-enh-pop 0.15s ease-out;
+        }
+        .pi-enh-queue-hover-preview img {
+          max-width: 220px;
+          max-height: 160px;
+          object-fit: contain;
+          border-radius: 6px;
+          display: block;
+        }
+        .pi-enh-queue-hover-preview span {
+          font-size: 11px;
+          color: var(--text-muted, #a1a1aa);
+          text-align: center;
+        }

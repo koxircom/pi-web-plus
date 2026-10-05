@@ -49,6 +49,20 @@ function MarkdownImage({
   );
 }
 
+function MarkdownInlineCode({ children, ...props }: ComponentProps<"code"> & ExtraProps) {
+  const insideLink = useContext(MarkdownLinkContext);
+  delete props.node;
+  const code = <code className="markdown-inline-code" {...props}>{children}</code>;
+  const href = String(children).trim();
+  if (insideLink || !/^https?:\/\/[^\s<>]+$/i.test(href)) return code;
+  try {
+    if (!new URL(href).hostname) return code;
+  } catch {
+    return code;
+  }
+  return <a href={href} target="_blank" rel="noopener noreferrer">{code}</a>;
+}
+
 export function MarkdownBody({ children, className, isStreaming, cwd, onOpenFile }: MarkdownBodyProps) {
   const normalizedMarkdown = useMemo(() => normalizeDisplayMath(children), [children]);
   // Stable renderer identities keep stateful blocks mounted across message hover updates.
@@ -69,14 +83,7 @@ export function MarkdownBody({ children, className, isStreaming, cwd, onOpenFile
         }
         return <CodeBlock code={raw.replace(/\n$/, "")} lang={lang} isStreaming={isStreaming} />;
       }
-      return (
-        <code
-          className="markdown-inline-code"
-          {...props}
-        >
-          {children}
-        </code>
-      );
+      return <MarkdownInlineCode {...props}>{children}</MarkdownInlineCode>;
     },
     pre({ children }) {
       return <>{children}</>;

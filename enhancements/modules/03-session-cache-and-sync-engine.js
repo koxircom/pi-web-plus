@@ -3313,7 +3313,7 @@
     // 真实 composer 边界限制：仅在 fieldset、form、.pi-enh-cursor-composer 或包含 textarea.chat-input-textarea 的容器内查找
     const composerRoots = [];
     const knownRoots = document.querySelectorAll(
-      'fieldset, form, .pi-enh-cursor-composer, .chat-input-container, [data-chat-input-wrap]'
+      '[data-pi-native-composer-host], form, .pi-enh-cursor-composer, .chat-input-container, [data-chat-input-wrap]'
     );
     for (const r of knownRoots) {
       if (r && r.nodeType === 1 && !composerRoots.includes(r)) {
@@ -3322,7 +3322,7 @@
     }
     const textareas = document.querySelectorAll('textarea.chat-input-textarea');
     for (const ta of textareas) {
-      const root = ta.closest('fieldset, form, [data-composer], div') || ta.parentElement;
+      const root = ta.closest('[data-pi-native-composer-host], form, [data-composer], div') || ta.parentElement;
       if (root && !composerRoots.includes(root)) {
         composerRoots.push(root);
       }

@@ -198,6 +198,7 @@ interface Props {
   onNavigate?: (entryId: string) => Promise<boolean>;
   onEditContent?: (message: UserMessage) => void;
   showTimestamp?: boolean;
+  compactProgress?: boolean;
   prevTimestamp?: number;
   sessionId?: string;
   /**
@@ -274,12 +275,12 @@ function haveSameRelevantToolResults(
   return true;
 }
 
-export const MessageView = memo(function MessageView({ message, isStreaming, toolResults, modelNames, cwd, onOpenFile, onOpenSession, entryId, searchBlock, onFork, forking, onNavigate, onEditContent, showTimestamp, prevTimestamp, sessionId, writtenFiles }: Props) {
+export const MessageView = memo(function MessageView({ message, isStreaming, toolResults, modelNames, cwd, onOpenFile, onOpenSession, entryId, searchBlock, onFork, forking, onNavigate, onEditContent, showTimestamp, compactProgress, prevTimestamp, sessionId, writtenFiles }: Props) {
   if (message.role === "user") {
     return <UserMessageView message={message as UserMessage} cwd={cwd} onOpenFile={onOpenFile} entryId={entryId} onFork={onFork} forking={forking} onNavigate={onNavigate} onEditContent={onEditContent} />;
   }
   if (message.role === "assistant") {
-    return <AssistantMessageView message={message as AssistantMessage} isStreaming={isStreaming} toolResults={toolResults} modelNames={modelNames} cwd={cwd} onOpenFile={onOpenFile} onOpenSession={onOpenSession} showTimestamp={showTimestamp} prevTimestamp={prevTimestamp} sessionId={sessionId} entryId={entryId} searchBlock={searchBlock} writtenFiles={writtenFiles} />;
+    return <AssistantMessageView message={message as AssistantMessage} isStreaming={isStreaming} toolResults={toolResults} modelNames={modelNames} cwd={cwd} onOpenFile={onOpenFile} onOpenSession={onOpenSession} showTimestamp={showTimestamp} compactProgress={compactProgress} prevTimestamp={prevTimestamp} sessionId={sessionId} entryId={entryId} searchBlock={searchBlock} writtenFiles={writtenFiles} />;
   }
   if (message.role === "toolResult") {
     // Rendered inline under its toolCall — skip standalone rendering if paired
@@ -309,6 +310,7 @@ export const MessageView = memo(function MessageView({ message, isStreaming, too
     && prev.forking === next.forking
     && prev.onNavigate === next.onNavigate
     && prev.onEditContent === next.onEditContent
+    && prev.compactProgress === next.compactProgress
     && prev.showTimestamp === next.showTimestamp
     && prev.prevTimestamp === next.prevTimestamp
     && prev.writtenFiles === next.writtenFiles
@@ -612,6 +614,7 @@ function AssistantMessageView({
   onOpenFile,
   onOpenSession,
   showTimestamp,
+  compactProgress = false,
   prevTimestamp,
   sessionId,
   entryId,
@@ -626,6 +629,7 @@ function AssistantMessageView({
   onOpenFile?: (filePath: string, page?: number) => void;
   onOpenSession?: (sessionId: string) => void;
   showTimestamp?: boolean;
+  compactProgress?: boolean;
   prevTimestamp?: number;
   sessionId?: string;
   entryId?: string;
@@ -640,7 +644,6 @@ function AssistantMessageView({
   const blocks = useMemo(() => blockItems.map(({ block }) => block), [blockItems]);
   const providerError = getAssistantErrorMessage(message, { isStreaming });
   const truncated = isAssistantTruncated(message, { isStreaming });
-  const [hovered, setHovered] = useState(false);
   const [copied, setCopied] = useState(false);
   const streamStartRef = useRef<number | null>(null);
   const [tps, setTps] = useState<number | null>(null);
@@ -759,13 +762,46 @@ function AssistantMessageView({
 
   if (blocks.length === 0 && !isStreaming && !providerError && !truncated) return null;
 
+  const copyButton = textContent && !isStreaming ? (
+    <button
+      className="assistant-message-copy"
+      aria-label={t("i18n.copyMessage")}
+      onClick={copyContent}
+       title={t("i18n.copyMessage")}
+      style={{
+        display: "flex", alignItems: "center", gap: 4,
+        padding: "3px 8px", height: 22,
+        background: "none", border: "none",
+        borderRadius: 5,
+        color: copied ? "var(--accent)" : "var(--text-dim)",
+        cursor: "pointer",
+        fontSize: 11, fontWeight: 400,
+        whiteSpace: "nowrap",
+        marginLeft: compactProgress ? "auto" : undefined,
+        transition: "opacity 0.12s, color 0.12s",
+      }}
+      onMouseEnter={(e) => { if (!copied) e.currentTarget.style.color = "var(--accent)"; }}
+      onMouseLeave={(e) => { if (!copied) e.currentTarget.style.color = "var(--text-dim)"; }}
+    >
+      {copied ? (
+        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+          <polyline points="20 6 9 17 4 12" />
+        </svg>
+      ) : (
+        <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+          <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
+          <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+        </svg>
+      )}
+       {!compactProgress && (copied ? t("i18n.copied") : t("i18n.copy"))}
+    </button>
+  ) : null;
   return (
     <div
       data-message-role="assistant"
       data-entry-id={entryId}
-      style={{ marginBottom: 16 }}
-      onMouseEnter={() => setHovered(true)}
-      onMouseLeave={() => setHovered(false)}
+      data-pi-native-progress-message={compactProgress || undefined}
+      style={{ marginBottom: compactProgress ? 8 : 16 }}
     >
       {/* Model label */}
       <div
@@ -773,6 +809,7 @@ function AssistantMessageView({
           fontSize: 11,
           color: "var(--text-dim)",
           marginBottom: 4,
+          minHeight: compactProgress ? 22 : undefined,
           display: "flex",
           alignItems: "center",
           gap: 6,
@@ -807,6 +844,7 @@ function AssistantMessageView({
             </>
           );
         })()}
+        {compactProgress && copyButton}
       </div>
 
       <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
@@ -861,7 +899,7 @@ function AssistantMessageView({
         <TurnWrittenFiles files={writtenFiles} onOpenFile={onOpenFile} />
       )}
 
-      <div style={{
+      {!compactProgress && <div data-pi-native-message-footer="true" style={{
         display: "flex", alignItems: "center", gap: 8, marginTop: 4,
       }}>
         {message.usage && !isStreaming && (
@@ -869,43 +907,11 @@ function AssistantMessageView({
             {formatUsage(message.usage)}
           </div>
         )}
-        {textContent && !isStreaming && (
-          <button
-            onClick={copyContent}
-             title={t("i18n.copyMessage")}
-            style={{
-              display: "flex", alignItems: "center", gap: 4,
-              padding: "3px 8px", height: 22,
-              background: "none", border: "none",
-              borderRadius: 5,
-              color: copied ? "var(--accent)" : "var(--text-dim)",
-              cursor: "pointer",
-              fontSize: 11, fontWeight: 400,
-              whiteSpace: "nowrap",
-              opacity: hovered ? 1 : 0,
-              pointerEvents: hovered ? "auto" : "none",
-              transition: "opacity 0.12s, color 0.12s",
-            }}
-            onMouseEnter={(e) => { if (!copied) e.currentTarget.style.color = "var(--accent)"; }}
-            onMouseLeave={(e) => { if (!copied) e.currentTarget.style.color = "var(--text-dim)"; }}
-          >
-            {copied ? (
-              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-                <polyline points="20 6 9 17 4 12" />
-              </svg>
-            ) : (
-              <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-                <rect x="9" y="9" width="13" height="13" rx="2" ry="2" />
-                <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
-              </svg>
-            )}
-             {copied ? t("i18n.copied") : t("i18n.copy")}
-          </button>
-        )}
+        {copyButton}
         {time && !isStreaming && (
           <span style={{ fontSize: 10, color: "var(--text-dim)", marginLeft: "auto" }}>{time}</span>
         )}
-      </div>
+      </div>}
     </div>
   );
 }

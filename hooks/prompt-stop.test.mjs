@@ -13,7 +13,7 @@ const tick=()=>new Promise(r=>setImmediate(r));
 function harness(isNew=false){
  const newSession=deferred(),events=deferred(),command=deferred(),state={running:false,bash:false,messages:[],restored:[],notices:[],commands:[],stopping:false,sessionSubmissions:[]},ref=current=>({current});
  const scope={AbortController,DOMException,Promise,useCallback:f=>f,waitForPromptPreparation:undefined,isNew,newSessionCwd:'/test',newSessionDraftKey:'new:draft:/test',newSessionModel:null,pendingSessionInfo,onSessionSubmissionChange:(...args)=>state.sessionSubmissions.push(args),session:isNew?null:{id:'s'},composerDraftKey:'draft',
-  agentRunningRef:ref(false),bashRunningRef:ref(false),sessionIdRef:ref(isNew?null:'s'),ensuringNewSessionRef:ref(null),promptRunIdRef:ref(0),rpcPromptPendingRef:ref(false),optimisticUserMessageKeyRef:ref(null),pendingScrollToUserRef:ref(false),preparationRef:ref(null),stopInFlightRef:ref(null),executeBashRef:ref(null),
+  agentRunningRef:ref(false),bashRunningRef:ref(false),sessionIdRef:ref(isNew?null:'s'),ensuringNewSessionRef:ref(null),promptRunIdRef:ref(0),rpcPromptPendingRef:ref(false),optimisticUserMessageRef:ref(null),entryIdsRef:ref([]),pendingScrollToUserRef:ref(false),preparationRef:ref(null),stopInFlightRef:ref(null),executeBashRef:ref(null),
   ensureNewSession:()=>newSession.promise.then(s=>{scope.sessionIdRef.current=s;return s;}),ensureEventsConnected:()=>events.promise,
   sendAgentCommand:async(s,c)=>{state.commands.push(c);if(c.type==='abort')await command.promise;},
   restoreSubmission:(...args)=>state.restored.push(args),setMessages:f=>state.messages=f(state.messages),setAgentRunning:v=>state.running=v,setBashRunning:v=>state.bash=v,setPendingBash:()=>{},setStopRequested:v=>state.stopping=v,

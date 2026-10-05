@@ -151,7 +151,7 @@
             const m = mutations[i];
             if (isEditorLocalTextOrNodeMutation(m)) continue;
             const target = m.target;
-            if (target && typeof target.closest === "function" && target.closest("fieldset, .pi-enh-queue-panel, .pi-enh-cursor-composer")) {
+            if (target && typeof target.closest === "function" && target.closest("[data-pi-native-composer-host], .pi-enh-queue-panel, .pi-enh-cursor-composer")) {
               touchesComposer = true;
             }
           }
@@ -160,7 +160,7 @@
             // 严禁在此高频执行耗时的全量布局扫描与重排！
             const isTypingInComposer = Boolean(
               document.activeElement &&
-              document.activeElement.closest?.("fieldset, .pi-enh-cursor-composer")
+              document.activeElement.closest?.("[data-pi-native-composer-host], .pi-enh-cursor-composer")
             );
             const cardReady = Boolean(document.querySelector(".pi-enh-cursor-composer"));
             if (!isTypingInComposer || !cardReady) {

@@ -36,6 +36,7 @@ import type { ToolPreset } from "@/lib/tool-presets";
 import type { PromptSubmissionPreviewIdentity } from "@/lib/prompt-submissions";
 import { ModelSelector, type ModelSelectorOption } from "./ModelSelector";
 import { ThinkingSelector } from "./ThinkingSelector";
+import { ComposerQueue } from "./ComposerQueue";
 
 export { filterModelOptions } from "./ModelSelector";
 
@@ -670,39 +671,8 @@ function revokeImagePreview(image: AttachedImage): void {
   }
 }
 
-function QueuedMessageRow({ kind, text }: { kind: "steer" | "follow-up"; text: string }) {
-  return (
-    <div
-      title={text}
-      style={{
-        display: "flex",
-        alignItems: "center",
-        gap: 8,
-        padding: "3px 10px",
-        fontSize: 12,
-        color: "var(--text-muted)",
-        minWidth: 0,
-      }}
-    >
-      <span
-        style={{
-          flexShrink: 0,
-          fontSize: 10,
-          fontFamily: "var(--font-mono)",
-          padding: "1px 7px",
-          borderRadius: 999,
-          border: `1px solid ${kind === "steer" ? "color-mix(in srgb, var(--accent) 45%, transparent)" : "var(--border)"}`,
-          color: kind === "steer" ? "var(--accent)" : "var(--text-dim)",
-        }}
-      >
-        {kind}
-      </span>
-      <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{text}</span>
-    </div>
-  );
-}
-
-function ModelNoticeBanner({ tone, title, body, onClose }: { tone: "error" | "warning"; title: string; body: string; onClose?: () => void }) {
+function ModelNoticeBanner({ tone, title, body, onClose }: { tone: "error" | "warning"; title: string; body: React.ReactNode; onClose?: () => void }) {
+  const { t } = useI18n();
   const color = tone === "error" ? "239,68,68" : "234,179,8";
   return (
     <div
@@ -747,7 +717,7 @@ function ModelNoticeBanner({ tone, title, body, onClose }: { tone: "error" | "wa
         <button
           type="button"
           onClick={onClose}
-          aria-label="Dismiss"
+          aria-label={t("chat.close")}
           style={{
             flexShrink: 0,
             background: "none",
@@ -784,15 +754,39 @@ export function modelSupportsImageInput(
   return entry.input.includes("image");
 }
 
-/** Surfaces `enabledModels` patterns that matched nothing, so a typo is visible (#307). */
+/** Keep SDK diagnostics intact in the API, and translate their known forms for display. */
+function modelScopeWarningText(warning: string, t: ReturnType<typeof useI18n>["t"]): string {
+  const noMatch = /^No models match pattern "(.*)"$/.exec(warning);
+  if (noMatch) return t("chat.modelScopeNoMatch", { pattern: noMatch[1] });
+  const invalidLevel = /^Invalid thinking level "(.*)" in pattern "(.*)"\. Using default instead\.$/.exec(warning);
+  if (invalidLevel) return t("chat.modelScopeInvalidLevel", { level: invalidLevel[1], pattern: invalidLevel[2] });
+  return warning;
+}
+
+/** Configuration diagnostics stay available without filling the composer. */
 export function ModelScopeWarningBanner({ warnings }: { warnings?: string[] }) {
   const { t } = useI18n();
-  if (!warnings || warnings.length === 0) return null;
+  const [dismissedSignature, setDismissedSignature] = useState<string | null>(null);
+  const uniqueWarnings = [...new Set(warnings ?? [])];
+  // A genuinely changed diagnostic set must be visible even after dismissal.
+  const signature = JSON.stringify([...uniqueWarnings].sort());
+  if (uniqueWarnings.length === 0 || dismissedSignature === signature) return null;
   return (
     <ModelNoticeBanner
       tone="warning"
-      title={warnings.length > 1 ? t("chat.modelScopeWarnings") : t("chat.modelScopeWarning")}
-      body={warnings.join("\n")}
+      title={t("chat.modelScopeWarning")}
+      onClose={() => setDismissedSignature(signature)}
+      body={(
+        <details>
+          <summary style={{ cursor: "pointer" }}>
+            {t("chat.modelScopeSummary", { count: uniqueWarnings.length })}
+          </summary>
+          <div style={{ marginTop: 4 }}>{t("chat.modelScopeHelp")}</div>
+          {uniqueWarnings.map((warning) => (
+            <div key={warning}>{modelScopeWarningText(warning, t)}</div>
+          ))}
+        </details>
+      )}
     />
   );
 }
@@ -817,7 +811,6 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const [value, setValue] = useState(() => (draftKey ? getDraftInMemory(draftKey)?.value ?? "" : ""));
   const [hasEnhancedSubmissionPayload, setHasEnhancedSubmissionPayload] = useState(false);
   const [toolDropdownOpen, setToolDropdownOpen] = useState(false);
-  const [controlsMenuOpen, setControlsMenuOpen] = useState(false);
   const [attachedImages, setAttachedImages] = useState<AttachedImage[]>(() => (
     draftKey ? draftImagesToAttachedImages(getDraftInMemory(draftKey)?.images) : []
   ));
@@ -849,7 +842,6 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
 
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const toolDropdownRef = useRef<HTMLDivElement>(null);
-  const controlsMenuRef = useRef<HTMLDivElement>(null);
   const historyMenuRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const isComposingRef = useRef(false);
@@ -1925,9 +1917,6 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
       if (toolDropdownRef.current && !toolDropdownRef.current.contains(e.target as Node)) {
         setToolDropdownOpen(false);
       }
-      if (controlsMenuRef.current && !controlsMenuRef.current.contains(e.target as Node)) {
-        setControlsMenuOpen(false);
-      }
       if (historyMenuRef.current && !historyMenuRef.current.contains(e.target as Node) && !textareaRef.current?.contains(e.target as Node)) {
         setHistoryMenuOpen(false);
       }
@@ -1940,10 +1929,6 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
     if (!isStreaming) return;
     setToolDropdownOpen(false);
   }, [isStreaming]);
-
-  useEffect(() => {
-    if (!isMobile) setControlsMenuOpen(false);
-  }, [isMobile]);
 
   const {
     codexLayoutEnabled,
@@ -2037,8 +2022,10 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
 
 
   return (
-    <fieldset
-      disabled={builtinCommandPending}
+    <div
+      data-pi-native-composer-host="true"
+      role="group"
+      inert={builtinCommandPending || undefined}
       aria-busy={builtinCommandPending}
       style={{
         flexShrink: 0,
@@ -2065,6 +2052,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
           e.target.value = "";
         }}
       />}
+      <ComposerQueue sessionId={draftKey ?? ""} queuedMessages={queuedMessages} onRecallQueue={onRecallQueue} pending={queuedPreviewVisible ? queuedSubmissionPreview : null} />
       <div className={rootClassName} style={rootStyle} data-pi-native-composer-layout="true">
         {isCodexActive && (
           <div
@@ -2100,90 +2088,6 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
         {queuedSubmissionPending && (
           <div className="chat-composer-submit-pending" role="status" style={{ color: "var(--text-dim)", fontSize: 12, marginBottom: 6 }}>
             {t("chat.submittingQueued")}
-          </div>
-        )}
-        {queuedSubmissionPreview && queuedPreviewVisible && (
-          <div data-pi-native-queue-submission="true" role="status" style={{ marginBottom: 8, padding: "8px 10px", border: "1px solid var(--border)", borderRadius: 8, background: "var(--bg-panel)", minWidth: 0 }}>
-            <div style={{ fontSize: 11, color: "var(--text-dim)", marginBottom: 4 }}>
-              {queuedSubmissionPreview.kind === "steering" ? "引导消息" : "排队消息"} · 发送中
-            </div>
-            <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center", minWidth: 0 }}>
-              {queuedSubmissionPreview.images.map((image, index) => (
-                <ImagePreview key={index} src={`data:${image.mimeType};base64,${image.data}`}>
-                  {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img alt={`图片 ${index + 1}`} src={`data:${image.mimeType};base64,${image.data}`} style={{ width: 40, height: 32, objectFit: "contain", borderRadius: 4, flexShrink: 0 }} />
-                </ImagePreview>
-              ))}
-              <span style={{ fontSize: 12, color: "var(--text-muted)", minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{queuedSubmissionPreview.text || "图片消息"}</span>
-            </div>
-          </div>
-        )}
-        {/* Queued steering / follow-up messages (delivered by pi on upcoming turns) */}
-        {((queuedMessages?.steering.length ?? 0) + (queuedMessages?.followUp.length ?? 0)) > 0 && (
-          <div style={{
-            marginBottom: 8,
-            border: "1px solid var(--border)",
-            borderRadius: 6,
-            background: "var(--bg-panel)",
-            padding: "5px 0",
-          }}>
-            <div style={{
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "space-between",
-              gap: 8,
-              padding: "2px 8px 4px 10px",
-            }}>
-              <span style={{
-                fontSize: 10,
-                fontFamily: "var(--font-mono)",
-                color: "var(--text-dim)",
-                textTransform: "uppercase",
-                letterSpacing: 0.4,
-              }}>
-                {t("chat.queued", { count: (queuedMessages?.steering.length ?? 0) + (queuedMessages?.followUp.length ?? 0) })}
-              </span>
-              {onRecallQueue && (
-                <button
-                  onClick={onRecallQueue}
-                   title={t("chat.recallTitle")}
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    gap: 6,
-                    padding: "4px 12px",
-                    fontSize: 12,
-                    color: "var(--text)",
-                    background: "transparent",
-                    border: "1px solid var(--border)",
-                    borderRadius: 7,
-                    cursor: "pointer",
-                    transition: "background 0.12s, border-color 0.12s",
-                    whiteSpace: "nowrap",
-                  }}
-                  onMouseEnter={(e) => {
-                    e.currentTarget.style.background = "var(--bg-hover)";
-                    e.currentTarget.style.borderColor = "color-mix(in srgb, var(--accent) 45%, var(--border))";
-                  }}
-                  onMouseLeave={(e) => {
-                    e.currentTarget.style.background = "transparent";
-                    e.currentTarget.style.borderColor = "var(--border)";
-                  }}
-                >
-                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <polyline points="9 14 4 9 9 4" />
-                    <path d="M20 20v-7a4 4 0 0 0-4-4H4" />
-                  </svg>
-                   {t("chat.recall")}
-                </button>
-              )}
-            </div>
-            {queuedMessages?.steering.map((text, i) => (
-              <QueuedMessageRow key={`steer-${i}`} kind="steer" text={text} />
-            ))}
-            {queuedMessages?.followUp.map((text, i) => (
-              <QueuedMessageRow key={`followup-${i}`} kind="follow-up" text={text} />
-            ))}
           </div>
         )}
         {/* Retry banner */}
@@ -2890,7 +2794,6 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
 
           {/* RIGHT: controls */}
           <div
-            ref={controlsMenuRef}
             className={isCodexActive ? "chat-composer-right chat-composer-contents" : ""}
             style={isCodexActive ? { display: "contents" } : {
               flex: "0 0 auto",
@@ -2961,80 +2864,10 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
               </button>
             )}
 
-            {/* 移动端 More controls 按钮 */}
-            {isMobile && !isStreaming && (
-              <button
-                type="button"
-                className={isCodexActive ? "chat-composer-more-btn" : ""}
-                title={controlsMenuOpen ? undefined : t("chat.moreControls")}
-                aria-label={t("chat.moreControls")}
-                aria-expanded={controlsMenuOpen}
-                aria-hidden={controlsMenuOpen || undefined}
-                tabIndex={controlsMenuOpen ? -1 : undefined}
-                onClick={() => {
-                  setControlsMenuOpen((v) => !v);
-                }}
-                style={isCodexActive ? undefined : {
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  width: "100%",
-                  height: 32,
-                  padding: "8px 10px",
-                  background: "none",
-                  border: "none",
-                  borderRadius: 9,
-                  color: "var(--text-muted)",
-                  cursor: controlsMenuOpen ? "default" : "pointer",
-                  fontSize: 12,
-                  fontWeight: 500,
-                  visibility: controlsMenuOpen ? "hidden" : "visible",
-                  pointerEvents: controlsMenuOpen ? "none" : "auto",
-                  transition: "background 0.12s, color 0.12s",
-                }}
-                onMouseEnter={(e) => {
-                  if (controlsMenuOpen) return;
-                  e.currentTarget.style.background = "var(--bg-hover)";
-                  e.currentTarget.style.color = "var(--text)";
-                }}
-                onMouseLeave={(e) => {
-                  if (controlsMenuOpen) return;
-                  e.currentTarget.style.background = "none";
-                  e.currentTarget.style.color = "var(--text-muted)";
-                }}
-              >
-                {t("chat.moreControls")}
-              </button>
-            )}
-
-            {/* 移动端展开浮层或桌面端内联容器 */}
-            <div
-              className={
-                isCodexActive
-                  ? (isMobile ? (controlsMenuOpen ? "chat-composer-mobile-popover" : "") : "chat-composer-right-inner")
-                  : ""
-              }
-              style={{
-                display: isMobile ? (controlsMenuOpen ? "flex" : "none") : "flex",
-                alignItems: "center",
-                gap: isMobile ? 1 : 2,
-                ...((!isCodexActive && isMobile) ? {
-                  position: "absolute",
-                  right: 0,
-                  bottom: 0,
-                  zIndex: 60,
-                  padding: 1,
-                  width: "max-content",
-                  maxWidth: "calc(100vw - 32px)",
-                  flexWrap: "nowrap",
-                  justifyContent: "flex-end",
-                  border: "1px solid color-mix(in srgb, var(--border) 72%, transparent)",
-                  borderRadius: 10,
-                  background: "color-mix(in srgb, var(--bg-panel) 92%, var(--bg))",
-                  boxShadow: "0 8px 24px rgba(0,0,0,0.14)",
-                  backdropFilter: "blur(10px)",
-                } : null),
-              }}
+            {/* Existing desktop auxiliary controls; no mobile overflow menu. */}
+            {!isMobile && <div
+              className={isCodexActive ? "chat-composer-right-inner" : ""}
+              style={{ display: "flex", alignItems: "center", gap: 2 }}
             >
             {!isStreaming && onToolPresetChange && (
               <div ref={toolDropdownRef} style={{ position: "relative" }}>
@@ -3070,7 +2903,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                   <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                     <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z" />
                   </svg>
-                  {(!isMobile || controlsMenuOpen) && <span className={isCodexActive ? "chat-composer-secondary-label" : undefined} style={{ whiteSpace: "nowrap" }}>{toolPresetLabel}</span>}
+                  <span className={isCodexActive ? "chat-composer-secondary-label" : undefined} style={{ whiteSpace: "nowrap" }}>{toolPresetLabel}</span>
                 </button>
                 {toolDropdownOpen && (
                   <div style={{
@@ -3152,61 +2985,22 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                    aria-label={isCompacting ? t("chat.stopCompaction") : t("chat.compactContext")}
                 >
                   {isCompacting ? (
-                    <><svg width="10" height="10" viewBox="0 0 10 10" fill="none"><rect x="2" y="2" width="6" height="6" rx="1" fill="currentColor" /></svg>{(!isMobile || controlsMenuOpen) && <span className={isCodexActive ? "chat-composer-secondary-label" : undefined} style={{ whiteSpace: "nowrap" }}>{t("chat.compacting")}</span>}</>
+                    <><svg width="10" height="10" viewBox="0 0 10 10" fill="none"><rect x="2" y="2" width="6" height="6" rx="1" fill="currentColor" /></svg><span className={isCodexActive ? "chat-composer-secondary-label" : undefined} style={{ whiteSpace: "nowrap" }}>{t("chat.compacting")}</span></>
                   ) : (
                     <><svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
                       <polyline points="4 14 10 14 10 20" /><polyline points="20 10 14 10 14 4" />
                       <line x1="10" y1="14" x2="3" y2="21" /><line x1="21" y1="3" x2="14" y2="10" />
-                    </svg>{(!isMobile || controlsMenuOpen) && <span className={isCodexActive ? "chat-composer-secondary-label" : undefined} style={{ whiteSpace: "nowrap" }}>{t("chat.compact")}</span>}</>
+                    </svg><span className={isCodexActive ? "chat-composer-secondary-label" : undefined} style={{ whiteSpace: "nowrap" }}>{t("chat.compact")}</span></>
                   )}
                 </button>
               </div>
             )}
 
-            {isMobile && controlsMenuOpen && (
-              <button
-                type="button"
-                 title={t("chat.collapseControls")}
-                 aria-label={t("chat.collapseControls")}
-                aria-expanded={true}
-                onClick={() => {
-                  setToolDropdownOpen(false);
-                                setControlsMenuOpen(false);
-                }}
-                style={{
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "center",
-                  width: 36,
-                  height: 32,
-                  padding: 0,
-                  marginLeft: 0,
-                  background: "var(--bg-hover)",
-                  border: "none",
-                  borderLeft: "1px solid color-mix(in srgb, var(--border) 72%, transparent)",
-                  borderRadius: "0 9px 9px 0",
-                  color: "var(--text)",
-                  cursor: "pointer",
-                  transition: "background 0.12s, color 0.12s",
-                }}
-                onMouseEnter={(e) => {
-                  e.currentTarget.style.background = "var(--bg-selected)";
-                }}
-                onMouseLeave={(e) => {
-                  e.currentTarget.style.background = "var(--bg-hover)";
-                }}
-              >
-                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-                  <line x1="18" y1="6" x2="6" y2="18" />
-                  <line x1="6" y1="6" x2="18" y2="18" />
-                </svg>
-              </button>
-            )}
-            </div>
+            </div>}
           </div>
 
         </div>}
       </div>
-    </fieldset>
+    </div>
   );
 });

@@ -221,6 +221,21 @@ test("renders enabledModels scope warnings", () => {
   );
 });
 
+test("scope warnings collapse duplicates and translate diagnostic details", () => {
+  const warning = 'No models match pattern "openai-codex/gpt-6.1-sol:high"';
+  const html = renderToStaticMarkup(React.createElement(I18nProvider, null,
+    React.createElement(ModelScopeWarningBanner, { warnings: [warning, warning,
+      'Invalid thinking level "bogus" in pattern "fixture/startup:bogus". Using default instead.'] })));
+  assert.match(html, /2 项模型配置需要检查/);
+  assert.match(html, /<details>/);
+  assert.doesNotMatch(html, /<details open/);
+  assert.match(html, /当前可用目录未匹配/);
+  assert.match(html, /推理等级 bogus 无效/);
+  assert.doesNotMatch(html, /No models match pattern|Invalid thinking level/);
+  assert.match(html, /aria-label="关闭"/);
+  assert.equal((html.match(/openai-codex\/gpt-6.1-sol:high/g) ?? []).length, 1);
+});
+
 test("keeps the model selector visible when a model error leaves no options", () => {
   const html = renderToStaticMarkup(
     React.createElement(
@@ -1221,4 +1236,12 @@ test("native queued extension payload commits only after acceptance, preserving 
     if(rejected)await assert.rejects(send("followup"),/rejected/);else await send("followup");
     assert.equal(seen,"queued annotation");assert.equal(commits,rejected?0:1);
   }
+});
+
+// Retired UI must not return through a native render or a responsive CSS path.
+test("retired more controls menu has no composer render, state or styles", () => {
+  const source = readFileSync(new URL("./ChatInput.tsx", import.meta.url), "utf8");
+  const styles = readFileSync(new URL("../app/composer.css", import.meta.url), "utf8");
+  assert.doesNotMatch(source, /chat\.(moreControls|collapseControls)|controlsMenu(Open|Ref)|setControlsMenuOpen|chat-composer-(more-btn|mobile-popover)/);
+  assert.doesNotMatch(styles, /chat-composer-(more-btn|mobile-popover)/);
 });

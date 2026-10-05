@@ -1,0 +1,17 @@
+const fs=require('fs'),vm=require('vm'),assert=require('assert/strict');
+const source=fs.readFileSync(__dirname+'/../enhancements/modules/05-composer-and-input-workflow.js','utf8');
+const take=(name,next)=>source.slice(source.indexOf('  '+name),source.indexOf('  '+next,source.indexOf('  '+name)));
+let messages=[],reads=0;
+const ctx={composerQueueUnsupported:new Set(),composerQueueErrors:new Map(),composerQueueActionsState:null,showQueueSecurityWarningToast:m=>messages.push(m),showToast:m=>messages.push(m),loadComposerQueueTokens:()=>{reads++}};
+vm.createContext(ctx);
+vm.runInContext(take('function showQueueUnavailable','function removeComposerQueuePanel'),ctx);
+ctx.composerQueueErrors.set('s','Queue desynchronized: steering queue length mismatch');
+ctx.showQueueUnavailable('s','signature',[]);
+assert.equal(reads,1);assert.match(messages.pop(),/不同步/);assert.equal(ctx.composerQueueUnsupported.size,0);
+ctx.handleQueueOperationError('s','Queued message not found','删除');
+assert.equal(ctx.composerQueueUnsupported.size,0);assert.match(messages.pop(),/删除失败/);
+ctx.handleQueueOperationError('s','Unknown command: get_queue_actions','删除');
+assert.equal(ctx.composerQueueUnsupported.has('s'),true);assert.match(messages.pop(),/不支持/);
+ctx.showQueueUnavailable('s','signature',[]);assert.equal(reads,1);
+assert.doesNotMatch(source,/安全接口待维护安装/);
+console.log(JSON.stringify({passed:4,desyncRetainsQueue:true,missingMessageDoesNotDisableInterface:true,userClickRefreshOnly:true}));

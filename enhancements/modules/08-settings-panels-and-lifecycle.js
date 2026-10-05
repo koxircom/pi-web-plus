@@ -4824,7 +4824,7 @@ window.__PI_ENH_RENDER_USAGE_PANEL__ = renderUsagePanel;
 
       // 4. Thorough DOM cleanup
       removeQuickActionButtons();
-      removeScrollBottomButton();
+      window.dispatchEvent(new CustomEvent("pi:scroll-bottom-preferences", { detail: { enabled: false } }));
       removeLocalPathLauncher();
       removeProjectStatusIndicators();
       removeCompactionEnhancements();

@@ -626,7 +626,7 @@
       addScope(fallbackRoot);
     }
     if (textarea) {
-      addScope(textarea.closest?.("fieldset"));
+      addScope(textarea.closest?.("[data-pi-native-composer-host]"));
       addScope(textarea.closest?.(".pi-enh-cursor-composer"));
       addScope(textarea.closest?.("form"));
       addScope(textarea.closest?.(".chat-input-container, [data-chat-input-wrap], .relative.shrink-0"));
@@ -947,7 +947,7 @@
 
   // Shared by the image-zoom plugin. Never search message history as fallback.
   function findComposerImageContainer(textarea) {
-    return textarea?.closest?.("fieldset")?.querySelector('div[style*="flex-wrap"], div[style*="flexWrap"]') || null;
+    return textarea?.closest?.("[data-pi-native-composer-host]")?.querySelector('div[style*="flex-wrap"], div[style*="flexWrap"]') || null;
   }
 
   function isNativeImagePreviewTrigger(el) {
@@ -1034,7 +1034,7 @@
   function findNativeComposerSendButton(textarea) {
     if (!textarea) return null;
     const roots = [
-      textarea.closest?.("fieldset"),
+      textarea.closest?.("[data-pi-native-composer-host]"),
       textarea.closest?.("form"),
       textarea.closest?.(".chat-input-container"),
       textarea.parentElement,
@@ -1133,7 +1133,7 @@
     if (String(textarea.value || "").trim()) return true;
     if (typeof pendingComposerAttachments !== "undefined" && Array.isArray(pendingComposerAttachments) && pendingComposerAttachments.length > 0) return true;
     if (typeof listAnnotations === "function" && listAnnotations().length > 0) return true;
-    const root = textarea.closest?.("fieldset") || textarea.closest?.("form") || textarea.parentElement?.parentElement || textarea.parentElement;
+    const root = textarea.closest?.("[data-pi-native-composer-host]") || textarea.closest?.("form") || textarea.parentElement?.parentElement || textarea.parentElement;
     if (root?.querySelector?.(".pi-enh-attachment-card")) return true;
     const nativeImageContainer = findComposerImageContainer(textarea);
     if (nativeImageContainer?.querySelectorAll?.("img")?.length) return true;
@@ -1327,7 +1327,7 @@
     // Compatibility adapter for Pi Web 0.9.1 ChatInput. Locate state by semantic
     // identity rather than hook indices; if upstream changes, fail closed.
     const textarea = document.querySelector("textarea.chat-input-textarea");
-    const fieldset = textarea?.closest("fieldset");
+    const fieldset = textarea?.closest("[data-pi-native-composer-host]");
     if (!fieldset?.isConnected) return null;
     let owner = committedComposerFiber(fieldset);
     for (let depth = 0; owner && depth < 12; depth++, owner = owner.return) {
@@ -2624,7 +2624,7 @@
     if (!textarea) return null;
     const host = textarea.parentElement || textarea;
     const grandParent = host.parentElement;
-    const composerCard = textarea.closest?.('.pi-enh-cursor-composer, fieldset > div[style*="max-width"]') || grandParent;
+    const composerCard = textarea.closest?.('.pi-enh-cursor-composer, [data-pi-native-composer-host] > div[style*="max-width"]') || grandParent;
     return composerCard?.querySelector?.(".pi-enh-attachments-bar") || grandParent?.querySelector?.(".pi-enh-attachments-bar") || host?.querySelector?.(".pi-enh-attachments-bar") || null;
   }
 
@@ -2632,7 +2632,7 @@
     if (!textarea) return;
     const host = textarea.parentElement || textarea;
     const grandParent = host.parentElement;
-    const composerCard = textarea.closest?.('.pi-enh-cursor-composer, fieldset > div[style*="max-width"]') || grandParent;
+    const composerCard = textarea.closest?.('.pi-enh-cursor-composer, [data-pi-native-composer-host] > div[style*="max-width"]') || grandParent;
     let bar = findComposerAttachmentBar(textarea);
 
     if (pendingComposerAttachments.length === 0) {
@@ -2850,7 +2850,7 @@
     if (!textarea || !card?.isConnected) return;
     removeComposerDocumentPicker();
     const generation = composerDocumentPickerGeneration;
-    const root = textarea.closest("fieldset") || textarea.closest("form");
+    const root = textarea.closest("[data-pi-native-composer-host]") || textarea.closest("form");
     const imageInput = root?.querySelector('input[type="file"]');
     const isCurrent = () => generation === composerDocumentPickerGeneration
       && card.isConnected && textarea.isConnected && findComposerTextarea() === textarea
@@ -2930,9 +2930,9 @@
 
   function syncComposerFileInputAndToolbar(textarea) {
     if (typeof document === "undefined") return;
-    const root = textarea?.closest?.("fieldset") || textarea?.closest?.("form") || document;
+    const root = textarea?.closest?.("[data-pi-native-composer-host]") || textarea?.closest?.("form") || document;
     const fileInput = root.querySelector?.('input[type="file"]') ||
-      document.querySelector?.('fieldset input[type="file"], form input[type="file"]');
+      document.querySelector?.('[data-pi-native-composer-host] input[type="file"], form input[type="file"]');
     if (fileInput) {
       if (!fileInput.hasAttribute("data-pi-orig-accept")) {
         fileInput.setAttribute("data-pi-orig-accept", fileInput.getAttribute("accept") || "image/*");
@@ -2992,9 +2992,9 @@
     for (const btn of attachBtns) {
       if (!btn.__piEnhAttachClickHandler) {
         btn.__piEnhAttachClickHandler = () => {
-          const r = btn.closest("fieldset") || btn.closest("form") || document;
+          const r = btn.closest("[data-pi-native-composer-host]") || btn.closest("form") || document;
           const fi = r.querySelector?.('input[type="file"]') ||
-            document.querySelector?.('fieldset input[type="file"], form input[type="file"]');
+            document.querySelector?.('[data-pi-native-composer-host] input[type="file"], form input[type="file"]');
           if (fi) fi.setAttribute("accept", "image/*,video/*");
         };
         btn.addEventListener("click", btn.__piEnhAttachClickHandler, true);
@@ -3164,7 +3164,7 @@
     };
 
     const getDropHighlightTarget = () =>
-      textarea.closest?.('.pi-enh-cursor-composer, fieldset > div[style*="max-width"]') ||
+      textarea.closest?.('.pi-enh-cursor-composer, [data-pi-native-composer-host] > div[style*="max-width"]') ||
       activeComposerPasteHost ||
       textarea;
 
@@ -3208,7 +3208,7 @@
     textarea.addEventListener("dragleave", composerDragLeaveHandler);
     textarea.addEventListener("drop", composerDropHandler);
 
-    const composerHost = textarea.closest?.("fieldset") || textarea.closest?.("form") || textarea.parentElement;
+    const composerHost = textarea.closest?.("[data-pi-native-composer-host]") || textarea.closest?.("form") || textarea.parentElement;
     if (composerHost && composerHost !== textarea) {
       activeComposerPasteHost = composerHost;
       composerHost.__piEnhHostDropBound = true;
@@ -3373,7 +3373,7 @@
       const style = (typeof curr.getAttribute === "function" ? curr.getAttribute("style") : curr.attributes?.style) || "";
       if (
         tag === "form"
-        || tag === "fieldset"
+        || curr.hasAttribute?.("data-pi-native-composer-host")
         || cls.includes("chat-input-container")
         || style.includes("flex-wrap")
         || style.includes("flexWrap")
@@ -3714,7 +3714,7 @@
   const RUNNING_MODEL_SWITCH_MARKER = "data-pi-enh-running-model-switch";
 
   function isComposerTaskRunning() {
-    const fieldset = document.querySelector("fieldset");
+    const fieldset = document.querySelector("[data-pi-native-composer-host]");
     if (!fieldset) return false;
     return Array.from(fieldset.querySelectorAll("button")).some((button) => {
       const text = String(button.textContent || "").trim().toLowerCase();
@@ -4025,39 +4025,33 @@
     notifyQueueAttachmentUpdated();
   }
 
-  // Read-only mirror outside the native composer. Never move React-owned queue nodes.
+  // Native React owns queue rendering; this adapter owns secure RPC/recovery only.
   composerQueuePanel = null;
-  let composerQueueSignature = "";
   let composerQueueLastEntriesSignature = "";
+  let composerQueueCurrentEntries = [];
   let composerQueueRequest = null;
   let composerQueueBusy = false;
   const composerQueueUnsupported = new Set();
   let composerQueueActionsState = null;
-  let activeQueueHoverCard = null;
-  let activeQueueHoverOwner = null;
-  let activeQueueHoverSessionId = "";
-
-  function closeQueueHoverCard(targetOwner = null) {
-    if (targetOwner && activeQueueHoverOwner && targetOwner !== activeQueueHoverOwner) {
+  const composerQueueErrors = new Map();
+  function showQueueUnavailable(sessionId, signature, entries) {
+    if (composerQueueUnsupported.has(sessionId)) {
+      showQueueSecurityWarningToast("队列未改动：当前服务不支持安全队列操作");
       return;
     }
-    if (activeQueueHoverCard) {
-      activeQueueHoverCard.remove();
-      activeQueueHoverCard = null;
-    }
-    activeQueueHoverOwner = null;
-    activeQueueHoverSessionId = "";
-    for (const preview of document.querySelectorAll(".pi-enh-queue-hover-preview")) {
-      preview.remove();
-    }
+    const error = composerQueueErrors.get(sessionId) || "队列状态尚未获取";
+    showToast(/Queue desynchronized/i.test(error)
+      ? "队列显示与执行状态不同步，原图文已保留；正在重新读取状态"
+      : "队列状态暂不可用，原图文已保留；正在重新读取状态", null, 3500);
+    void loadComposerQueueTokens(sessionId, signature, entries);
   }
 
   function handleQueueOperationError(sessionId, errorMsg, defaultPrefix = "操作") {
     const raw = String(errorMsg || "");
-    if (/unknown|unsupported|not found|404|未安装|不支持/i.test(raw)) {
+    if (/unknown command|unsupported command|未安装|不支持.*(?:命令|接口)/i.test(raw)) {
       if (sessionId) composerQueueUnsupported.add(sessionId);
       composerQueueActionsState = null;
-      showQueueSecurityWarningToast("队列未改动：安全接口待维护安装，暂不能编辑、删除或提升");
+      showQueueSecurityWarningToast("队列未改动：当前服务不支持安全队列操作");
     } else {
       showToast(`${defaultPrefix}失败: ${raw || "请求异常"}`, null, 3000);
     }
@@ -4065,18 +4059,11 @@
 
   function removeComposerQueuePanel() {
     clearQueueDetailCache();
-    closeQueueHoverCard();
-    if (activeZoomDialog?.hasAttribute("data-pi-queue-gallery")) closeComposerImageZoomModal();
-    for (const preview of document.querySelectorAll(".pi-enh-queue-hover-preview")) preview.remove();
-    composerQueuePanel?.remove();
     composerQueuePanel = null;
-    composerQueueSignature = "";
     composerQueueLastEntriesSignature = "";
+    composerQueueCurrentEntries = [];
     composerQueueActionsState = null;
-    document.getElementById("pi-enh-queue-panel-style")?.remove();
-    for (const node of document.querySelectorAll(".pi-enh-native-queue-hidden")) {
-      node.classList.remove("pi-enh-native-queue-hidden");
-    }
+    window.dispatchEvent(new CustomEvent("pi:native-queue-details", { detail: { signature: "", enabled: false, busy: false, images: [] } }));
   }
 
   async function fetchQueuedMessageDetail(sessionId, token) {
@@ -4138,7 +4125,9 @@
       const result = await response.json();
       const data = result?.data;
       if (!response.ok || result.success === false) {
-        if (/unknown|unsupported|不支持/i.test(String(result?.error || ""))) {
+        composerQueueActionsState = null;
+        composerQueueErrors.set(sessionId, String(result?.error || "队列状态请求失败"));
+        if (/unknown command|unsupported command|不支持.*(?:命令|接口)/i.test(String(result?.error || ""))) {
           composerQueueUnsupported.add(sessionId);
         }
         return;
@@ -4146,6 +4135,7 @@
       if (!isPluginEnabled("composer-queue-panel") || !composerQueuePanel?.isConnected || sessionId !== getCurrentSessionId()
         || entriesSignature !== composerQueueLastEntriesSignature) return;
 
+      composerQueueErrors.delete(sessionId);
       if (data?.version === 2) {
         const steering = Array.isArray(data.steering) ? data.steering : [];
         const followUp = Array.isArray(data.followUp) ? data.followUp : [];
@@ -4174,6 +4164,7 @@
           sessionId,
           signature: entriesSignature,
           version: 2,
+          reorder: data.reorder === true,
           steering,
           followUp,
         };
@@ -4200,23 +4191,23 @@
           followUp: Array.isArray(data.followUp) ? data.followUp : [],
         };
       }
-    } catch (_) {
+    } catch (error) {
+      composerQueueActionsState = null;
+      composerQueueErrors.set(sessionId, String(error?.message || "网络异常"));
       // Keep native queue intact on a network error.
     } finally {
       composerQueueRequest = null;
       if (composerQueueLastEntriesSignature && composerQueueLastEntriesSignature !== entriesSignature) {
-        composerQueueSignature = "";
-        syncComposerQueuePanel();
+            syncComposerQueuePanel();
       }
     }
   }
 
   async function promoteComposerQueuedMessage(entryIndex, sessionId, signature) {
-    closeQueueHoverCard();
     if (composerQueueBusy || sessionId !== getCurrentSessionId() || signature !== composerQueueLastEntriesSignature) return;
     const hasSecure = composerQueueActionsState && (composerQueueActionsState.version === 1 || composerQueueActionsState.version === 2) && !composerQueueUnsupported.has(sessionId);
     if (!hasSecure) {
-      showQueueSecurityWarningToast("队列未改动：安全接口待维护安装，暂不能编辑、删除或提升");
+      showQueueUnavailable(sessionId, composerQueueLastEntriesSignature, composerQueueCurrentEntries);
       return;
     }
     if (composerQueueActionsState.sessionId !== sessionId || composerQueueActionsState.signature !== signature) {
@@ -4224,12 +4215,12 @@
       return;
     }
     composerQueueBusy = true;
-    for (const button of composerQueuePanel?.querySelectorAll("button") || []) button.disabled = true;
+    publishNativeQueueDetails();
 
     try {
       const hasSecure = composerQueueActionsState.version === 1 || composerQueueActionsState.version === 2;
       if (!hasSecure) {
-        showQueueSecurityWarningToast("队列未改动：安全接口待维护安装，暂不能编辑、删除或提升");
+        showQueueUnavailable(sessionId, composerQueueLastEntriesSignature, composerQueueCurrentEntries);
         return;
       }
 
@@ -4241,7 +4232,7 @@
           token = composerQueueActionsState.followUp[followUpIdx]?.token;
         }
       } else if (composerQueueActionsState.version === 1) {
-        const steerCount = composerQueuePanel?.querySelectorAll ? Array.from(composerQueuePanel.querySelectorAll(".pi-enh-queue-number")).filter((n) => n.textContent === "↗").length : 0;
+        const steerCount = composerQueueCurrentEntries.filter((entry) => entry.kind === "steer").length;
         const followUpIdx = entryIndex >= steerCount ? entryIndex - steerCount : -1;
         if (followUpIdx >= 0 && followUpIdx < composerQueueActionsState.followUp.length) {
           token = composerQueueActionsState.followUp[followUpIdx]?.token;
@@ -4249,7 +4240,7 @@
       }
 
       if (!token) {
-        showQueueSecurityWarningToast("队列未改动：安全接口待维护安装，暂不能编辑、删除或提升");
+        showQueueUnavailable(sessionId, composerQueueLastEntriesSignature, composerQueueCurrentEntries);
         return;
       }
 
@@ -4268,17 +4259,42 @@
       handleQueueOperationError(sessionId, error.message, "转引导");
     } finally {
       composerQueueBusy = false;
-      composerQueueSignature = "";
+        syncComposerQueuePanel();
+    }
+  }
+
+  async function reorderComposerQueuedMessage(index, targetIndex, sessionId, signature) {
+    const state = composerQueueActionsState;
+    if (composerQueueBusy || sessionId !== getCurrentSessionId() || signature !== composerQueueLastEntriesSignature
+      || state?.signature !== signature || state?.sessionId !== sessionId || !state.reorder) return;
+    const items = [...state.steering, ...state.followUp];
+    const entries = composerQueueCurrentEntries;
+    if (!Number.isInteger(index) || !Number.isInteger(targetIndex) || !items[index] || !items[targetIndex]
+      || entries[index]?.kind !== entries[targetIndex]?.kind || index === targetIndex) return;
+    composerQueueBusy = true;
+    publishNativeQueueDetails();
+    try {
+      const res = await window.fetch(`/api/agent/${encodeURIComponent(sessionId)}`, {
+        method: "POST", headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({type: "reorder_queued_message", tokens: items.map(item => item.token), token: items[index].token, targetToken: items[targetIndex].token}),
+      });
+      const result = await res.json();
+      if (!res.ok || result?.success !== true || result.data?.version !== 2) throw new Error(result?.error || "排序失败");
+    } catch (error) { handleQueueOperationError(sessionId, error.message, "排序"); }
+    finally {
+      composerQueueBusy = false;
+      // Identical text may keep the render signature unchanged: re-read tokens
+      // so images continue to follow their original message objects.
+      composerQueueActionsState = null;
       syncComposerQueuePanel();
     }
   }
 
   async function recallSingleQueuedMessage(entryIndex, sessionId, signature) {
-    closeQueueHoverCard();
     if (composerQueueBusy || sessionId !== getCurrentSessionId() || signature !== composerQueueLastEntriesSignature) return;
     const hasSecure = composerQueueActionsState && composerQueueActionsState.version === 2 && !composerQueueUnsupported.has(sessionId);
     if (!hasSecure) {
-      showQueueSecurityWarningToast("队列未改动：安全接口待维护安装，暂不能编辑、删除或提升");
+      showQueueUnavailable(sessionId, composerQueueLastEntriesSignature, composerQueueCurrentEntries);
       return;
     }
     if (composerQueueActionsState.sessionId !== sessionId || composerQueueActionsState.signature !== signature) {
@@ -4308,12 +4324,12 @@
     }
 
     if (!token) {
-      showQueueSecurityWarningToast("队列未改动：安全接口待维护安装，暂不能编辑、删除或提升");
+      showQueueUnavailable(sessionId, composerQueueLastEntriesSignature, composerQueueCurrentEntries);
       return;
     }
 
     composerQueueBusy = true;
-    for (const button of composerQueuePanel?.querySelectorAll("button") || []) button.disabled = true;
+    publishNativeQueueDetails();
 
     try {
       const payload = await fetchQueuedMessageDetail(sessionId, token);
@@ -4362,17 +4378,15 @@
       handleQueueOperationError(sessionId, error.message, "移回编辑");
     } finally {
       composerQueueBusy = false;
-      composerQueueSignature = "";
-      syncComposerQueuePanel();
+        syncComposerQueuePanel();
     }
   }
 
   async function recallAllQueuedMessages(sessionId, signature, entries) {
-    closeQueueHoverCard();
     if (composerQueueBusy || sessionId !== getCurrentSessionId() || signature !== composerQueueLastEntriesSignature) return;
     const hasSecure = composerQueueActionsState && composerQueueActionsState.version === 2 && !composerQueueUnsupported.has(sessionId);
     if (!hasSecure) {
-      showQueueSecurityWarningToast("队列未改动：安全接口待维护安装，暂不能编辑、删除或提升");
+      showQueueUnavailable(sessionId, composerQueueLastEntriesSignature, composerQueueCurrentEntries);
       return;
     }
     if (composerQueueActionsState.sessionId !== sessionId || composerQueueActionsState.signature !== signature) {
@@ -4409,7 +4423,7 @@
     }
 
     composerQueueBusy = true;
-    for (const button of composerQueuePanel?.querySelectorAll("button") || []) button.disabled = true;
+    publishNativeQueueDetails();
 
     try {
       // Keep complete payloads before removal, including on ambiguous network failure.
@@ -4457,17 +4471,15 @@
       handleQueueOperationError(sessionId, error.message, "全部移回");
     } finally {
       composerQueueBusy = false;
-      composerQueueSignature = "";
-      syncComposerQueuePanel();
+        syncComposerQueuePanel();
     }
   }
 
   async function deleteSingleQueuedMessage(entryIndex, sessionId, signature) {
-    closeQueueHoverCard();
     if (composerQueueBusy || sessionId !== getCurrentSessionId() || signature !== composerQueueLastEntriesSignature) return;
     const hasSecure = composerQueueActionsState && composerQueueActionsState.version === 2 && !composerQueueUnsupported.has(sessionId);
     if (!hasSecure) {
-      showQueueSecurityWarningToast("队列未改动：安全接口待维护安装，暂不能编辑、删除或提升");
+      showQueueUnavailable(sessionId, composerQueueLastEntriesSignature, composerQueueCurrentEntries);
       return;
     }
     if (composerQueueActionsState.sessionId !== sessionId || composerQueueActionsState.signature !== signature) {
@@ -4480,12 +4492,12 @@
     const token = entryIndex < steerList.length ? steerList[entryIndex]?.token : followUpList[entryIndex - steerList.length]?.token;
 
     if (!token) {
-      showQueueSecurityWarningToast("队列未改动：安全接口待维护安装，暂不能编辑、删除或提升");
+      showQueueUnavailable(sessionId, composerQueueLastEntriesSignature, composerQueueCurrentEntries);
       return;
     }
 
     composerQueueBusy = true;
-    for (const button of composerQueuePanel?.querySelectorAll("button") || []) button.disabled = true;
+    publishNativeQueueDetails();
 
     try {
       const res = await window.fetch(`/api/agent/${encodeURIComponent(sessionId)}`, {
@@ -4504,185 +4516,7 @@
       handleQueueOperationError(sessionId, error.message, "删除");
     } finally {
       composerQueueBusy = false;
-      composerQueueSignature = "";
-      syncComposerQueuePanel();
-    }
-  }
-
-    const QUEUE_PANEL_STYLE_ID = "pi-enh-queue-panel-style";
-
-  function ensureQueuePanelStyle() {
-    let style = document.getElementById(QUEUE_PANEL_STYLE_ID);
-    if (!style) {
-      style = document.createElement("style");
-      style.id = QUEUE_PANEL_STYLE_ID;
-      style.textContent = `
-        /* Only hide queues explicitly replaced by this enabled plugin. */
-        .pi-enh-native-queue-hidden {
-          display: none !important;
-          position: absolute !important;
-          width: 0 !important;
-          height: 0 !important;
-          overflow: hidden !important;
-          pointer-events: none !important;
-          visibility: hidden !important;
-          opacity: 0 !important;
-          margin: 0 !important;
-          padding: 0 !important;
-          border: none !important;
-        }
-        .pi-enh-queue-panel { max-width: var(--chat-content-max-width, 820px); margin: 0 auto 8px; padding: 0 6px; box-sizing: border-box; color: var(--text-muted); }
-        .pi-enh-queue-header { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin: 0 4px 4px; font-size: 11px; color: var(--text-dim); }
-        .pi-enh-queue-list { display: grid; gap: 3px; max-height: 144px; overflow-y: auto; }
-        .pi-enh-queue-row { display: flex; align-items: center; gap: 6px; min-width: 0; min-height: 32px; padding: 2px 6px 2px 9px; border-radius: 8px; background: color-mix(in srgb, var(--bg-panel) 75%, transparent); transition: background 0.12s ease; }
-        .pi-enh-queue-row:hover { background: color-mix(in srgb, var(--bg-panel) 90%, var(--text) 6%); }
-        .pi-enh-queue-number { width: 16px; flex-shrink: 0; font-size: 10px; text-align: center; color: var(--text-dim); }
-        .pi-enh-queue-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; cursor: pointer; transition: color 0.12s ease; }
-        .pi-enh-queue-text:hover { color: var(--text); text-decoration: underline; text-underline-offset: 3px; }
-        .pi-enh-queue-text-empty { color: var(--text-muted, #71717a) !important; font-style: italic; }
-        .pi-enh-queue-actions { display: flex; align-items: center; gap: 4px; flex-shrink: 0; }
-        .pi-enh-queue-panel button { display: inline-flex; align-items: center; justify-content: center; border: 1px solid transparent; border-radius: 6px; background: transparent; color: var(--text-muted); cursor: pointer; flex-shrink: 0; transition: all 0.12s ease; box-sizing: border-box; }
-        .pi-enh-queue-edit { width: 26px; height: 24px; padding: 0; color: var(--text-dim); }
-        .pi-enh-queue-edit:hover:not(:disabled) { background: color-mix(in srgb, var(--text) 8%, transparent); color: var(--text); border-color: color-mix(in srgb, var(--border) 60%, transparent); }
-        
-        /* 截图2同款“➜ 引导”胶囊样式 */
-        .pi-enh-queue-promote {
-          height: 24px !important;
-          padding: 0 8px !important;
-          gap: 4px !important;
-          font-size: 11px !important;
-          font-weight: 500 !important;
-          color: var(--text-muted, #a1a1aa) !important;
-          border: 1px solid rgba(234, 179, 8, 0.35) !important;
-          background: rgba(234, 179, 8, 0.08) !important;
-          border-radius: 6px !important;
-          white-space: nowrap !important;
-        }
-        .pi-enh-queue-promote:hover:not(:disabled) {
-          color: #eab308 !important;
-          border-color: rgba(234, 179, 8, 0.45) !important;
-          background: rgba(234, 179, 8, 0.16) !important;
-        }
-
-        /* 垃圾桶删除按键：普通态与二次确认红色底纹 */
-        .pi-enh-queue-delete {
-          width: 26px !important;
-          height: 24px !important;
-          padding: 0 !important;
-          color: var(--text-dim) !important;
-          border-radius: 6px !important;
-          transition: all 0.15s ease !important;
-        }
-        .pi-enh-queue-delete:hover:not(:disabled):not(.pi-enh-queue-delete-confirming) {
-          background: color-mix(in srgb, #ef4444 12%, transparent) !important;
-          color: #ef4444 !important;
-          border-color: color-mix(in srgb, #ef4444 35%, transparent) !important;
-        }
-        .pi-enh-queue-delete.pi-enh-queue-delete-confirming {
-          background: #ef4444 !important;
-          color: #ffffff !important;
-          border-color: #dc2626 !important;
-          box-shadow: 0 1px 4px rgba(239, 68, 68, 0.4) !important;
-        }
-
-        /* 排队条目图片缩略图胶囊徽章 */
-        .pi-enh-queue-image-badge {
-          appearance: none !important;
-          -webkit-appearance: none !important;
-          font: inherit !important;
-          color: inherit !important;
-          line-height: inherit !important;
-          margin: 0 !important;
-          display: inline-flex !important;
-          align-items: center !important;
-          gap: 4px !important;
-          padding: 2px 6px !important;
-          background: color-mix(in srgb, var(--accent, #38bdf8) 12%, transparent) !important;
-          border: 1px solid color-mix(in srgb, var(--accent, #38bdf8) 32%, transparent) !important;
-          border-radius: 6px !important;
-          cursor: pointer !important;
-          flex-shrink: 0 !important;
-          position: relative !important;
-          transition: all 0.15s ease !important;
-          user-select: none !important;
-          box-sizing: border-box !important;
-        }
-        .pi-enh-queue-image-badge:hover {
-          background: color-mix(in srgb, var(--accent, #38bdf8) 22%, transparent) !important;
-          border-color: var(--accent, #38bdf8) !important;
-          transform: translateY(-1px);
-          box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25) !important;
-        }
-        .pi-enh-queue-image-badge:focus-visible {
-          outline: 2px solid var(--accent, #38bdf8) !important;
-          outline-offset: 1px !important;
-        }
-        dialog[data-pi-queue-gallery] .pi-enh-zoom-toolbar { white-space: nowrap; }
-        dialog[data-pi-queue-gallery] .pi-enh-zoom-btn { flex-shrink: 0; min-width: max-content; white-space: nowrap; }
-        .pi-enh-queue-thumb {
-          height: 22px !important;
-          width: auto !important;
-          min-width: 18px !important;
-          max-width: 78px !important;
-          object-fit: contain !important;
-          border-radius: 4px !important;
-          background: rgba(0, 0, 0, 0.3) !important;
-          border: 1px solid rgba(255, 255, 255, 0.18) !important;
-          display: block !important;
-          aspect-ratio: auto !important;
-        }
-        .pi-enh-queue-img-icon {
-          width: 13px !important;
-          height: 13px !important;
-          color: var(--accent, #38bdf8) !important;
-          display: inline-flex !important;
-          align-items: center !important;
-          justify-content: center !important;
-          flex-shrink: 0 !important;
-        }
-        .pi-enh-queue-img-label {
-          font-size: 10.5px !important;
-          font-weight: 500 !important;
-          color: var(--accent, #38bdf8) !important;
-          white-space: nowrap !important;
-        }
-
-        /* 鼠标悬停大图卡片预览浮层 */
-        .pi-enh-queue-hover-preview {
-          position: fixed !important;
-          z-index: 1000 !important;
-          background: color-mix(in srgb, var(--bg-panel, #1e1e24) 95%, black) !important;
-          border: 1px solid color-mix(in srgb, var(--border, #3f3f46) 75%, transparent) !important;
-          border-radius: 10px !important;
-          padding: 6px !important;
-          box-shadow: 0 12px 32px rgba(0, 0, 0, 0.6) !important;
-          pointer-events: none !important;
-          display: flex !important;
-          flex-direction: column !important;
-          align-items: center !important;
-          gap: 4px !important;
-          backdrop-filter: blur(12px) !important;
-          max-width: 240px !important;
-          animation: pi-enh-pop 0.15s ease-out !important;
-        }
-        .pi-enh-queue-hover-preview img {
-          max-width: 220px !important;
-          max-height: 160px !important;
-          object-fit: contain !important;
-          border-radius: 6px !important;
-          display: block !important;
-        }
-        .pi-enh-queue-hover-preview span {
-          font-size: 11px !important;
-          color: var(--text-muted, #a1a1aa) !important;
-          text-align: center !important;
-        }
-        .pi-enh-queue-recall { gap: 4px; height: 26px; padding: 0 7px; font-size: 11px; }
-        .pi-enh-queue-recall:hover:not(:disabled) { background: color-mix(in srgb, var(--text) 8%, transparent); color: var(--text); }
-        .pi-enh-queue-panel button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
-        .pi-enh-queue-panel button:disabled { opacity: .4; cursor: not-allowed; }
-      `;
-      document.head.appendChild(style);
+        syncComposerQueuePanel();
     }
   }
 
@@ -4717,309 +4551,72 @@
     return [];
   }
 
-  function syncComposerQueuePanel(isAttachmentUpdateOnly = false) {
-    if (!isPluginEnabled("composer-queue-panel")) return removeComposerQueuePanel();
-    ensureQueuePanelStyle();
-    const textarea = findComposerTextarea();
-    const card = textarea?.closest('fieldset > div[style*="max-width"]');
-    // The native queue lives inside the banner stack, not directly in the card.
-    // Resolve only the recall button's own queue; never hide the shared banners.
-    const recallButton = card && Array.from(card.querySelectorAll("button")).find((button) =>
-      /移回输入框|Recall/i.test(button.textContent || "")
-    );
-    const nativeQueue = recallButton?.parentElement?.parentElement;
-    const entries = nativeQueue ? Array.from(nativeQueue.children).filter((row) =>
-      row.hasAttribute("title") && /^(steer|follow-up)$/.test(row.firstElementChild?.textContent?.trim() || "")
-    ).map((row) => ({
-      kind: row.firstElementChild.textContent.trim(),
-      text: row.getAttribute("title") || "",
-    })) : [];
-    if (!entries.length || entries.length !== nativeQueue.children.length - 1) {
-      // Fail open: an unrecognized native structure must remain readable.
-      removeComposerQueuePanel();
-      return;
-    }
-    for (const node of card.querySelectorAll(".pi-enh-native-queue-hidden")) {
-      if (node !== nativeQueue) node.classList.remove("pi-enh-native-queue-hidden");
-    }
-    nativeQueue.classList.add("pi-enh-native-queue-hidden");
+  function publishNativeQueueDetails() {
     const sessionId = getCurrentSessionId();
-    if (activeQueueHoverCard && (!activeQueueHoverOwner || !activeQueueHoverOwner.isConnected || activeQueueHoverSessionId !== sessionId)) {
-      closeQueueHoverCard();
-    }
-    const entriesSignature = JSON.stringify([sessionId, entries]);
-    const renderSignature = JSON.stringify([sessionId, entries, queueAttachmentRevision]);
-
-    const expectedNext = card;
-
-    if (composerQueuePanel?.isConnected && composerQueuePanel.nextElementSibling === expectedNext && renderSignature === composerQueueSignature) return;
-
-    composerQueueSignature = renderSignature;
-    composerQueueLastEntriesSignature = entriesSignature;
-
-    let panel = composerQueuePanel;
-    const isSamePanel = Boolean(panel?.isConnected && panel.nextElementSibling === expectedNext);
-    if (!isSamePanel) {
-      closeQueueHoverCard();
-      panel?.remove();
-      panel = document.createElement("section");
-      panel.className = "pi-enh-queue-panel";
-      panel.setAttribute("aria-label", "排队消息");
-      card.parentElement.insertBefore(panel, expectedNext);
-      composerQueuePanel = panel;
-    }
-    closeQueueHoverCard();
-    panel.innerHTML = "";
-
-    const header = document.createElement("div");
-    header.className = "pi-enh-queue-header";
-    const caption = document.createElement("span");
-    caption.textContent = `待处理 · ${entries.length}`;
-    header.appendChild(caption);
-    const recall = document.createElement("button");
-    recall.type = "button";
-    recall.className = "pi-enh-queue-recall";
-    recall.textContent = "↩ 全部编辑";
-    recall.title = "安全移回全部排队消息至输入框（绝不清空丢失）";
-    recall.addEventListener("click", () => {
-      void recallAllQueuedMessages(sessionId, entriesSignature, entries);
-    });
-    header.appendChild(recall);
-    panel.appendChild(header);
-
-    const list = document.createElement("div");
-    list.className = "pi-enh-queue-list";
-    let followUpIndex = 0;
-    entries.forEach((entry, index) => {
-      const row = document.createElement("div");
-      row.className = "pi-enh-queue-row";
-      const number = document.createElement("span");
-      number.className = "pi-enh-queue-number";
-      number.textContent = entry.kind === "steer" ? "↗" : String(index + 1);
-      number.title = entry.kind === "steer" ? "已是引导消息：将在下一个执行点优先处理" : "等待当前任务完成";
-
-      // 获取 token（仅在 composerQueueActionsState 与当前 entriesSignature 匹配时才有效）
-      let token = null;
-      if (composerQueueActionsState?.version === 2 && composerQueueActionsState.signature === entriesSignature && composerQueueActionsState.sessionId === sessionId) {
-        if (entry.kind === "steer") {
-          token = composerQueueActionsState.steering?.[index]?.token;
-        } else {
-          const steerCount = composerQueueActionsState.steering?.length || 0;
-          const fIdx = index >= steerCount ? index - steerCount : -1;
-          token = composerQueueActionsState.followUp?.[fIdx]?.token;
-        }
-      }
-
-      // 检测该排队条目是否附带图片附件并渲染缩略图胶囊
-      const attachedImages = getQueueEntryAttachments(sessionId, entry.text, index, entry.kind, token);
-      const hasText = Boolean(entry.text && entry.text.trim());
-      const hasImages = attachedImages.length > 0;
-      const text = document.createElement("span");
-      text.className = "pi-enh-queue-text";
-      if (hasText) {
-        text.textContent = entry.text;
-        text.title = `点击移回输入框编辑：${entry.text}`;
-      } else if (!hasImages) {
-        text.textContent = "无文字 · 附件状态未知";
-        text.title = "无文字 · 附件状态未知（点击移回输入框编辑）";
-        text.classList.add("pi-enh-queue-text-empty");
-      } else {
-        text.textContent = "";
-        text.title = "纯图片排队消息（点击移回输入框编辑）";
-      }
-      text.addEventListener("click", () => {
-        void recallSingleQueuedMessage(index, sessionId, entriesSignature);
-      });
-      let imageBadge = null;
-      if (attachedImages.length > 0) {
-        imageBadge = document.createElement("button");
-        imageBadge.type = "button";
-        imageBadge.className = "pi-enh-queue-image-badge";
-        const count = attachedImages.length;
-        imageBadge.setAttribute("aria-label", count > 1 ? `查看排队消息附带的 ${count} 张图片` : "查看排队消息附带图片");
-        imageBadge.title = count > 1 ? `附带 ${count} 张图片，点击或回车全屏放大左右切换` : "附带 1 张图片，点击全屏放大预览";
-
-        const label = document.createElement("span");
-        label.className = "pi-enh-queue-img-label";
-        label.textContent = count > 1 ? `图片 ×${count}` : "图片";
-
-        const firstImg = attachedImages[0];
-        const activeSrc = firstImg.data && firstImg.mimeType ? `data:${firstImg.mimeType};base64,${firstImg.data}` : firstImg.src;
-
-        if (activeSrc && !activeSrc.startsWith("blob:null")) {
-          const thumb = document.createElement("img");
-          thumb.className = "pi-enh-queue-thumb";
-          thumb.src = activeSrc;
-          thumb.alt = firstImg.alt || "图片附件";
-          thumb.setAttribute("data-no-zoom", "true");
-          thumb.onerror = () => {
-            thumb.style.display = "none";
-            const icon = document.createElement("span");
-            icon.className = "pi-enh-queue-img-icon";
-            icon.innerHTML = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>';
-            imageBadge.insertBefore(icon, label);
-          };
-          imageBadge.appendChild(thumb);
-        } else {
-          const icon = document.createElement("span");
-          icon.className = "pi-enh-queue-img-icon";
-          icon.innerHTML = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>';
-          imageBadge.appendChild(icon);
-        }
-
-        imageBadge.appendChild(label);
-
-        // 鼠标悬停大图卡片预览（统一单例 hover + owner 身份）
-        imageBadge.addEventListener("mouseenter", () => {
-          if (!activeSrc) return;
-          if (activeQueueHoverCard && activeQueueHoverOwner === imageBadge) return;
-          closeQueueHoverCard();
-          if (!imageBadge.isConnected) return;
-
-          const hoverCard = document.createElement("div");
-          hoverCard.className = "pi-enh-queue-hover-preview";
-          const hint = count > 1
-            ? `共 ${count} 张图片 · 点击放大左右切换`
-            : `${firstImg.alt || "图片附件预览"} · 点击放大`;
-          hoverCard.innerHTML = `<img src="${activeSrc}" alt="${firstImg.alt || "图片附件"}" onerror="this.style.display='none'" /><span>${hint}</span>`;
-          document.body.appendChild(hoverCard);
-          activeQueueHoverCard = hoverCard;
-          activeQueueHoverOwner = imageBadge;
-          activeQueueHoverSessionId = sessionId;
-
-          const rect = imageBadge.getBoundingClientRect();
-          hoverCard.style.left = `${Math.max(10, Math.min(window.innerWidth - 250, rect.left))}px`;
-          hoverCard.style.bottom = `${window.innerHeight - rect.top + 8}px`;
-        });
-        imageBadge.addEventListener("mouseleave", () => {
-          closeQueueHoverCard(imageBadge);
-        });
-
-        // 点击与双击均调用全站图片灯箱预览器（传递全部图片 items 并显式禁用 autoEdit）
-        const openGalleryModal = (e) => {
-          if (e) {
-            e.stopPropagation?.();
-          }
-          closeQueueHoverCard();
-          if (typeof openComposerImageZoomModal === "function" && activeSrc && !activeSrc.startsWith("blob:null")) {
-            const galleryItems = attachedImages.map((img, idx) => ({
-              src: img.data && img.mimeType ? `data:${img.mimeType};base64,${img.data}` : (img.src || ""),
-              alt: img.alt || `图片附件 ${idx + 1}`,
-            }));
-            openComposerImageZoomModal(
-              activeSrc,
-              firstImg.alt || "图片附件",
-              null,
-              { items: galleryItems, initialIndex: 0 },
-              { autoEdit: false, source: "queue" }
-            );
-          } else {
-            showToast("图片附件已由后端接收，点击右侧铅笔即可移回输入框", null, 2200);
-          }
-        };
-
-        imageBadge.addEventListener("click", openGalleryModal);
-      }
-
-      const actions = document.createElement("div");
-      actions.className = "pi-enh-queue-actions";
-
-      // 1. 单条移回输入框编辑按钮
-      const editBtn = document.createElement("button");
-      editBtn.type = "button";
-      editBtn.className = "pi-enh-queue-edit";
-      editBtn.setAttribute("aria-label", `移回输入框编辑第 ${index + 1} 条排队消息`);
-      editBtn.title = "移回输入框编辑此条";
-      editBtn.innerHTML = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/><path d="m15 5 4 4"/></svg>';
-      editBtn.addEventListener("click", (e) => {
-        e.stopPropagation();
-        void recallSingleQueuedMessage(index, sessionId, entriesSignature);
-      });
-      actions.appendChild(editBtn);
-
-      // 2. 属于后续消息 (follow-up) 的条目提供引导胶囊按钮
-      if (entry.kind === "follow-up") {
-        const currentIndex = followUpIndex++;
-        const button = document.createElement("button");
-        button.type = "button";
-        button.className = "pi-enh-queue-promote";
-        button.dataset.queueFollowupIndex = String(currentIndex);
-        button.setAttribute("aria-label", `立即引导第 ${index + 1} 条排队消息`);
-        button.title = "立即引导：转为此任务优先执行的引导消息";
-        button.disabled = false;
-        button.innerHTML = '<svg width="11" height="11" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 1 L9 5 L5 9"/><line x1="1" y1="5" x2="9" y2="5"/></svg><span>引导</span>';
-        button.addEventListener("click", (e) => {
-          e.stopPropagation();
-          void promoteComposerQueuedMessage(index, sessionId, entriesSignature);
-        });
-        actions.appendChild(button);
-      }
-
-      // 3. 删除按钮（垃圾桶）：第一次点击变成确认红色底纹，再次点击真正删除
-      const deleteBtn = document.createElement("button");
-      deleteBtn.type = "button";
-      deleteBtn.className = "pi-enh-queue-delete";
-      deleteBtn.setAttribute("aria-label", `删除第 ${index + 1} 条排队消息`);
-      deleteBtn.title = "删除此排队消息";
-      deleteBtn.innerHTML = '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 6h18"/><path d="M19 6v14c0 1-1 2-2 2H7c-1 0-2-1-2-2V6"/><path d="M8 6V4c0-1 1-2 2-2h4c1 0 2 1 2 2v2"/><line x1="10" y1="11" x2="10" y2="17"/><line x1="14" y1="11" x2="14" y2="17"/></svg>';
-
-      let deleteTimer = null;
-      deleteBtn.addEventListener("click", (e) => {
-        e.stopPropagation();
-        if (!deleteBtn.classList.contains("pi-enh-queue-delete-confirming")) {
-          deleteBtn.classList.add("pi-enh-queue-delete-confirming");
-          deleteBtn.title = "再次点击确认删除";
-          if (deleteTimer) clearTimeout(deleteTimer);
-          deleteTimer = setTimeout(() => {
-            deleteBtn.classList.remove("pi-enh-queue-delete-confirming");
-            deleteBtn.title = "删除此排队消息";
-          }, 3500);
-        } else {
-          if (deleteTimer) clearTimeout(deleteTimer);
-          deleteBtn.classList.remove("pi-enh-queue-delete-confirming");
-          void deleteSingleQueuedMessage(index, sessionId, entriesSignature);
-        }
-      });
-      actions.appendChild(deleteBtn);
-
-      if (imageBadge) {
-        row.append(number, imageBadge, text, actions);
-      } else {
-        row.append(number, text, actions);
-      }
-      list.appendChild(row);
-    });
-    panel.appendChild(list);
-
-    // 仅在 entries 变化时才触发 loadComposerQueueTokens，绝不因图片 revision 更新产生请求风暴！
-    if (sessionId && !composerQueueBusy && !isAttachmentUpdateOnly) {
-      void loadComposerQueueTokens(sessionId, entriesSignature, entries);
-    }
-    triggerSessionHydration(sessionId);
+    const items = composerQueueActionsState?.signature === composerQueueLastEntriesSignature
+      ? [...(composerQueueActionsState.steering || []), ...(composerQueueActionsState.followUp || [])] : [];
+    window.dispatchEvent(new CustomEvent("pi:native-queue-details", { detail: {
+      signature: composerQueueLastEntriesSignature,
+      enabled: isPluginEnabled("composer-queue-panel"),
+      busy: composerQueueBusy,
+      reorder: composerQueueActionsState?.signature === composerQueueLastEntriesSignature && composerQueueActionsState?.reorder === true,
+      images: composerQueueCurrentEntries.map((entry, i) => getQueueEntryAttachments(sessionId, entry.text, i, entry.kind, items[i]?.token)),
+    } }));
   }
 
-  activeCleanups.push(removeComposerQueuePanel);
-  const handleQueueHoverWindowBlurOrScroll = () => {
-    if (activeQueueHoverCard) {
-      closeQueueHoverCard();
+  function syncComposerQueuePanel(isAttachmentUpdateOnly = false) {
+    if (!isPluginEnabled("composer-queue-panel")) {
+      publishNativeQueueDetails();
+      return;
     }
-  };
-  const handleQueueHoverDocumentKeyDown = (e) => {
-    if (e.key === "Escape" && activeQueueHoverCard) {
-      closeQueueHoverCard();
+    if (!composerQueuePanel?.isConnected || !composerQueueCurrentEntries.length) return;
+    publishNativeQueueDetails();
+    // Only React's explicit snapshot event refreshes tokens; never DOM scans/timers.
+    if (!isAttachmentUpdateOnly && getCurrentSessionId() && !composerQueueBusy) {
+      void loadComposerQueueTokens(getCurrentSessionId(), composerQueueLastEntriesSignature, composerQueueCurrentEntries);
     }
-  };
-  window.addEventListener("blur", handleQueueHoverWindowBlurOrScroll);
-  window.addEventListener("scroll", handleQueueHoverWindowBlurOrScroll, { capture: true, passive: true });
-  document.addEventListener("keydown", handleQueueHoverDocumentKeyDown, true);
+  }
 
+  const handleNativeQueueSnapshot = (event) => {
+    const detail = event.detail;
+    if (!detail || detail.sessionId !== getCurrentSessionId() || !Array.isArray(detail.entries)) return;
+    composerQueuePanel = detail.host;
+    const signature = JSON.stringify([detail.sessionId, detail.entries]);
+    const changed = signature !== composerQueueLastEntriesSignature;
+    composerQueueCurrentEntries = detail.entries;
+    composerQueueLastEntriesSignature = signature;
+    if (changed) composerQueueActionsState = null;
+    if (!detail.entries.length) { clearQueueDetailCache(); return; }
+    syncComposerQueuePanel(!changed);
+    triggerSessionHydration(detail.sessionId);
+  };
+  const handleNativeQueueAction = (event) => {
+    const { action, index, targetIndex, sessionId, signature } = event.detail || {};
+    if (!isPluginEnabled("composer-queue-panel") || sessionId !== getCurrentSessionId() || signature !== composerQueueLastEntriesSignature) return;
+    if (action === "recall") void recallSingleQueuedMessage(index, sessionId, signature);
+    else if (action === "recallAll") void recallAllQueuedMessages(sessionId, signature, composerQueueCurrentEntries);
+    else if (action === "delete") void deleteSingleQueuedMessage(index, sessionId, signature);
+    else if (action === "promote") void promoteComposerQueuedMessage(index, sessionId, signature);
+    else if (action === "reorder") void reorderComposerQueuedMessage(index, targetIndex, sessionId, signature);
+    else if (action === "gallery") {
+      const items = composerQueueActionsState?.signature === signature
+        ? [...(composerQueueActionsState.steering || []), ...(composerQueueActionsState.followUp || [])] : [];
+      const entry = composerQueueCurrentEntries[index];
+      if (!entry) return;
+      const images = getQueueEntryAttachments(sessionId, entry.text, index, entry.kind, items[index]?.token);
+      const gallery = images.map((img, i) => ({src: `data:${img.mimeType};base64,${img.data}`, alt: img.alt || `图片附件 ${i + 1}`}));
+      if (gallery.length) openComposerImageZoomModal(gallery[0].src, gallery[0].alt, null, {items: gallery, initialIndex: 0}, {autoEdit: false, source: "queue"});
+    }
+  };
+  window.addEventListener("pi:native-queue-snapshot", handleNativeQueueSnapshot);
+  window.addEventListener("pi:native-queue-action", handleNativeQueueAction);
   activeCleanups.push(() => {
-    window.removeEventListener("blur", handleQueueHoverWindowBlurOrScroll);
-    window.removeEventListener("scroll", handleQueueHoverWindowBlurOrScroll, { capture: true });
-    document.removeEventListener("keydown", handleQueueHoverDocumentKeyDown, true);
-    closeQueueHoverCard();
+    window.removeEventListener("pi:native-queue-snapshot", handleNativeQueueSnapshot);
+    window.removeEventListener("pi:native-queue-action", handleNativeQueueAction);
+    removeComposerQueuePanel();
   });
-  window.__PI_ENH_SYNC_COMPOSER_QUEUE__ = syncComposerQueuePanel;
+  window.dispatchEvent(new Event("pi:native-queue-ready"));
+  window.__PI_ENH_SYNC_COMPOSER_QUEUE__ = () => publishNativeQueueDetails();
 
   // Foundation composer layout, pill and resize belong to native React/static CSS.
 
@@ -5108,7 +4705,7 @@
       document.documentElement.classList.toggle("pi-enh-hide-composer-tool-preset", !showToolPreset);
     }
 
-    const fieldset = document.querySelector("fieldset");
+    const fieldset = document.querySelector("[data-pi-native-composer-host]");
     if (!fieldset) return;
 
     for (const btn of fieldset.querySelectorAll("button")) {
@@ -5466,7 +5063,7 @@
     const isSend = btn.classList.contains("pi-enh-cursor-send") ||
                    btn.classList.contains("pi-enh-cursor-followup") ||
                    btn.classList.contains("pi-enh-cursor-steer") ||
-                   (btn.closest("fieldset") && (btn.textContent.includes("发送") || btn.textContent.includes("引导") || btn.textContent.includes("后续消息")));
+                   (btn.closest("[data-pi-native-composer-host]") && (btn.textContent.includes("发送") || btn.textContent.includes("引导") || btn.textContent.includes("后续消息")));
     if (isSend && !btn.disabled) {
       const native = readNativeComposerDraft();
       const capturedOwner = native?.key;
@@ -5657,7 +5254,7 @@
   function readComposerNativeDraftKey() {
     try {
       const textarea = findComposerTextarea();
-      const fieldset = textarea?.closest?.("fieldset");
+      const fieldset = textarea?.closest?.("[data-pi-native-composer-host]");
       if (!fieldset || !fieldset.isConnected) return null;
       let owner = typeof committedComposerFiber === "function" ? committedComposerFiber(fieldset) : null;
       for (let depth = 0; owner && depth < 12; depth++, owner = owner.return) {
@@ -5863,7 +5460,7 @@
       return false;
     }
     const host = anchor.closest("[data-pi-composer-mode-host]");
-    const card = anchor.closest(".pi-enh-cursor-composer") || anchor.closest("fieldset") || host?.closest(".pi-enh-cursor-composer, fieldset");
+    const card = anchor.closest(".pi-enh-cursor-composer") || anchor.closest("[data-pi-native-composer-host]") || host?.closest(".pi-enh-cursor-composer, [data-pi-native-composer-host]");
     if (!card) return false;
     openComposerAddMenu(card, anchor);
     return Boolean(composerAddMenuEl);
@@ -7006,7 +6603,7 @@
     const currentSessionId = getEffectiveComposerSessionId();
     const currentMode = getSessionComposerMode(currentSessionId);
     if ((currentMode === "plan" || currentMode === "goal") && currentSessionId && !options.forceCleanNotice) {
-      const card = textarea?.closest?.(".pi-enh-cursor-composer") || textarea?.closest?.("fieldset");
+      const card = textarea?.closest?.(".pi-enh-cursor-composer") || textarea?.closest?.("[data-pi-native-composer-host]");
       if (card && !card.querySelector(".pi-enh-composer-modes-disabled-notice")) {
         const notice = document.createElement("div");
         notice.className = "pi-enh-composer-modes-disabled-notice";
@@ -7526,7 +7123,7 @@
     }
 
     const container = textarea.closest(".pi-enh-cursor-contents")
-      || textarea.closest("fieldset > div")
+      || textarea.closest("[data-pi-native-composer-host] > div")
       || textarea.parentElement;
     if (!container) return;
 
@@ -8288,9 +7885,7 @@
 
       /* 6. 滚动到底部悬浮按钮在面板打开时也必须在“下面一层” */
       html.pi-file-panel-open .chat-scroll-to-bottom,
-      html.pi-file-panel-open .pi-enh-scroll-bottom-btn,
-      html:has(#file-panel.right-panel-open) .chat-scroll-to-bottom,
-      html:has(#file-panel.right-panel-open) .pi-enh-scroll-bottom-btn {
+      html:has(#file-panel.right-panel-open) .chat-scroll-to-bottom {
         z-index: 15 !important;
       }
     `;
@@ -8668,7 +8263,7 @@
     // 1. 输入控件、按钮、富文本及整个输入卡片容器内部：绝对豁免手势拦截，保障任何点击与输入100%直达
     if (typeof cur.closest === "function") {
       try {
-        if (cur.closest("input, textarea, select, button, fieldset, .pi-enh-cursor-composer, .pi-enh-queue-panel, .pi-enh-cursor-actions, .chat-input-container, [data-chat-input-wrap]")) {
+        if (cur.closest("input, textarea, select, button, [data-pi-native-composer-host], .pi-enh-cursor-composer, .pi-enh-queue-panel, .pi-enh-cursor-actions, .chat-input-container, [data-chat-input-wrap]")) {
           return true;
         }
         // 2. 核心代码块标签：用户触摸在 pre、code、table 或代码卡片内部
@@ -8763,8 +8358,8 @@
 
     // 0. 核心防护：如果触摸点落在输入框、任何按钮、排队面板或输入卡片内部，绝对退出手势追踪，绝不拦截！
     if (
-      (targetEl && targetEl.closest && targetEl.closest("button, fieldset, .pi-enh-cursor-composer, .pi-enh-queue-panel, input, textarea")) ||
-      (pointEl && pointEl.closest && pointEl.closest("button, fieldset, .pi-enh-cursor-composer, .pi-enh-queue-panel, input, textarea"))
+      (targetEl && targetEl.closest && targetEl.closest("button, [data-pi-native-composer-host], .pi-enh-cursor-composer, .pi-enh-queue-panel, input, textarea")) ||
+      (pointEl && pointEl.closest && pointEl.closest("button, [data-pi-native-composer-host], .pi-enh-cursor-composer, .pi-enh-queue-panel, input, textarea"))
     ) {
       mobileSwipeTracking = false;
       mobileSwipeEligible = false;
@@ -9936,7 +9531,7 @@
     const roots = [
       textarea.closest?.("form"),
       textarea.closest?.(".chat-input-container"),
-      textarea.closest?.("fieldset"),
+      textarea.closest?.("[data-pi-native-composer-host]"),
       textarea.parentElement,
       textarea.parentElement?.parentElement,
     ].filter(Boolean);
@@ -10217,7 +9812,7 @@
     const active = document.activeElement;
     if (!force && active && active !== document.body && active !== el) {
       const isOther = (active.tagName === "INPUT" || active.tagName === "TEXTAREA" || active.isContentEditable) &&
-                      !active.closest("fieldset, form, .chat-input-textarea, .pi-enh-cursor-composer");
+                      !active.closest("[data-pi-native-composer-host], form, .chat-input-textarea, .pi-enh-cursor-composer");
       if (isOther) return false;
     }
 

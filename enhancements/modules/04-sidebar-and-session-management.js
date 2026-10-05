@@ -1774,8 +1774,8 @@
       const isInput = target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable);
       const nativeTextarea = document.querySelector?.("textarea.chat-input-textarea");
       const formattedComposer = target?.closest?.(".pi-enh-formatted-composer");
-      const nativeFieldset = nativeTextarea?.closest?.("fieldset");
-      const formattedFieldset = formattedComposer?.closest?.("fieldset");
+      const nativeFieldset = nativeTextarea?.closest?.("[data-pi-native-composer-host]");
+      const formattedFieldset = formattedComposer?.closest?.("[data-pi-native-composer-host]");
       const isMainComposer = target === nativeTextarea || Boolean(
         formattedComposer && nativeFieldset && formattedFieldset === nativeFieldset
       );
@@ -2070,9 +2070,9 @@
       annotationBatchSelectChecked = false;
       return;
     }
-    const composerCard = textarea.closest?.('fieldset > div[style*="max-width"]') ||
+    const composerCard = textarea.closest?.('[data-pi-native-composer-host] > div[style*="max-width"]') ||
                          textarea.closest?.('.pi-enh-cursor-composer') ||
-                         textarea.closest?.('fieldset') ||
+                         textarea.closest?.('[data-pi-native-composer-host]') ||
                          textarea.closest?.('form');
     const composerHost = composerCard?.parentElement || textarea.parentElement?.parentElement || textarea.parentElement;
 

@@ -174,3 +174,32 @@ test("uses a generic preview label when a markdown image has no alt text", () =>
   assert.match(html, /<button[^>]+aria-label="预览图片"[^>]*>/);
   assert.doesNotMatch(html, /预览图片:/);
 });
+
+
+test("opens complete HTTP and HTTPS inline-code URLs in a safe new tab", () => {
+  for (const url of ["http://103.170.217.198:8317", "http://103.170.217.198:8317/management.html", "https://example.com/docs?q=1#section"]) {
+    const html = renderMarkdown("`" + url + "`");
+    assert(html.includes('href="' + url + '"'));
+    assert.match(html, /target="_blank" rel="noopener noreferrer"><code class="markdown-inline-code"/);
+    assert.doesNotMatch(html, /\snode=/);
+    assert(html.includes(url + "</code></a>"));
+  }
+});
+
+test("leaves commands, code blocks and non-HTTP schemes as code", () => {
+  for (const code of ["curl http://example.com", "javascript:alert(1)", "data:text/html,hello", "file:///tmp/report.html", "ftp://example.com", "https://", "http://example.com:99999"]) {
+    const html = renderMarkdown("`" + code + "`");
+    assert.doesNotMatch(html, /<a\b/);
+    assert.match(html, /class="markdown-inline-code"/);
+  }
+  for (const markdown of ["```text\nhttp://example.com\n```", "    http://example.com"]) {
+    assert.doesNotMatch(renderMarkdown(markdown), /<a\b/);
+  }
+});
+
+test("does not nest links when an inline-code URL is already a link label", () => {
+  const html = renderMarkdown("[`http://example.com`](https://example.com/docs)");
+  assert.equal((html.match(/<a\b/g) ?? []).length, 1);
+  assert.match(html, /href="https:\/\/example.com\/docs"/);
+  assert.match(html, /<code class="markdown-inline-code">http:\/\/example.com<\/code>/);
+});

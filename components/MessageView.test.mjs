@@ -385,3 +385,24 @@ test("shows tool-result images while the tool details stay collapsed", () => {
   assert.doesNotMatch(html, /captured-1280x720/);
   assert.doesNotMatch(html, /"tabId"/);
 });
+
+
+test("compact progress keeps copy in the model row and preserves final answer metadata", () => {
+  const message = {
+    role: "assistant", provider: "fixture", model: "compact",
+    timestamp: Date.now(), content: [{ type: "text", text: "阶段检查完成" }],
+    usage: { input: 10, output: 4, cacheRead: 0, cacheWrite: 0, totalTokens: 14,
+      cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+  };
+  const compact = renderMessage(message, { compactProgress: true, showTimestamp: false });
+  assert.match(compact, /data-pi-native-progress-message="true"/);
+  assert.equal((compact.match(/class="assistant-message-copy"/g) ?? []).length, 1);
+  assert(!compact.includes('data-pi-native-message-footer'));
+  assert(compact.indexOf('assistant-message-copy') < compact.indexOf('data-message-text'));
+  const final = renderMessage(message, { compactProgress: false, showTimestamp: true });
+  assert.match(final, /data-pi-native-message-footer="true"/);
+  assert(final.indexOf('assistant-message-copy') > final.indexOf('data-message-text'));
+  assert(!final.includes('data-pi-native-progress-message'));
+  const props = { message, compactProgress: true };
+  assert.equal(MessageView.compare(props, { ...props, compactProgress: false }), false);
+});

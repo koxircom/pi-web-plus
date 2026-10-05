@@ -6,6 +6,7 @@ import { THEME_INIT_SCRIPT } from "@/lib/theme";
 import "katex/dist/katex.min.css";
 import { BRAND_NAME } from "@/lib/branding";
 import "./globals.css";
+import "../components/ComposerQueue.css";
 import "./settings.css";
 import "./composer.css";
 import "./enhancements.css";

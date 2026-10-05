@@ -56,7 +56,7 @@
     try {
       const textarea = findComposerTextarea();
       if (textarea) {
-        const box = textarea.closest("form, fieldset, .chat-content > div:last-child") || textarea.parentElement?.parentElement || textarea;
+        const box = textarea.closest("form, [data-pi-native-composer-host], .chat-content > div:last-child") || textarea.parentElement?.parentElement || textarea;
         if (box && typeof box.getBoundingClientRect === "function") {
           const rect = box.getBoundingClientRect();
           if (rect.top > 80 && rect.top < window.innerHeight) {
@@ -4428,7 +4428,6 @@
     { fn: syncNativeMessageFont, scope: "full" },
     { fn: syncSessionVirtualScroll, scope: "full" },
     { fn: syncMinimapEnhancements, scope: "chat-text" },
-    { fn: syncScrollBottomButton, scope: "chat-text" },
     { fn: syncSessionScrollTracking, scope: "chat-text" },
     { fn: syncLocalPathLauncher, scope: "full" },
     { fn: syncSessionPinArchiveControls, scope: "full" },
@@ -5207,219 +5206,22 @@
   window.__PI_ENH_SET_MINIMAP_STEP_TURNS__ = setMinimapStepTurns;
   window.__PI_ENH_SYNC_MINIMAP__ = syncMinimapEnhancements;
 
-  // ==========================================
-  // 3.6. Scroll to Bottom Button Plugin (类似 Codex 悬浮向下回到底部按钮)
-  // ==========================================
-  let scrollBottomBtn = null;
-  let activeScrollContainer = null;
-  let scrollListenerAttached = false;
-
+  // React owns the arrow, its geometry and its click lifecycle.
+  // Shared history helpers still use the explicit native scroll owner.
   function getChatScrollContainer() {
-    return document.querySelector(".chat-content .overflow-y-auto") ||
-      document.querySelector(".chat-content [class*='overflow-y-auto']") ||
-      document.querySelector(".chat-content div[style*='visibility']");
+    return document.querySelector("[data-pi-native-scroll-owner]");
   }
 
   function getChatContentContainer() {
-    const scroll = getChatScrollContainer();
-    return document.querySelector(".chat-content") ||
-      (scroll && typeof scroll.closest === "function" ? scroll.closest(".chat-content") : null) ||
-      (scroll ? scroll.parentElement : null);
+    return document.querySelector(".chat-content");
   }
 
-  function getChatInputArea() {
-    const parent = getChatContentContainer();
-    const textarea = (parent && typeof parent.querySelector === "function" ? parent.querySelector("textarea") : null) ||
-      document.querySelector(".chat-content textarea") ||
-      document.querySelector("textarea");
-    if (textarea) {
-      return (typeof textarea.closest === "function" ? textarea.closest(".pi-enh-cursor-composer") : null) ||
-        (typeof textarea.closest === "function" ? textarea.closest(".chat-content > div:last-child") : null) ||
-        (typeof textarea.closest === "function" ? textarea.closest(".relative.shrink-0") : null) ||
-        textarea.parentElement?.parentElement ||
-        textarea.parentElement;
-    }
-    return document.querySelector(".chat-content .relative.shrink-0");
+  function syncScrollBottomPreferences() {
+    window.dispatchEvent(new CustomEvent("pi:scroll-bottom-preferences", {
+      detail: { enabled: isPluginEnabled("scroll-to-bottom") },
+    }));
   }
-
-  let cancelScrollBottomConvergence = null;
-
-  function removeScrollBottomButton() {
-    if (cancelScrollBottomConvergence) cancelScrollBottomConvergence();
-    if (scrollBottomBtn) {
-      scrollBottomBtn.remove();
-      scrollBottomBtn = null;
-    }
-    if (activeScrollContainer && scrollListenerAttached) {
-      if (typeof activeScrollContainer.removeEventListener === "function") {
-        activeScrollContainer.removeEventListener("scroll", onChatContentScroll);
-      }
-      scrollListenerAttached = false;
-      activeScrollContainer = null;
-    }
-  }
-
-  function ensureScrollBottomButton() {
-    if (scrollBottomBtn && scrollBottomBtn.isConnected) {
-      return scrollBottomBtn;
-    }
-
-    const parent = getChatContentContainer();
-    if (!parent) return null;
-
-    let btn = parent.querySelector(".pi-enh-scroll-bottom-btn");
-    if (!btn) {
-      btn = document.createElement("button");
-      btn.type = "button";
-      btn.className = "pi-enh-scroll-bottom-btn";
-      btn.setAttribute("aria-label", "回到底部");
-      btn.setAttribute("title", "回到底部 (Click to scroll to bottom)");
-      btn.innerHTML = `<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4v13m0 0l-5-5m5 5l5-5"/></svg>`;
-
-      btn.addEventListener("click", (e) => {
-        e.preventDefault();
-        e.stopPropagation();
-        scrollToChatBottom();
-      });
-
-      parent.appendChild(btn);
-    }
-    scrollBottomBtn = btn;
-    return btn;
-  }
-
-  function scrollToChatBottom() {
-    if (typeof cancelActiveScrollRestore === "function") {
-      cancelActiveScrollRestore("scroll-to-bottom-clicked");
-    }
-    if (cancelScrollBottomConvergence) cancelScrollBottomConvergence();
-    const container = getChatScrollContainer();
-    if (!container) return;
-
-    // content-visibility and pending history pages can change scrollHeight after
-    // a click. A single smooth-scroll target then stops short of the real end.
-    // This click-owned correction expires quickly and yields to any user input.
-    const controller = new AbortController();
-    const startedAt = performance.now();
-    let lastShiftAt = startedAt;
-    let lastHeight = -1;
-    let frame = null;
-    const finish = () => {
-      if (frame !== null) cancelAnimationFrame(frame);
-      controller.abort();
-      if (cancelScrollBottomConvergence === finish) cancelScrollBottomConvergence = null;
-    };
-    cancelScrollBottomConvergence = finish;
-    for (const type of ["wheel", "touchstart", "pointerdown", "keydown"]) {
-      document.addEventListener(type, finish, { capture: true, passive: true, signal: controller.signal });
-    }
-    const align = () => {
-      if (cancelScrollBottomConvergence !== finish) return;
-      if (!container.isConnected || !isPluginEnabled("scroll-to-bottom") ||
-          getCurrentSessionId() !== currentSid || getChatScrollContainer() !== container) {
-        finish();
-        return;
-      }
-      const now = performance.now();
-      const height = container.scrollHeight;
-      const target = Math.max(0, height - container.clientHeight);
-      if (height !== lastHeight || Math.abs(container.scrollTop - target) > 1) {
-        lastShiftAt = now;
-        lastHeight = height;
-        try { container.scrollTo({ top: target, behavior: "instant" }); }
-        catch (_) { container.scrollTop = target; }
-      }
-      if (scrollBottomBtn) scrollBottomBtn.classList.remove("visible");
-      if (now - startedAt >= 2000 || now - lastShiftAt >= 250) {
-        finish();
-        return;
-      }
-      frame = requestAnimationFrame(align);
-    };
-    align();
-  }
-
-  function syncScrollBottomPosition() {
-    if (!scrollBottomBtn) return;
-    const inputArea = getChatInputArea();
-    const parent = scrollBottomBtn.parentElement;
-    const inputRect = inputArea?.getBoundingClientRect?.();
-    const parentRect = parent?.getBoundingClientRect?.();
-    const parentHeight = Number(parent?.clientHeight) || Number(parentRect?.height) || 0;
-
-    if (inputRect && parentRect && parentHeight > 0 && inputRect.width > 0 && inputRect.height > 0) {
-      const parentTop = parentRect.top + (Number(parent.clientTop) || 0);
-      const parentLeft = parentRect.left + (Number(parent.clientLeft) || 0);
-      const composerTop = inputRect.top - parentTop;
-      const bottomPx = Math.max(14, Math.round(parentHeight - composerTop + 14));
-      scrollBottomBtn.style.bottom = `${bottomPx}px`;
-      scrollBottomBtn.style.left = `${Math.round(inputRect.left + inputRect.width / 2 - parentLeft)}px`;
-      return;
-    }
-
-    if (inputArea && inputArea.offsetHeight) {
-      scrollBottomBtn.style.bottom = `${inputArea.offsetHeight + 14}px`;
-    } else {
-      scrollBottomBtn.style.bottom = "96px";
-    }
-    scrollBottomBtn.style.left = "50%";
-  }
-
-  function onChatContentScroll() {
-    if (!isPluginEnabled("scroll-to-bottom")) {
-      removeScrollBottomButton();
-      return;
-    }
-    const container = getChatScrollContainer();
-    if (!container) return;
-
-    const btn = ensureScrollBottomButton();
-    if (!btn) return;
-
-    syncScrollBottomPosition();
-
-    const scrollHeight = container.scrollHeight || 0;
-    const clientHeight = container.clientHeight || 0;
-    const scrollTop = container.scrollTop || 0;
-    const distanceFromBottom = scrollHeight - clientHeight - scrollTop;
-
-    // 灵敏度优化：离开底部超过 70px 即刻灵敏浮现，距底部小于 30px 时自然收起
-    if (distanceFromBottom > 70) {
-      btn.classList.add("visible");
-    } else if (distanceFromBottom <= 30) {
-      btn.classList.remove("visible");
-    }
-  }
-
-  function syncScrollBottomButton() {
-    if (!isPluginEnabled("scroll-to-bottom")) {
-      removeScrollBottomButton();
-      return;
-    }
-
-    const container = getChatScrollContainer();
-    if (!container) {
-      removeScrollBottomButton();
-      return;
-    }
-
-    if (activeScrollContainer !== container) {
-      if (activeScrollContainer && scrollListenerAttached) {
-        activeScrollContainer.removeEventListener("scroll", onChatContentScroll);
-      }
-      activeScrollContainer = container;
-      activeScrollContainer.addEventListener("scroll", onChatContentScroll, { passive: true });
-      scrollListenerAttached = true;
-    }
-
-    ensureScrollBottomButton();
-    syncScrollBottomPosition();
-    onChatContentScroll();
-  }
-
-  // 全局滚动捕获探针：在 document 捕获阶段监听 scroll，防止容器重绘导致监听脱落
-  addManagedListener(document, "scroll", onChatContentScroll, { capture: true, passive: true });
-  addManagedListener(window, "resize", onChatContentScroll, { passive: true });
+  syncScrollBottomPreferences();
 
   // Native ChatWindow owns tab-local positions and restores them before paint.
   const SESSION_SCROLL_STORAGE_KEY = "pi-enh-session-scroll-memory-v2";
@@ -5861,7 +5663,7 @@
       code.setAttribute("data-pi-path-enhanced", "true");
 
       // 绝对排除右侧面板、代码块 (pre code)、输入框及模态框
-      if (code.closest("#file-panel, .file-viewer-shell, .markdown-file-preview, [data-panel='file'], pre, fieldset, [role='dialog']")) {
+      if (code.closest("#file-panel, .file-viewer-shell, .markdown-file-preview, [data-panel='file'], pre, [data-pi-native-composer-host], [role='dialog']")) {
         continue;
       }
 

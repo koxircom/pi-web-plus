@@ -719,6 +719,17 @@ pre, code {
   font-family: var(--font-mono);
 }
 
+/* Copy stays in the model row for progress messages, without reserving a footer. */
+.assistant-message-copy { opacity: 0; pointer-events: none; }
+[data-message-role="assistant"]:hover .assistant-message-copy,
+[data-message-role="assistant"]:focus-within .assistant-message-copy {
+  opacity: 1;
+  pointer-events: auto;
+}
+@media (hover: none), (pointer: coarse), (max-width: 768px) {
+  .assistant-message-copy { opacity: 0.85; pointer-events: auto; }
+}
+
 /* react-markdown output styles */
 .chat-content {
   --chat-font-size-offset: calc(var(--chat-content-font-size, 14px) - 14px);
@@ -1371,8 +1382,8 @@ pre, code {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 32px;
-  height: 32px;
+  width: 28px;
+  height: 28px;
   padding: 0;
   box-sizing: border-box;
   border: 1px solid var(--border);
@@ -1404,6 +1415,17 @@ pre, code {
     background 0.12s,
     color 0.12s,
     visibility 0s;
+}
+
+.chat-scroll-to-bottom.is-enhanced.is-visible {
+  opacity: 1;
+}
+
+/* Menus remain above the sole native arrow. */
+body:has(div[role="listbox"]) .chat-scroll-to-bottom,
+body:has([data-pi-thinking-control] div[style*="position"]) .chat-scroll-to-bottom {
+  visibility: hidden;
+  pointer-events: none;
 }
 
 .chat-scroll-to-bottom.is-visible:hover,

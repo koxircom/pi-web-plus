@@ -45,3 +45,24 @@ export function userMessageKey(message: Partial<AgentMessage>): string {
     images: content.map(imageSignature).filter(Boolean),
   });
 }
+
+/** One local submission, owned by the session hook until confirmation/rejection.
+ * History reads stay authoritative; this echo is only part of the display view.
+ */
+export interface OptimisticUserMessage {
+  sessionId: string | null;
+  message: AgentMessage;
+  precedingEntryIds: readonly string[];
+}
+
+export function preservePendingUserMessage(
+  history: AgentMessage[], entryIds: string[], sessionId: string,
+  pending: OptimisticUserMessage | null,
+): AgentMessage[] {
+  if (!pending || pending.sessionId !== sessionId) return history;
+  const previousIds = new Set(pending.precedingEntryIds);
+  const key = userMessageKey(pending.message);
+  const confirmed = history.some((message, i) => message.role === "user"
+    && entryIds[i] && !previousIds.has(entryIds[i]) && userMessageKey(message) === key);
+  return confirmed ? history : [...history, pending.message];
+}

@@ -13,6 +13,7 @@ import type {
   UserMessage,
 } from "@/lib/types";
 import { isBlockingExtensionUiRequest } from "@/lib/browser-notifications";
+import { completeActiveToolResult } from "@/lib/tool-public-status";
 import { normalizeToolCalls } from "@/lib/normalize";
 import { isPromptRejectedError, readPromptReceipt, sendAgentCommand } from "@/lib/agent-client";
 import { getPendingPromptSubmissions, getServerPendingPromptSubmissions, subscribePendingPromptSubmissions, releasePromptSubmission, type PendingPromptSubmission, type PromptSubmissionPreviewIdentity } from "@/lib/prompt-submissions";
@@ -44,7 +45,7 @@ import { getPreferredToolPreset, setPreferredToolPreset } from "@/lib/tool-prese
 import { CONFIGURED_TOOL_PRESET, getPresetFromToolNames, getToolNamesForPreset, type ToolEntry, type ToolPreset } from "@/lib/tool-presets";
 import type { SessionStatsInfo } from "@/lib/pi-types";
 import { mergeSessionStats, type SessionFileStats } from "@/lib/session-stats";
-import { userMessageKey } from "@/lib/prompt-recovery";
+import { userMessageKey, preservePendingUserMessage, type OptimisticUserMessage } from "@/lib/prompt-recovery";
 import { waitForPromptPreparation } from "@/lib/prompt-preparation";
 import { AgentEventConnection } from "@/lib/agent-event-connection";
 import { isNestedToolExecutionEvent, isSystemMessageEvent } from "@/lib/agent-event-wire";
@@ -485,7 +486,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const thinkingLevelPinsRef = useRef<Record<string, string>>({});
   const defaultThinkingLevelRef = useRef<ConcreteThinkingLevel | null>(null);
   const promptRunIdRef = useRef(0);
-  const optimisticUserMessageKeyRef = useRef<string | null>(null);
+  const optimisticUserMessageRef = useRef<OptimisticUserMessage | null>(null);
   const modelSwitchPendingRef = useRef(false);
   const draftKeyAliasesRef = useRef(new Map<string, string>());
   const sessionHookMountedRef = useRef(true);
@@ -717,8 +718,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         messages: messagesRef.current, entryIds: entryIdsRef.current,
         oldestEntryId: historyCursorRef.current, hasMore: hasEarlierMessagesRef.current,
       });
-      dataRef.current = d; messagesRef.current = d.context.messages; entryIdsRef.current = d.context.entryIds;
-      setData(d); setActiveLeafId(d.leafId); setMessages(d.context.messages); setEntryIds(d.context.entryIds);
+      // A history read during preparation may predate the submitted prompt.
+      // Keep its local echo visible without adding it to a certified baseline.
+      const displayMessages = preservePendingUserMessage(d.context.messages, d.context.entryIds, sid, optimisticUserMessageRef.current);
+      dataRef.current = d; messagesRef.current = displayMessages; entryIdsRef.current = d.context.entryIds;
+      setData(d); setActiveLeafId(d.leafId); setMessages(displayMessages); setEntryIds(d.context.entryIds);
       setHistoryCursor(d.context.oldestEntryId ?? null); setHasEarlierMessages(Boolean(d.context.hasMore));
       // Apply even on unchanged: a remounted view must restore the session's tool preset.
       sessionToolsPinnedRef.current = d.toolNames !== undefined;
@@ -1331,7 +1335,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     const agentWasActive = sdkAgentActiveRef.current;
     rpcPromptPendingRef.current = false;
     sdkAgentActiveRef.current = false;
-    optimisticUserMessageKeyRef.current = null;
+    optimisticUserMessageRef.current = null;
     const wasRunning = settleUiStage();
     if (promptWasPending || agentWasActive || wasRunning) {
       notifyPromptStage(runId);
@@ -1554,7 +1558,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           const runId = promptRunIdRef.current;
           const promptWasPending = rpcPromptPendingRef.current;
           rpcPromptPendingRef.current = false;
-          optimisticUserMessageKeyRef.current = null;
+          optimisticUserMessageRef.current = null;
           if (!promptWasPending && notifiedPromptRunIdRef.current === runId) break;
 
           const sid = sessionIdRef.current;
@@ -1625,14 +1629,19 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         if (isSystemMessageEvent(event)) break;
         const completed = event.message as AgentMessage | undefined;
         if (completed && completed.role === "user") {
+          // The bubble and authoritative queue snapshot share the same React
+          // update batch; do not infer consumption from text (duplicates/images).
+          if (event.queuedMessages !== undefined) {
+            setQueuedMessages(normalizeQueuedMessages(event.queuedMessages as QueuedMessages));
+          }
           // Delivered steering/follow-up messages surface here as user
           // messages. The run's initial prompt also emits one, but handleSend
           // already appended it optimistically. Consume only the still-adjacent
           // optimistic bubble; later same-text queue deliveries must render.
           const delivered = normalizeToolCalls(completed);
           const deliveredKey = userMessageKey(delivered);
-          const optimisticKey = optimisticUserMessageKeyRef.current;
-          optimisticUserMessageKeyRef.current = null;
+          const optimisticKey = optimisticUserMessageRef.current ? userMessageKey(optimisticUserMessageRef.current.message) : null;
+          optimisticUserMessageRef.current = null;
           setMessages((prev) => {
             const fallback = () => {
               const last = prev[prev.length - 1];
@@ -1652,6 +1661,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           });
         } else if (completed) {
           setMessages((prev) => [...prev, normalizeToolCalls(completed)]);
+          if (completed.role === "toolResult") {
+            setActiveToolResults((prev) => {
+              if (!prev.has(completed.toolCallId)) return prev;
+              const next = new Map(prev);
+              next.delete(completed.toolCallId);
+              return next;
+            });
+          }
         }
         dispatch({ type: "end" });
         setAgentPhase({ kind: "waiting_model" });
@@ -1715,9 +1732,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         if (isNestedToolExecutionEvent(event)) break;
         const id = event.toolCallId as string;
         setActiveToolResults((prev) => {
-          if (!prev.has(id)) return prev;
           const next = new Map(prev);
-          next.delete(id);
+          next.set(id, completeActiveToolResult(prev.get(id), {
+            toolCallId: id,
+            toolName: event.toolName as string | undefined,
+            isError: event.isError as boolean | undefined,
+          }));
           return next;
         });
         setAgentPhase((prev) => {
@@ -1806,8 +1826,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       timestamp: Date.now(),
     };
     markOptimisticUserMessage(userMsg);
+    optimisticUserMessageRef.current = { sessionId: sessionIdRef.current, message: userMsg, precedingEntryIds: entryIdsRef.current };
     setMessages((prev) => [...prev, userMsg]);
-    optimisticUserMessageKeyRef.current = userMessageKey(userMsg);
     promptRunIdRef.current = promptRunId;
     agentRunningRef.current = true;
     setAgentRunning(true);
@@ -1832,6 +1852,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
         if (!sid) throw new Error("Unable to create a session for the prompt");
         sentSessionId = sid;
+        if (optimisticUserMessageRef.current?.message === userMsg) optimisticUserMessageRef.current.sessionId = sid;
         if (sourceDraftKey) onSessionSubmissionChange?.(sourceDraftKey, pendingSessionInfo(sourceDraftKey, newSessionCwd, sid, message));
         if (selectedModel) {
           setPendingModel(selectedModel);
@@ -1887,7 +1908,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       });
       if (!cancelledBeforeDispatch) addNotice({ type: "error", message: e instanceof Error ? e.message : String(e) });
       restoreSubmission(message, images, composerDraftKey);
-      optimisticUserMessageKeyRef.current = null;
+      optimisticUserMessageRef.current = null;
       // Rejection only describes this submission. Another tab or an event we
       // missed may still have a real run active for the same session, so keep
       // its SSE connection until server state says the wrapper is idle.

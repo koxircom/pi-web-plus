@@ -519,55 +519,6 @@ body:has(.settings-dialog-backdrop, .settings-dialog-surface, [role="dialog"][ar
   background: rgba(239, 68, 68, 0.16);
 }
 
-/* --------------------------------------------------------------------------
-   移动端 (Mobile) 与 More controls 折叠面板
-   -------------------------------------------------------------------------- */
-.chat-composer-card .chat-composer-more-btn {
-  grid-column: -4;
-  grid-row: 3;
-  justify-self: end;
-  align-self: center;
-  height: 28px;
-  padding: 0 8px;
-  white-space: nowrap;
-  font-size: 11px;
-  font-weight: 500;
-  border-radius: 8px;
-  border: none;
-  background: transparent;
-  color: var(--text-muted);
-  cursor: pointer;
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  flex-shrink: 0;
-  transition: background 0.12s ease, color 0.12s ease;
-}
-
-.chat-composer-card .chat-composer-more-btn:hover {
-  background: var(--bg-hover);
-  color: var(--text);
-}
-
-/* 移动端展开的真实 Absolute Popover，拥有独立盒模型，不被 contents 扁平化 */
-.chat-composer-card .chat-composer-mobile-popover {
-  position: absolute;
-  right: 10px;
-  bottom: 46px;
-  z-index: 80;
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  padding: 4px 6px;
-  width: max-content;
-  max-width: calc(100vw - 32px);
-  border: 1px solid color-mix(in srgb, var(--border) 72%, transparent);
-  border-radius: 10px;
-  background: color-mix(in srgb, var(--bg-panel) 94%, var(--bg));
-  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.2);
-  backdrop-filter: blur(10px);
-}
-
 /* 调整高度手柄 (Resize Handle Bar) */
 .chat-composer-resizer {
   position: absolute;
@@ -634,10 +585,6 @@ body:has(.settings-dialog-backdrop, .settings-dialog-surface, [role="dialog"][ar
     padding: 8px 10px;
     column-gap: 2px;
     row-gap: 6px;
-  }
-  .chat-composer-card .chat-composer-more-btn {
-    grid-column: -4;
-    grid-row: 3;
   }
   .chat-composer-card .chat-composer-model-controls .model-selector > button { max-width: 142px; padding: 0 6px; }
   .chat-composer-card .chat-composer-model-controls .thinking-selector > button { padding: 0 6px; }

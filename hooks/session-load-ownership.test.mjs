@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {readFileSync} from 'node:fs';
 import {stripTypeScriptTypes} from 'node:module';
 import vm from 'node:vm';
+import {preservePendingUserMessage} from '../lib/prompt-recovery.ts';
 
 // Execute the real load callback with controlled network completion order.
 const source=readFileSync(new URL('./useAgentSession.ts',import.meta.url),'utf8');
@@ -10,13 +11,13 @@ const callback=source.slice(source.indexOf('  const loadSession = useCallback'),
 const executable=stripTypeScriptTypes(callback)+'\nloadSession';
 const data=(name)=>({sessionId:'s',leafId:name,toolNames:undefined,context:{messages:[name],entryIds:[name],oldestEntryId:name,hasMore:false,thinkingLevel:'off'}});
 function harness(){
-  let epoch=0;const pending=[],state={loading:false,error:null,history:null};
+  let epoch=0;const pending=[],state={loading:false,error:null,history:null,messages:[]};
   const ref=current=>({current});
   const scope={useCallback:f=>f,isSessionMemoryCacheEnabled:()=>false,getSessionEpoch:()=>epoch,bumpSessionEpoch:()=>++epoch,isEpochFresh:(_,e)=>e===epoch,
     sessionHookMountedRef:ref(true),sessionIdRef:ref('s'),latestLoadRequestRef:ref(null),loadFlightsRef:ref(new Map()),
-    getSessionWireBaseline:()=>null,dataRef:ref(null),messagesRef:ref([]),entryIdsRef:ref([]),historyCursorRef:ref(null),hasEarlierMessagesRef:ref(false),
+    preservePendingUserMessage,optimisticUserMessageRef:ref(null),getSessionWireBaseline:()=>null,dataRef:ref(null),messagesRef:ref([]),entryIdsRef:ref([]),historyCursorRef:ref(null),hasEarlierMessagesRef:ref(false),
     buildSessionSyncUrl:()=>'/history',fetch:()=>new Promise((resolve,reject)=>pending.push({resolve,reject})),reconcileSyncResponse:({payload})=>({action:'legacy',data:payload}),
-    preserveLoadedHistoryPrefix:d=>d,deleteSessionViewSnapshot:()=>{},setLoading:v=>state.loading=v,setData:d=>state.history=d,setMessages:()=>{},setEntryIds:()=>{},setActiveLeafId:()=>{},setHistoryCursor:()=>{},setHasEarlierMessages:()=>{},
+    preserveLoadedHistoryPrefix:d=>d,deleteSessionViewSnapshot:()=>{},setLoading:v=>state.loading=v,setData:d=>state.history=d,setMessages:m=>state.messages=m,setEntryIds:()=>{},setActiveLeafId:()=>{},setHistoryCursor:()=>{},setHasEarlierMessages:()=>{},
     sessionToolsPinnedRef:ref(false),CONFIGURED_TOOL_PRESET:'configured',setToolPresetState:()=>{},modelSwitchPendingRef:ref(false),setCurrentModelOverride:()=>{},setCurrentThinkingOverride:()=>{},setError:e=>state.error=e,syncLiveModel:()=>{},
     isAbortError:e=>e?.name==='AbortError',queueMicrotask,console};
   return{load:vm.runInNewContext(executable,scope),pending,state,scope};
@@ -37,4 +38,15 @@ for(const outcome of ['success','failure','missing','cancelled'])test(`a silent 
   assert.equal(h.pending.length,2,'terminal errors and explicit cancellation must not replay history');
   if(outcome==='failure')assert.match(h.state.error,/offline/);
   if(outcome==='cancelled')assert.equal(h.state.error,null);
+});
+
+test('a current history read retains the local prompt until its committed entry arrives',async()=>{
+ const h=harness(),local={role:'user',content:'now',timestamp:10};
+ h.scope.optimisticUserMessageRef.current={sessionId:'s',message:local,precedingEntryIds:['old']};
+ const first=h.load('s');h.pending[0].resolve(response({sessionId:'s',leafId:'old',context:{messages:[{role:'user',content:'now',timestamp:1}],entryIds:['old']}}));await first;
+ assert.equal(h.state.messages.length,2);assert.equal(h.state.messages[1],local);
+ assert.equal(h.state.history.context.messages.length,1,'local echo must not enter confirmed data');
+ const committed={role:'user',content:'now',timestamp:11};const second=h.load('s');
+ h.pending[1].resolve(response({sessionId:'s',leafId:'new',context:{messages:[committed],entryIds:['new']}}));await second;
+ assert.equal(h.state.messages.length,1);assert.equal(h.state.messages[0],committed);
 });

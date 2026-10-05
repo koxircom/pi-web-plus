@@ -62,6 +62,8 @@ import {
   promote,
   recall,
   recallAll,
+  reconcileDeliveredImageOnlyMessage,
+  reorderQueued,
   snapshot,
 } from "./queue-actions";
 
@@ -403,6 +405,7 @@ export class AgentSessionWrapper {
 
   start(): void {
     this.unsubscribe = this.inner.subscribe((event: AgentEvent) => {
+      if (event.type === "message_start") reconcileDeliveredImageOnlyMessage(this.inner, event.message);
       if (event.type === "agent_start") this.agentRunNeedsCompletion = true;
       if (event.type === "agent_end") {
         invalidateSessionListCache();
@@ -411,7 +414,16 @@ export class AgentSessionWrapper {
       }
       this.trackActiveToolEvent(event);
       if (IDLE_RESET_EVENT_TYPES.has(event.type)) this.resetIdleTimer();
-      this.emit(event);
+      // Deliver the user bubble and current queue as one wire event. A consumer
+      // need not wait for a DOM mirror or another state request to remove it.
+      if (event.type === "message_end" && (event.message as { role?: string } | undefined)?.role === "user") {
+        this.emit({ ...event, queuedMessages: {
+          steering: [...this.inner.getSteeringMessages()],
+          followUp: [...this.inner.getFollowUpMessages()],
+        } } as AgentEvent);
+      } else {
+        this.emit(event);
+      }
       if (event.type === "agent_settled") this.notifyAgentRunCompleteIfIdle();
     });
     this.resetIdleTimer();
@@ -1145,6 +1157,10 @@ export class AgentSessionWrapper {
 
       case "recall_all_queued_messages": {
         return recallAll(this.inner, command.tokens as string[]);
+      }
+
+      case "reorder_queued_message": {
+        return reorderQueued(this.inner, command.tokens, command.token, command.targetToken);
       }
 
       case "clear_queue": {
