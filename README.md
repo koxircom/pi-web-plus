@@ -1,6 +1,6 @@
-> **PI Web Plus v1.3.19** 基于 Pi Coding Agent 1.0.2。通过 [GitHub Releases](https://github.com/koxircom/pi-web-plus/releases/tag/v1.3.19) 安装预构建包；本地服务默认只监听 `127.0.0.1`。
+> **PI Web Plus v1.3.20** 基于 Pi Coding Agent 1.0.2。通过 [GitHub Releases](https://github.com/koxircom/pi-web-plus/releases/tag/v1.3.20) 安装预构建包；本地服务默认只监听 `127.0.0.1`。
 
-> 1.3.19：新增会话导航书签、模型缓存后台刷新、新会话启动提速与图片功能预热；保留现有聊天界面。
+> 1.3.20：新增会话导航书签、模型缓存后台刷新、新会话启动提速与图片功能预热；保留现有聊天界面。
 
 # PI Web Plus
 
@@ -25,7 +25,7 @@ PI Web Plus 保留并扩展 agegr 的 pi-web 开源项目，许可证及原版�
 PI Web Plus requires Node.js 22.19.0 or newer (`node >=22.19`). Check your version with `node --version`, then install the prebuilt release tarball from [`koxircom/pi-web-plus` GitHub Releases](https://github.com/koxircom/pi-web-plus/releases) and start `pi-web`:
 
 ```bash
-npm install -g https://github.com/koxircom/pi-web-plus/releases/download/v1.3.19/pi-web-plus-1.3.19.tgz
+npm install -g https://github.com/koxircom/pi-web-plus/releases/download/v1.3.20/pi-web-plus-1.3.20.tgz
 pi-web
 ```
 
@@ -35,7 +35,7 @@ The CLI opens a browser after the server is ready. If it does not, open [http://
 
 If no model provider is configured yet, open the **Models** panel to sign in or add an API key.
 
-The command above installs v1.3.19. To install or upgrade to another release, stop the running process with `Ctrl+C`, replace `v1.3.19` and `1.3.19` in the URL with the target `<version>` from [GitHub Releases](https://github.com/koxircom/pi-web-plus/releases), and run the install command again:
+The command above installs v1.3.20. To install or upgrade to another release, stop the running process with `Ctrl+C`, replace `v1.3.20` and `1.3.20` in the URL with the target `<version>` from [GitHub Releases](https://github.com/koxircom/pi-web-plus/releases), and run the install command again:
 
 ```bash
 npm install -g https://github.com/koxircom/pi-web-plus/releases/download/v<version>/pi-web-plus-<version>.tgz
@@ -79,10 +79,10 @@ Password authentication does not encrypt the connection. Do not expose Pi Web ov
 
 Server-side model and API requests honor the standard `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY` environment variables.
 
-On macOS or Linux (after installing the [GitHub Release tarball](https://github.com/koxircom/pi-web-plus/releases/download/v1.3.19/pi-web-plus-1.3.19.tgz)):
+On macOS or Linux (after installing the [GitHub Release tarball](https://github.com/koxircom/pi-web-plus/releases/download/v1.3.20/pi-web-plus-1.3.20.tgz)):
 
 ```bash
-npm install -g https://github.com/koxircom/pi-web-plus/releases/download/v1.3.19/pi-web-plus-1.3.19.tgz
+npm install -g https://github.com/koxircom/pi-web-plus/releases/download/v1.3.20/pi-web-plus-1.3.20.tgz
 HTTP_PROXY=http://127.0.0.1:7890 \
 HTTPS_PROXY=http://127.0.0.1:7890 \
 NO_PROXY=localhost,127.0.0.1 \
@@ -92,7 +92,7 @@ pi-web
 On Windows PowerShell:
 
 ```powershell
-npm install -g https://github.com/koxircom/pi-web-plus/releases/download/v1.3.19/pi-web-plus-1.3.19.tgz
+npm install -g https://github.com/koxircom/pi-web-plus/releases/download/v1.3.20/pi-web-plus-1.3.20.tgz
 $env:HTTP_PROXY = "http://127.0.0.1:7890"
 $env:HTTPS_PROXY = "http://127.0.0.1:7890"
 $env:NO_PROXY = "localhost,127.0.0.1"

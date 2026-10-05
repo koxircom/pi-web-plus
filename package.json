@@ -1,6 +1,6 @@
 {
   "name": "@agegr/pi-web",
-  "version": "1.3.19",
+  "version": "1.3.20",
   "capabilities": {
     "nativeSettingsHost": true,
     "nativeSettingsLayout": true,
@@ -11,7 +11,7 @@
   },
   "piWebEdition": "koxir-standalone",
   "standalone": true,
-  "description": "PI Web Plus — Web UI for the pi coding agent",
+  "description": "PI Web Plus — Web UI for the Pi coding agent",
   "homepage": "https://github.com/koxircom/pi-web-plus#readme",
   "repository": {
     "type": "git",

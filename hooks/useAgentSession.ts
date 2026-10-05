@@ -457,6 +457,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // labelling it with whichever preset the resolved tools happen to match.
   const sessionToolsPinnedRef = useRef(false);
   const agentRunningRef = useRef(false);
+  // Lifecycle events outrank state snapshots already in flight.
+  const agentStateRevisionRef = useRef(0);
   const sdkAgentActiveRef = useRef(false);
   const rpcPromptPendingRef = useRef(false);
   const notifiedPromptRunIdRef = useRef(-1);
@@ -1409,6 +1411,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const reconcileAgentState = useCallback(async (sid: string) => {
     if (!agentRunningRef.current || sessionIdRef.current !== sid) return;
     const runId = promptRunIdRef.current;
+    const revision = agentStateRevisionRef.current;
     try {
       const res = await fetch(`/api/agent/${encodeURIComponent(sid)}`);
       if (!res.ok) return;
@@ -1416,7 +1419,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       // A slow response can straddle a run boundary (previous run finished
       // and the user already started the next one while this request was in
       // flight) — everything in it is stale, drop it.
-      if (sessionIdRef.current !== sid || promptRunIdRef.current !== runId) return;
+      if (sessionIdRef.current !== sid || promptRunIdRef.current !== runId
+          || agentStateRevisionRef.current !== revision) return;
       const state = data.state;
       syncLiveModel(state);
       // Mirror compaction state unconditionally: a missed compaction_end
@@ -1474,6 +1478,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   }, [agentRunning]);
 
   const handleAgentEvent = useCallback((event: AgentEvent) => {
+    if (["connected", "agent_start", "agent_end", "agent_settled", "prompt_done"].includes(event.type)) {
+      agentStateRevisionRef.current += 1;
+    }
     if (sessionIdRef.current && invalidatesSessionHistory(event.type)) {
       bumpSessionEpoch(sessionIdRef.current);
     }
@@ -1539,7 +1546,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       case "agent_settled": {
         const agentWasActive = sdkAgentActiveRef.current;
         sdkAgentActiveRef.current = false;
-        if (!agentWasActive || rpcPromptPendingRef.current) break;
+        if (!agentWasActive) break;
+        // SDK settlement ends this run. The POST promise may still be unwinding;
+        // it is not model activity and must not keep Stop / waiting visible.
 
         const sid = sessionIdRef.current;
         const wasRunning = settleUiStage();
@@ -1671,7 +1680,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           }
         }
         dispatch({ type: "end" });
-        setAgentPhase({ kind: "waiting_model" });
+        // A terminal answer is already available. Only real tool/start events
+        // can announce the next phase; message completion is not a new request.
+        setAgentPhase(completed?.role === "assistant" ? null : { kind: "waiting_model" });
         break;
       }
       case "tool_execution_start": {
