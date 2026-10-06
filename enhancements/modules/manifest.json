@@ -1,17 +1,17 @@
 {
   "schemaVersion": 1,
-  "edition": "koxir-standalone-1.3.38",
-  "version": "1.3.38",
+  "edition": "koxir-standalone-1.3.39",
+  "version": "1.3.39",
   "targetFile": "enhancements/pi-web-enhancements.js",
   "mirrorFile": "public/pi-web-enhancements.js",
   "totalLines": 41413,
   "totalBytes": 1826946,
   "bundleSha256": "f2556072cff424e960c570c313e042cae93850d7bd13177caef07c2d532306d0",
-  "publicSha256": "019c371b03ab352c5d8e4d9aa060d2621f8275006935dc4032f03560a193b61d",
+  "publicSha256": "2ccffdb36253aa44a895b0e9592c0a04237249f8c4fae8a043cc9af04bc5d25f",
   "runtimeAsset": {
-    "path": "/pi-web-assets/enhancements-86e74a7a4a10d9e2.js",
-    "sha256": "86e74a7a4a10d9e23cb4c439779697aca28a255b125b40bec430ba495e3334b6",
-    "integrity": "sha256-hudKekoQ2eI8tMQ5d5aXrKKKJVsSW0C+xDC6SV4zNLY=",
+    "path": "/pi-web-assets/enhancements-2ce8c7047a51f398.js",
+    "sha256": "2ce8c7047a51f39853c2675d06fb35c043d3e08913c4251e1452df1cf7000c21",
+    "integrity": "sha256-LOjHBHpR85hTwmddBvs1wEPT4IkTxCUeFFLfHPcADCE=",
     "bytes": 1391284
   },
   "modules": [

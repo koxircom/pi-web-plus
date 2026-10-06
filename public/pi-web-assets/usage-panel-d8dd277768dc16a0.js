@@ -908,28 +908,28 @@
               ${dispatchedTokens > 0 ? `<br><span class="pi-enh-dispatch-note">* 调度 Sub agent (${tokens(dispatchedTokens)}) 计入执行模型自身的直接消耗。由本模型牵头的任务总负荷实为 <strong>${tokens(mainTokens + dispatchedTokens)}</strong>。</span>` : ""}
             </div>
           </div>
-          ${(!m.key.includes("deepseek") && m.key !== "system-summaries" && (m.totalTokens || 0) > 0 && !(m.dispatchedSubagents && m.dispatchedSubagents.savedCost > 0)) ? (() => {
+          ${(m.key !== "system-summaries" && (m.totalTokens || 0) > 0) ? (() => {
             const flashUsd = (((m.inputTokens || 0) * 0.15 + (m.outputTokens || 0) * 0.60 + (m.cacheReadTokens || 0) * 0.003 + (m.cacheWriteTokens || 0) * 0.003) / 1e6);
             const flashCny = (((m.inputTokens || 0) * 1.00 + (m.outputTokens || 0) * 4.00 + (m.cacheReadTokens || 0) * 0.02 + (m.cacheWriteTokens || 0) * 0.02) / 1e6);
 
             let subInfo = "";
             if (workerTokens > 0) {
-              const subFlashUsd = (((mRoles.subagent?.inputTokens || 0) * 0.15 + (mRoles.subagent?.outputTokens || 0) * 0.60 + (mRoles.subagent?.cacheReadTokens || 0) * 0.003) / 1e6);
-              const subFlashCny = (((mRoles.subagent?.inputTokens || 0) * 1.00 + (mRoles.subagent?.outputTokens || 0) * 4.00 + (mRoles.subagent?.cacheReadTokens || 0) * 0.02) / 1e6);
+              const subFlashUsd = (((mRoles.subagent?.inputTokens || 0) * 0.15 + (mRoles.subagent?.outputTokens || 0) * 0.60 + (mRoles.subagent?.cacheReadTokens || 0) * 0.003 + (mRoles.subagent?.cacheWriteTokens || 0) * 0.003) / 1e6);
+              const subFlashCny = (((mRoles.subagent?.inputTokens || 0) * 1.00 + (mRoles.subagent?.outputTokens || 0) * 4.00 + (mRoles.subagent?.cacheReadTokens || 0) * 0.02 + (mRoles.subagent?.cacheWriteTokens || 0) * 0.02) / 1e6);
               subInfo = `<div style="font-size:10px;color:#7dd3fc;margin-top:2px;">含执行 Sub agent (${tokens(workerTokens)}): $${subFlashUsd.toFixed(3)} (约 ¥${subFlashCny.toFixed(2)})</div>`;
             }
 
             return `
-          <div style="margin-top:10px;padding:8px 10px;background:rgba(56,189,248,0.05);border:1px solid rgba(56,189,248,0.22);border-radius:6px;box-sizing:border-box;">
-            <div style="display:flex;align-items:center;justify-content:space-between;gap:6px;">
-              <div style="display:flex;align-items:center;gap:6px;">
+          <div data-usage-deepseek-estimate style="margin-top:10px;padding:8px 10px;background:rgba(56,189,248,0.05);border:1px solid rgba(56,189,248,0.22);border-radius:6px;box-sizing:border-box;">
+            <div style="display:flex;flex-wrap:wrap;align-items:center;justify-content:space-between;gap:6px;">
+              <div style="display:flex;flex-wrap:wrap;align-items:center;gap:6px;">
                 <span style="font-size:13px;font-weight:700;color:#38bdf8;font-variant-numeric:tabular-nums;">折算 DeepSeek-V4.1 Flash 低谷期: $${flashUsd.toFixed(3)}</span>
                 <span style="font-size:10px;color:#7dd3fc;border:1px solid rgba(56,189,248,0.3);border-radius:3px;padding:0 4px;">约 ¥${flashCny.toFixed(2)}</span>
               </div>
               <span style="font-size:10px;color:#71717a;border:1px solid rgba(255,255,255,0.1);border-radius:3px;padding:0 4px;">闲时 5折</span>
             </div>
             <div style="font-size:11px;color:#a1a1aa;margin-top:4px;line-height:1.4;">
-              按官网最新低谷单价（输入 $0.15/M，输出 $0.60/M，缓存命中 $0.003/M）基准测算。
+              按当前内置低谷单价（输入 $0.15/M，输出 $0.60/M，缓存命中 $0.003/M）基准测算。
               ${subInfo}
             </div>
           </div>

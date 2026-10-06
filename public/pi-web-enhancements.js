@@ -472,7 +472,7 @@
 /* Optional resources share one request and publish no UI ownership. */
 (function (root) {
   "use strict";
-  const assets = {"xlsx-engine":{"path":"/pi-web-assets/xlsx-engine-ca804c22e21dd24b.js","integrity":"sha256-yoBMIuId0ksu79m7pYMZbbCTcQew2ejVoD+cI1B/VXU=","bytes":279670},"usage-panel":{"path":"/pi-web-assets/usage-panel-0d56e65aeefd08a2.js","integrity":"sha256-DVbmWu79CKKFcL3k6/he49U5mrT49r0z0FirfNij9l4=","bytes":63769},"image-editor":{"path":"/pi-web-assets/image-editor-42f6645a70f43e69.js","integrity":"sha256-QvZkWnD0PmlNxebzPKvYNLKW//UgBpYPtG+DxJYS9ps=","bytes":54018}};
+  const assets = {"xlsx-engine":{"path":"/pi-web-assets/xlsx-engine-ca804c22e21dd24b.js","integrity":"sha256-yoBMIuId0ksu79m7pYMZbbCTcQew2ejVoD+cI1B/VXU=","bytes":279670},"usage-panel":{"path":"/pi-web-assets/usage-panel-d8dd277768dc16a0.js","integrity":"sha256-2N0nd2jcFqBSHu5ZuTqChaQiL+dMN4ABKOe/STnG0fU=","bytes":63831},"image-editor":{"path":"/pi-web-assets/image-editor-42f6645a70f43e69.js","integrity":"sha256-QvZkWnD0PmlNxebzPKvYNLKW//UgBpYPtG+DxJYS9ps=","bytes":54018}};
   const pending = new Map();
   // Hot reloads may change an optional asset while keeping the same window.
   // Reuse only an export stamped with this exact content-addressed path.
