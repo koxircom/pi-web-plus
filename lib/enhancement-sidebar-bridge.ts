@@ -330,6 +330,52 @@ export function getEnhancementSessionItemTop<T>(
   return fallback;
 }
 
+export interface EnhancementSessionOdooAddon {
+  technical: string;
+  status: string;
+  isLatest: boolean;
+}
+
+// The manifest owner validates update evidence; React owns the resulting badges.
+export function getEnhancementSessionOdooAddons(
+  sessionId: string,
+  win: WindowRecord | undefined = getDefaultWindow(),
+): EnhancementSessionOdooAddon[] {
+  if (!win || !sessionId) return [];
+  try {
+    const hook = win.__PI_ENH_GET_SESSION_ODOO_ADDONS__;
+    if (typeof hook === "function") {
+      const addons = hook(sessionId);
+      if (Array.isArray(addons)) {
+        return addons.filter((addon): addon is EnhancementSessionOdooAddon =>
+          addon && typeof addon.technical === "string" && Boolean(addon.technical),
+        );
+      }
+    }
+  } catch {
+    // An unavailable enhancement must not prevent the native sidebar rendering.
+  }
+  return [];
+}
+
+export function getEnhancementSessionItemHeight(
+  sessionId: string,
+  fallback: number,
+  win: WindowRecord | undefined = getDefaultWindow(),
+): number {
+  if (!win) return fallback;
+  try {
+    const hook = win.__PI_ENH_GET_SESSION_ITEM_HEIGHT__;
+    if (typeof hook === "function") {
+      const height = hook(sessionId);
+      if (typeof height === "number" && Number.isFinite(height) && height > 0) return height;
+    }
+  } catch {
+    // Keep the native height when enhancement state is unavailable.
+  }
+  return fallback;
+}
+
 export function processEnhancementSearchResults<T>(
   results: T[] | undefined,
   win: WindowRecord | undefined = getDefaultWindow(),

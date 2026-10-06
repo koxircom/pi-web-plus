@@ -472,7 +472,7 @@
 /* Optional resources share one request and publish no UI ownership. */
 (function (root) {
   "use strict";
-  const assets = {"xlsx-engine":{"path":"/pi-web-assets/xlsx-engine-ca804c22e21dd24b.js","integrity":"sha256-yoBMIuId0ksu79m7pYMZbbCTcQew2ejVoD+cI1B/VXU=","bytes":279670},"usage-panel":{"path":"/pi-web-assets/usage-panel-0d56e65aeefd08a2.js","integrity":"sha256-DVbmWu79CKKFcL3k6/he49U5mrT49r0z0FirfNij9l4=","bytes":63769},"image-editor":{"path":"/pi-web-assets/image-editor-81d4e7815c0c623d.js","integrity":"sha256-gdTngVwMYj2CaV6WtN0CJ1xSaejn5zbCC39G48jXJbU=","bytes":53249}};
+  const assets = {"xlsx-engine":{"path":"/pi-web-assets/xlsx-engine-ca804c22e21dd24b.js","integrity":"sha256-yoBMIuId0ksu79m7pYMZbbCTcQew2ejVoD+cI1B/VXU=","bytes":279670},"usage-panel":{"path":"/pi-web-assets/usage-panel-0d56e65aeefd08a2.js","integrity":"sha256-DVbmWu79CKKFcL3k6/he49U5mrT49r0z0FirfNij9l4=","bytes":63769},"image-editor":{"path":"/pi-web-assets/image-editor-42f6645a70f43e69.js","integrity":"sha256-QvZkWnD0PmlNxebzPKvYNLKW//UgBpYPtG+DxJYS9ps=","bytes":54018}};
   const pending = new Map();
   // Hot reloads may change an optional asset while keeping the same window.
   // Reuse only an export stamped with this exact content-addressed path.
@@ -6039,79 +6039,6 @@
     return normalizeSessionOdooAddonItems(items, sessionId, manifest);
   }
 
-  function syncSessionOdooAddonsHeight(row, sessionId) {
-    const height = getSessionItemHeight(sessionId) + "px";
-    if (row.style.height !== height) row.style.height = height;
-    const wrapper = row.parentElement;
-    if (wrapper?.style.position === "absolute" && wrapper.style.height !== height) wrapper.style.height = height;
-  }
-
-  function removeSessionOdooAddonsAll() {
-    for (const row of document.querySelectorAll(".pi-enh-session-row-host[data-pi-enh-has-odoo-addons='true']")) {
-      row.querySelector(".pi-enh-session-odoo-addons")?.remove();
-      row.removeAttribute("data-pi-enh-has-odoo-addons");
-      syncSessionOdooAddonsHeight(row, row.dataset.piEnhSessionId);
-    }
-  }
-
-  function syncSessionOdooAddonsRow(row, sessionId) {
-    if (!row || !sessionId) return;
-
-    if (!isPluginEnabled("session-odoo-addons") || row.querySelector("input") || row.getAttribute("data-pi-enh-editing") === "true") {
-      row.querySelector(".pi-enh-session-odoo-addons")?.remove();
-      row.removeAttribute("data-pi-enh-has-odoo-addons");
-      syncSessionOdooAddonsHeight(row, sessionId);
-      return;
-    }
-
-    const addons = getSessionOdooAddons(sessionId);
-    let container = row.querySelector(".pi-enh-session-odoo-addons");
-
-    if (addons.length === 0) {
-      container?.remove();
-      row.removeAttribute("data-pi-enh-has-odoo-addons");
-      syncSessionOdooAddonsHeight(row, sessionId);
-      return;
-    }
-
-    if (row.getAttribute("data-pi-enh-has-odoo-addons") !== "true") row.setAttribute("data-pi-enh-has-odoo-addons", "true");
-
-    if (!container) {
-      container = document.createElement("div");
-      container.className = "pi-enh-session-odoo-addons";
-    }
-
-    // 独立的全宽第二行，不挤占第一行标题、标签与操作按钮，也不继承元数据截断。
-    if (container.parentElement !== row) row.appendChild(container);
-
-    // 渲染每个插件一行：仅显示插件的技术标识名称（不显示中文，如仅显示 kx_srm）
-    let html = "";
-    const activeManifest = window.__PI_ENH_ODOO_ADDONS_MANIFEST__;
-    for (const addon of addons) {
-      const tech = (typeof addon === "string" ? addon : (addon.technical || addon.name || "")).trim();
-      if (!tech) continue;
-      const isLatest = isLatestSessionForOdooAddon(sessionId, tech, activeManifest);
-      const baseTooltip = addon.status ? `${tech} · ${addon.status}` : tech;
-      const tooltip = isLatest ? `${baseTooltip} · 最新实际更新会话` : `${baseTooltip} · 历史更新会话`;
-      const ariaLabel = isLatest ? `${tech}（最新实际更新会话）` : `${tech}（历史更新会话）`;
-      const pillClass = isLatest ? "pi-enh-odoo-addon-pill is-latest" : "pi-enh-odoo-addon-pill";
-
-      html += `<div class="pi-enh-odoo-addon-row">
-        <span class="${pillClass}" data-pi-enh-latest="${isLatest ? "true" : "false"}" title="${escapeHtml(tooltip)}" aria-label="${escapeHtml(ariaLabel)}">
-          <span class="pi-enh-odoo-addon-dot" aria-hidden="true"></span>
-          <span class="pi-enh-odoo-addon-name">${escapeHtml(tech)}</span>
-        </span>
-      </div>`;
-    }
-
-    // 不重复替换相同节点，避免 MutationObserver 自激和悬停/选择闪烁。
-    if (container.__renderedHtml !== html && container.innerHTML !== html) {
-      container.innerHTML = html;
-    }
-    container.__renderedHtml = html;
-    syncSessionOdooAddonsHeight(row, sessionId);
-  }
-
   function syncSessionOdooAddonsLayout() {
     // React 的刷新是异步的；切换开关/热加载时，同步用同一高度函数重排整组，
     // 不能只改变某一行高度而暂时保留下方旧坐标。
@@ -6173,7 +6100,6 @@
           const index = indices.get(entry.sid);
           const top = getSessionItemTop(index, groups) + "px";
           if (entry.wrapper.style.top !== top) entry.wrapper.style.top = top;
-          syncSessionOdooAddonsHeight(entry.row, entry.sid);
         }
         const height = (SESSION_NORMAL_ITEM_HEIGHT * groups.length + getSessionHeadersHeight(groups)) + "px";
         if (container.style.height !== height) container.style.height = height;
@@ -6192,21 +6118,9 @@
     }
   }
 
+  // Explicit state notifications only. SessionSidebar owns addon DOM and row lifecycle.
   function syncSessionOdooAddons() {
-    if (!isPluginEnabled("session-odoo-addons")) {
-      removeSessionOdooAddonsAll();
-      syncSessionOdooAddonsLayout();
-      return;
-    }
-
-    const rows = document.querySelectorAll(".pi-enh-session-row-host[data-pi-enh-session-id]");
-    for (const row of rows) {
-      const sessionId = row.getAttribute("data-pi-enh-session-id");
-      if (sessionId) {
-        syncSessionOdooAddonsRow(row, sessionId);
-      }
-    }
-    syncSessionOdooAddonsLayout();
+    window.__PI_ENH_RERENDER_SESSIONS__?.();
   }
 
   let activeOdooAddonsRefreshPromise = null;
@@ -6330,12 +6244,7 @@
         }
 
         window.__PI_ENH_ODOO_ADDONS_MANIFEST__ = nextManifest;
-        syncSessionOdooAddons();
-        if (contentChanged) {
-          try {
-            window.__PI_ENH_RERENDER_SESSIONS__?.();
-          } catch (e) {}
-        }
+        if (contentChanged) syncSessionOdooAddons();
         return { updated: true, changed: contentChanged, versionChanged, revision: nextRev };
       } catch (err) {
         return { updated: false, changed: false, error: err && err.message ? err.message : "FETCH_ERROR" };
@@ -7244,12 +7153,12 @@
     return false;
   }
 
-  function markSessionAsDeleted(sessionId, retentionMs = 60000) {
+  function markSessionAsDeleted(sessionId, retentionMs = 60000, notify = true) {
     if (!sessionId) return;
     pendingDeletedSessionIds.add(sessionId);
     confirmedDeletedSessionIds.set(sessionId, Date.now() + retentionMs);
     try {
-      if (typeof window !== "undefined" && typeof window.__PI_ENH_RERENDER_SESSIONS__ === "function") {
+      if (notify && typeof window !== "undefined" && typeof window.__PI_ENH_RERENDER_SESSIONS__ === "function") {
         window.__PI_ENH_RERENDER_SESSIONS__();
       }
     } catch (e) {}
@@ -7261,12 +7170,12 @@
     confirmedDeletedSessionIds.set(sessionId, Date.now() + retentionMs);
   }
 
-  function restoreSessionDeleteState(sessionId) {
+  function restoreSessionDeleteState(sessionId, notify = true) {
     if (!sessionId) return;
     pendingDeletedSessionIds.delete(sessionId);
     confirmedDeletedSessionIds.delete(sessionId);
     try {
-      if (typeof window !== "undefined" && typeof window.__PI_ENH_RERENDER_SESSIONS__ === "function") {
+      if (notify && typeof window !== "undefined" && typeof window.__PI_ENH_RERENDER_SESSIONS__ === "function") {
         window.__PI_ENH_RERENDER_SESSIONS__();
       }
     } catch (e) {}
@@ -28350,24 +28259,25 @@
   batchDeleteModal = null;
   let isBatchDragging = false;
   let batchDragTargetState = true;
+  let batchDeleteInFlight = false;
 
   function getAllActiveSessionIds() {
-    const ids = [];
+    const ids = new Set();
     if (Array.isArray(latestKnownSessionGroups) && latestKnownSessionGroups.length > 0) {
       for (const group of latestKnownSessionGroups) {
         const rootId = group?.root?.id;
-        if (rootId && !ids.includes(rootId)) {
-          ids.push(rootId);
+        if (rootId && !ids.has(rootId)) {
+          ids.add(rootId);
         }
       }
     }
     for (const row of document.querySelectorAll(".pi-enh-session-row-host[data-pi-enh-session-id]")) {
       const sid = row.getAttribute("data-pi-enh-session-id");
-      if (sid && !ids.includes(sid)) {
-        ids.push(sid);
+      if (sid && !ids.has(sid)) {
+        ids.add(sid);
       }
     }
-    return ids;
+    return Array.from(ids);
   }
 
   function getSessionTitleForBatch(sessionId) {
@@ -28454,61 +28364,59 @@
       bar = document.createElement("div");
       bar.id = "pi-enh-session-batch-bar";
       bar.className = "pi-enh-session-batch-bar";
-      mainCol.insertBefore(bar, listContainer);
-    }
-
-    const allIds = getAllActiveSessionIds();
-    const total = allIds.length;
-    const selectedCount = selectedSessionBatchIds.size;
-    const isAll = total > 0 && selectedCount >= total;
-    const isIndeterminate = selectedCount > 0 && selectedCount < total;
-
-    bar.innerHTML = `
-      <div style="display: flex; align-items: center; gap: 8px; min-width: 0;">
-        <label class="pi-enh-session-batch-select-all" title="全选所有会话">
-          <input type="checkbox" data-action="batch-select-all" ${isAll ? "checked" : ""}>
-          <span>全选</span>
-        </label>
-        <span style="font-size: 11.5px; color: var(--text-muted); line-height: 1; white-space: nowrap;">
-          ${selectedCount > 0 ? `已选 <strong style="color: var(--text);">${selectedCount}</strong> 项` : `未选择`}
-        </span>
-      </div>
-      <div class="pi-enh-session-batch-actions">
-        <button type="button" class="pi-enh-session-batch-btn" data-action="batch-copy-ids" style="padding: 6px;" ${selectedCount === 0 ? "disabled" : ""} aria-label="复制所选会话 ID" title="${selectedCount > 0 ? `复制已选 ${selectedCount} 个会话 ID（每行一个）` : "请先勾选要复制 ID 的会话"}">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
-        </button>
-        <button type="button" class="pi-enh-session-batch-btn pi-enh-session-batch-btn-danger" data-action="batch-delete" style="padding: 6px;" ${selectedCount === 0 ? "disabled" : ""} aria-label="删除所选会话" title="${selectedCount > 0 ? `彻底删除已选 ${selectedCount} 个会话` : "请先勾选要删除的会话"}">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"></path><path d="M10 11v6M14 11v6"></path></svg>
-        </button>
-      </div>
-    `;
-
-    const selectAllInput = bar.querySelector('input[data-action="batch-select-all"]');
-    if (selectAllInput) {
-      selectAllInput.indeterminate = isIndeterminate;
-      selectAllInput.addEventListener("change", (e) => {
+      // The toolbar owns these nodes. Replacing them during sidebar layout
+      // notifications triggers another virtual-list resize/render notification.
+      bar.innerHTML = `
+        <div style="display: flex; align-items: center; gap: 8px; min-width: 0;">
+          <label class="pi-enh-session-batch-select-all" title="全选所有会话">
+            <input type="checkbox" data-action="batch-select-all" >
+            <span>全选</span>
+          </label>
+          <span data-batch-selection-count style="font-size: 11.5px; color: var(--text-muted); line-height: 1; white-space: nowrap;">
+            未选择
+          </span>
+        </div>
+        <div class="pi-enh-session-batch-actions">
+          <button type="button" class="pi-enh-session-batch-btn" data-action="batch-copy-ids" style="padding: 6px;" disabled aria-label="复制所选会话 ID" title="复制所选会话 ID">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="9" y="9" width="13" height="13" rx="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
+          </button>
+          <button type="button" class="pi-enh-session-batch-btn pi-enh-session-batch-btn-danger" data-action="batch-delete" style="padding: 6px;" disabled aria-label="删除所选会话" title="删除所选会话">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"></path><path d="M10 11v6M14 11v6"></path></svg>
+          </button>
+        </div>
+      `;
+      bar.querySelector('input').addEventListener("change", (e) => {
         e.stopPropagation();
-        toggleSelectAllBatch(selectAllInput.checked);
+        toggleSelectAllBatch(e.currentTarget.checked);
       });
-    }
-
-    const deleteBtn = bar.querySelector('button[data-action="batch-delete"]');
-    if (deleteBtn) {
-      deleteBtn.addEventListener("click", (e) => {
+      bar.querySelector('[data-action="batch-delete"]').addEventListener("click", (e) => {
         e.stopPropagation();
         openBatchDeleteModal();
       });
-    }
-
-    const copyBtn = bar.querySelector('button[data-action="batch-copy-ids"]');
-    if (copyBtn) {
-      copyBtn.addEventListener("click", (e) => {
+      bar.querySelector('[data-action="batch-copy-ids"]').addEventListener("click", (e) => {
         e.stopPropagation();
         const ids = Array.from(selectedSessionBatchIds);
-        if (ids.length === 0) return;
-        copyText(ids.join("\n"), `已复制 ${ids.length} 个会话 ID（每行一个）`);
+        if (ids.length) copyText(ids.join("\n"), `已复制 ${ids.length} 个会话 ID（每行一个）`);
       });
+      mainCol.insertBefore(bar, listContainer);
     }
+
+    const total = getAllActiveSessionIds().length;
+    const selectedCount = selectedSessionBatchIds.size;
+    const selectAll = bar.querySelector('input');
+    selectAll.checked = total > 0 && selectedCount >= total;
+    selectAll.indeterminate = selectedCount > 0 && selectedCount < total;
+    selectAll.disabled = batchDeleteInFlight;
+    const count = bar.querySelector('[data-batch-selection-count]');
+    const countText = selectedCount ? `已选 ${selectedCount} 项` : "未选择";
+    if (count.textContent !== countText) count.textContent = countText;
+    const copy = bar.querySelector('[data-action="batch-copy-ids"]');
+    const remove = bar.querySelector('[data-action="batch-delete"]');
+    copy.disabled = remove.disabled = selectedCount === 0 || batchDeleteInFlight;
+    const copyTitle = selectedCount ? `复制已选 ${selectedCount} 个会话 ID（每行一个）` : "请先勾选要复制 ID 的会话";
+    const deleteTitle = selectedCount ? `彻底删除已选 ${selectedCount} 个会话` : "请先勾选要删除的会话";
+    if (copy.title !== copyTitle) copy.title = copyTitle;
+    if (remove.title !== deleteTitle) remove.title = deleteTitle;
   }
 
   function removeSessionBatchBar() {
@@ -28556,6 +28464,7 @@
   }
 
   function toggleSessionBatchSelect(sessionId, targetChecked, isShift) {
+    if (batchDeleteInFlight) return;
     if (!sessionId) return;
     const allIds = getAllActiveSessionIds();
     const currIndex = allIds.indexOf(sessionId);
@@ -28586,6 +28495,7 @@
   }
 
   function toggleSelectAllBatch(checked) {
+    if (batchDeleteInFlight) return;
     const allIds = getAllActiveSessionIds();
     if (checked) {
       for (const id of allIds) selectedSessionBatchIds.add(id);
@@ -28613,6 +28523,7 @@
   }
 
   function closeBatchDeleteModal() {
+    if (batchDeleteInFlight) return;
     if (batchDeleteModal) {
       batchDeleteModal.remove();
       batchDeleteModal = null;
@@ -28620,6 +28531,7 @@
   }
 
   function openBatchDeleteModal() {
+    if (batchDeleteInFlight) return;
     closeBatchDeleteModal();
     const targetIds = Array.from(selectedSessionBatchIds);
     if (targetIds.length === 0) return;
@@ -28684,83 +28596,99 @@
   }
 
   async function executeBatchDeleteSessions(targetIds, confirmBtn) {
-    if (!Array.isArray(targetIds) || targetIds.length === 0) return;
-
+    if (batchDeleteInFlight || !Array.isArray(targetIds) || targetIds.length === 0) return;
+    targetIds = Array.from(new Set(targetIds));
+    batchDeleteInFlight = true;
     if (confirmBtn) {
       confirmBtn.disabled = true;
       confirmBtn.textContent = `正在删除 (0/${targetIds.length})...`;
     }
-
+    // Paint the busy state before any local bookkeeping. One request serves up
+    // to 100 sessions; do not rerender the entire sidebar for every pending ID.
+    await new Promise((resolve) => setTimeout(resolve, 0));
     const activeSessionId = typeof getCurrentSessionId === "function" ? getCurrentSessionId() : null;
     let shouldResetActiveView = false;
     let successCount = 0;
-    let failCount = 0;
+    const failedIds = new Set();
+    let transportFailed = false;
+    for (const sid of targetIds) markSessionAsDeleted(sid, 60000, false);
+    try { window.__PI_ENH_RERENDER_SESSIONS__?.(); } catch (e) {}
 
-    // 1. 乐观批量标记已删除，避免界面闪烁（只标 pending，网络前严禁提前 cleanup）
-    for (const sid of targetIds) {
-      markSessionAsDeleted(sid);
-      const row = getSessionRowById(sid);
-      if (row) row.setAttribute("data-pi-enh-pending-delete", "true");
-    }
-    syncSessionBatchRowStates();
-
-    // 每批共用目录扫描与用量封存；仅依据后端确认清理，列表最后刷新一次。
     for (let offset = 0; offset < targetIds.length; offset += 100) {
       const ids = targetIds.slice(offset, offset + 100);
-      let results;
+      const controller = new AbortController();
+      const deadline = setTimeout(() => controller.abort(), 30000);
+      let results = new Map();
       let deletedIds = [];
       try {
         const response = await fetch("/api/sessions/batch-delete", {
-          method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ ids }),
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ ids }), signal: controller.signal,
         });
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const payload = await response.json();
         if (!Array.isArray(payload.results) || !Array.isArray(payload.deletedSessionIds)) throw new Error("无效的删除回执");
         results = new Map(payload.results.map((result) => [result.id, result]));
-        deletedIds = payload.deletedSessionIds;
+        deletedIds = payload.deletedSessionIds.filter((id) => typeof id === "string" && id);
       } catch (err) {
-        console.error("[pi-enh] Batch deletion failed:", err?.message || String(err));
-        results = new Map();
+        transportFailed = true;
+        console.warn("[pi-enh] Batch deletion receipt unavailable:", err?.message || String(err));
+      } finally {
+        clearTimeout(deadline);
       }
       const confirmedIds = new Set(deletedIds);
       for (const sid of ids) {
-        if (results.get(sid)?.ok === true) { confirmedIds.add(sid); successCount++; }
+        if (results.get(sid)?.ok === true) confirmedIds.add(sid);
+        if (confirmedIds.has(sid)) successCount++;
         else {
-          failCount++;
-          if (!confirmedIds.has(sid)) {
-            restoreSessionDeleteState(sid);
-            getSessionRowById(sid)?.removeAttribute("data-pi-enh-pending-delete");
-          }
+          failedIds.add(sid);
+          restoreSessionDeleteState(sid, false);
         }
       }
       for (const sid of confirmedIds) {
         markSessionDeleteConfirmed(sid);
+        selectedSessionBatchIds.delete(sid);
         cleanupDeletedSessionEverywhere(sid);
         try { window.__PI_ENH_SESSION_DELETED__?.(sid); } catch (e) {}
         try { void cleanupSessionUploadedFiles(sid).catch(() => {}); } catch (e) {}
         if (sid === activeSessionId) shouldResetActiveView = true;
       }
       if (confirmBtn) confirmBtn.textContent = `正在删除 (${offset + ids.length}/${targetIds.length})...`;
+      // If the connection is lost, stop submitting more destructive requests.
+      // An aborted request may have committed: refresh server truth; never
+      // automatically resend it or claim that its files were restored.
+      if (transportFailed) {
+        for (const sid of targetIds.slice(offset + ids.length)) {
+          failedIds.add(sid);
+          restoreSessionDeleteState(sid, false);
+        }
+        break;
+      }
     }
 
-    // 3. 如果当前激活的会话被删除了，回到根页面
     if (shouldResetActiveView) {
-      try {
-        window.history.replaceState(null, "", "/");
-      } catch (e) {}
+      try { window.history.replaceState(null, "", "/"); } catch (e) {}
     }
-
-    // 4. 收尾清理
+    batchDeleteInFlight = false;
     closeBatchDeleteModal();
-    setSessionBatchMode(false);
+    if (failedIds.size === 0) setSessionBatchMode(false);
+    else {
+      selectedSessionBatchIds.clear();
+      for (const sid of failedIds) selectedSessionBatchIds.add(sid);
+      syncSessionBatchBar();
+      syncSessionBatchRowStates();
+      try { window.__PI_ENH_RERENDER_SESSIONS__?.(); } catch (e) {}
+    }
     requestSessionListRefresh(false, true);
-
-    if (failCount === 0) {
-      showToast(`已成功彻底删除 ${successCount} 个会话`, sessionDeleteIcon);
+    if (transportFailed) {
+      showToast(`连接中断或等待超时：已确认删除 ${successCount} 个，${failedIds.size} 个结果待确认。刷新列表后可重试。`, sessionDeleteIcon);
+    } else if (failedIds.size) {
+      showToast(`已删除 ${successCount} 个，${failedIds.size} 个未删除，已保留选择，可重试。`, sessionDeleteIcon);
     } else {
-      showToast(`批量删除完成：成功 ${successCount} 个，失败 ${failCount} 个`, sessionDeleteIcon);
+      showToast(`已成功彻底删除 ${successCount} 个会话`, sessionDeleteIcon);
     }
   }
+
 
   // 鼠标点击捕获监听：快捷激活批量模式与单选/连选
   addManagedListener(document, "click", (event) => {
@@ -33724,7 +33652,6 @@
     { fn: syncSessionItemCompact, scope: "full" },
     { fn: syncSessionColorEffects, scope: "full" },
     { fn: syncSessionTags, scope: "full" },
-    { fn: syncSessionOdooAddons, scope: "full" },
     { fn: syncSessionSectionHeaders, scope: "full" },
     { fn: syncSessionSearchTagFilterBar, scope: "full" },
     { fn: highlightSearchResultsKeywords, scope: "full" },
@@ -36219,7 +36146,6 @@
       syncSessionModelLabels();
       syncSessionColorEffects();
       syncSessionTags();
-      syncSessionOdooAddons();
       syncSessionSectionHeaders();
     });
   }

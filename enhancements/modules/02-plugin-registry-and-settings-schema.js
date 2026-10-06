@@ -4700,79 +4700,6 @@
     return normalizeSessionOdooAddonItems(items, sessionId, manifest);
   }
 
-  function syncSessionOdooAddonsHeight(row, sessionId) {
-    const height = getSessionItemHeight(sessionId) + "px";
-    if (row.style.height !== height) row.style.height = height;
-    const wrapper = row.parentElement;
-    if (wrapper?.style.position === "absolute" && wrapper.style.height !== height) wrapper.style.height = height;
-  }
-
-  function removeSessionOdooAddonsAll() {
-    for (const row of document.querySelectorAll(".pi-enh-session-row-host[data-pi-enh-has-odoo-addons='true']")) {
-      row.querySelector(".pi-enh-session-odoo-addons")?.remove();
-      row.removeAttribute("data-pi-enh-has-odoo-addons");
-      syncSessionOdooAddonsHeight(row, row.dataset.piEnhSessionId);
-    }
-  }
-
-  function syncSessionOdooAddonsRow(row, sessionId) {
-    if (!row || !sessionId) return;
-
-    if (!isPluginEnabled("session-odoo-addons") || row.querySelector("input") || row.getAttribute("data-pi-enh-editing") === "true") {
-      row.querySelector(".pi-enh-session-odoo-addons")?.remove();
-      row.removeAttribute("data-pi-enh-has-odoo-addons");
-      syncSessionOdooAddonsHeight(row, sessionId);
-      return;
-    }
-
-    const addons = getSessionOdooAddons(sessionId);
-    let container = row.querySelector(".pi-enh-session-odoo-addons");
-
-    if (addons.length === 0) {
-      container?.remove();
-      row.removeAttribute("data-pi-enh-has-odoo-addons");
-      syncSessionOdooAddonsHeight(row, sessionId);
-      return;
-    }
-
-    if (row.getAttribute("data-pi-enh-has-odoo-addons") !== "true") row.setAttribute("data-pi-enh-has-odoo-addons", "true");
-
-    if (!container) {
-      container = document.createElement("div");
-      container.className = "pi-enh-session-odoo-addons";
-    }
-
-    // 独立的全宽第二行，不挤占第一行标题、标签与操作按钮，也不继承元数据截断。
-    if (container.parentElement !== row) row.appendChild(container);
-
-    // 渲染每个插件一行：仅显示插件的技术标识名称（不显示中文，如仅显示 kx_srm）
-    let html = "";
-    const activeManifest = window.__PI_ENH_ODOO_ADDONS_MANIFEST__;
-    for (const addon of addons) {
-      const tech = (typeof addon === "string" ? addon : (addon.technical || addon.name || "")).trim();
-      if (!tech) continue;
-      const isLatest = isLatestSessionForOdooAddon(sessionId, tech, activeManifest);
-      const baseTooltip = addon.status ? `${tech} · ${addon.status}` : tech;
-      const tooltip = isLatest ? `${baseTooltip} · 最新实际更新会话` : `${baseTooltip} · 历史更新会话`;
-      const ariaLabel = isLatest ? `${tech}（最新实际更新会话）` : `${tech}（历史更新会话）`;
-      const pillClass = isLatest ? "pi-enh-odoo-addon-pill is-latest" : "pi-enh-odoo-addon-pill";
-
-      html += `<div class="pi-enh-odoo-addon-row">
-        <span class="${pillClass}" data-pi-enh-latest="${isLatest ? "true" : "false"}" title="${escapeHtml(tooltip)}" aria-label="${escapeHtml(ariaLabel)}">
-          <span class="pi-enh-odoo-addon-dot" aria-hidden="true"></span>
-          <span class="pi-enh-odoo-addon-name">${escapeHtml(tech)}</span>
-        </span>
-      </div>`;
-    }
-
-    // 不重复替换相同节点，避免 MutationObserver 自激和悬停/选择闪烁。
-    if (container.__renderedHtml !== html && container.innerHTML !== html) {
-      container.innerHTML = html;
-    }
-    container.__renderedHtml = html;
-    syncSessionOdooAddonsHeight(row, sessionId);
-  }
-
   function syncSessionOdooAddonsLayout() {
     // React 的刷新是异步的；切换开关/热加载时，同步用同一高度函数重排整组，
     // 不能只改变某一行高度而暂时保留下方旧坐标。
@@ -4834,7 +4761,6 @@
           const index = indices.get(entry.sid);
           const top = getSessionItemTop(index, groups) + "px";
           if (entry.wrapper.style.top !== top) entry.wrapper.style.top = top;
-          syncSessionOdooAddonsHeight(entry.row, entry.sid);
         }
         const height = (SESSION_NORMAL_ITEM_HEIGHT * groups.length + getSessionHeadersHeight(groups)) + "px";
         if (container.style.height !== height) container.style.height = height;
@@ -4853,21 +4779,9 @@
     }
   }
 
+  // Explicit state notifications only. SessionSidebar owns addon DOM and row lifecycle.
   function syncSessionOdooAddons() {
-    if (!isPluginEnabled("session-odoo-addons")) {
-      removeSessionOdooAddonsAll();
-      syncSessionOdooAddonsLayout();
-      return;
-    }
-
-    const rows = document.querySelectorAll(".pi-enh-session-row-host[data-pi-enh-session-id]");
-    for (const row of rows) {
-      const sessionId = row.getAttribute("data-pi-enh-session-id");
-      if (sessionId) {
-        syncSessionOdooAddonsRow(row, sessionId);
-      }
-    }
-    syncSessionOdooAddonsLayout();
+    window.__PI_ENH_RERENDER_SESSIONS__?.();
   }
 
   let activeOdooAddonsRefreshPromise = null;
@@ -4991,12 +4905,7 @@
         }
 
         window.__PI_ENH_ODOO_ADDONS_MANIFEST__ = nextManifest;
-        syncSessionOdooAddons();
-        if (contentChanged) {
-          try {
-            window.__PI_ENH_RERENDER_SESSIONS__?.();
-          } catch (e) {}
-        }
+        if (contentChanged) syncSessionOdooAddons();
         return { updated: true, changed: contentChanged, versionChanged, revision: nextRev };
       } catch (err) {
         return { updated: false, changed: false, error: err && err.message ? err.message : "FETCH_ERROR" };
@@ -5905,12 +5814,12 @@
     return false;
   }
 
-  function markSessionAsDeleted(sessionId, retentionMs = 60000) {
+  function markSessionAsDeleted(sessionId, retentionMs = 60000, notify = true) {
     if (!sessionId) return;
     pendingDeletedSessionIds.add(sessionId);
     confirmedDeletedSessionIds.set(sessionId, Date.now() + retentionMs);
     try {
-      if (typeof window !== "undefined" && typeof window.__PI_ENH_RERENDER_SESSIONS__ === "function") {
+      if (notify && typeof window !== "undefined" && typeof window.__PI_ENH_RERENDER_SESSIONS__ === "function") {
         window.__PI_ENH_RERENDER_SESSIONS__();
       }
     } catch (e) {}
@@ -5922,12 +5831,12 @@
     confirmedDeletedSessionIds.set(sessionId, Date.now() + retentionMs);
   }
 
-  function restoreSessionDeleteState(sessionId) {
+  function restoreSessionDeleteState(sessionId, notify = true) {
     if (!sessionId) return;
     pendingDeletedSessionIds.delete(sessionId);
     confirmedDeletedSessionIds.delete(sessionId);
     try {
-      if (typeof window !== "undefined" && typeof window.__PI_ENH_RERENDER_SESSIONS__ === "function") {
+      if (notify && typeof window !== "undefined" && typeof window.__PI_ENH_RERENDER_SESSIONS__ === "function") {
         window.__PI_ENH_RERENDER_SESSIONS__();
       }
     } catch (e) {}

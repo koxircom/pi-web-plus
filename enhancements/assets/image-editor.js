@@ -794,6 +794,7 @@
       const sourceUrl = editContext?.editSrc || src;
       const MAX_UNDO_STEPS = 50;
       let drawing = false;
+      let activePointerId = null;
       let draftAction = null;
       let activeAction = null;
       let cropBox = null;
@@ -996,12 +997,39 @@
         };
       }
 
+      function isActivePointer(event) {
+        return (event?.pointerId ?? null) === activePointerId;
+      }
+
+      function abandonActiveDraft(event = null) {
+        if (event && !isActivePointer(event)) return;
+        if (!drawing || !draftAction) return;
+        const pointerId = activePointerId;
+        drawing = false;
+        activePointerId = null;
+        draftAction = null;
+        if (pointerId !== null) {
+          try { canvas.releasePointerCapture?.(pointerId); } catch (error) {}
+        }
+        redraw();
+      }
+
+      function hasMinimumRectDrag(action) {
+        const bounds = canvas.getBoundingClientRect?.();
+        const minCanvasWidth = 4 * (canvas.width || 1) / (bounds?.width || 1);
+        const minCanvasHeight = 4 * (canvas.height || 1) / (bounds?.height || 1);
+        return Math.abs(action.end.x - action.start.x) >= minCanvasWidth
+          && Math.abs(action.end.y - action.start.y) >= minCanvasHeight;
+      }
+
       const onPointerDown = (event) => {
         if (isTwoFingerGesture || Date.now() - lastTwoFingerTime < 320) return;
+        if (drawing) return;
         if (event.pointerType === "touch" && !event.isPrimary) return;
         if (event.button !== undefined && event.button !== 0) return;
         event.preventDefault?.();
         event.stopPropagation?.();
+        activePointerId = event.pointerId ?? null;
         drawing = true;
         const point = pointFromEvent(event);
         if (tool === "crop") {
@@ -1018,7 +1046,7 @@
       };
 
       const onPointerMove = (event) => {
-        if (!drawing || !draftAction) return;
+        if (!drawing || !draftAction || !isActivePointer(event)) return;
         event.preventDefault?.();
         const point = pointFromEvent(event);
         if (draftAction.type === "crop" || draftAction.type === "rect") {
@@ -1030,10 +1058,11 @@
       };
 
       const onPointerUp = (event) => {
-        if (!drawing || !draftAction) return;
+        if (!drawing || !draftAction || !isActivePointer(event)) return;
         event.preventDefault?.();
         drawing = false;
         try { canvas.releasePointerCapture?.(event.pointerId); } catch (error) {}
+        activePointerId = null;
         if (draftAction.type === "crop") {
           const box = normalizeRect(draftAction.start, draftAction.end);
           if (box.w >= 16 && box.h >= 16) {
@@ -1051,9 +1080,7 @@
           redraw();
           return;
         }
-        if (draftAction.type === "rect"
-          && Math.abs(draftAction.end.x - draftAction.start.x) < 4
-          && Math.abs(draftAction.end.y - draftAction.start.y) < 4) {
+        if (draftAction.type === "rect" && !hasMinimumRectDrag(draftAction)) {
           draftAction = null;
           redraw();
           return;
@@ -1067,10 +1094,12 @@
         status.textContent = `当前标注 ${lineWidth}px；滚轮或双指上下滑可立即改变实际粗细`;
       };
 
+      const onPointerCancel = (event) => abandonActiveDraft(event);
+
       canvas.addEventListener("pointerdown", onPointerDown);
       canvas.addEventListener("pointermove", onPointerMove);
       canvas.addEventListener("pointerup", onPointerUp);
-      canvas.addEventListener("pointercancel", onPointerUp);
+      canvas.addEventListener("pointercancel", onPointerCancel);
       editor.addEventListener("click", (event) => event.stopPropagation?.());
 
       penBtn.addEventListener("click", () => selectTool("pen", true));
@@ -1388,9 +1417,7 @@
         event.preventDefault?.();
         event.stopPropagation?.();
         if (drawing) {
-          drawing = false;
-          draftAction = null;
-          redraw();
+          abandonActiveDraft();
         }
         isTwoFingerGesture = true;
         twoFingerStartY = (event.touches[0].clientY + event.touches[1].clientY) / 2;
@@ -1441,7 +1468,7 @@
         canvas.removeEventListener("pointerdown", onPointerDown);
         canvas.removeEventListener("pointermove", onPointerMove);
         canvas.removeEventListener("pointerup", onPointerUp);
-        canvas.removeEventListener("pointercancel", onPointerUp);
+        canvas.removeEventListener("pointercancel", onPointerCancel);
         stage.removeEventListener("wheel", onEditorWheel);
         stage.removeEventListener("touchstart", onThicknessTouchStart);
         stage.removeEventListener("touchmove", onThicknessTouchMove);

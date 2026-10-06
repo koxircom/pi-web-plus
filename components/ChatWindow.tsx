@@ -1296,8 +1296,8 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
           }}
         >
           <span style={{ width: 8, height: 8, borderRadius: "50%", background: "#f59e0b", flexShrink: 0 }} />
-          <span style={{ flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-            网络同步异常，当前显示已缓存内容 ({error})
+          <span style={{ flex: 1, minWidth: 0, overflowWrap: "anywhere" }}>
+            会话同步失败，已保留缓存内容：{error}
           </span>
           <button
             type="button"

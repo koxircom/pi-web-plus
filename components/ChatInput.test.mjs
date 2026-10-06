@@ -257,7 +257,7 @@ test("keeps the model selector visible when a model error leaves no options", ()
   assert.match(html, /title="无可用模型"/);
 });
 
-test("renders the read-only tool preset as the active selection", () => {
+test("desktop composer omits tool and manual compaction controls when compatibility props are supplied", () => {
   const html = renderToStaticMarkup(
     React.createElement(
       I18nProvider,
@@ -266,33 +266,18 @@ test("renders the read-only tool preset as the active selection", () => {
         onSend() {},
         onAbort() {},
         onToolPresetChange() {},
+        onCompact() {},
+        onAbortCompaction() {},
+        isCompacting: true,
         isStreaming: false,
         toolPreset: "read-only",
       }),
     ),
   );
 
-  assert.match(html, /title="更改工具预设: read-only"/);
-  assert.match(html, />read-only<\/span>/);
-});
-
-test("renders the empty tool preset as Chat only", () => {
-  const html = renderToStaticMarkup(
-    React.createElement(
-      I18nProvider,
-      null,
-      React.createElement(ChatInput, {
-        onSend() {},
-        onAbort() {},
-        onToolPresetChange() {},
-        isStreaming: false,
-        toolPreset: "none",
-      }),
-    ),
-  );
-
-  assert.match(html, /title="更改工具预设: 仅聊天"/);
-  assert.match(html, />仅聊天<\/span>/);
+  assert.doesNotMatch(html, /更改工具预设|read-only|仅聊天|压缩上下文|停止压缩/);
+  const source = readFileSync(new URL("./ChatInput.tsx", import.meta.url), "utf8");
+  assert.doesNotMatch(source, /chat-composer-right-inner|toolDropdown(Open|Ref)|setToolDropdownOpen/);
 });
 
 test("renders the compact composer with the standard Send button and no session controls", () => {

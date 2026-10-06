@@ -19,6 +19,7 @@ const MAX_PERSISTED_DRAFTS = 10;
 const MAX_PERSISTED_IMAGES = 10;
 const NEW_DRAFT_MAX_AGE_MS = 7 * 86400 * 1000;
 const knownPersistedDraftKeys = new Set<string>();
+const hydratedScopedDraftOwners = new Map<string, string>();
 let draftMaintenanceCounter = 0;
 const pendingPersistence = new Map<string, ReturnType<typeof setTimeout>>();
 
@@ -151,6 +152,7 @@ export function flushDraftPersistence(): void {
 }
 
 function readPersistedDraft(key: string): ChatDraft | null {
+  hydratedScopedDraftOwners.delete(key);
   const storage = getLocalStorage();
   if (!storage || !key || !isDraftPersistenceEnabled()) return null;
 
@@ -179,6 +181,7 @@ function readPersistedDraft(key: string): ChatDraft | null {
     // previous value. Never resurrect that older exact draft ahead of it.
     const current = isNonEmpty && isRecent && (!exact || scoped.updatedAt > exact.updatedAt)
       ? scoped : exact;
+    if (current === scoped) hydratedScopedDraftOwners.set(key, scoped.ownerKey);
     return current ? cloneDraft(current) : null;
   } catch {
     return null;
@@ -296,6 +299,7 @@ export function getDraftInMemory(key: string): ChatDraft | null {
 }
 
 export function setDraft(key: string, draft: ChatDraft): boolean {
+  hydratedScopedDraftOwners.delete(key);
   if (isEmptyDraft(draft)) {
     cancelDraftPersistence(key);
     drafts.delete(key);
@@ -307,6 +311,7 @@ export function setDraft(key: string, draft: ChatDraft): boolean {
 }
 
 export function clearDraft(key: string): boolean {
+  hydratedScopedDraftOwners.delete(key);
   cancelDraftPersistence(key);
   drafts.delete(key);
   return removePersistedDraft(key);
@@ -362,10 +367,11 @@ export function rekeyDraft(
     ? cloneDraft(currentDraft)
     : (storedPrevious ?? (currentDraft ? cloneDraft(currentDraft) : null));
   const next = getDraft(nextKey);
+  const nextIsPreviousScopedAlias = hydratedScopedDraftOwners.get(nextKey) === previousKey;
   clearDraft(previousKey);
   if (!previous) return next;
 
-  const merged = next
+  const merged = next && !nextIsPreviousScopedAlias
     ? mergeRestoredSubmissionDraft(next.value, next.images, previous.value, previous.images)
     : previous;
   setDraft(nextKey, merged);

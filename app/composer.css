@@ -316,34 +316,15 @@ body:has(.settings-dialog-backdrop, .settings-dialog-surface, [role="dialog"][ar
 .thinking-selector-option[aria-selected="true"] { color: var(--text); background: var(--bg-selected); }
 .thinking-selector-description { margin-left: auto; color: var(--text-dim); font-size: 11px; }
 
-/* Native auxiliary controls stay in one toolbar slot, never an implicit content row. */
-.chat-composer-card .chat-composer-right-inner {
-  grid-column: -1;
-  grid-row: 3;
-  display: inline-flex;
-  justify-self: end;
-  align-self: center;
-  min-width: max-content;
-}
-.chat-composer-card .chat-composer-right-inner:empty {
-  display: none;
-}
-
 /* Narrow chat panes can occur on a wide touch viewport with the sidebar open. */
 @container native-composer (max-width: 500px) {
-  .chat-composer-right-inner .chat-composer-secondary-label { display: none; }
   .chat-composer-card .chat-composer-mode-status { max-width: 25vw; gap: 4px; }
   .chat-composer-card .chat-composer-goal-summary { max-width: 100%; }
   .chat-composer-card .chat-composer-goal-status { display: none; }
   .chat-composer-card .chat-composer-goal-text { display: none; }
   .chat-composer-card .chat-composer-goal-timer { display: none; }
   .chat-composer-card .chat-composer-goal-action { padding: 3px 5px; }
-  .chat-composer-right-inner > div > button,
-  .chat-composer-right-inner > button {
-    width: 28px;
-    min-width: 28px;
-    padding: 0;
-  }
+
 }
 
 /* 6. 发送与操作区 (倒数第 2 列) */

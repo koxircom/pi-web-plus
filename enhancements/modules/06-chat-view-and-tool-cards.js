@@ -4436,7 +4436,6 @@
     { fn: syncSessionItemCompact, scope: "full" },
     { fn: syncSessionColorEffects, scope: "full" },
     { fn: syncSessionTags, scope: "full" },
-    { fn: syncSessionOdooAddons, scope: "full" },
     { fn: syncSessionSectionHeaders, scope: "full" },
     { fn: syncSessionSearchTagFilterBar, scope: "full" },
     { fn: highlightSearchResultsKeywords, scope: "full" },

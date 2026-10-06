@@ -674,7 +674,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         }
       }
       let reconciled: ReturnType<typeof reconcileSyncResponse> | undefined;
-      // Exactly one baseline-free repair attempt; never recurse with the same invalid base.
+      // One bounded repair for a changed snapshot or invalid baseline; keep cached history visible.
       if (reuseResident && wireBaseline?.data) reconciled = { action: "unchanged", revision: wireBaseline.revision, preserveCurrentMessages: true };
       for (let attempt = 0; !reconciled && attempt < 2; attempt++) {
         const url = buildSessionSyncUrl({ sessionId: sid, baseRevision, force: options?.force || Boolean(options?.resident && !reuseResident), syncEnabled, treeFormat: "summary" });
@@ -689,6 +689,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           setError(res.status === 404 ? "Session not found" : "Session authorization required");
           return null;
         }
+        // The server explicitly rejects a snapshot changed during its read.
+        // Retry within this same owner instead of surfacing an expected write race.
+        if (res.status === 409 && attempt === 0) continue;
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const payload = await res.json();
         if (!isCurrentRead()) return null;

@@ -16,7 +16,9 @@ import { formatRelativeTime } from "@/lib/i18n/format";
 import {
   createSidebarShortcutsFallbackHandler,
   getEnhancementSessionHeadersHeight,
+  getEnhancementSessionItemHeight,
   getEnhancementSessionItemTop,
+  getEnhancementSessionOdooAddons,
   processEnhancementSessionGroups,
   registerEnhancementOpenSettings,
   registerEnhancementSidebarBridge,
@@ -2428,10 +2430,14 @@ function SessionItem({
     e.stopPropagation();
   }, [onRenamed, session.cwd, session.id, session.name, session.path]);
 
+  const odooAddons = getEnhancementSessionOdooAddons(session.id);
+  const showOdooAddons = !renaming && !confirmDelete && odooAddons.length > 0;
+
   // Fixed-height outer wrapper — content swaps in place so the list never reflows
   return (
     <div
       data-pi-enh-session-id={session.id}
+      data-pi-enh-has-odoo-addons={showOdooAddons ? "true" : undefined}
       className="pi-enh-session-row-host"
       aria-disabled={session.submissionPending || undefined}
       onClick={confirmDelete || renaming || session.submissionPending ? undefined : onClick}
@@ -2439,7 +2445,7 @@ function SessionItem({
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => { setHovered(false); }}
       style={{
-        height: SESSION_LIST_ITEM_HEIGHT,
+        height: getEnhancementSessionItemHeight(session.id, SESSION_LIST_ITEM_HEIGHT),
         display: "flex",
         alignItems: "center",
         paddingLeft: depth > 0 ? depth * 12 + 14 : 14,
@@ -2661,6 +2667,23 @@ function SessionItem({
           {!hovered && !session.transient && (
             <div className="pi-enh-native-session-actions" hidden aria-hidden="true" style={{ display: "none" }}>
               <button type="button" onClick={startRename} title={t("sidebar.rename")} tabIndex={-1} />
+            </div>
+          )}
+          {showOdooAddons && (
+            <div className="pi-enh-session-odoo-addons">
+              {odooAddons.map((addon) => (
+                <div className="pi-enh-odoo-addon-row" key={addon.technical}>
+                  <span
+                    className={`pi-enh-odoo-addon-pill${addon.isLatest ? " is-latest" : ""}`}
+                    data-pi-enh-latest={addon.isLatest ? "true" : "false"}
+                    title={`${addon.technical} · ${addon.status}${addon.isLatest ? " · 最新实际更新会话" : ""}`}
+                    aria-label={`${addon.technical}${addon.isLatest ? "（最新实际更新会话）" : ""}`}
+                  >
+                    <span className="pi-enh-odoo-addon-dot" aria-hidden="true" />
+                    <span className="pi-enh-odoo-addon-name">{addon.technical}</span>
+                  </span>
+                </div>
+              ))}
             </div>
           )}
         </>

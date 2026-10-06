@@ -198,7 +198,6 @@
       syncSessionModelLabels();
       syncSessionColorEffects();
       syncSessionTags();
-      syncSessionOdooAddons();
       syncSessionSectionHeaders();
     });
   }
