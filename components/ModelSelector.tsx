@@ -24,6 +24,7 @@ interface ModelSelectorProps {
   busy?: boolean;
   isAutoSelection?: boolean;
   ariaLabel?: string;
+  title?: string;
   variant?: "toolbar" | "field";
   placement?: "up" | "auto";
 }
@@ -60,6 +61,7 @@ export function ModelSelector({
   busy = false,
   isAutoSelection = false,
   ariaLabel,
+  title,
   variant = "toolbar",
   placement = "up",
 }: ModelSelectorProps) {
@@ -207,7 +209,7 @@ export function ModelSelector({
         aria-expanded={open}
         aria-busy={busy || undefined}
         disabled={locked}
-        title={busy ? t("chat.switchingModel") : locked ? currentName : sortedOptions.length > 0 || onClear ? t("chat.changeModel") : t("chat.noAvailableModels")}
+        title={busy ? t("chat.switchingModel") : title ?? (locked ? currentName : sortedOptions.length > 0 || onClear ? t("chat.changeModel") : t("chat.noAvailableModels"))}
         style={buttonStyle}
         onClick={(event) => {
           const rect = event.currentTarget.getBoundingClientRect();

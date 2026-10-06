@@ -50,4 +50,4 @@ FileViewer 与聊天代码块都使用 AsyncLight 入口和两个 deep ESM 主�
 
 隔离脚本先等待真实历史渲染与附件就绪，显式管理模拟模型的挂起/释放；只能创建并清理自有隔离会话，不使用用户模型凭据、生产会话或后台 LLM 巡检。检查通过立即停止，不重复构建或全量测试。
 
-首次证据（2026-10-05，1.3.19隔离候选）：`/home/koxir/CODEX/output/piweb-send-visibility-20261005/REPORT.md` 与 `receipt.json`，BUILD_ID `nJ4PWAPMij1LOk7C44wnW`。此证据只证明该指纹的隔离实例通过，不代表正式部署或其他设备已经生效。
+首次证据（2026-10-05，1.3.19隔离候选）：`[脱敏历史验收目录]/REPORT.md` 与 `receipt.json`，BUILD_ID `nJ4PWAPMij1LOk7C44wnW`。此证据只证明该指纹的隔离实例通过，不代表正式部署或其他设备已经生效。

@@ -5378,7 +5378,6 @@
   }
 
   function restoreStatusRow(row) {
-    row.querySelector(".pi-enh-session-status-label")?.remove();
     row.removeAttribute("data-pi-enh-completed-unread");
     row.classList.remove("pi-enh-session-needs-attention");
     row.removeAttribute("data-pi-enh-project-status");
@@ -5388,11 +5387,6 @@
     if (originalBorderLeft !== null) row.style.borderLeft = originalBorderLeft;
     row.removeAttribute("data-pi-enh-original-background");
     row.removeAttribute("data-pi-enh-original-border-left");
-  }
-
-  function getPendingInteractionLabel(entry) {
-    const method = entry.pendingRequests[0]?.method;
-    return ["select", "confirm"].includes(method) ? "待决策" : ["input", "editor"].includes(method) ? "待输入" : "待交互";
   }
 
   function decorateProjectStatusRows() {
@@ -5409,21 +5403,10 @@
         row.setAttribute("data-pi-enh-project-status", status);
         if (status === "attention") row.classList.add("pi-enh-session-needs-attention");
       }
-      let label = row.querySelector(".pi-enh-session-status-label");
-      if (!label) { label = document.createElement("span"); label.className = "pi-enh-session-status-label"; row.insertBefore(label, row.querySelector(".pi-enh-session-overflow")); }
-      const text = status === "attention" ? getPendingInteractionLabel(entry) : PROJECT_STATUS_META[status].label;
-      if (label.textContent !== text) label.textContent = text;
-      const hint = status === "attention" ? `${entry.pendingRequests.length} 项待处理；切换或收起不会解除` : status === "load-error" ? `${entry.loadError?.message || "会话加载失败"}；重新进入并成功加载后自动清除` : status === "completed" ? "未读，点击打开后清除；本轮运行已结束" : entry.toolNames.length ? `正在使用 ${entry.toolNames.join("、")}` : text;
-      if (label.title !== hint) label.title = hint;
       const unreadValue = status === "completed" ? String(entry.unread) : null;
       if (unreadValue !== null && row.getAttribute("data-pi-enh-completed-unread") !== unreadValue) row.setAttribute("data-pi-enh-completed-unread", unreadValue);
       else if (unreadValue === null && row.hasAttribute("data-pi-enh-completed-unread")) row.removeAttribute("data-pi-enh-completed-unread");
-      const color = status === "completed" ? "#4ade80" : PROJECT_STATUS_META[status].color;
-      const currentColor = typeof label.style.getPropertyValue === "function" ? label.style.getPropertyValue("--status-color") : label.style["--status-color"];
-      if (currentColor !== color) {
-        if (typeof label.style.setProperty === "function") label.style.setProperty("--status-color", color);
-        else label.style["--status-color"] = color;
-      }
+
     }
   }
 

@@ -6,7 +6,7 @@ test("offers compact quoting controls and sends branch questions through the mai
   const chatSource = await readFile(new URL("./ChatWindow.tsx", import.meta.url), "utf8");
   const shellSource = await readFile(new URL("./AppShell.tsx", import.meta.url), "utf8");
 
-  assert.match(chatSource, /document\.addEventListener\("selectionchange", captureQuotedSelection\)/);
+  assert.match(chatSource, /document\.addEventListener\("selectionchange", scheduleSelection\)/);
   assert.match(chatSource, /closest<HTMLElement>\("\[data-message-role=/);
   assert.match(chatSource, /chatInputRef\?\.current\?\.insertText\(buildQuotedSelection/);
   assert.match(chatSource, /onAskInNewChat\([\s\S]*?sourceSessionId,[\s\S]*?quotedSelection\.sourceEntryId/);

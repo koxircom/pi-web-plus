@@ -192,6 +192,18 @@ function syncMirrorBundle(bundleBuffer) {
   fs.writeFileSync(MIRROR_BUNDLE_PATH, buildPublicBundle(bundleBuffer, true));
 }
 
+// Keep only this release's immutable assets; old hashes contain retired code.
+// This runs in the build checkout, never against an installed running service.
+function pruneRetiredAssets(runtimeAsset) {
+  const { manifest } = require("./build-optional-assets.cjs").buildOptionalAssets(__dirname);
+  const current = new Set([runtimeAsset.path, ...Object.values(manifest).map(asset => asset.path)]);
+  const dir = path.join(__dirname, "..", "public", "pi-web-assets");
+  for (const name of fs.readdirSync(dir)) {
+    if (/^(enhancements|image-editor|usage-panel|xlsx-engine)-[a-f0-9]{16}\.js$/.test(name)
+        && !current.has(`/pi-web-assets/${name}`)) fs.unlinkSync(path.join(dir, name));
+  }
+}
+
 function resolveModuleBoundaries(lineChunks) {
   const totalLines = lineChunks.length;
   const startLines = new Array(MODULE_SPECS.length).fill(1);
@@ -289,6 +301,7 @@ function runSplit() {
     modules: manifestModules,
   };
 
+  pruneRetiredAssets(manifest.runtimeAsset);
   fs.writeFileSync(MANIFEST_PATH, JSON.stringify(manifest, null, 2) + "\n", "utf8");
 
   console.log(
@@ -352,6 +365,7 @@ function runBuild() {
     runtimeAsset: buildRuntimeAsset(fs.readFileSync(MIRROR_BUNDLE_PATH), true),
     modules: manifestModules,
   };
+  pruneRetiredAssets(manifest.runtimeAsset);
   fs.writeFileSync(MANIFEST_PATH, JSON.stringify(manifest, null, 2) + "\n", "utf8");
 
   console.log(

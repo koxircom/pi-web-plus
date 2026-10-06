@@ -1,3 +1,4 @@
+import { ProjectStatusLedger } from "./project-status-ledger";
 import { createProgressCommentaryExtension } from "./progress-commentary";
 import type { ThinkingLevel } from "@earendil-works/pi-agent-core";
 import { createAgentSessionFromServices, createAgentSessionServices, getAgentDir, initTheme, SessionManager, SettingsManager, Theme } from "@earendil-works/pi-coding-agent";
@@ -77,6 +78,8 @@ export interface AgentEvent {
   type: string;
   [key: string]: unknown;
 }
+
+type NextTurnSettings = { model?: { provider: string; id: string }; thinkingLevel?: string };
 
 type EventListener = (event: AgentEvent) => void;
 type AgentRunCompleteListener = (sessionId: string) => void;
@@ -306,6 +309,7 @@ export class AgentSessionWrapper {
   private extensionWidgetGenerations = new Map<string, number>();
   private extensionWidgetsResetting = false;
   private pendingPromptCount = 0;
+  private promptStopEpoch = 0;
   private activeMutatingCommands = 0;
   private sessionReplacement: "fork" | "clone" | null = null;
   private agentRunNeedsCompletion = false;
@@ -336,6 +340,9 @@ export class AgentSessionWrapper {
   // but lookups must treat the wrapper as gone from this point on.
   private closing = false;
 
+  private nextTurnSettings: NextTurnSettings = {};
+  private nextTurnUserEntryId: string | null = null;
+
   constructor(
     public readonly inner: AgentSessionLike,
     options: AgentSessionWrapperOptions = {},
@@ -345,6 +352,62 @@ export class AgentSessionWrapper {
     this.onAgentRunComplete = options.onAgentRunComplete;
     this.suppressCompletionNotifications = options.suppressCompletionNotifications ?? false;
     this.mcpHost = options.mcpHost;
+    const saved = this.inner.sessionManager?.getBranch?.().findLast(
+      entry => entry.type === "custom" && entry.customType === "next-turn-settings",
+    );
+    if (saved?.type === "custom") {
+      const data = saved.data as NextTurnSettings & { version?: number; afterUserEntryId?: string | null };
+      if (data?.version === 1) {
+        this.nextTurnUserEntryId = data.afterUserEntryId ?? null;
+        this.nextTurnSettings = {
+          ...(data.model && typeof data.model.provider === "string" && typeof data.model.id === "string" ? { model: data.model } : {}),
+          ...(typeof data.thinkingLevel === "string" ? { thinkingLevel: data.thinkingLevel } : {}),
+        };
+      }
+    }
+    // The SDK calls this public hook after queue delivery and before provider
+    // projection. A tool continuation has the same last user message and keeps
+    // the current run's settings; a new user message activates the saved choice.
+    const prepareRequest = this.inner.agent?.prepareRequest;
+    if (this.inner.agent) this.inner.agent.prepareRequest = async (request, signal) => {
+      if ((this.nextTurnSettings.model || this.nextTurnSettings.thinkingLevel !== undefined)
+        && this.latestUserEntryId() !== this.nextTurnUserEntryId) await this.applyNextTurnSettings();
+      const update = await prepareRequest?.(request, signal);
+      return update || undefined;
+    };
+  }
+
+  private latestUserEntryId(): string | null {
+    const entry = this.inner.sessionManager.getBranch().findLast(
+      entry => entry.type === "message" && entry.message.role === "user",
+    );
+    return entry?.id ?? null;
+  }
+
+  private saveNextTurnSettings(settings: NextTurnSettings): void {
+    this.nextTurnSettings = settings;
+    this.nextTurnUserEntryId = this.latestUserEntryId();
+    this.inner.sessionManager.appendCustomEntry("next-turn-settings", { version: 1, afterUserEntryId: this.nextTurnUserEntryId, ...settings });
+    invalidateSessionListCache();
+  }
+
+  private async applyNextTurnSettings(): Promise<void> {
+    const settings = this.nextTurnSettings;
+    if (!settings.model && settings.thinkingLevel === undefined) return;
+    if (settings.model) {
+      const model = this.inner.modelRuntime.getModel(settings.model.provider, settings.model.id);
+      if (!model) throw new Error("为下一轮选择的模型已不可用，请重新选择。");
+      await this.inner.setModel(model);
+    }
+    if (settings.thinkingLevel !== undefined) this.setThinkingLevel(settings.thinkingLevel);
+    if (this.nextTurnSettings === settings) this.saveNextTurnSettings({});
+  }
+
+  private setThinkingLevel(level: string): void {
+    this.inner.setThinkingLevel(level);
+    if (level === "xhigh" && (this.inner.model as { compat?: { thinkingFormat?: string } } | null)?.compat?.thinkingFormat === "deepseek" && this.inner.agent?.state) {
+      this.inner.agent.state.thinkingLevel = "xhigh";
+    }
   }
 
   get sessionId(): string {
@@ -395,6 +458,13 @@ export class AgentSessionWrapper {
     return true;
   }
 
+  getPendingProjectRequests(): { id: string; method: string }[] {
+    return [...this.pendingUiRequests.values()].flatMap(request =>
+      typeof request.id === "string" && typeof request.method === "string"
+        && ["select", "confirm", "input", "editor", "custom"].includes(request.method)
+        ? [{ id: request.id, method: request.method }] : []);
+  }
+
   isChatOnly(): boolean {
     return this.chatOnly;
   }
@@ -406,8 +476,14 @@ export class AgentSessionWrapper {
   start(): void {
     this.unsubscribe = this.inner.subscribe((event: AgentEvent) => {
       if (event.type === "message_start") reconcileDeliveredImageOnlyMessage(this.inner, event.message);
-      if (event.type === "agent_start") this.agentRunNeedsCompletion = true;
+      if (event.type === "agent_start") {
+        this.agentRunNeedsCompletion = true;
+        getProjectStatusLedger().begin(this.sessionId);
+      }
       if (event.type === "agent_end") {
+        const messages = Array.isArray(event.messages) ? event.messages : this.inner.agent.state?.messages || [];
+        const last = messages.at(-1) as { role?: string; stopReason?: string } | undefined;
+        getProjectStatusLedger().finish(this.sessionId, last?.role === "assistant" ? last.stopReason : "error", this.suppressCompletionNotifications);
         invalidateSessionListCache();
         // Every tool call of the run has finished; nothing is left to replay.
         this.activeToolEvents.clear();
@@ -545,7 +621,8 @@ export class AgentSessionWrapper {
   }
 
   private shouldWaitForExtensions(type: string): boolean {
-    return type === "prompt"
+    return type === "set_composer_mode"
+      || type === "prompt"
       || type === "steer"
       || type === "follow_up"
       || type === "get_commands"
@@ -653,6 +730,35 @@ export class AgentSessionWrapper {
     cacheSessionPath(this.inner.sessionId, sessionFile);
   }
 
+  /** Keep a stopped submission in the native transcript without starting a model. */
+  private retainStoppedPrompt(command: Record<string, unknown>): { stopped: true; entryId: string } {
+    if (this.inner.isStreaming || this.inner.isBashRunning || this.inner.isCompacting) {
+      throw new Error("会话仍在运行，无法保存已停止的消息，请稍后重试。");
+    }
+    const manager = this.inner.sessionManager;
+    const requestId = typeof command.requestId === "string" ? command.requestId : undefined;
+    if (requestId) {
+      const saved = manager.getEntries().find((entry) => entry.type === "custom"
+        && entry.customType === "pi-web-stopped-prompt"
+        && (entry.data as { requestId?: string } | undefined)?.requestId === requestId);
+      if (saved?.type === "custom") return { stopped: true, entryId: (saved.data as { entryId: string }).entryId };
+    }
+    const text = typeof command.message === "string" ? command.message : "";
+    const images = command.images as Array<{ type: "image"; data: string; mimeType: string }> | undefined;
+    if (!text.trim() && !images?.length) throw new Error("无法保存空消息。");
+    const message = { role: "user" as const, content: [
+      ...(text ? [{ type: "text" as const, text }] : []), ...(images ?? []),
+    ], timestamp: Date.now() };
+    const entryId = manager.appendMessage(message);
+    // SDK 1.0.4 exposes a writable transcript; the file and live context agree.
+    if (this.inner.agent.state) this.inner.agent.state.messages = [...(this.inner.agent.state.messages ?? []), message];
+    if (requestId) manager.appendCustomEntry("pi-web-stopped-prompt", { requestId, entryId });
+    if (this.inner.sessionFile) cacheSessionPath(this.inner.sessionId, this.inner.sessionFile);
+    invalidateSessionListCache();
+    this.emit({ type: "message_end", message, entryId });
+    return { stopped: true, entryId };
+  }
+
   onEvent(listener: EventListener): () => void {
     this.listeners.add(listener);
     for (const event of this.pendingUiRequests.values()) listener(event);
@@ -731,12 +837,48 @@ export class AgentSessionWrapper {
         throw new Error("Session is being copied to a new session");
       }
 
-      if (type === "prompt" || type === "steer" || type === "follow_up") {
+      if (type === "prompt" || type === "retain_stopped_prompt" || type === "steer" || type === "follow_up") {
         const imageError = validateAgentImages(command.images);
         if (imageError) throw new Error(imageError);
       }
 
       switch (type) {
+      case "set_composer_mode": {
+        const mode = command.mode;
+        if (mode !== "normal" && mode !== "plan" && mode !== "goal") {
+          throw new Error("模式参数无效，只支持普通、计划和目标模式。");
+        }
+        const releaseAdmission = await this.acquirePromptAdmission();
+        try {
+          const runner = this.inner.extensionRunner;
+          const registered = runner.getCommand?.("composer-mode");
+          if (!registered || !runner.createCommandContext) {
+            throw new Error("该会话未加载模式扩展，请在空闲时重新加载扩展。");
+          }
+          // Invoke the existing extension's public command API. This is a
+          // configuration change, so it never enters prompt/MCP/model preflight.
+          await registered.handler(mode, runner.createCommandContext());
+          const text = this.extensionStatuses.get("composer-modes");
+          let status: { version?: number; mode?: string } | null = null;
+          try { status = typeof text === "string" ? JSON.parse(text) : null; } catch { /* fail closed below */ }
+          if (status?.version !== 1 || status.mode !== mode) {
+            throw new Error("模式扩展未确认切换，请稍后重试。");
+          }
+          return { extensionStatuses: [{ key: "composer-modes", text }] };
+        } finally { releaseAdmission(); }
+      }
+
+      case "retain_stopped_prompt": {
+        if (typeof command.requestId !== "string" || !/^[a-zA-Z0-9-]{16,80}$/.test(command.requestId)) {
+          throw new Error("已停止消息的标识无效。");
+        }
+        const releaseAdmission = await this.acquirePromptAdmission();
+        try {
+          if (this.isRunning()) throw new Error("会话仍在运行，无法保存已停止的消息，请稍后重试。");
+          return this.retainStoppedPrompt(command);
+        } finally { releaseAdmission(); }
+      }
+
       case "prompt": {
         // Serialize only admission. Once the preceding prompt has either
         // passed or failed preflight, the SDK can atomically decide whether
@@ -746,11 +888,16 @@ export class AgentSessionWrapper {
           if (this.inner.isBashRunning) {
             throw new Error("Cannot send a prompt while a shell command is running");
           }
+          if (!this.isRunning()) await this.applyNextTurnSettings();
           if (this.extensionUiAbortController.signal.aborted) {
             this.extensionUiAbortController = new AbortController();
           }
           const promptImages = command.images as Array<{ type: "image"; data: string; mimeType: string }> | undefined;
           const streamingBehavior = command.streamingBehavior as "steer" | "followUp" | undefined;
+          const stopEpoch = this.promptStopEpoch;
+          let stoppedBeforeRun = false;
+          let stoppedResult: { stopped: true; entryId: string } | undefined;
+          let settleStoppedPreflight!: () => void;
           let preflightAccepted = false;
           let promptDisposition: "handled" | "queued" | "started" | undefined;
           let preflightSettled = false;
@@ -758,6 +905,11 @@ export class AgentSessionWrapper {
           let acceptPreflight!: () => void;
           let rejectPreflight!: (error: unknown) => void;
           const preflight = new Promise<void>((resolve, reject) => {
+            settleStoppedPreflight = () => {
+              if (preflightSettled) return;
+              preflightSettled = true;
+              resolve();
+            };
             acceptPreflight = () => {
               preflightAccepted = true;
               this.agentRunNeedsCompletion = true;
@@ -783,7 +935,7 @@ export class AgentSessionWrapper {
           // A prompt that may start a run first connects the session's MCP servers and
           // waits for the ones still connecting. The SDK runs before_agent_start before a
           // run has an abort signal, so Stop is honoured here: it ends the wait, and the
-          // message is rejected unsent, which returns it to the composer. pi runs an
+          // message is retained in the transcript without a model call. pi runs an
           // extension command before anything else and starts no run for it: another
           // extension's command skips this, and the built-in `/mcp`, which acts on the
           // registered servers, registers them without waiting (`mcpPromptPreparation()`).
@@ -795,16 +947,15 @@ export class AgentSessionWrapper {
             const waited = this.mcpHost.prepareForPrompt(controller.signal, { wait: mcpPreparation === "wait" })
               .catch((error: unknown) => {
                 console.error("[pi-web] MCP servers could not be prepared:", error instanceof Error ? error.message : error);
-              })
-              .then(() => {
-                if (!controller.signal.aborted) return;
-                finishPrompt();
-                throw new Error(MCP_WAIT_STOPPED_MESSAGE);
               });
             const wait = { controller, done: waited.then(() => undefined, () => undefined) };
             this.mcpPromptWait = wait;
             try {
               await waited;
+              if (controller.signal.aborted) {
+                try { return this.retainStoppedPrompt(command); }
+                finally { finishPrompt(); }
+              }
             } finally {
               if (this.mcpPromptWait === wait) this.mcpPromptWait = null;
             }
@@ -820,6 +971,10 @@ export class AgentSessionWrapper {
               // Every disposition (handled, queued, started) is an acceptance; a
               // rejected prompt never calls this and rejects `prompt` instead.
               preflightResult: (disposition) => {
+                if (disposition === "started" && stopEpoch !== this.promptStopEpoch) {
+                  stoppedBeforeRun = true;
+                  throw new Error(MCP_WAIT_STOPPED_MESSAGE);
+                }
                 promptDisposition = disposition;
                 acceptPreflight();
               },
@@ -839,6 +994,14 @@ export class AgentSessionWrapper {
             // run; started/handled requests still need wrapper completion.
             if (promptDisposition !== "queued") this.emit({ type: "prompt_done" });
           }, (error) => {
+            if (stoppedBeforeRun) {
+              try {
+                stoppedResult = this.retainStoppedPrompt(command);
+                settleStoppedPreflight();
+              } catch (saveError) { rejectPreflight(saveError); }
+              finishPrompt();
+              return;
+            }
             rejectPreflight(error);
             finishPrompt();
             invalidateSessionListCache();
@@ -859,13 +1022,14 @@ export class AgentSessionWrapper {
           });
 
           await preflight;
-          return null;
+          return stoppedResult ?? null;
         } finally {
           releaseAdmission();
         }
       }
 
       case "abort": {
+        this.promptStopEpoch += 1;
         if (this.abortCleanupPromise) return { accepted: true };
 
         let resolveAbortCleanup!: () => void;
@@ -942,7 +1106,9 @@ export class AgentSessionWrapper {
           isCompacting: this.inner.isCompacting,
           autoCompactionEnabled: this.inner.autoCompactionEnabled,
           autoRetryEnabled: this.inner.autoRetryEnabled,
-          model: model ? { id: model.id, provider: model.provider } : undefined,
+          model: this.nextTurnSettings.model ?? (model ? { id: model.id, provider: model.provider } : undefined),
+          activeModel: model ? { id: model.id, provider: model.provider } : undefined,
+          nextTurnSettings: this.nextTurnSettings,
           messageCount: 0,
           pendingMessageCount: this.inner.pendingMessageCount,
           queuedMessages: {
@@ -955,7 +1121,7 @@ export class AgentSessionWrapper {
           // An exact prompt is projected onto each run by the inline extension;
           // the SDK state only shows Pi's structured sections.
           systemPrompt: this.exactSystemPrompt?.() ?? this.inner.agent.state?.systemPrompt ?? "",
-          thinkingLevel: this.inner.agent.state?.thinkingLevel ?? "off",
+          thinkingLevel: this.nextTurnSettings.thinkingLevel ?? this.inner.agent.state?.thinkingLevel ?? "off",
           extensionStatuses: this.getExtensionStatuses(),
           extensionWidgets: this.getExtensionWidgets(),
         };
@@ -968,8 +1134,16 @@ export class AgentSessionWrapper {
           await this.inner.modelRuntime.refresh({ allowNetwork: false });
           model = this.inner.modelRuntime.getModel(provider, modelId);
         }
-        if (!model) throw new Error(`Model not found: ${provider}/${modelId}`);
-        await this.inner.setModel(model);
+        if (!model) throw new Error(`模型不存在：${provider}/${modelId}`);
+        if (this.isRunning()) {
+          if (this.inner.modelRuntime.checkAuth && !await this.inner.modelRuntime.checkAuth(provider)) {
+            throw new Error("所选模型认证失败，请检查该模型的认证配置。");
+          }
+          this.saveNextTurnSettings({ ...this.nextTurnSettings, model: { id: model.id, provider: model.provider } });
+        } else {
+          await this.inner.setModel(model);
+          if (this.nextTurnSettings.model) this.saveNextTurnSettings({ ...this.nextTurnSettings, model: undefined });
+        }
         invalidateModelsCache();
         invalidateSessionListCache();
         return { id: model.id, provider: model.provider };
@@ -1090,12 +1264,13 @@ export class AgentSessionWrapper {
 
       case "set_thinking_level": {
         const level = command.level as string;
-        this.inner.setThinkingLevel(level);
-        // setThinkingLevel clamps xhigh→high for models where supportsXhigh()===false.
-        // If the model has DeepSeek thinking compat (reasoningEffortMap maps xhigh→max),
-        // force the state back so the compat layer can use it correctly.
-        if (level === "xhigh" && (this.inner.model as { compat?: { thinkingFormat?: string } } | null)?.compat?.thinkingFormat === "deepseek" && this.inner.agent?.state) {
-          this.inner.agent.state.thinkingLevel = "xhigh";
+        if (!["off", "minimal", "low", "medium", "high", "xhigh", "max"].includes(level)) {
+          throw new Error("思考深度参数无效，请重新选择。");
+        }
+        if (this.isRunning()) this.saveNextTurnSettings({ ...this.nextTurnSettings, thinkingLevel: level });
+        else {
+          this.setThinkingLevel(level);
+          if (this.nextTurnSettings.thinkingLevel !== undefined) this.saveNextTurnSettings({ ...this.nextTurnSettings, thinkingLevel: undefined });
         }
         invalidateSessionListCache();
         return null;
@@ -1900,6 +2075,14 @@ export class AgentSessionWrapper {
         opts?.signal,
       ),
       notify: (message, type) => {
+        // Routine Pi-Droid startup metadata belongs in its status, not a toast.
+        // Match only the known info banner; warnings and errors still reach users.
+        if (type === "info" && /^Pi-Droid ready — \d+ tools registered, (?:no app adaptors|\d+ app adaptor\(s\): [^\r\n]+)$/.test(message)) return;
+        // Compatibility for older Pi Mail producers: optional discovery only.
+        if (type === "warning" && message === "Pi Mail presence could not start; peer discovery may be unavailable.") {
+          console.warn("[pi-web] optional mail discovery unavailable:", message);
+          return;
+        }
         this.emit({
           type: "extension_ui_request",
           id: randomUUID(),
@@ -2033,6 +2216,7 @@ export class AgentSessionWrapper {
 
 declare global {
   var __piSessions: Map<string, AgentSessionWrapper> | undefined;
+  var __piProjectStatusLedger: ProjectStatusLedger | undefined;
   var __piStartLocks: Map<string, Promise<{ session: AgentSessionWrapper; realSessionId: string }>> | undefined;
   var __piStartingSessionCwds: Map<string, number> | undefined;
 }
@@ -2349,6 +2533,15 @@ export async function destroyRpcSessionsForCwd(cwd: string): Promise<number> {
   );
   await Promise.all(sessions.map((session) => session.shutdown()));
   return sessions.length;
+}
+
+function getProjectStatusLedger(): ProjectStatusLedger {
+  return globalThis.__piProjectStatusLedger ??= new ProjectStatusLedger();
+}
+export function getRpcProjectStatusSnapshot() {
+  return getProjectStatusLedger().snapshot(getRunningRpcSessionIds(), [...getRegistry().values()]
+    .filter(session => session.isAlive())
+    .map(session => ({ sessionId: session.sessionId, pendingRequests: session.getPendingProjectRequests() })));
 }
 
 export function getRunningRpcSessionIds(): string[] {

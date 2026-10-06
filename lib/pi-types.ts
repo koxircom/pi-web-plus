@@ -1,12 +1,13 @@
 import type {
   AgentSessionEvent,
+  ExtensionRunner,
   BashOperations,
   SessionManager,
   SettingsManager,
   SlashCommandInfo,
   Theme,
 } from "@earendil-works/pi-coding-agent";
-import type { AgentMessage as PiAgentMessage } from "@earendil-works/pi-agent-core";
+import type { PrepareRequest, AgentMessage as PiAgentMessage } from "@earendil-works/pi-agent-core";
 import type { ImageContent, TextContent } from "@earendil-works/pi-ai";
 
 export interface ContextUsage {
@@ -76,6 +77,8 @@ interface ResourceLoaderLike {
 }
 
 interface ExtensionRunnerLike {
+  getCommand?: ExtensionRunner["getCommand"];
+  createCommandContext?: ExtensionRunner["createCommandContext"];
   getRegisteredCommands(): Array<{
     invocationName: string;
     description?: string;
@@ -136,16 +139,18 @@ export interface AgentSessionLike {
   readonly modelRuntime: {
     getModel: (provider: string, modelId: string) => ModelLike | undefined;
     refresh: (options?: { allowNetwork?: boolean }) => Promise<unknown>;
+    checkAuth?: (provider: string) => Promise<unknown>;
   };
   readonly sessionManager: SessionManager;
   readonly settingsManager: SettingsManager;
   readonly agent: {
+    prepareRequest?: PrepareRequest;
     state?: {
       /** Replayed from the transcript's system messages since Pi 0.86; never assign it. */
       readonly systemPrompt?: string;
       thinkingLevel?: string;
       streamingMessage?: PiAgentMessage;
-      readonly messages?: readonly PiAgentMessage[];
+      messages?: PiAgentMessage[];
       /** The declared tools, with the descriptions `prepareLoadout` hooks set for the model. */
       readonly tools?: readonly { readonly name: string; readonly description: string }[];
     };

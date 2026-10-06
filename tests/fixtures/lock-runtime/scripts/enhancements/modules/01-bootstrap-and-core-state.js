@@ -3590,12 +3590,6 @@
       html.pi-enh-session-compact-active .pi-enh-session-msg-count {
         display: none !important;
       }
-      html.pi-enh-session-compact-active .pi-enh-session-status-label {
-        font-size: 10px !important;
-        line-height: 16px !important;
-        padding: 0 4px !important;
-        max-width: 56px !important;
-      }
       html.pi-enh-session-compact-active .pi-enh-session-overflow {
         width: 22px !important;
         height: 22px !important;
@@ -3665,12 +3659,6 @@
     div[style*="alignItems: flex-end"]:hover > div[style*="justifyContent: flex-end"] > div {
       opacity: 1 !important;
       pointer-events: auto !important;
-    }
-    html.pi-enh-mobile.pi-enh-session-compact-active .pi-enh-session-status-label {
-      font-size: 10px !important;
-      line-height: 16px !important;
-      padding: 0 4px !important;
-      max-width: 56px !important;
     }
     html.pi-enh-mobile.pi-enh-session-compact-active .pi-enh-session-overflow {
       width: 22px !important;
@@ -6963,8 +6951,6 @@ ${SETTINGS_SIDEBAR_LAYOUT_CSS}
       box-shadow: 0 0 0 2px color-mix(in srgb, currentColor 10%, transparent);
     }
 
-    /* Keep status in normal flex flow, before the final overflow action. */
-    .pi-enh-session-status-label { position: static; order: 2147483646; flex: 0 0 auto; align-self: center; max-width: 72px; font-size: 11px; line-height: 20px; padding: 0 5px; border-radius: 4px; color: var(--status-color); background: color-mix(in srgb, var(--status-color) 10%, transparent); white-space: nowrap; pointer-events: auto; }
     .pi-enh-attention-notice { position: fixed; z-index: 1200; width: min(370px, calc(100vw - 24px)); box-sizing: border-box; border: 1px solid var(--border, #52525b); border-radius: 10px; padding: 12px; color: var(--text, #eee); background: var(--bg-panel, #27272a); box-shadow: 0 8px 24px #0005; font: 13px/1.5 system-ui; right: 12px; bottom: 20px; border-left: 3px solid #f59e0b; max-height: min(360px, 45dvh); overflow-y: auto; }
     .pi-enh-attention-notice button { cursor: pointer; border: 1px solid var(--border, #52525b); border-radius: 5px; padding: 3px 7px; background: var(--bg-panel, #27272a); color: var(--text, #eee); font: inherit; margin: 8px 6px 0 0; }
     .pi-enh-attention-notice-item { display: flex; align-items: flex-start; gap: 4px; }

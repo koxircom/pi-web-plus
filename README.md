@@ -1,6 +1,6 @@
-> **PI Web Plus v1.3.23** 基于 Pi Coding Agent 1.0.2。通过 [GitHub Releases](https://github.com/koxircom/pi-web-plus/releases/tag/v1.3.23) 安装预构建包；本地服务默认只监听 `127.0.0.1`。
+> **PI Web Plus v1.3.38** 基于 Pi Coding Agent 1.0.4。通过 [GitHub Releases](https://github.com/koxircom/pi-web-plus/releases/tag/v1.3.38) 安装预构建包；本地服务默认只监听 `127.0.0.1`。
 
-> 1.3.23：新增会话导航书签、模型缓存后台刷新、新会话启动提速与图片功能预热；保留现有聊天界面。
+> 1.3.38：移除侧边栏重复的文字状态标签和旧资源，补充脱敏实景图；包含截至 1.3.37 的改进，基于 Pi Coding Agent 1.0.4。
 
 # PI Web Plus
 
@@ -20,12 +20,64 @@ PI Web Plus 是 [Pi Coding Agent](https://github.com/earendil-works/pi) 的本�
 
 PI Web Plus 保留并扩展 agegr 的 pi-web 开源项目，许可证及原版权声明见 [MIT License](./LICENSE)。本项目使用 [Pi Coding Agent](https://github.com/earendil-works/pi)。
 
+## 实际界面
+
+以下图片均在独立演示环境中拍摄。项目、对话、图片和标签全部为虚构示例，不含真实会话、账号、密钥或设备地址。
+
+### 会话工作区
+
+项目会话列表、文件浏览器与对话区集中展示；运行状态沿用列表左侧指示，不再增加右侧文字状态标签。
+
+![会话工作区](docs/screenshots/overview.png)
+
+### 图片预览
+
+点击会话中的图片可打开独立预览，关闭后回到原来的阅读位置。
+
+![图片预览](docs/screenshots/image-preview.png)
+
+### 会话导航
+
+按轮次查看问题摘要，定位长会话中的对应消息，并管理导航书签。
+
+![会话导航](docs/screenshots/navigation.png)
+
+### 引用与评论
+
+鼠标完成文本选择后显示复制与引用操作；引用可附加简短评论，再汇总到输入框。
+
+![引用与评论](docs/screenshots/quote.png)
+
+### 正文搜索
+
+搜索会话正文并查看命中片段，点击结果跳转到对应消息。
+
+![正文搜索](docs/screenshots/search.png)
+
+### 分类与标签
+
+为会话添加彩色标签，按任务类别整理项目；标签可统一维护。
+
+![会话分类](docs/screenshots/categories.png)
+
+### 增强功能
+
+按功能模块管理阅读导航、输入附件、引用、会话列表和通知偏好。
+
+![增强设置](docs/screenshots/enhancements.png)
+
+### 设置页面
+
+统一管理外观、聊天布局、模型、技能和子代理；公开示例仅展示界面偏好。
+
+![设置页面](docs/screenshots/settings.png)
+
 ## Quick Start
 
 PI Web Plus requires Node.js 22.19.0 or newer (`node >=22.19`). Check your version with `node --version`, then install the prebuilt release tarball from [`koxircom/pi-web-plus` GitHub Releases](https://github.com/koxircom/pi-web-plus/releases) and start `pi-web`:
 
 ```bash
-npm install -g https://github.com/koxircom/pi-web-plus/releases/download/v1.3.23/pi-web-plus-1.3.23.tgz
+npm install -g https://github.com/koxircom/pi-web-plus/releases/download/v1.3.38/pi-web-plus-1.3.38.tgz
 pi-web
 ```
 
@@ -35,7 +87,7 @@ The CLI opens a browser after the server is ready. If it does not, open [http://
 
 If no model provider is configured yet, open the **Models** panel to sign in or add an API key.
 
-The command above installs v1.3.23. To install or upgrade to another release, stop the running process with `Ctrl+C`, replace `v1.3.23` and `1.3.23` in the URL with the target `<version>` from [GitHub Releases](https://github.com/koxircom/pi-web-plus/releases), and run the install command again:
+The command above installs v1.3.38. To install or upgrade to another release, stop the running process with `Ctrl+C`, replace `v1.3.38` and `1.3.38` in the URL with the target `<version>` from [GitHub Releases](https://github.com/koxircom/pi-web-plus/releases), and run the install command again:
 
 ```bash
 npm install -g https://github.com/koxircom/pi-web-plus/releases/download/v<version>/pi-web-plus-<version>.tgz
@@ -79,10 +131,10 @@ Password authentication does not encrypt the connection. Do not expose Pi Web ov
 
 Server-side model and API requests honor the standard `HTTP_PROXY`, `HTTPS_PROXY`, and `NO_PROXY` environment variables.
 
-On macOS or Linux (after installing the [GitHub Release tarball](https://github.com/koxircom/pi-web-plus/releases/download/v1.3.23/pi-web-plus-1.3.23.tgz)):
+On macOS or Linux (after installing the [GitHub Release tarball](https://github.com/koxircom/pi-web-plus/releases/download/v1.3.38/pi-web-plus-1.3.38.tgz)):
 
 ```bash
-npm install -g https://github.com/koxircom/pi-web-plus/releases/download/v1.3.23/pi-web-plus-1.3.23.tgz
+npm install -g https://github.com/koxircom/pi-web-plus/releases/download/v1.3.38/pi-web-plus-1.3.38.tgz
 HTTP_PROXY=http://127.0.0.1:7890 \
 HTTPS_PROXY=http://127.0.0.1:7890 \
 NO_PROXY=localhost,127.0.0.1 \
@@ -92,7 +144,7 @@ pi-web
 On Windows PowerShell:
 
 ```powershell
-npm install -g https://github.com/koxircom/pi-web-plus/releases/download/v1.3.23/pi-web-plus-1.3.23.tgz
+npm install -g https://github.com/koxircom/pi-web-plus/releases/download/v1.3.38/pi-web-plus-1.3.38.tgz
 $env:HTTP_PROXY = "http://127.0.0.1:7890"
 $env:HTTPS_PROXY = "http://127.0.0.1:7890"
 $env:NO_PROXY = "localhost,127.0.0.1"

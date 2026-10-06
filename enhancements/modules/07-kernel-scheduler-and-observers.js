@@ -748,8 +748,6 @@
   // ==========================================
   activeTurnStartTime = null;
   activeTurnEntryId = null;
-  baseTitle = cleanSessionTitleBase(document.title) || "会话";
-  restoreTitleTimer = null;
   wasRunning = false;
   notRunningConsecutiveTicks = 0;
 
@@ -1047,13 +1045,6 @@
       if (!wasRunning) {
         wasRunning = true;
         activeTurnEntryId = null;
-        baseTitle = cleanSessionTitleBase(document.title) || "会话";
-        if (restoreTitleTimer) {
-          clearManagedTimeout(restoreTitleTimer);
-          restoreTitleTimer = null;
-        }
-        // 运行开始时同步一次标题，标签页绝不带跳动的秒表，保持彻底静止无抖动
-        applyProjectStatusTitle("running", baseTitle);
       }
       const elapsed = Math.max(0, (Date.now() - turnStartTime) / 1000);
       const timeStr = formatSec(elapsed);
@@ -1208,7 +1199,6 @@
       // Transition from running -> completed
       if (wasRunning) {
         if (hasActiveAskUserOnScreen() || isCurrentSessionInAttention(currentSessionId)) {
-          applyProjectStatusTitle("attention", baseTitle);
           return;
         }
 
@@ -1222,13 +1212,6 @@
           const totalElapsed = Math.max(0, (Date.now() - turnStartTime) / 1000);
           const finalSec = Math.max(1, Math.round(totalElapsed));
           const finalTimeStr = formatSec(totalElapsed);
-
-          applyProjectStatusTitle("completed", baseTitle);
-          if (restoreTitleTimer) clearManagedTimeout(restoreTitleTimer);
-          restoreTitleTimer = addManagedTimeout(() => {
-            restoreTitleTimer = null;
-            applyProjectStatusTitle(null, baseTitle);
-          }, 4000);
 
           // Find the assistant message that just finished (latest assistant message in active turn)
           const assistantMsgs = document.querySelectorAll('div[data-message-role="assistant"]');

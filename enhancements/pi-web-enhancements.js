@@ -37,18 +37,6 @@
     }
   } catch (e) {}
 
-  // 0.5 物理级去除标签页中的 Pi Web 标识与防止标题抖动（保留状态文字 🔵/🟠/🔴/🟢 等）
-  function sanitizePageTitle(rawTitle) {
-    if (!rawTitle) return "";
-    let clean = String(rawTitle)
-      .replace(/\s*[-·|_]\s*(?:π\+\s*)?\bPi\s*Web\b(?:\s+Plus\b|\s*\+)?/gi, "")
-      .replace(/(?:π\+\s*)?\bPi\s*Web\b(?:\s+Plus\b|\s*\+)?\s*[-·|_]\s*/gi, "")
-      .replace(/(?:π\+\s*)?\bPi\s*Web\b(?:\s+Plus\b|\s*\+)?/gi, "")
-      .replace(/\s*[-·|_]\s*$/, "")
-      .trim();
-    return clean;
-  }
-
   // Safe Hot-Reloading: Clean up any previous instance before re-initializing
   if (typeof window.__PI_WEB_ENHANCEMENTS_CLEANUP__ === "function") {
     try {
@@ -68,12 +56,6 @@
   let isDisposed = false;
   let hasDeferredSync = false;
 
-  let titleObserver = null;
-  let headObserver = null;
-  let installedTitleGetter = null;
-  let installedTitleSetter = null;
-  let hadOwnTitleDesc = false;
-  let prevOwnTitleDesc = null;
   // Top-level TDZ hoisted forward declarations (< line 200)
   let pendingDecorationOperations,
     latestKnownSessionGroups,
@@ -119,7 +101,6 @@
     minimapHistoryDisplayState,
     autoLoadEarlierTriggered,
     viewerFileContentCache,
-    baseTitle,
     wasRunning,
     restoredThinkingSessionScopes,
     SHORTCUT_TIP_STORAGE_KEY,
@@ -130,7 +111,6 @@
     sidebarObserver = null,
     activeTurnStartTime = null,
     activeTurnEntryId = null,
-    restoreTitleTimer = null,
     notRunningConsecutiveTicks = 0,
     isRestoringThinking = false,
     settingsDialogObserver = null,
@@ -146,208 +126,6 @@
     bridgeBaseSyncUrl = null,
     currentScriptTag = null,
     pollerIntervalId = null;
-
-  function isProjectStatusIndicatorActive() {
-    if (isDisposed) return false;
-    if (typeof isPluginEnabled === "function") {
-      try {
-        return Boolean(isPluginEnabled("project-status-indicator"));
-      } catch (e) {}
-    }
-    try {
-      if (typeof localStorage !== "undefined") {
-        const direct = localStorage.getItem("pi-enh-plugin-project-status-indicator");
-        if (direct === "false") return false;
-        if (direct === "true") return true;
-        const raw = localStorage.getItem("pi-enh-settings-v1") || localStorage.getItem("pi-enh-features");
-        if (raw) {
-          const cfg = JSON.parse(raw);
-          if (cfg && cfg.features && cfg.features["project-status-indicator"] && cfg.features["project-status-indicator"].enabled === false) {
-            return false;
-          }
-          if (cfg && cfg["project-status-indicator"] && cfg["project-status-indicator"].enabled === false) {
-            return false;
-          }
-        }
-      }
-    } catch (e) {}
-    return true;
-  }
-
-  // 0.6 document.title setter 拦截与 DOM 更新防护（去除 Pi Web 尾缀并防止与原生 MutationObserver 死循环）
-  try {
-    if (typeof document !== "undefined") {
-      hadOwnTitleDesc = Object.prototype.hasOwnProperty.call(document, "title");
-      let desc = hadOwnTitleDesc
-        ? Object.getOwnPropertyDescriptor(document, "title")
-        : (Object.getOwnPropertyDescriptor(Document.prototype, "title") ||
-           (typeof HTMLDocument !== "undefined" && Object.getOwnPropertyDescriptor(HTMLDocument.prototype, "title")) ||
-           Object.getOwnPropertyDescriptor(Object.getPrototypeOf(document) || Document.prototype, "title"));
-
-      let origGet = null;
-      let origSet = null;
-
-      if (desc && (desc.get || desc.set)) {
-        origGet = desc.get;
-        origSet = desc.set;
-      } else if (desc && "value" in desc) {
-        let storedVal = desc.value;
-        origGet = function () { return storedVal; };
-        origSet = function (val) { storedVal = val; };
-      }
-
-      if (origSet) {
-        // 防止热重载重复 defineProperty 套娃，解包最底层原始方法
-        if (origGet && origGet.__pi_enh_orig_get) {
-          origGet = origGet.__pi_enh_orig_get;
-        }
-        if (origSet && origSet.__pi_enh_orig_set) {
-          origSet = origSet.__pi_enh_orig_set;
-        }
-
-        prevOwnTitleDesc = hadOwnTitleDesc ? Object.getOwnPropertyDescriptor(document, "title") : null;
-
-        let isSettingTitleInternally = false;
-
-        installedTitleGetter = function () {
-          const raw = origGet ? origGet.call(this) : "";
-          if (!isProjectStatusIndicatorActive()) {
-            return raw;
-          }
-          const sanitized = sanitizePageTitle(raw);
-          return sanitized || raw;
-        };
-        installedTitleGetter.__pi_enh_title__ = true;
-        installedTitleGetter.__pi_enh_orig_get = origGet;
-
-        installedTitleSetter = function (val) {
-          window.__PI_WEB_NATIVE_TITLE_RAW__ = val;
-          // Preserve the native title before sanitizing the enhanced display.
-          // Legacy cores publish it through document.title, newer cores also
-          // provide __PI_WEB_NATIVE_TITLE_BASE__ directly.
-          if (
-            typeof val === "string" &&
-            (/^(?:π\+\s*)?Pi\s*Web(?:\s+Plus|\+)?$/i.test(val.trim()) ||
-             /\s-\s(?:π\+\s*)?Pi\s*Web(?:\s+Plus|\+)?$/i.test(val.trim()))
-          ) {
-            window.__PI_WEB_NATIVE_TITLE_BASE__ = val;
-          }
-
-          if (!isProjectStatusIndicatorActive()) {
-            origSet.call(this, val);
-            return;
-          }
-
-          const cleanBase = sanitizePageTitle(val);
-          // A sanitized enhancer write must not replace an authoritative native base.
-          if (!window.__PI_WEB_NATIVE_TITLE_BASE__ && cleanBase && !/^(?:🔵|🟠|🔴|🟢|⚠️)/.test(cleanBase)) {
-            window.__PI_WEB_NATIVE_TITLE_BASE__ = cleanBase;
-          }
-
-          // 状态前缀保护：若当前 val 本身已带有状态前缀（如 🔵、🟠 需要确认、🟢 已完成等），直接使用 cleanBase
-          let targetTitle = cleanBase;
-          const hasStatusPrefix = /^(?:🔵|🟠|🔴|🟢|⚠️)/.test(cleanBase);
-
-          if (!hasStatusPrefix && typeof window.__PI_ENH_COMPOSE_WINDOW_TITLE__ === "function") {
-            try {
-              const composed = window.__PI_ENH_COMPOSE_WINDOW_TITLE__(cleanBase);
-              if (composed) targetTitle = composed;
-            } catch (e) {}
-          }
-
-          if (!targetTitle) {
-            targetTitle = cleanBase || (val ? sanitizePageTitle(val) : "") || "work";
-          }
-
-          // 获取当前底层真实的 title，若已等于目标值则禁止重复写入（防止与原生 MutationObserver 死循环）
-          const currentTitle = origGet ? origGet.call(this) : (document.querySelector("title")?.textContent || "");
-          if (currentTitle === targetTitle) {
-            return;
-          }
-
-          if (isSettingTitleInternally) {
-            origSet.call(this, targetTitle);
-            return;
-          }
-
-          isSettingTitleInternally = true;
-          try {
-            origSet.call(this, targetTitle);
-          } finally {
-            isSettingTitleInternally = false;
-          }
-        };
-        installedTitleSetter.__pi_enh_title__ = true;
-        installedTitleSetter.__pi_enh_orig_set = origSet;
-
-        Object.defineProperty(document, "title", {
-          configurable: true,
-          enumerable: true,
-          get: installedTitleGetter,
-          set: installedTitleSetter,
-        });
-
-        // 初始若已有标题且开启增强，同步一次净化
-        if (isProjectStatusIndicatorActive() && document.title) {
-          const initClean = sanitizePageTitle(document.title);
-          if (initClean && initClean !== document.title) {
-            installedTitleSetter.call(document, document.title);
-          }
-        }
-      }
-
-      let isSanitizingDomTitle = false;
-      const cleanDomTitle = () => {
-        if (isDisposed || isSanitizingDomTitle) return;
-        if (!isProjectStatusIndicatorActive()) return;
-        const titleEl = document.querySelector("title");
-        if (!titleEl) return;
-        const currentText = titleEl.textContent || "";
-        if (!/Pi\s*Web/i.test(currentText)) return;
-        let cleaned = sanitizePageTitle(currentText);
-        if (!cleaned) return;
-        const hasStatus = /^(?:🔵|🟠|🔴|🟢|⚠️)/.test(cleaned);
-        if (!hasStatus && typeof window.__PI_ENH_COMPOSE_WINDOW_TITLE__ === "function") {
-          try {
-            const composed = window.__PI_ENH_COMPOSE_WINDOW_TITLE__(cleaned);
-            if (composed) cleaned = composed;
-          } catch (e) {}
-        }
-        if (titleEl.textContent !== cleaned) {
-          isSanitizingDomTitle = true;
-          try {
-            titleEl.textContent = cleaned;
-          } finally {
-            isSanitizingDomTitle = false;
-          }
-        }
-      };
-
-      if (typeof MutationObserver !== "undefined") {
-        titleObserver = new MutationObserver(cleanDomTitle);
-        const attachTitleObserver = () => {
-          if (isDisposed) return;
-          const t = document.querySelector("title");
-          if (t) {
-            titleObserver.observe(t, { childList: true, characterData: true, subtree: true });
-            cleanDomTitle();
-          }
-        };
-
-        if (document.head) {
-          headObserver = new MutationObserver(() => {
-            if (isDisposed) return;
-            const t = document.querySelector("title");
-            if (t) {
-              attachTitleObserver();
-            }
-          });
-          headObserver.observe(document.head, { childList: true });
-        }
-        attachTitleObserver();
-      }
-    }
-  } catch (e) {}
 
   // --- Managed Lifecycle & Zero-Leak Teardown Registry ---
   const activeCleanups = [];
@@ -874,7 +652,7 @@
     {
       id: "pi-mail-auto-collapse",
       name: "协作消息自动折叠",
-      desc: "跨会话协作消息长卡片默认收起为单行亲民摘要，仅呈现「协作消息 · 已收到」并支持随时展开/收起及原文复制。",
+      desc: "跨会话协作消息默认显示主题摘要，支持展开、收起与可读内容复制。",
       category: "显示增强",
       defaultEnabled: true,
     },
@@ -986,7 +764,7 @@
     {
       id: "project-status-indicator",
       name: "跨项目会话状态提示",
-      desc: "精简标签页标题，移除冗余 Pi Web 标识与跳动的计时秒数。运行中以蓝色小球 🔵 纯净指示，需要确认 🟠、错误 🔴、已完成 🟢 显示状态文字与对应颜色小球；多标签页一目了然。", 
+      desc: "当前项目有未读完成或待回答会话时，标签页标题显示项目名和去重合计数；Pi 图标以蓝色数字徽标标记未读完成，以橙色数字徽标标记待处理。阅读完成或服务器确认答复后计数减少，折叠会话不会清除计数。", 
       category: "运行监控",
       defaultEnabled: true,
     },
@@ -1815,24 +1593,7 @@
         removeCompactionEnhancements();
       }
     } else if (id === "pi-mail-auto-collapse") {
-      if (typeof syncPiMailActiveState === "function") {
-        syncPiMailActiveState();
-      } else if (typeof window !== "undefined" && typeof window.__PI_ENH_SYNC_PI_MAIL_ACTIVE_STATE__ === "function") {
-        window.__PI_ENH_SYNC_PI_MAIL_ACTIVE_STATE__();
-      }
-      if (enabled) {
-        if (typeof syncPiMailCards === "function") {
-          syncPiMailCards();
-        } else if (typeof window !== "undefined" && typeof window.__PI_ENH_SYNC_PI_MAIL_CARDS__ === "function") {
-          window.__PI_ENH_SYNC_PI_MAIL_CARDS__();
-        }
-      } else {
-        if (typeof removePiMailEnhancements === "function") {
-          removePiMailEnhancements();
-        } else if (typeof window !== "undefined" && typeof window.__PI_ENH_REMOVE_PI_MAIL_ENHANCEMENTS__ === "function") {
-          window.__PI_ENH_REMOVE_PI_MAIL_ENHANCEMENTS__();
-        }
-      }
+      window.dispatchEvent(new Event("pi-mail-collapse-change"));
     } else if (id === "live-stopwatch") {
       if (!enabled) {
         for (const timer of document.querySelectorAll(".pi-enh-live-timer")) {
@@ -2511,6 +2272,11 @@
   const pendingModelMetadataQueue = [];
   let activeModelMetadataWorkers = 0;
 
+  function isPersistentSessionModelId(sessionId) {
+    return typeof sessionId === "string" && sessionId.length > 0 &&
+      !sessionId.startsWith("new:") && !sessionId.startsWith("parked-new:");
+  }
+
   function loadPersistedSessionModelMetadata() {
     try {
       const raw = localStorage.getItem(SESSION_MODEL_STORAGE_KEY);
@@ -2518,7 +2284,7 @@
       const parsed = JSON.parse(raw);
       if (typeof parsed !== "object" || parsed === null) return;
       for (const [sId, item] of Object.entries(parsed)) {
-        if (!sId || !item || typeof item !== "object" || !item.modelId) continue;
+        if (!isPersistentSessionModelId(sId) || !item || typeof item !== "object" || !item.modelId) continue;
         const updatedAt = Number(item.updatedAt) || 0;
         sessionModelMetadata.set(sId, {
           provider: item.provider || "",
@@ -2536,7 +2302,7 @@
     try {
       const validEntries = [];
       for (const [sId, meta] of sessionModelMetadata.entries()) {
-        if (!sId || !meta?.modelId) continue;
+        if (!isPersistentSessionModelId(sId) || !meta?.modelId) continue;
         validEntries.push({
           id: sId,
           provider: meta.provider || "",
@@ -2561,7 +2327,7 @@
   }
 
   function recordSessionModelMetadataFromPayload(sessionId, payload) {
-    if (!sessionId || !payload?.context?.model?.modelId) return;
+    if (!isPersistentSessionModelId(sessionId) || !payload?.context?.model?.modelId) return;
     const m = payload.context.model;
     const now = Date.now();
     sessionModelMetadata.set(sessionId, {
@@ -2678,7 +2444,7 @@
   }
 
   async function fetchSessionModelMetadata(sessionId) {
-    if (!sessionId || sessionModelRequests.has(sessionId)) return;
+    if (!isPersistentSessionModelId(sessionId) || sessionModelRequests.has(sessionId)) return;
     sessionModelRequests.add(sessionId);
     try {
       const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}?deferThinking=1&deferMedia=1&tail=1`, { cache: "no-store" });
@@ -2720,7 +2486,7 @@
   }
 
   function enqueueSessionModelMetadata(sessionId) {
-    if (!sessionId || sessionModelRequests.has(sessionId) || pendingModelMetadataQueue.includes(sessionId)) return;
+    if (!isPersistentSessionModelId(sessionId) || sessionModelRequests.has(sessionId) || pendingModelMetadataQueue.includes(sessionId)) return;
     pendingModelMetadataQueue.push(sessionId);
     pumpSessionModelMetadataQueue();
   }
@@ -2757,7 +2523,7 @@
     const now = Date.now();
     for (const row of document.querySelectorAll(".pi-enh-session-row-host[data-pi-enh-session-id]")) {
       const sessionId = row.getAttribute("data-pi-enh-session-id");
-      if (!sessionId) continue;
+      if (!isPersistentSessionModelId(sessionId)) continue;
       const metadata = sessionModelMetadata.get(sessionId);
       if (metadata && metadata.modelId) {
         renderSessionModelLabel(row, metadata);
@@ -7614,7 +7380,6 @@
   window.__PI_ENH_GET_ARCHIVE_RETENTION_DAYS__ = getArchiveRetentionDays;
   window.__PI_ENH_SET_ARCHIVE_RETENTION_DAYS__ = setArchiveRetentionDays;
   window.__PI_ENH_PURGE_EXPIRED_ARCHIVES__ = purgeExpiredArchives;
-
   // ==========================================
   // 0.2 Session Memory Cache (会话内存秒开与长会话优化)
   // ==========================================
@@ -10828,7 +10593,7 @@
     try {
       checkCancelled();
       const activeFetch = baseFetch || originalWindowFetch;
-      if (!activeFetch) return;
+      if (!activeFetch) return true;
       const headers = new Headers(init?.headers || input?.headers);
       headers.set("Content-Type", "application/json");
       const call = (type) => activeFetch.call(window, target.urlStr, {
@@ -10843,11 +10608,20 @@
       checkCancelled();
       // Never reload a running session or consume its user queue. Fresh SDK
       // resources are loaded only at the existing idle command boundary.
-      if (state?.isStreaming || state?.isPromptRunning || state?.isBashRunning || state?.isCompacting) return;
-      if (state?.stopRuntimeVersion === "1.0.0" && ["1.0.0", "not-applicable"].includes(state?.subagentCancellationVersion)) return;
-      const reload = await call("reload");
+      if (state?.isStreaming || state?.isPromptRunning || state?.isBashRunning || state?.isCompacting) return true;
+      if (!(state?.stopRuntimeVersion === "1.0.0" && ["1.0.0", "not-applicable"].includes(state?.subagentCancellationVersion))) {
+        const reload = await call("reload");
+        checkCancelled();
+        if (!reload.ok) throw new Error("停止保护更新失败，消息未启动");
+      }
+      // Keep Stop ownership through the lazy SSE upgrade, before dispatch.
+      const lazyEs = dormantSessionEventSources.get(target.sessionId);
+      if (lazyEs && typeof lazyEs.upgradeToReal === "function") await lazyEs.upgradeToReal();
       checkCancelled();
-      if (!reload.ok) throw new Error("停止保护更新失败，消息未启动");
+      return true;
+    } catch (error) {
+      if (entry.cancelled && !signal?.aborted) return false;
+      throw error;
     } finally {
       entries.delete(entry);
       if (!entries.size) pendingStopRuntimePreparations.delete(target.sessionId);
@@ -11316,7 +11090,17 @@
         if (typeof init?.body === "string") {
           try { commandType = JSON.parse(init.body)?.type; } catch (_) {}
         }
-        if (commandType === "prompt") await prepareStopRuntimeForPrompt(agentTarget, input, init);
+        if (commandType === "prompt" && await prepareStopRuntimeForPrompt(agentTarget, input, init) === false) {
+          const command = JSON.parse(init.body);
+          const activeFetch = baseFetch || originalWindowFetch;
+          const response = await activeFetch.call(this, input, { ...init,
+            body: JSON.stringify({ ...command, type: "retain_stopped_prompt" }) });
+          if (response.ok) {
+            markSessionRunning(agentTarget.sessionId, false, { settled: true });
+            void invalidateSessionCache(agentTarget.sessionId);
+          }
+          return response;
+        }
         const asyncAbortType = await resolveAgentAbortType(input, init);
         if (asyncAbortType) {
           return dispatchDirectStopFetch.call(this, agentTarget, asyncAbortType, input, init);
@@ -16384,7 +16168,7 @@
   function resizeAnnotationComment(textarea) {
     if (!textarea) return;
     textarea.style.height = "auto";
-    const height = Math.max(38, Math.min(220, textarea.scrollHeight || 38));
+    const height = Math.max(30, Math.min(220, textarea.scrollHeight || 30));
     textarea.style.height = `${height}px`;
     textarea.style.overflowY = (textarea.scrollHeight || 0) > 220 ? "auto" : "hidden";
   }
@@ -17158,8 +16942,8 @@
   projectStatusState = readProjectStatusState();
   projectStatusCatalog = new Map();
   let projectStatusIntervalId = null;
-  let projectStatusAttentionFaviconTimer = null;
   const projectStatusOriginalIcons = new Map();
+  let projectTabStatusSnapshot = null;
   let projectInteractionInterval = null;
   let projectInteractionController = null;
   let projectInteractionGeneration = 0;
@@ -17449,7 +17233,6 @@
   }
 
   function restoreStatusRow(row) {
-    row.querySelector(".pi-enh-session-status-label")?.remove();
     row.removeAttribute("data-pi-enh-completed-unread");
     row.classList.remove("pi-enh-session-needs-attention");
     row.removeAttribute("data-pi-enh-project-status");
@@ -17459,11 +17242,6 @@
     if (originalBorderLeft !== null) row.style.borderLeft = originalBorderLeft;
     row.removeAttribute("data-pi-enh-original-background");
     row.removeAttribute("data-pi-enh-original-border-left");
-  }
-
-  function getPendingInteractionLabel(entry) {
-    const method = entry.pendingRequests[0]?.method;
-    return ["select", "confirm"].includes(method) ? "待决策" : ["input", "editor"].includes(method) ? "待输入" : "待交互";
   }
 
   function decorateProjectStatusRows() {
@@ -17480,21 +17258,10 @@
         row.setAttribute("data-pi-enh-project-status", status);
         if (status === "attention") row.classList.add("pi-enh-session-needs-attention");
       }
-      let label = row.querySelector(".pi-enh-session-status-label");
-      if (!label) { label = document.createElement("span"); label.className = "pi-enh-session-status-label"; row.insertBefore(label, row.querySelector(".pi-enh-session-overflow")); }
-      const text = status === "attention" ? getPendingInteractionLabel(entry) : PROJECT_STATUS_META[status].label;
-      if (label.textContent !== text) label.textContent = text;
-      const hint = status === "attention" ? `${entry.pendingRequests.length} 项待处理；切换或收起不会解除` : status === "load-error" ? `${entry.loadError?.message || "会话加载失败"}；重新进入并成功加载后自动清除` : status === "completed" ? "未读，点击打开后清除；本轮运行已结束" : entry.toolNames.length ? `正在使用 ${entry.toolNames.join("、")}` : text;
-      if (label.title !== hint) label.title = hint;
       const unreadValue = status === "completed" ? String(entry.unread) : null;
       if (unreadValue !== null && row.getAttribute("data-pi-enh-completed-unread") !== unreadValue) row.setAttribute("data-pi-enh-completed-unread", unreadValue);
       else if (unreadValue === null && row.hasAttribute("data-pi-enh-completed-unread")) row.removeAttribute("data-pi-enh-completed-unread");
-      const color = status === "completed" ? "#4ade80" : PROJECT_STATUS_META[status].color;
-      const currentColor = typeof label.style.getPropertyValue === "function" ? label.style.getPropertyValue("--status-color") : label.style["--status-color"];
-      if (currentColor !== color) {
-        if (typeof label.style.setProperty === "function") label.style.setProperty("--status-color", color);
-        else label.style["--status-color"] = color;
-      }
+
     }
   }
 
@@ -17568,28 +17335,34 @@
     return cleanSessionTitleBase(title);
   }
 
-  function renderProjectStatusAttentionFavicon(status) {
+  function renderProjectStatusFavicon(count, hasAttention) {
     const favicon = document.head?.querySelector("link[data-pi-enh-attention-favicon]");
     if (!favicon) return;
-    const color = PROJECT_STATUS_META[status]?.color || "#a1a1aa";
-    const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="8" fill="#16434b"/><path d="M6 10h17v3h-3v11h-3V13h-5v11H9V13H6z" fill="white"/><circle cx="25" cy="7" r="6" fill="${color}" stroke="#18181b" stroke-width="2"/></svg>`;
+    const color = hasAttention ? "#f59e0b" : "#3b82f6";
+    const badge = count > 9 ? "9+" : String(count);
+    const fontSize = badge.length > 1 ? 22 : 26;
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200"><defs><linearGradient id="flatBlueViolet" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#4F5AE8"/><stop offset="100%" stop-color="#7850E8"/></linearGradient></defs><g transform="translate(13.7 21.6) scale(0.84)"><circle cx="91.2" cy="96" r="87.5" fill="url(#flatBlueViolet)"/><path fill="#FFFFFF" d="M67.7,59.5H132.7C135.9,59.5 136.1,62.9 135.4,67.2C134.8,71.3 133.9,73.5 130.4,73.5H114.1L107.7,107.5C106.3,114.4 106.7,118.8 110.8,121.2C114.6,123.3 121.1,123.8 124.9,119.8C126.7,117.9 128.6,120 129.5,123C131.7,130.9 122.2,137.5 113.8,137.5C101.1,137.5 92.2,131.4 93.7,114.9C94.1,105.5 97.7,86.3 100.5,73.5H82.1L75.5,108.4C72.9,122.1 66.6,137.5 55.6,137.5C49.5,137.5 45.8,132.7 48,127.2C49.6,123.8 54.5,122 57.5,116C62.4,106.5 65.3,89.4 68.7,73.7H60.2C56.7,73.7 55.3,75.4 53.1,78.4C50.5,82.3 43.5,82.9 44.9,77.2C47.2,67.1 56.2,59.5 67.7,59.5Z"/></g><circle cx="167" cy="38" r="34" fill="${color}" stroke="#FFFFFF" stroke-width="3"/><text x="167" y="${badge.length > 1 ? 46 : 47}" text-anchor="middle" font-family="Arial,sans-serif" font-size="${fontSize}" font-weight="700" fill="white">${badge}</text></svg>`;
     const href = `data:image/svg+xml,${encodeURIComponent(svg)}`;
     if (favicon.getAttribute("href") !== href) favicon.setAttribute("href", href);
   }
 
-  function syncProjectStatusAttentionFavicon(status) {
-    // 图标不再依赖打开当前弹窗；只要处于 attention 状态即展示待处理图标
-    if (!status || status !== "attention" || projectStatusDisposed) {
-      if (projectStatusAttentionFaviconTimer !== null) clearInterval(projectStatusAttentionFaviconTimer);
-      projectStatusAttentionFaviconTimer = null;
-      document.head?.querySelector("link[data-pi-enh-attention-favicon]")?.remove();
-      for (const [icon, rel] of projectStatusOriginalIcons) icon.setAttribute("rel", rel);
-      projectStatusOriginalIcons.clear();
+  function restoreProjectStatusFavicon() {
+    document.head?.querySelector("link[data-pi-enh-attention-favicon]")?.remove();
+    for (const [icon, rel] of projectStatusOriginalIcons) {
+      if (rel) icon.setAttribute("rel", rel);
+      else icon.removeAttribute("rel");
+    }
+    projectStatusOriginalIcons.clear();
+  }
+
+  function syncProjectStatusFavicon(snapshot) {
+    if (!snapshot?.count || projectStatusDisposed || !isPluginEnabled("project-status-indicator")) {
+      restoreProjectStatusFavicon();
       return;
     }
     for (const icon of document.head.querySelectorAll('link[rel~="icon"]')) {
       if (icon.hasAttribute("data-pi-enh-attention-favicon")) continue;
-      projectStatusOriginalIcons.set(icon, icon.getAttribute("rel"));
+      if (!projectStatusOriginalIcons.has(icon)) projectStatusOriginalIcons.set(icon, icon.getAttribute("rel"));
       icon.removeAttribute("rel");
     }
     let favicon = document.head.querySelector("link[data-pi-enh-attention-favicon]");
@@ -17600,7 +17373,51 @@
       favicon.setAttribute("data-pi-enh-attention-favicon", "true");
       document.head.appendChild(favicon);
     }
-    renderProjectStatusAttentionFavicon(status);
+    renderProjectStatusFavicon(snapshot.count, snapshot.hasAttention);
+  }
+
+  function getCurrentProjectTabStatusSnapshot() {
+    const projectKey = getCurrentProjectStatusKey();
+    const countedSessions = new Set();
+    let hasAttention = false;
+    if (projectKey) {
+      const targetProjectKey = normalizeProjectStatusKey(projectKey);
+      for (const rawEntry of projectStatusModel.list()) {
+        const entry = getEffectiveProjectStatusEntry(rawEntry.id);
+        if (entry.projectKey !== targetProjectKey) continue;
+        const hasPendingAttention = entry.status === "attention"
+          || (Array.isArray(entry.pendingRequests) && entry.pendingRequests.length > 0);
+        const unreadCompleted = entry.status === "completed" && entry.unread === true;
+        if (hasPendingAttention) hasAttention = true;
+        if ((unreadCompleted || hasPendingAttention) && entry.id) countedSessions.add(entry.id);
+      }
+
+      const currentSessionId = getSessionIdFromCurrentUrl();
+      if (currentSessionId && hasActiveAskUserOnScreen()) {
+        const currentSession = projectStatusCatalog.get(currentSessionId) || projectStatusState.sessions[currentSessionId] || {};
+        const currentSessionProjectKey = getSessionProjectStatusKey(currentSession);
+        if (!currentSessionProjectKey || currentSessionProjectKey === targetProjectKey) {
+          countedSessions.add(currentSessionId);
+          hasAttention = true;
+        }
+      }
+    }
+    return {
+      projectKey: normalizeProjectStatusKey(projectKey),
+      count: countedSessions.size,
+      hasAttention,
+    };
+  }
+
+  function syncProjectTabStatusSnapshot(force = false) {
+    const currentProjectKey = normalizeProjectStatusKey(getCurrentProjectStatusKey());
+    if (!force && projectTabStatusSnapshot?.projectKey === currentProjectKey) return projectTabStatusSnapshot;
+    projectTabStatusSnapshot = projectStatusDisposed || !isPluginEnabled("project-status-indicator")
+      ? { projectKey: currentProjectKey, count: 0, hasAttention: false }
+      : getCurrentProjectTabStatusSnapshot();
+    window.__PI_WEB_PROJECT_TAB_STATUS__ = projectTabStatusSnapshot;
+    syncProjectStatusFavicon(projectTabStatusSnapshot);
+    return projectTabStatusSnapshot;
   }
 
   function hasActiveAskUserOnScreen() {
@@ -17640,35 +17457,17 @@
     return status;
   }
 
-  function composeProjectWindowTitle(base, statusOverride = null) {
-    const status = statusOverride !== null ? statusOverride : getCurrentEffectiveStatus();
+  function formatProjectTabTitle(base, count) {
+    const cleanBase = cleanSessionTitleBase(base);
+    return count > 0 ? `${cleanBase}（${count}）` : cleanBase;
+  }
+
+  function composeProjectWindowTitle(base) {
     if (projectStatusDisposed || !isPluginEnabled("project-status-indicator")) {
       return window.__PI_WEB_NATIVE_TITLE_BASE__ || base || "Pi Web";
     }
-    const cleanBase = cleanSessionTitleBase(base);
-    if (!status || status === "idle") {
-      return cleanBase || "work";
-    }
-
-    const statusMeta = {
-      running: { ball: "🔵", text: "" },
-      attention: { ball: "🟠", text: "需要确认" },
-      interrupted: { ball: "🔴", text: "任务中断" },
-      completed: { ball: "🟢", text: "已完成" },
-    }[status];
-
-    if (!statusMeta) {
-      return cleanBase || "work";
-    }
-
-    const { ball, text } = statusMeta;
-    const statusLabel = text ? `${ball} ${text}` : ball;
-
-    if (!cleanBase) {
-      return statusLabel;
-    }
-
-    return text ? `${statusLabel} · ${cleanBase}` : `${ball} ${cleanBase}`;
+    const snapshot = syncProjectTabStatusSnapshot(false);
+    return formatProjectTabTitle(base, snapshot.count);
   }
   window.__PI_ENH_COMPOSE_WINDOW_TITLE__ = composeProjectWindowTitle;
   window.__PI_ENH_CLEAR_SESSION_ATTENTION__ = clearSessionAttention;
@@ -17678,51 +17477,9 @@
   window.__PI_ENH_GET_CURRENT_EFFECTIVE_STATUS__ = getCurrentEffectiveStatus;
   window.__PI_ENH_GET_PROJECT_STATUS_FOR_SUMMARY__ = getProjectStatusForSummary;
 
-  let attentionTitleAlertTick = 0;
-  let attentionTitleAlertTimer = null;
-
-  function stopAttentionTitleAlert() {
-    if (attentionTitleAlertTimer !== null) {
-      clearInterval(attentionTitleAlertTimer);
-      attentionTitleAlertTimer = null;
-    }
-    attentionTitleAlertTick = 0;
-  }
-
-  function startAttentionTitleAlert(cleanBase) {
-    // 彻底废除定时器交替跳动机制，杜绝浏览器标签页标题反复跳动与抖动！
-    stopAttentionTitleAlert();
-    const target = cleanBase ? `🟠 需要确认 · ${cleanBase}` : "🟠 需要确认";
-    if (document.title !== target) document.title = target;
-  }
-
-  function applyProjectStatusTitle(status = null, baseOverride = null) {
-    const base = baseOverride || window.__PI_WEB_NATIVE_TITLE_BASE__ || document.title;
-    if (!base && !status) return;
-    let effectiveStatus = status !== null ? status : getCurrentEffectiveStatus();
-    if ((hasActiveAskUserOnScreen() || isCurrentSessionInAttention()) && effectiveStatus !== "attention") {
-      effectiveStatus = "attention";
-    }
-    const cleanBase = cleanSessionTitleBase(base);
-
-    if (effectiveStatus === "attention" && typeof document !== "undefined" && document.hidden) {
-      startAttentionTitleAlert(cleanBase);
-    } else {
-      stopAttentionTitleAlert();
-    }
-
-    const target = composeProjectWindowTitle(base, effectiveStatus);
-    if (document.title !== target) document.title = target;
-  }
-
-  function updateProjectStatusTitle(status) {
-    syncProjectStatusAttentionFavicon(status);
-    applyProjectStatusTitle(status);
-  }
-
-  function updateLiveStopwatchTitle(baseTitle) {
-    const status = getCurrentEffectiveStatus();
-    applyProjectStatusTitle(status, baseTitle);
+  function updateProjectStatusTitle() {
+    syncProjectTabStatusSnapshot(true);
+    window.dispatchEvent(new Event("pi-enh-title-change"));
   }
 
   function getCurrentProjectButton() {
@@ -17771,6 +17528,10 @@
     }
   }
 
+  /*
+   * Keep project status rows and browser chrome sourced from one snapshot so
+   * read completion and resolved Ask User state update together.
+   */
   function syncProjectStatusIndicators() {
     if (projectStatusDisposed || !isPluginEnabled("project-status-indicator")) {
       removeProjectStatusIndicators();
@@ -17791,9 +17552,7 @@
     renderAttentionNotices();
     syncProjectStatusDots();
     renderProjectStatusSummary();
-    const currentKey = getCurrentProjectStatusKey();
-    const currentStatus = getCurrentEffectiveStatus(currentKey);
-    updateProjectStatusTitle(currentStatus);
+    updateProjectStatusTitle();
   }
 
   function removeProjectStatusIndicators() {
@@ -17803,7 +17562,7 @@
     for (const node of document.querySelectorAll(".pi-enh-project-status-summary, .pi-enh-status-popover, .pi-enh-attention-notice")) node.remove();
     for (const row of getSessionStatusRows()) restoreStatusRow(row);
     for (const dot of document.querySelectorAll("[data-pi-enh-project-status-dot]")) restoreProjectStatusDot(dot);
-    updateProjectStatusTitle(null);
+    updateProjectStatusTitle();
   }
 
   function clearSessionAttention(sessionId, nextStatus = null, resolvedRequestIds = []) {
@@ -17918,6 +17677,7 @@
     const tokens = [...new Set([...readCompletedTokens(), token])].slice(-500);
     try { localStorage.setItem(COMPLETED_READ_KEY, JSON.stringify(tokens)); } catch {}
     persistProjectStatusState();
+    updateProjectStatusTitle();
   }
 
   function markProjectCompletionUnread(id) {
@@ -17940,6 +17700,7 @@
       try { localStorage.setItem(COMPLETED_READ_KEY, JSON.stringify(filtered)); } catch {}
       persistProjectStatusState();
     }
+    updateProjectStatusTitle();
   }
 
   function receiveProjectStatus(payload, catalog = null) {
@@ -22048,6 +21809,44 @@
     return text.trim() ? `${text}${extraText}` : extraText.trim();
   }
 
+  // Decode the existing submission format, only for a contiguous attachment
+  // suffix. Ordinary fenced code elsewhere in the message remains plain text.
+  function parseSubmittedComposerAttachments(body) {
+    const text = String(body || "");
+    const pattern = /(?:\n\n|^)(?:### `([^`\n]+)`\n```[^`\n]*\n([\s\S]*?)```\n?|\[附件: @([^\]\n]+)\])/g;
+    const matches = Array.from(text.matchAll(pattern));
+    if (!matches.length || text.slice(matches.at(-1).index + matches.at(-1)[0].length).trim()) return { text, attachments: [] };
+    let first = matches.length - 1;
+    while (first > 0) {
+      const preceding = matches[first - 1];
+      if (text.slice(preceding.index + preceding[0].length, matches[first].index).trim()) break;
+      first -= 1;
+    }
+    const attachments = matches.slice(first).map((match) => match[3] ? {
+      name: extractOriginalFilename(match[3]), serverRelativePath: match[3],
+      type: getMimeTypeFromExt(extractOriginalFilename(match[3])), isText: false,
+    } : {
+      name: match[1], textContent: match[2], isText: true,
+      size: new TextEncoder().encode(match[2]).length, type: getMimeTypeFromExt(match[1]),
+    });
+    return { text: text.slice(0, matches[first].index), attachments };
+  }
+
+  function restoreSubmittedComposerAttachments(body) {
+    if (!isPluginEnabled("composer-file-paste")) return String(body || "");
+    // Never replace a draft's own files with historical attachments.
+    if (pendingComposerAttachments.length) return null;
+    const restored = parseSubmittedComposerAttachments(body);
+    pendingComposerAttachments = restored.attachments.map((attachment) => ({
+      ...attachment, id: "restored-" + crypto.randomUUID(),
+    }));
+    notifyComposerSubmissionStateChange();
+    syncComposerAttachmentBar(findComposerTextarea());
+    return restored.text;
+  }
+
+  window.__PI_ENH_RESTORE_COMPOSER_ATTACHMENTS__ = restoreSubmittedComposerAttachments;
+
   function prepareComposerSubmission(kind, body) {
     const attachmentSnapshot = isPluginEnabled("composer-file-paste")
       ? pendingComposerAttachments.slice()
@@ -23978,13 +23777,12 @@
   let composerModeFetchToken = 0;
   let lastComposerGoalMismatchKey = null;
 
-  // SVG 目标：同心圆右上缺口 + 向右上箭头的截图形态
-  const SVG_GOAL_ICON = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a9 9 0 1 0 9 9"></path><path d="M12 7a5 5 0 1 0 5 5"></path><line x1="12" y1="12" x2="21" y2="3"></line><polyline points="16 3 21 3 21 8"></polyline></svg>`;
-  // SVG 计划：完整灯泡含底座与 5 短射线
-  const SVG_PLAN_ICON = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="2" y1="11" x2="4.5" y2="11"></line><line x1="4.93" y1="4.93" x2="6.7" y2="6.7"></line><line x1="12" y1="1.5" x2="12" y2="4"></line><line x1="19.07" y1="4.93" x2="17.3" y2="6.7"></line><line x1="22" y1="11" x2="19.5" y2="11"></line><path d="M9 17h6M10 20h4M12 6a5.5 5.5 0 0 0-4.8 8.2c.9 1.4 1.8 2.3 1.8 2.8h6c0-.5.9-1.4 1.8-2.8A5.5 5.5 0 0 0 12 6z"></path></svg>`;
+  // Shared same-origin SVG geometry keeps the native menu and React controls aligned.
+  const SVG_GOAL_ICON = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true" focusable="false"><use href="/icons/composer-mode-icons.svg#goal"></use></svg>`;
+  const SVG_PLAN_ICON = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true" focusable="false"><use href="/icons/composer-mode-icons.svg#plan"></use></svg>`;
   const SVG_ATTACH_ICON = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"></path></svg>`;
   const SVG_IMAGE_ICON = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><circle cx="8.5" cy="8.5" r="1.5"></circle><polyline points="21 15 16 10 5 21"></polyline></svg>`;
-  const SVG_CHECK_ICON = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#22c55e" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>`;
+  const SVG_CHECK_ICON = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>`;
 
   function parseExtensionStatus(data, key) {
     const statuses = data?.extensionStatuses || data?.data?.extensionStatuses;
@@ -24140,17 +23938,18 @@
         display: flex !important; align-items: center !important; gap: 7px !important;
         padding: 6px 8px !important; border-radius: 6px !important; background: transparent !important;
         border: none !important; color: var(--text, #f4f4f5) !important; cursor: pointer !important;
-        text-align: left !important; width: 100% !important; font-size: 12.5px !important;
+        text-align: left !important; width: 100% !important; font-size: 13px !important;
         font-weight: 500 !important; box-sizing: border-box !important;
       }
       .pi-enh-composer-menu-item:hover { background: color-mix(in srgb, var(--text, #fff) 8%, transparent) !important; }
       .pi-enh-composer-menu-item.active { background: color-mix(in srgb, var(--text, #fff) 12%, transparent) !important; }
-      .pi-enh-composer-menu-icon { display: inline-flex !important; align-items: center !important; justify-content: center !important; width: 18px !important; height: 18px !important; flex-shrink: 0 !important; }
+      .pi-enh-composer-menu-item:focus-visible { outline: 2px solid var(--text-muted, #a1a1aa); outline-offset: 1px; }
+      .pi-enh-composer-menu-icon { display: inline-flex !important; align-items: center !important; justify-content: center !important; width: 18px !important; height: 18px !important; flex-shrink: 0 !important; color: var(--text-muted, #a1a1aa) !important; }
       .pi-enh-composer-menu-label { display: flex !important; align-items: center !important; flex: 1 1 auto !important; min-width: 0 !important; }
-      .pi-enh-composer-menu-title { white-space: nowrap !important; font-size: 12.5px !important; }
-      .pi-enh-composer-menu-desc { font-size: 11.5px !important; color: var(--text-dim, #71717a) !important; margin-left: 6px !important; white-space: nowrap !important; overflow: hidden !important; text-overflow: ellipsis !important; }
+      .pi-enh-composer-menu-title { white-space: nowrap !important; font-size: 13px !important; }
+      .pi-enh-composer-menu-desc { font-size: 12px !important; color: var(--text-dim, #71717a) !important; margin-left: 6px !important; white-space: nowrap !important; overflow: hidden !important; text-overflow: ellipsis !important; }
       .pi-enh-composer-menu-kbd { margin-left: auto !important; font-size: 10px !important; color: var(--text-dim, #71717a) !important; padding: 1px 4px !important; border-radius: 3px !important; border: 1px solid var(--border, #3f3f46) !important; line-height: 1.2 !important; flex-shrink: 0 !important; }
-      .pi-enh-composer-menu-check { margin-left: 4px !important; display: flex !important; align-items: center !important; color: #22c55e !important; flex-shrink: 0 !important; }
+      .pi-enh-composer-menu-check { margin-left: 4px !important; display: flex !important; align-items: center !important; color: var(--text-muted, #a1a1aa) !important; flex-shrink: 0 !important; }
       .pi-enh-composer-modes-disabled-notice { display: inline-flex !important; align-items: center !important; gap: 8px !important; padding: 4px 10px !important; margin: 4px 0 !important; border-radius: 6px !important; background: color-mix(in srgb, var(--warning, #f59e0b) 15%, transparent) !important; border: 1px solid color-mix(in srgb, var(--warning, #f59e0b) 40%, transparent) !important; color: var(--text, #f4f4f5) !important; font-size: 12px !important; }
       .pi-enh-composer-modes-disabled-notice button { background: color-mix(in srgb, var(--warning, #f59e0b) 30%, transparent) !important; border: 1px solid color-mix(in srgb, var(--warning, #f59e0b) 60%, transparent) !important; color: var(--text, #f4f4f5) !important; border-radius: 4px !important; padding: 2px 8px !important; font-size: 11px !important; cursor: pointer !important; }
       html[data-pi-composer-modes-active="true"] .extension-status-line[aria-label*='"version":1'] .extension-status-text,
@@ -24264,6 +24063,7 @@
     const fileItem = document.createElement("button");
     fileItem.type = "button";
     fileItem.className = "pi-enh-composer-menu-item";
+    fileItem.title = "添加任意类型的文件";
     fileItem.innerHTML = `
       <span class="pi-enh-composer-menu-icon">${SVG_ATTACH_ICON}</span>
       <span class="pi-enh-composer-menu-label">
@@ -24282,6 +24082,8 @@
     const goalItem = document.createElement("button");
     goalItem.type = "button";
     goalItem.className = `pi-enh-composer-menu-item${currentMode === "goal" ? " active" : ""}`;
+    goalItem.setAttribute("aria-label", "目标模式：设置要持续追求的目标");
+    goalItem.title = "设置要持续追求的目标";
     goalItem.innerHTML = `
       <span class="pi-enh-composer-menu-icon">${SVG_GOAL_ICON}</span>
       <span class="pi-enh-composer-menu-label">
@@ -24302,6 +24104,8 @@
     const planItem = document.createElement("button");
     planItem.type = "button";
     planItem.className = `pi-enh-composer-menu-item${currentMode === "plan" ? " active" : ""}`;
+    planItem.setAttribute("aria-label", "计划模式：开启计划模式");
+    planItem.title = "开启计划模式；快捷键 Shift+Tab";
     planItem.innerHTML = `
       <span class="pi-enh-composer-menu-icon">${SVG_PLAN_ICON}</span>
       <span class="pi-enh-composer-menu-label">
@@ -24330,6 +24134,7 @@
 
   async function requestSwitchComposerMode(targetMode, targetSessionId) {
     if (!["normal", "plan", "goal"].includes(targetMode)) return false;
+    findComposerTextarea()?.focus();
     const sessionId = targetSessionId || getEffectiveComposerSessionId();
     if (!sessionId) {
       pendingNewComposerMode = targetMode === "normal" ? null : {mode: targetMode, project: getCurrentProjectStatusKey()};
@@ -24344,80 +24149,19 @@
     composerModeSwitching = true;
 
     try {
-      // 1. 切换前先调用 get_state 检查会话是否忙碌
-      const preStateRes = await window.fetch(`/api/agent/${encodeURIComponent(sessionId)}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ type: "get_state" }),
-      });
-      if (!preStateRes.ok) {
-        showToast("无法获取会话状态，请检查网络", null, 2500);
-        return false;
-      }
-      const preStateData = await preStateRes.json().catch(() => null);
-      if (preStateData?.success !== true || !preStateData.data) {
-        showToast("会话状态无效，模式未切换", null, 2500);
-        return false;
-      }
-      const preState = preStateData.data;
-      if (
-        preState.isPromptRunning ||
-        preState.isStreaming ||
-        preState.isCompacting ||
-        preState.isBashRunning ||
-        (!targetSessionId && isChatSessionRunning(sessionId))
-      ) {
-        showToast("当前会话正在执行中，无法切换主输入框模式", null, 3000);
-        return false;
-      }
-
-      // 2. 检查后端扩展命令是否注册
-      const cmdRes = await window.fetch(`/api/agent/${encodeURIComponent(sessionId)}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ type: "get_commands" }),
-      });
-      if (!cmdRes.ok) {
-        showToast("无法获取会话命令列表", null, 2500);
-        return false;
-      }
-      const cmdData = await cmdRes.json().catch(() => null);
-      const commands = cmdData?.data?.commands || [];
-      const hasComposerMode = Array.isArray(commands) && commands.some(
-        (c) => c?.name === "composer-mode" || c?.name === "/composer-mode"
-      );
-      if (!hasComposerMode) {
-        showToast("该会话未加载 composer-modes 扩展，需等待空闲后输入 /reload 重新加载", null, 4000);
-        return false;
-      }
-
-      // 3. 发送切换命令
-      const promptRes = await window.fetch(`/api/agent/${encodeURIComponent(sessionId)}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ type: "prompt", message: `/composer-mode ${targetMode}` }),
-      });
-      if (!promptRes.ok) {
-        showToast("切换模式请求失败，请稍后重试", null, 2500);
-        return false;
-      }
-      const promptData = await promptRes.json().catch(() => null);
-      if (promptData && promptData.success === false) {
-        showToast(`切换模式被拒绝: ${promptData.error || "未知原因"}`, null, 3000);
-        return false;
-      }
-
-      // 4. 回读状态确认（必须读取真实模式核对，不更新假状态）
+      // One atomic request saves the next-input mode and reads the extension's
+      // authoritative result; no prompt execution or speculative UI state.
+      composerModeFetchToken++;
       const postStateRes = await window.fetch(`/api/agent/${encodeURIComponent(sessionId)}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ type: "get_state" }),
+        body: JSON.stringify({ type: "set_composer_mode", mode: targetMode }),
       });
-      if (!postStateRes.ok) {
-        showToast("回读会话状态失败，未更新模式", null, 2500);
+      const postStateData = await postStateRes.json().catch(() => null);
+      if (!postStateRes.ok || postStateData?.success !== true) {
+        showToast(postStateData?.error || "模式切换失败，请检查网络后重试", null, 3000);
         return false;
       }
-      const postStateData = await postStateRes.json().catch(() => null);
       const parsed = parseExtensionStatus(postStateData, "composer-modes");
       const realMode = parsed?.mode;
 
@@ -24450,47 +24194,6 @@
       return false;
     } finally {
       composerModeSwitching = false;
-    }
-  }
-
-  function handleComposerModesKeydown(event) {
-    if (!isPluginEnabled("composer-modes")) return;
-
-    // 严格限制：无 Ctrl/Alt/Meta，无 IME 合成输入
-    if (event.ctrlKey || event.altKey || event.metaKey || event.isComposing || event.keyCode === 229) {
-      return;
-    }
-
-    if (event.shiftKey && (event.key === "Tab" || event.keyCode === 9)) {
-      const activeEl = document.activeElement;
-      if (!activeEl) return;
-
-      // 绝对不劫持按钮！如果焦点在按钮或链接上，直接放行
-      if (activeEl.tagName === "BUTTON" || activeEl.tagName === "A" || activeEl.closest("button")) {
-        return;
-      }
-
-      const textarea = findComposerTextarea();
-      const isEditorFocused = Boolean(textarea && (activeEl === textarea || textarea.contains(activeEl)));
-
-      if (isEditorFocused) {
-        // 先消费事件，防止默认焦点跳动
-        event.preventDefault();
-        event.stopPropagation();
-        if (typeof event.stopImmediatePropagation === "function") {
-          event.stopImmediatePropagation();
-        }
-
-        // repeat 守卫：在 preventDefault 后拦截长按事件，既不切模式也不移动焦点
-        if (event.repeat) {
-          return;
-        }
-
-        const sid = getEffectiveComposerSessionId();
-        const currentMode = getSessionComposerMode(sid);
-        const target = currentMode === "plan" ? "normal" : "plan";
-        void requestSwitchComposerMode(target);
-      }
     }
   }
 
@@ -25264,7 +24967,6 @@
   function bindComposerModesEvents() {
     if (!composerModesEventsBound) {
       composerModesEventsBound = true;
-      window.addEventListener("keydown", handleComposerModesKeydown, true);
       document.addEventListener("click", handleComposerModesDocClick, true);
       document.addEventListener("keydown", handleComposerModesDocKeydown, true);
       window.addEventListener("resize", handleComposerModesResize);
@@ -25276,7 +24978,6 @@
 
   function unbindComposerModesEvents() {
     if (composerModesEventsBound) {
-      window.removeEventListener("keydown", handleComposerModesKeydown, true);
       document.removeEventListener("click", handleComposerModesDocClick, true);
       document.removeEventListener("keydown", handleComposerModesDocKeydown, true);
       window.removeEventListener("resize", handleComposerModesResize);
@@ -31281,278 +30982,7 @@
     }
   }
 
-  // ==========================================
-  // 3.7.1. Pi-Mail Peer Message Auto-Collapse Plugin (pi-mail 协作消息自动折叠)
-  // ==========================================
-  const PI_MAIL_COLLAPSE_STYLE_ID = "pi-enh-pi-mail-collapse-style";
-  const PI_MAIL_COLLAPSE_STYLE_CONTENT = `
-    .pi-enh-pi-mail-header {
-      cursor: pointer;
-      user-select: none;
-      transition: background 0.12s ease;
-    }
-    .pi-enh-pi-mail-header:hover {
-      filter: brightness(0.97);
-    }
-    .pi-enh-pi-mail-header .pi-enh-pi-mail-native-title {
-      display: none;
-    }
-    .pi-enh-pi-mail-summary {
-      display: inline-block;
-      color: var(--text-dim);
-      font-size: 11px;
-      line-height: 1.4;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      max-width: 100%;
-      flex: 1 1 auto;
-      min-width: 0;
-      margin: 0 4px;
-    }
-    .pi-enh-pi-mail-toggle-btn {
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      width: 20px;
-      height: 20px;
-      padding: 0;
-      border: 1px solid var(--border);
-      border-radius: 4px;
-      background: var(--bg);
-      color: var(--text-muted);
-      cursor: pointer;
-      flex-shrink: 0;
-      margin-left: auto;
-      transition: transform 0.15s ease, background 0.12s ease;
-    }
-    .pi-enh-pi-mail-toggle-btn:hover {
-      background: var(--bg-hover);
-      color: var(--text);
-    }
-    .pi-enh-pi-mail-toggle-btn:focus-visible {
-      outline: 2px solid var(--accent);
-      outline-offset: 1px;
-    }
-    .pi-enh-pi-mail-arrow {
-      transition: transform 0.15s ease;
-      display: block;
-    }
-    .pi-enh-pi-mail-toggle-btn[aria-expanded="true"] .pi-enh-pi-mail-arrow,
-    .pi-enh-pi-mail-header[data-user-expanded="true"] .pi-enh-pi-mail-arrow {
-      transform: rotate(180deg);
-    }
-  `;
-
-  function ensurePiMailCollapseStyles() {
-    const existing = document.getElementById(PI_MAIL_COLLAPSE_STYLE_ID);
-    if (existing) {
-      if (existing.textContent !== PI_MAIL_COLLAPSE_STYLE_CONTENT) {
-        existing.textContent = PI_MAIL_COLLAPSE_STYLE_CONTENT;
-      }
-      return;
-    }
-    const style = document.createElement("style");
-    style.id = PI_MAIL_COLLAPSE_STYLE_ID;
-    style.textContent = PI_MAIL_COLLAPSE_STYLE_CONTENT;
-    (document.head || document.documentElement).appendChild(style);
-  }
-
-  function removePiMailCollapseStyles() {
-    const el = document.getElementById(PI_MAIL_COLLAPSE_STYLE_ID);
-    if (el) el.remove();
-  }
-
-  function syncPiMailActiveState() {
-    const enabled = isPluginEnabled("pi-mail-auto-collapse");
-    if (document.documentElement) {
-      document.documentElement.classList.toggle("pi-enh-pi-mail-collapse-active", enabled);
-    }
-    if (enabled) {
-      ensurePiMailCollapseStyles();
-    } else {
-      removePiMailCollapseStyles();
-    }
-  }
-
-  // 记录用户主动展开的邮件指纹，保障 React 重绘或同一会话流式更新时不强占用户已展开状态
-  const userExpandedMailKeys = new Set();
-
-  function syncPiMailCards() {
-    syncPiMailActiveState();
-    const enabled = isPluginEnabled("pi-mail-auto-collapse");
-    if (!enabled) {
-      removePiMailEnhancements();
-      return;
-    }
-
-    const chatContent = document.querySelector(".chat-content");
-    if (!chatContent) return;
-
-    const allSpans = chatContent.querySelectorAll("span");
-    for (const s of allSpans) {
-      if ((s.textContent || "").trim() !== "pi-mail") continue;
-      const header = s.parentElement;
-      if (!header) continue;
-
-      const body = header.nextElementSibling;
-      if (!body) continue;
-
-      // 契约：只在正文包含 '<pi_mail source="peer-session"' 的卡片适用
-      const rawText = body.textContent || "";
-      if (!rawText.includes('<pi_mail source="peer-session"')) continue;
-
-      const cardBox = header.parentElement;
-      if (!cardBox) continue;
-
-      const idMatch = rawText.match(/message_id="([^"]+)"/);
-      const mailKey = idMatch ? idMatch[1] : rawText.slice(0, 80);
-
-      const footer = body.nextElementSibling;
-
-      header.classList.add("pi-enh-pi-mail-header");
-      body.classList.add("pi-enh-pi-mail-body");
-      if (footer) footer.classList.add("pi-enh-pi-mail-footer");
-      s.classList.add("pi-enh-pi-mail-native-title");
-
-      let summarySpan = header.querySelector(".pi-enh-pi-mail-summary");
-      if (!summarySpan) {
-        summarySpan = document.createElement("span");
-        summarySpan.className = "pi-enh-pi-mail-summary";
-        summarySpan.textContent = "协作消息 · 已收到";
-        summarySpan.setAttribute("title", "协作消息 · 已收到");
-        s.insertAdjacentElement("afterend", summarySpan);
-      } else {
-        if (summarySpan.textContent !== "协作消息 · 已收到") {
-          summarySpan.textContent = "协作消息 · 已收到";
-          summarySpan.setAttribute("title", "协作消息 · 已收到");
-        }
-      }
-
-      let toggleBtn = header.querySelector(".pi-enh-pi-mail-toggle-btn");
-      if (!toggleBtn) {
-        toggleBtn = document.createElement("button");
-        toggleBtn.type = "button";
-        toggleBtn.className = "pi-enh-pi-mail-toggle-btn";
-        toggleBtn.setAttribute("aria-expanded", "false");
-        toggleBtn.setAttribute("title", "展开/收起协作消息");
-        toggleBtn.setAttribute("aria-label", "展开/收起协作消息");
-        toggleBtn.innerHTML = `<svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" class="pi-enh-pi-mail-arrow"><polyline points="2 3.5 5 6.5 8 3.5"></polyline></svg>`;
-
-        const hasAutoMargin = Array.from(header.children).some(
-          (c) => c !== toggleBtn && (c.style?.marginLeft === "auto" || c.style?.marginInlineStart === "auto")
-        );
-        if (!hasAutoMargin) {
-          toggleBtn.style.marginLeft = "auto";
-        }
-        header.appendChild(toggleBtn);
-
-        const handleToggle = (e) => {
-          if (e) {
-            e.stopPropagation();
-            if (typeof e.preventDefault === "function") e.preventDefault();
-          }
-          const isCurrentExpanded = toggleBtn.getAttribute("aria-expanded") === "true";
-          const next = !isCurrentExpanded;
-          toggleBtn.setAttribute("aria-expanded", next ? "true" : "false");
-          const arrow = toggleBtn.querySelector(".pi-enh-pi-mail-arrow");
-          if (arrow) arrow.style.transform = next ? "rotate(180deg)" : "none";
-          if (next) {
-            userExpandedMailKeys.add(mailKey);
-            header.setAttribute("data-user-expanded", "true");
-            header.classList.remove("pi-enh-pi-mail-collapsed");
-            body.style.display = "";
-            if (footer) footer.style.display = "";
-          } else {
-            userExpandedMailKeys.delete(mailKey);
-            header.setAttribute("data-user-expanded", "false");
-            header.classList.add("pi-enh-pi-mail-collapsed");
-            body.style.display = "none";
-            if (footer) footer.style.display = "none";
-          }
-        };
-
-        toggleBtn.addEventListener("click", handleToggle);
-
-        if (header._piEnhPiMailHeaderClick) {
-          try {
-            header.removeEventListener("click", header._piEnhPiMailHeaderClick);
-          } catch (err) {}
-          header._piEnhPiMailHeaderClick = null;
-        }
-
-        const handleHeaderClick = (e) => {
-          if (e.target === toggleBtn || toggleBtn.contains(e.target)) return;
-          if (e.target.closest && e.target.closest("button, a, input")) return;
-          handleToggle(e);
-        };
-        header._piEnhPiMailHeaderClick = handleHeaderClick;
-        header.addEventListener("click", handleHeaderClick);
-      }
-
-      const isExpanded = header.getAttribute("data-user-expanded") === "true" || userExpandedMailKeys.has(mailKey);
-
-      toggleBtn.setAttribute("aria-expanded", isExpanded ? "true" : "false");
-      const arrow = toggleBtn.querySelector(".pi-enh-pi-mail-arrow");
-      if (arrow) arrow.style.transform = isExpanded ? "rotate(180deg)" : "none";
-
-      if (isExpanded) {
-        header.setAttribute("data-user-expanded", "true");
-        header.classList.remove("pi-enh-pi-mail-collapsed");
-        if (body.style.display !== "") body.style.display = "";
-        if (footer && footer.style.display !== "") footer.style.display = "";
-      } else {
-        header.setAttribute("data-user-expanded", "false");
-        header.classList.add("pi-enh-pi-mail-collapsed");
-        if (body.style.display !== "none") body.style.display = "none";
-        if (footer && footer.style.display !== "none") footer.style.display = "none";
-      }
-    }
-  }
-
-  function removePiMailEnhancements() {
-    userExpandedMailKeys.clear();
-    removePiMailCollapseStyles();
-    if (document.documentElement) {
-      document.documentElement.classList.remove("pi-enh-pi-mail-collapse-active");
-    }
-    for (const title of document.querySelectorAll(".pi-enh-pi-mail-native-title")) {
-      title.classList.remove("pi-enh-pi-mail-native-title");
-      title.style.display = "";
-    }
-    for (const btn of document.querySelectorAll(".pi-enh-pi-mail-toggle-btn")) {
-      btn.remove();
-    }
-    for (const span of document.querySelectorAll(".pi-enh-pi-mail-summary")) {
-      span.remove();
-    }
-    for (const el of document.querySelectorAll(".pi-enh-pi-mail-header")) {
-      if (el._piEnhPiMailHeaderClick) {
-        try {
-          el.removeEventListener("click", el._piEnhPiMailHeaderClick);
-        } catch (err) {}
-        el._piEnhPiMailHeaderClick = null;
-      }
-      el.classList.remove("pi-enh-pi-mail-header", "pi-enh-pi-mail-collapsed");
-      el.removeAttribute("data-user-expanded");
-    }
-    for (const el of document.querySelectorAll(".pi-enh-pi-mail-body")) {
-      el.classList.remove("pi-enh-pi-mail-body");
-      el.style.display = "";
-    }
-    for (const el of document.querySelectorAll(".pi-enh-pi-mail-footer")) {
-      el.classList.remove("pi-enh-pi-mail-footer");
-      el.style.display = "";
-    }
-  }
-
-  activeCleanups.push(removePiMailEnhancements);
-
-  if (typeof window !== "undefined") {
-    window.__PI_ENH_SYNC_PI_MAIL_ACTIVE_STATE__ = syncPiMailActiveState;
-    window.__PI_ENH_SYNC_PI_MAIL_CARDS__ = syncPiMailCards;
-    window.__PI_ENH_REMOVE_PI_MAIL_ENHANCEMENTS__ = removePiMailEnhancements;
-  }
+  // Pi Mail presentation and disclosure are owned by CustomMessageView.
 
   function getCurrentSessionId() {
     return new URLSearchParams(window.location.search).get("session");
@@ -33064,7 +32494,6 @@
     { fn: syncSubagentDispatchCards, scope: "full" },
     { fn: syncHistoryScrollStability, scope: "chat-text" },
     { fn: syncCompactionCards, scope: "chat-text" },
-    { fn: syncPiMailCards, scope: "chat-text" },
     { fn: syncModelScopeWarnings, scope: "full" },
     { fn: hideQuickActionAnalysisCards, scope: "full" },
     { fn: syncQuickActionButtons, scope: "full" },
@@ -36127,8 +35556,6 @@
   // ==========================================
   activeTurnStartTime = null;
   activeTurnEntryId = null;
-  baseTitle = cleanSessionTitleBase(document.title) || "会话";
-  restoreTitleTimer = null;
   wasRunning = false;
   notRunningConsecutiveTicks = 0;
 
@@ -36426,13 +35853,6 @@
       if (!wasRunning) {
         wasRunning = true;
         activeTurnEntryId = null;
-        baseTitle = cleanSessionTitleBase(document.title) || "会话";
-        if (restoreTitleTimer) {
-          clearManagedTimeout(restoreTitleTimer);
-          restoreTitleTimer = null;
-        }
-        // 运行开始时同步一次标题，标签页绝不带跳动的秒表，保持彻底静止无抖动
-        applyProjectStatusTitle("running", baseTitle);
       }
       const elapsed = Math.max(0, (Date.now() - turnStartTime) / 1000);
       const timeStr = formatSec(elapsed);
@@ -36587,7 +36007,6 @@
       // Transition from running -> completed
       if (wasRunning) {
         if (hasActiveAskUserOnScreen() || isCurrentSessionInAttention(currentSessionId)) {
-          applyProjectStatusTitle("attention", baseTitle);
           return;
         }
 
@@ -36601,13 +36020,6 @@
           const totalElapsed = Math.max(0, (Date.now() - turnStartTime) / 1000);
           const finalSec = Math.max(1, Math.round(totalElapsed));
           const finalTimeStr = formatSec(totalElapsed);
-
-          applyProjectStatusTitle("completed", baseTitle);
-          if (restoreTitleTimer) clearManagedTimeout(restoreTitleTimer);
-          restoreTitleTimer = addManagedTimeout(() => {
-            restoreTitleTimer = null;
-            applyProjectStatusTitle(null, baseTitle);
-          }, 4000);
 
           // Find the assistant message that just finished (latest assistant message in active turn)
           const assistantMsgs = document.querySelectorAll('div[data-message-role="assistant"]');

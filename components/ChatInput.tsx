@@ -36,7 +36,7 @@ import type { ToolPreset } from "@/lib/tool-presets";
 import type { PromptSubmissionPreviewIdentity } from "@/lib/prompt-submissions";
 import { ModelSelector, type ModelSelectorOption } from "./ModelSelector";
 import { ThinkingSelector } from "./ThinkingSelector";
-import { ComposerQueue } from "./ComposerQueue";
+import { ComposerQueue, ComposerQueueIcon } from "./ComposerQueue";
 
 export { filterModelOptions } from "./ModelSelector";
 
@@ -57,6 +57,8 @@ interface Props {
   compact?: boolean;
   /** End rail measured by the owning chat viewport; compact composers ignore it. */
   columnEndInset?: number;
+  /** Native question surface, between the queue and the editable composer. */
+  extensionPanel?: React.ReactNode;
   model?: { provider: string; modelId: string } | null;
   isAutoModelSelection?: boolean;
   modelNames?: Record<string, string>;
@@ -236,6 +238,13 @@ function NativeComposerModeControls({ onModeChange }: { onModeChange: (mode: Com
     }
   }, []);
 
+  const exitMode = useCallback(() => {
+    const switchMode = (window as any).__PI_ENH_SWITCH_COMPOSER_MODE__;
+    if (typeof switchMode === "function") {
+      try { void switchMode("normal", snapshot.sessionId ?? undefined); } catch (_) {}
+    }
+  }, [snapshot.sessionId]);
+
   const handleGoalAction = useCallback((event: React.MouseEvent<HTMLButtonElement>) => {
     const { goal } = snapshot;
     const handleAction = (window as any).__PI_ENH_HANDLE_COMPOSER_GOAL_ACTION__;
@@ -285,9 +294,24 @@ function NativeComposerModeControls({ onModeChange }: { onModeChange: (mode: Com
       </button>
       {modeLabel && (
         <div className="chat-composer-mode-status" data-mode={snapshot.mode}>
-          <span className="chat-composer-mode-chip" aria-label={`${modeLabel}模式`}>
-            {modeLabel}
-          </span>
+          <button
+            type="button"
+            className="chat-composer-mode-chip"
+            aria-label={`退出${modeLabel}模式`}
+            title={`退出${modeLabel}模式`}
+            onClick={exitMode}
+          >
+            <span className="chat-composer-mode-icon" aria-hidden="true">
+              <svg className="chat-composer-mode-symbol" width="16" height="16" viewBox="0 0 24 24" fill="none">
+                <use href={`/icons/composer-mode-icons.svg#${snapshot.mode}`} />
+              </svg>
+              <svg className="chat-composer-mode-dismiss" width="16" height="16" viewBox="0 0 16 16" fill="none">
+                <circle cx="8" cy="8" r="7" fill="var(--text-muted)" />
+                <path d="m5.8 5.8 4.4 4.4m0-4.4-4.4 4.4" stroke="var(--bg-panel)" strokeWidth="1.4" strokeLinecap="round" />
+              </svg>
+            </span>
+            <span>{modeLabel}</span>
+          </button>
           {goalText && goal && (
             <div
               className="chat-composer-goal-summary"
@@ -794,6 +818,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   cwd,
   compact = false,
   columnEndInset,
+  extensionPanel,
 }: Props, ref) {
   const { t, locale } = useI18n();
   const { fontSize } = useChatAppearance();
@@ -885,7 +910,13 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
       const current = ta ? ta.value : value;
       if (!canRestoreUserMessage(current, attachedImagesRef.current.length, pendingImageCountRef.current)) return;
 
-      const restoredText = getUserMessageText(message);
+      const body = getUserMessageText(message);
+      const enhancementWindow = window as Window & {
+        __PI_ENH_RESTORE_COMPOSER_ATTACHMENTS__?: (body: string) => string | null;
+      };
+      const restoredBody = enhancementWindow.__PI_ENH_RESTORE_COMPOSER_ATTACHMENTS__?.(body);
+      if (restoredBody === null) return;
+      const restoredText = restoredBody ?? body;
       const restoredImages = draftImagesToAttachedImages(getUserMessageDraftImages(message));
       valueRef.current = restoredText;
       attachedImagesRef.current = restoredImages;
@@ -1527,6 +1558,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
       const nativeEvent = e.nativeEvent;
       const enhancementWindow = typeof window !== "undefined" ? window as Window & {
         __PI_ENH_IS_MOBILE_ENV__?: () => boolean;
+        __PI_ENH_SWITCH_COMPOSER_MODE__?: (mode: ComposerMode, sessionId?: string) => Promise<boolean>;
         __PI_ENH_IS_PLUGIN_ENABLED__?: (pluginId: string) => boolean;
         __PI_ENH_GET_ACTIVE_AT_MENTION_MENU__?: (textarea: HTMLTextAreaElement) => { count: number } | null;
         __PI_ENH_MOVE_ACTIVE_AT_MENTION__?: (delta: number) => void;
@@ -1542,6 +1574,17 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
         isComposingRef.current ||
         nativeEvent.isComposing ||
         nativeEvent.keyCode === 229;
+
+      if (e.key === "Tab" && e.shiftKey && !e.ctrlKey && !e.altKey && !e.metaKey && !isComposing
+        && enhancementWindow?.__PI_ENH_IS_PLUGIN_ENABLED__?.("composer-modes")
+        && enhancementWindow.__PI_ENH_SWITCH_COMPOSER_MODE__) {
+        e.preventDefault();
+        if (!nativeEvent.repeat) {
+          const snapshot = readComposerModeSnapshot();
+          void enhancementWindow.__PI_ENH_SWITCH_COMPOSER_MODE__(snapshot.mode === "plan" ? "normal" : "plan", snapshot.sessionId ?? undefined);
+        }
+        return;
+      }
 
       if (sendShortcut && (isComposing || recentlyComposed)) {
         if (recentlyComposed) e.preventDefault();
@@ -2030,6 +2073,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
         }}
       />}
       <ComposerQueue sessionId={draftKey ?? ""} queuedMessages={queuedMessages} onRecallQueue={onRecallQueue} pending={queuedPreviewVisible ? queuedSubmissionPreview : null} />
+      {extensionPanel}
       <div className={rootClassName} style={rootStyle} data-pi-native-composer-layout="true">
         {isCodexActive && (
           <div
@@ -2062,11 +2106,6 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
             />
           );
         })()}
-        {queuedSubmissionPending && (
-          <div className="chat-composer-submit-pending" role="status" style={{ color: "var(--text-dim)", fontSize: 12, marginBottom: 6 }}>
-            {t("chat.submittingQueued")}
-          </div>
-        )}
         {/* Retry banner */}
         {retryInfo && (
           <div style={{
@@ -2594,26 +2633,14 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
             >
               {onSteer && (
                 <button
+                  type="button"
                   onClick={() => sendQueued("steer")}
                   disabled={!canQueueStreamingMessage}
-                  title={t("chat.steerHint")}
-                  className={isCodexActive ? "chat-composer-steer" : ""}
-                  style={isCodexActive ? undefined : {
-                    display: "flex", alignItems: "center", gap: 5,
-                    padding: "7px 12px",
-                    background: canQueueStreamingMessage ? "rgba(234,179,8,0.12)" : "none",
-                    border: "1px solid rgba(234,179,8,0.35)",
-                    borderRadius: 8,
-                    color: canQueueStreamingMessage ? "rgba(180,130,0,1)" : "var(--text-dim)",
-                    cursor: canQueueStreamingMessage ? "pointer" : "not-allowed",
-                    fontSize: 13, fontWeight: 600, letterSpacing: "-0.01em",
-                    transition: "background 0.12s",
-                  }}
+                  aria-label="将消息加入引导队列"
+                  title="将消息加入引导队列"
+                  className="chat-composer-steer pi-enh-cursor-send pi-enh-cursor-steer"
                 >
-                  <svg width="12" height="12" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
-                    <path d="M5 1 L9 5 L5 9" /><line x1="1" y1="5" x2="9" y2="5" />
-                  </svg>
-                  <span className={isCodexActive ? "chat-composer-steer-label" : ""}>{t("chat.steer")}</span>
+                  <ComposerQueueIcon kind="promote" />
                 </button>
               )}
               {onFollowUp && (
@@ -2759,8 +2786,9 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                 loading={modelsLoading}
                 value={model}
                 onChange={onModelChange}
-                // SDK refreshes the selected model at the next request boundary.
+                // Running sessions save this selection for the next user message.
                 busy={modelSwitching}
+                title={isStreaming ? "为下一条消息选择模型，当前任务继续使用原模型" : undefined}
                 isAutoSelection={isAutoModelSelection}
               />
             )}
@@ -2789,8 +2817,9 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                 loading={modelsLoading}
                 value={model}
                 onChange={onModelChange}
-                // SDK refreshes the selected model at the next request boundary.
+                // Running sessions save this selection for the next user message.
                 busy={modelSwitching}
+                title={isStreaming ? "为下一条消息选择模型，当前任务继续使用原模型" : undefined}
                 isAutoSelection={isAutoModelSelection}
               />
             )}
@@ -2804,7 +2833,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                 levelMap={thinkingLevelMap}
                 descriptions={Object.fromEntries(THINKING_LEVELS.map((level) => [level, t(THINKING_LEVEL_DESC_KEYS[level])]))}
                 label={t("chat.changeReasoningLabel")}
-                title={isStreaming ? t("chat.currentReasoning", { level: thinkingDisplayLabel }) : t("chat.changeReasoning", { level: thinkingDisplayLabel })}
+                title={isStreaming ? `为下一条消息设置思考深度：${thinkingDisplayLabel}` : t("chat.changeReasoning", { level: thinkingDisplayLabel })}
                 native={isCodexActive}
                 onChange={onThinkingLevelChange}
               />

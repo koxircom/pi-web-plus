@@ -104,7 +104,7 @@
     {
       id: "pi-mail-auto-collapse",
       name: "协作消息自动折叠",
-      desc: "跨会话协作消息长卡片默认收起为单行亲民摘要，仅呈现「协作消息 · 已收到」并支持随时展开/收起及原文复制。",
+      desc: "跨会话协作消息默认显示主题摘要，支持展开、收起与可读内容复制。",
       category: "显示增强",
       defaultEnabled: true,
     },
@@ -216,7 +216,7 @@
     {
       id: "project-status-indicator",
       name: "跨项目会话状态提示",
-      desc: "精简标签页标题，移除冗余 Pi Web 标识与跳动的计时秒数。运行中以蓝色小球 🔵 纯净指示，需要确认 🟠、错误 🔴、已完成 🟢 显示状态文字与对应颜色小球；多标签页一目了然。", 
+      desc: "当前项目有未读完成或待回答会话时，标签页标题显示项目名和去重合计数；Pi 图标以蓝色数字徽标标记未读完成，以橙色数字徽标标记待处理。阅读完成或服务器确认答复后计数减少，折叠会话不会清除计数。", 
       category: "运行监控",
       defaultEnabled: true,
     },
@@ -1045,24 +1045,7 @@
         removeCompactionEnhancements();
       }
     } else if (id === "pi-mail-auto-collapse") {
-      if (typeof syncPiMailActiveState === "function") {
-        syncPiMailActiveState();
-      } else if (typeof window !== "undefined" && typeof window.__PI_ENH_SYNC_PI_MAIL_ACTIVE_STATE__ === "function") {
-        window.__PI_ENH_SYNC_PI_MAIL_ACTIVE_STATE__();
-      }
-      if (enabled) {
-        if (typeof syncPiMailCards === "function") {
-          syncPiMailCards();
-        } else if (typeof window !== "undefined" && typeof window.__PI_ENH_SYNC_PI_MAIL_CARDS__ === "function") {
-          window.__PI_ENH_SYNC_PI_MAIL_CARDS__();
-        }
-      } else {
-        if (typeof removePiMailEnhancements === "function") {
-          removePiMailEnhancements();
-        } else if (typeof window !== "undefined" && typeof window.__PI_ENH_REMOVE_PI_MAIL_ENHANCEMENTS__ === "function") {
-          window.__PI_ENH_REMOVE_PI_MAIL_ENHANCEMENTS__();
-        }
-      }
+      window.dispatchEvent(new Event("pi-mail-collapse-change"));
     } else if (id === "live-stopwatch") {
       if (!enabled) {
         for (const timer of document.querySelectorAll(".pi-enh-live-timer")) {
@@ -1741,6 +1724,11 @@
   const pendingModelMetadataQueue = [];
   let activeModelMetadataWorkers = 0;
 
+  function isPersistentSessionModelId(sessionId) {
+    return typeof sessionId === "string" && sessionId.length > 0 &&
+      !sessionId.startsWith("new:") && !sessionId.startsWith("parked-new:");
+  }
+
   function loadPersistedSessionModelMetadata() {
     try {
       const raw = localStorage.getItem(SESSION_MODEL_STORAGE_KEY);
@@ -1748,7 +1736,7 @@
       const parsed = JSON.parse(raw);
       if (typeof parsed !== "object" || parsed === null) return;
       for (const [sId, item] of Object.entries(parsed)) {
-        if (!sId || !item || typeof item !== "object" || !item.modelId) continue;
+        if (!isPersistentSessionModelId(sId) || !item || typeof item !== "object" || !item.modelId) continue;
         const updatedAt = Number(item.updatedAt) || 0;
         sessionModelMetadata.set(sId, {
           provider: item.provider || "",
@@ -1766,7 +1754,7 @@
     try {
       const validEntries = [];
       for (const [sId, meta] of sessionModelMetadata.entries()) {
-        if (!sId || !meta?.modelId) continue;
+        if (!isPersistentSessionModelId(sId) || !meta?.modelId) continue;
         validEntries.push({
           id: sId,
           provider: meta.provider || "",
@@ -1791,7 +1779,7 @@
   }
 
   function recordSessionModelMetadataFromPayload(sessionId, payload) {
-    if (!sessionId || !payload?.context?.model?.modelId) return;
+    if (!isPersistentSessionModelId(sessionId) || !payload?.context?.model?.modelId) return;
     const m = payload.context.model;
     const now = Date.now();
     sessionModelMetadata.set(sessionId, {
@@ -1908,7 +1896,7 @@
   }
 
   async function fetchSessionModelMetadata(sessionId) {
-    if (!sessionId || sessionModelRequests.has(sessionId)) return;
+    if (!isPersistentSessionModelId(sessionId) || sessionModelRequests.has(sessionId)) return;
     sessionModelRequests.add(sessionId);
     try {
       const response = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}?deferThinking=1&deferMedia=1&tail=1`, { cache: "no-store" });
@@ -1950,7 +1938,7 @@
   }
 
   function enqueueSessionModelMetadata(sessionId) {
-    if (!sessionId || sessionModelRequests.has(sessionId) || pendingModelMetadataQueue.includes(sessionId)) return;
+    if (!isPersistentSessionModelId(sessionId) || sessionModelRequests.has(sessionId) || pendingModelMetadataQueue.includes(sessionId)) return;
     pendingModelMetadataQueue.push(sessionId);
     pumpSessionModelMetadataQueue();
   }
@@ -1987,7 +1975,7 @@
     const now = Date.now();
     for (const row of document.querySelectorAll(".pi-enh-session-row-host[data-pi-enh-session-id]")) {
       const sessionId = row.getAttribute("data-pi-enh-session-id");
-      if (!sessionId) continue;
+      if (!isPersistentSessionModelId(sessionId)) continue;
       const metadata = sessionModelMetadata.get(sessionId);
       if (metadata && metadata.modelId) {
         renderSessionModelLabel(row, metadata);
@@ -6844,4 +6832,3 @@
   window.__PI_ENH_GET_ARCHIVE_RETENTION_DAYS__ = getArchiveRetentionDays;
   window.__PI_ENH_SET_ARCHIVE_RETENTION_DAYS__ = setArchiveRetentionDays;
   window.__PI_ENH_PURGE_EXPIRED_ARCHIVES__ = purgeExpiredArchives;
-

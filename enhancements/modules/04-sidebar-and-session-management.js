@@ -2654,7 +2654,7 @@
   function resizeAnnotationComment(textarea) {
     if (!textarea) return;
     textarea.style.height = "auto";
-    const height = Math.max(38, Math.min(220, textarea.scrollHeight || 38));
+    const height = Math.max(30, Math.min(220, textarea.scrollHeight || 30));
     textarea.style.height = `${height}px`;
     textarea.style.overflowY = (textarea.scrollHeight || 0) > 220 ? "auto" : "hidden";
   }
@@ -3428,8 +3428,8 @@
   projectStatusState = readProjectStatusState();
   projectStatusCatalog = new Map();
   let projectStatusIntervalId = null;
-  let projectStatusAttentionFaviconTimer = null;
   const projectStatusOriginalIcons = new Map();
+  let projectTabStatusSnapshot = null;
   let projectInteractionInterval = null;
   let projectInteractionController = null;
   let projectInteractionGeneration = 0;
@@ -3719,7 +3719,6 @@
   }
 
   function restoreStatusRow(row) {
-    row.querySelector(".pi-enh-session-status-label")?.remove();
     row.removeAttribute("data-pi-enh-completed-unread");
     row.classList.remove("pi-enh-session-needs-attention");
     row.removeAttribute("data-pi-enh-project-status");
@@ -3729,11 +3728,6 @@
     if (originalBorderLeft !== null) row.style.borderLeft = originalBorderLeft;
     row.removeAttribute("data-pi-enh-original-background");
     row.removeAttribute("data-pi-enh-original-border-left");
-  }
-
-  function getPendingInteractionLabel(entry) {
-    const method = entry.pendingRequests[0]?.method;
-    return ["select", "confirm"].includes(method) ? "待决策" : ["input", "editor"].includes(method) ? "待输入" : "待交互";
   }
 
   function decorateProjectStatusRows() {
@@ -3750,21 +3744,10 @@
         row.setAttribute("data-pi-enh-project-status", status);
         if (status === "attention") row.classList.add("pi-enh-session-needs-attention");
       }
-      let label = row.querySelector(".pi-enh-session-status-label");
-      if (!label) { label = document.createElement("span"); label.className = "pi-enh-session-status-label"; row.insertBefore(label, row.querySelector(".pi-enh-session-overflow")); }
-      const text = status === "attention" ? getPendingInteractionLabel(entry) : PROJECT_STATUS_META[status].label;
-      if (label.textContent !== text) label.textContent = text;
-      const hint = status === "attention" ? `${entry.pendingRequests.length} 项待处理；切换或收起不会解除` : status === "load-error" ? `${entry.loadError?.message || "会话加载失败"}；重新进入并成功加载后自动清除` : status === "completed" ? "未读，点击打开后清除；本轮运行已结束" : entry.toolNames.length ? `正在使用 ${entry.toolNames.join("、")}` : text;
-      if (label.title !== hint) label.title = hint;
       const unreadValue = status === "completed" ? String(entry.unread) : null;
       if (unreadValue !== null && row.getAttribute("data-pi-enh-completed-unread") !== unreadValue) row.setAttribute("data-pi-enh-completed-unread", unreadValue);
       else if (unreadValue === null && row.hasAttribute("data-pi-enh-completed-unread")) row.removeAttribute("data-pi-enh-completed-unread");
-      const color = status === "completed" ? "#4ade80" : PROJECT_STATUS_META[status].color;
-      const currentColor = typeof label.style.getPropertyValue === "function" ? label.style.getPropertyValue("--status-color") : label.style["--status-color"];
-      if (currentColor !== color) {
-        if (typeof label.style.setProperty === "function") label.style.setProperty("--status-color", color);
-        else label.style["--status-color"] = color;
-      }
+
     }
   }
 
@@ -3838,28 +3821,34 @@
     return cleanSessionTitleBase(title);
   }
 
-  function renderProjectStatusAttentionFavicon(status) {
+  function renderProjectStatusFavicon(count, hasAttention) {
     const favicon = document.head?.querySelector("link[data-pi-enh-attention-favicon]");
     if (!favicon) return;
-    const color = PROJECT_STATUS_META[status]?.color || "#a1a1aa";
-    const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32"><rect width="32" height="32" rx="8" fill="#16434b"/><path d="M6 10h17v3h-3v11h-3V13h-5v11H9V13H6z" fill="white"/><circle cx="25" cy="7" r="6" fill="${color}" stroke="#18181b" stroke-width="2"/></svg>`;
+    const color = hasAttention ? "#f59e0b" : "#3b82f6";
+    const badge = count > 9 ? "9+" : String(count);
+    const fontSize = badge.length > 1 ? 22 : 26;
+    const svg = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200"><defs><linearGradient id="flatBlueViolet" x1="0%" y1="0%" x2="100%" y2="100%"><stop offset="0%" stop-color="#4F5AE8"/><stop offset="100%" stop-color="#7850E8"/></linearGradient></defs><g transform="translate(13.7 21.6) scale(0.84)"><circle cx="91.2" cy="96" r="87.5" fill="url(#flatBlueViolet)"/><path fill="#FFFFFF" d="M67.7,59.5H132.7C135.9,59.5 136.1,62.9 135.4,67.2C134.8,71.3 133.9,73.5 130.4,73.5H114.1L107.7,107.5C106.3,114.4 106.7,118.8 110.8,121.2C114.6,123.3 121.1,123.8 124.9,119.8C126.7,117.9 128.6,120 129.5,123C131.7,130.9 122.2,137.5 113.8,137.5C101.1,137.5 92.2,131.4 93.7,114.9C94.1,105.5 97.7,86.3 100.5,73.5H82.1L75.5,108.4C72.9,122.1 66.6,137.5 55.6,137.5C49.5,137.5 45.8,132.7 48,127.2C49.6,123.8 54.5,122 57.5,116C62.4,106.5 65.3,89.4 68.7,73.7H60.2C56.7,73.7 55.3,75.4 53.1,78.4C50.5,82.3 43.5,82.9 44.9,77.2C47.2,67.1 56.2,59.5 67.7,59.5Z"/></g><circle cx="167" cy="38" r="34" fill="${color}" stroke="#FFFFFF" stroke-width="3"/><text x="167" y="${badge.length > 1 ? 46 : 47}" text-anchor="middle" font-family="Arial,sans-serif" font-size="${fontSize}" font-weight="700" fill="white">${badge}</text></svg>`;
     const href = `data:image/svg+xml,${encodeURIComponent(svg)}`;
     if (favicon.getAttribute("href") !== href) favicon.setAttribute("href", href);
   }
 
-  function syncProjectStatusAttentionFavicon(status) {
-    // 图标不再依赖打开当前弹窗；只要处于 attention 状态即展示待处理图标
-    if (!status || status !== "attention" || projectStatusDisposed) {
-      if (projectStatusAttentionFaviconTimer !== null) clearInterval(projectStatusAttentionFaviconTimer);
-      projectStatusAttentionFaviconTimer = null;
-      document.head?.querySelector("link[data-pi-enh-attention-favicon]")?.remove();
-      for (const [icon, rel] of projectStatusOriginalIcons) icon.setAttribute("rel", rel);
-      projectStatusOriginalIcons.clear();
+  function restoreProjectStatusFavicon() {
+    document.head?.querySelector("link[data-pi-enh-attention-favicon]")?.remove();
+    for (const [icon, rel] of projectStatusOriginalIcons) {
+      if (rel) icon.setAttribute("rel", rel);
+      else icon.removeAttribute("rel");
+    }
+    projectStatusOriginalIcons.clear();
+  }
+
+  function syncProjectStatusFavicon(snapshot) {
+    if (!snapshot?.count || projectStatusDisposed || !isPluginEnabled("project-status-indicator")) {
+      restoreProjectStatusFavicon();
       return;
     }
     for (const icon of document.head.querySelectorAll('link[rel~="icon"]')) {
       if (icon.hasAttribute("data-pi-enh-attention-favicon")) continue;
-      projectStatusOriginalIcons.set(icon, icon.getAttribute("rel"));
+      if (!projectStatusOriginalIcons.has(icon)) projectStatusOriginalIcons.set(icon, icon.getAttribute("rel"));
       icon.removeAttribute("rel");
     }
     let favicon = document.head.querySelector("link[data-pi-enh-attention-favicon]");
@@ -3870,7 +3859,51 @@
       favicon.setAttribute("data-pi-enh-attention-favicon", "true");
       document.head.appendChild(favicon);
     }
-    renderProjectStatusAttentionFavicon(status);
+    renderProjectStatusFavicon(snapshot.count, snapshot.hasAttention);
+  }
+
+  function getCurrentProjectTabStatusSnapshot() {
+    const projectKey = getCurrentProjectStatusKey();
+    const countedSessions = new Set();
+    let hasAttention = false;
+    if (projectKey) {
+      const targetProjectKey = normalizeProjectStatusKey(projectKey);
+      for (const rawEntry of projectStatusModel.list()) {
+        const entry = getEffectiveProjectStatusEntry(rawEntry.id);
+        if (entry.projectKey !== targetProjectKey) continue;
+        const hasPendingAttention = entry.status === "attention"
+          || (Array.isArray(entry.pendingRequests) && entry.pendingRequests.length > 0);
+        const unreadCompleted = entry.status === "completed" && entry.unread === true;
+        if (hasPendingAttention) hasAttention = true;
+        if ((unreadCompleted || hasPendingAttention) && entry.id) countedSessions.add(entry.id);
+      }
+
+      const currentSessionId = getSessionIdFromCurrentUrl();
+      if (currentSessionId && hasActiveAskUserOnScreen()) {
+        const currentSession = projectStatusCatalog.get(currentSessionId) || projectStatusState.sessions[currentSessionId] || {};
+        const currentSessionProjectKey = getSessionProjectStatusKey(currentSession);
+        if (!currentSessionProjectKey || currentSessionProjectKey === targetProjectKey) {
+          countedSessions.add(currentSessionId);
+          hasAttention = true;
+        }
+      }
+    }
+    return {
+      projectKey: normalizeProjectStatusKey(projectKey),
+      count: countedSessions.size,
+      hasAttention,
+    };
+  }
+
+  function syncProjectTabStatusSnapshot(force = false) {
+    const currentProjectKey = normalizeProjectStatusKey(getCurrentProjectStatusKey());
+    if (!force && projectTabStatusSnapshot?.projectKey === currentProjectKey) return projectTabStatusSnapshot;
+    projectTabStatusSnapshot = projectStatusDisposed || !isPluginEnabled("project-status-indicator")
+      ? { projectKey: currentProjectKey, count: 0, hasAttention: false }
+      : getCurrentProjectTabStatusSnapshot();
+    window.__PI_WEB_PROJECT_TAB_STATUS__ = projectTabStatusSnapshot;
+    syncProjectStatusFavicon(projectTabStatusSnapshot);
+    return projectTabStatusSnapshot;
   }
 
   function hasActiveAskUserOnScreen() {
@@ -3910,35 +3943,17 @@
     return status;
   }
 
-  function composeProjectWindowTitle(base, statusOverride = null) {
-    const status = statusOverride !== null ? statusOverride : getCurrentEffectiveStatus();
+  function formatProjectTabTitle(base, count) {
+    const cleanBase = cleanSessionTitleBase(base);
+    return count > 0 ? `${cleanBase}（${count}）` : cleanBase;
+  }
+
+  function composeProjectWindowTitle(base) {
     if (projectStatusDisposed || !isPluginEnabled("project-status-indicator")) {
       return window.__PI_WEB_NATIVE_TITLE_BASE__ || base || "Pi Web";
     }
-    const cleanBase = cleanSessionTitleBase(base);
-    if (!status || status === "idle") {
-      return cleanBase || "work";
-    }
-
-    const statusMeta = {
-      running: { ball: "🔵", text: "" },
-      attention: { ball: "🟠", text: "需要确认" },
-      interrupted: { ball: "🔴", text: "任务中断" },
-      completed: { ball: "🟢", text: "已完成" },
-    }[status];
-
-    if (!statusMeta) {
-      return cleanBase || "work";
-    }
-
-    const { ball, text } = statusMeta;
-    const statusLabel = text ? `${ball} ${text}` : ball;
-
-    if (!cleanBase) {
-      return statusLabel;
-    }
-
-    return text ? `${statusLabel} · ${cleanBase}` : `${ball} ${cleanBase}`;
+    const snapshot = syncProjectTabStatusSnapshot(false);
+    return formatProjectTabTitle(base, snapshot.count);
   }
   window.__PI_ENH_COMPOSE_WINDOW_TITLE__ = composeProjectWindowTitle;
   window.__PI_ENH_CLEAR_SESSION_ATTENTION__ = clearSessionAttention;
@@ -3948,51 +3963,9 @@
   window.__PI_ENH_GET_CURRENT_EFFECTIVE_STATUS__ = getCurrentEffectiveStatus;
   window.__PI_ENH_GET_PROJECT_STATUS_FOR_SUMMARY__ = getProjectStatusForSummary;
 
-  let attentionTitleAlertTick = 0;
-  let attentionTitleAlertTimer = null;
-
-  function stopAttentionTitleAlert() {
-    if (attentionTitleAlertTimer !== null) {
-      clearInterval(attentionTitleAlertTimer);
-      attentionTitleAlertTimer = null;
-    }
-    attentionTitleAlertTick = 0;
-  }
-
-  function startAttentionTitleAlert(cleanBase) {
-    // 彻底废除定时器交替跳动机制，杜绝浏览器标签页标题反复跳动与抖动！
-    stopAttentionTitleAlert();
-    const target = cleanBase ? `🟠 需要确认 · ${cleanBase}` : "🟠 需要确认";
-    if (document.title !== target) document.title = target;
-  }
-
-  function applyProjectStatusTitle(status = null, baseOverride = null) {
-    const base = baseOverride || window.__PI_WEB_NATIVE_TITLE_BASE__ || document.title;
-    if (!base && !status) return;
-    let effectiveStatus = status !== null ? status : getCurrentEffectiveStatus();
-    if ((hasActiveAskUserOnScreen() || isCurrentSessionInAttention()) && effectiveStatus !== "attention") {
-      effectiveStatus = "attention";
-    }
-    const cleanBase = cleanSessionTitleBase(base);
-
-    if (effectiveStatus === "attention" && typeof document !== "undefined" && document.hidden) {
-      startAttentionTitleAlert(cleanBase);
-    } else {
-      stopAttentionTitleAlert();
-    }
-
-    const target = composeProjectWindowTitle(base, effectiveStatus);
-    if (document.title !== target) document.title = target;
-  }
-
-  function updateProjectStatusTitle(status) {
-    syncProjectStatusAttentionFavicon(status);
-    applyProjectStatusTitle(status);
-  }
-
-  function updateLiveStopwatchTitle(baseTitle) {
-    const status = getCurrentEffectiveStatus();
-    applyProjectStatusTitle(status, baseTitle);
+  function updateProjectStatusTitle() {
+    syncProjectTabStatusSnapshot(true);
+    window.dispatchEvent(new Event("pi-enh-title-change"));
   }
 
   function getCurrentProjectButton() {
@@ -4041,6 +4014,10 @@
     }
   }
 
+  /*
+   * Keep project status rows and browser chrome sourced from one snapshot so
+   * read completion and resolved Ask User state update together.
+   */
   function syncProjectStatusIndicators() {
     if (projectStatusDisposed || !isPluginEnabled("project-status-indicator")) {
       removeProjectStatusIndicators();
@@ -4061,9 +4038,7 @@
     renderAttentionNotices();
     syncProjectStatusDots();
     renderProjectStatusSummary();
-    const currentKey = getCurrentProjectStatusKey();
-    const currentStatus = getCurrentEffectiveStatus(currentKey);
-    updateProjectStatusTitle(currentStatus);
+    updateProjectStatusTitle();
   }
 
   function removeProjectStatusIndicators() {
@@ -4073,7 +4048,7 @@
     for (const node of document.querySelectorAll(".pi-enh-project-status-summary, .pi-enh-status-popover, .pi-enh-attention-notice")) node.remove();
     for (const row of getSessionStatusRows()) restoreStatusRow(row);
     for (const dot of document.querySelectorAll("[data-pi-enh-project-status-dot]")) restoreProjectStatusDot(dot);
-    updateProjectStatusTitle(null);
+    updateProjectStatusTitle();
   }
 
   function clearSessionAttention(sessionId, nextStatus = null, resolvedRequestIds = []) {
@@ -4188,6 +4163,7 @@
     const tokens = [...new Set([...readCompletedTokens(), token])].slice(-500);
     try { localStorage.setItem(COMPLETED_READ_KEY, JSON.stringify(tokens)); } catch {}
     persistProjectStatusState();
+    updateProjectStatusTitle();
   }
 
   function markProjectCompletionUnread(id) {
@@ -4210,6 +4186,7 @@
       try { localStorage.setItem(COMPLETED_READ_KEY, JSON.stringify(filtered)); } catch {}
       persistProjectStatusState();
     }
+    updateProjectStatusTitle();
   }
 
   function receiveProjectStatus(payload, catalog = null) {

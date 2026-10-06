@@ -3211,7 +3211,7 @@
     try {
       checkCancelled();
       const activeFetch = baseFetch || originalWindowFetch;
-      if (!activeFetch) return;
+      if (!activeFetch) return true;
       const headers = new Headers(init?.headers || input?.headers);
       headers.set("Content-Type", "application/json");
       const call = (type) => activeFetch.call(window, target.urlStr, {
@@ -3226,11 +3226,20 @@
       checkCancelled();
       // Never reload a running session or consume its user queue. Fresh SDK
       // resources are loaded only at the existing idle command boundary.
-      if (state?.isStreaming || state?.isPromptRunning || state?.isBashRunning || state?.isCompacting) return;
-      if (state?.stopRuntimeVersion === "1.0.0" && ["1.0.0", "not-applicable"].includes(state?.subagentCancellationVersion)) return;
-      const reload = await call("reload");
+      if (state?.isStreaming || state?.isPromptRunning || state?.isBashRunning || state?.isCompacting) return true;
+      if (!(state?.stopRuntimeVersion === "1.0.0" && ["1.0.0", "not-applicable"].includes(state?.subagentCancellationVersion))) {
+        const reload = await call("reload");
+        checkCancelled();
+        if (!reload.ok) throw new Error("停止保护更新失败，消息未启动");
+      }
+      // Keep Stop ownership through the lazy SSE upgrade, before dispatch.
+      const lazyEs = dormantSessionEventSources.get(target.sessionId);
+      if (lazyEs && typeof lazyEs.upgradeToReal === "function") await lazyEs.upgradeToReal();
       checkCancelled();
-      if (!reload.ok) throw new Error("停止保护更新失败，消息未启动");
+      return true;
+    } catch (error) {
+      if (entry.cancelled && !signal?.aborted) return false;
+      throw error;
     } finally {
       entries.delete(entry);
       if (!entries.size) pendingStopRuntimePreparations.delete(target.sessionId);
@@ -3699,7 +3708,17 @@
         if (typeof init?.body === "string") {
           try { commandType = JSON.parse(init.body)?.type; } catch (_) {}
         }
-        if (commandType === "prompt") await prepareStopRuntimeForPrompt(agentTarget, input, init);
+        if (commandType === "prompt" && await prepareStopRuntimeForPrompt(agentTarget, input, init) === false) {
+          const command = JSON.parse(init.body);
+          const activeFetch = baseFetch || originalWindowFetch;
+          const response = await activeFetch.call(this, input, { ...init,
+            body: JSON.stringify({ ...command, type: "retain_stopped_prompt" }) });
+          if (response.ok) {
+            markSessionRunning(agentTarget.sessionId, false, { settled: true });
+            void invalidateSessionCache(agentTarget.sessionId);
+          }
+          return response;
+        }
         const asyncAbortType = await resolveAgentAbortType(input, init);
         if (asyncAbortType) {
           return dispatchDirectStopFetch.call(this, agentTarget, asyncAbortType, input, init);

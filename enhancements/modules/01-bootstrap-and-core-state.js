@@ -37,18 +37,6 @@
     }
   } catch (e) {}
 
-  // 0.5 物理级去除标签页中的 Pi Web 标识与防止标题抖动（保留状态文字 🔵/🟠/🔴/🟢 等）
-  function sanitizePageTitle(rawTitle) {
-    if (!rawTitle) return "";
-    let clean = String(rawTitle)
-      .replace(/\s*[-·|_]\s*(?:π\+\s*)?\bPi\s*Web\b(?:\s+Plus\b|\s*\+)?/gi, "")
-      .replace(/(?:π\+\s*)?\bPi\s*Web\b(?:\s+Plus\b|\s*\+)?\s*[-·|_]\s*/gi, "")
-      .replace(/(?:π\+\s*)?\bPi\s*Web\b(?:\s+Plus\b|\s*\+)?/gi, "")
-      .replace(/\s*[-·|_]\s*$/, "")
-      .trim();
-    return clean;
-  }
-
   // Safe Hot-Reloading: Clean up any previous instance before re-initializing
   if (typeof window.__PI_WEB_ENHANCEMENTS_CLEANUP__ === "function") {
     try {
@@ -68,12 +56,6 @@
   let isDisposed = false;
   let hasDeferredSync = false;
 
-  let titleObserver = null;
-  let headObserver = null;
-  let installedTitleGetter = null;
-  let installedTitleSetter = null;
-  let hadOwnTitleDesc = false;
-  let prevOwnTitleDesc = null;
   // Top-level TDZ hoisted forward declarations (< line 200)
   let pendingDecorationOperations,
     latestKnownSessionGroups,
@@ -119,7 +101,6 @@
     minimapHistoryDisplayState,
     autoLoadEarlierTriggered,
     viewerFileContentCache,
-    baseTitle,
     wasRunning,
     restoredThinkingSessionScopes,
     SHORTCUT_TIP_STORAGE_KEY,
@@ -130,7 +111,6 @@
     sidebarObserver = null,
     activeTurnStartTime = null,
     activeTurnEntryId = null,
-    restoreTitleTimer = null,
     notRunningConsecutiveTicks = 0,
     isRestoringThinking = false,
     settingsDialogObserver = null,
@@ -146,208 +126,6 @@
     bridgeBaseSyncUrl = null,
     currentScriptTag = null,
     pollerIntervalId = null;
-
-  function isProjectStatusIndicatorActive() {
-    if (isDisposed) return false;
-    if (typeof isPluginEnabled === "function") {
-      try {
-        return Boolean(isPluginEnabled("project-status-indicator"));
-      } catch (e) {}
-    }
-    try {
-      if (typeof localStorage !== "undefined") {
-        const direct = localStorage.getItem("pi-enh-plugin-project-status-indicator");
-        if (direct === "false") return false;
-        if (direct === "true") return true;
-        const raw = localStorage.getItem("pi-enh-settings-v1") || localStorage.getItem("pi-enh-features");
-        if (raw) {
-          const cfg = JSON.parse(raw);
-          if (cfg && cfg.features && cfg.features["project-status-indicator"] && cfg.features["project-status-indicator"].enabled === false) {
-            return false;
-          }
-          if (cfg && cfg["project-status-indicator"] && cfg["project-status-indicator"].enabled === false) {
-            return false;
-          }
-        }
-      }
-    } catch (e) {}
-    return true;
-  }
-
-  // 0.6 document.title setter 拦截与 DOM 更新防护（去除 Pi Web 尾缀并防止与原生 MutationObserver 死循环）
-  try {
-    if (typeof document !== "undefined") {
-      hadOwnTitleDesc = Object.prototype.hasOwnProperty.call(document, "title");
-      let desc = hadOwnTitleDesc
-        ? Object.getOwnPropertyDescriptor(document, "title")
-        : (Object.getOwnPropertyDescriptor(Document.prototype, "title") ||
-           (typeof HTMLDocument !== "undefined" && Object.getOwnPropertyDescriptor(HTMLDocument.prototype, "title")) ||
-           Object.getOwnPropertyDescriptor(Object.getPrototypeOf(document) || Document.prototype, "title"));
-
-      let origGet = null;
-      let origSet = null;
-
-      if (desc && (desc.get || desc.set)) {
-        origGet = desc.get;
-        origSet = desc.set;
-      } else if (desc && "value" in desc) {
-        let storedVal = desc.value;
-        origGet = function () { return storedVal; };
-        origSet = function (val) { storedVal = val; };
-      }
-
-      if (origSet) {
-        // 防止热重载重复 defineProperty 套娃，解包最底层原始方法
-        if (origGet && origGet.__pi_enh_orig_get) {
-          origGet = origGet.__pi_enh_orig_get;
-        }
-        if (origSet && origSet.__pi_enh_orig_set) {
-          origSet = origSet.__pi_enh_orig_set;
-        }
-
-        prevOwnTitleDesc = hadOwnTitleDesc ? Object.getOwnPropertyDescriptor(document, "title") : null;
-
-        let isSettingTitleInternally = false;
-
-        installedTitleGetter = function () {
-          const raw = origGet ? origGet.call(this) : "";
-          if (!isProjectStatusIndicatorActive()) {
-            return raw;
-          }
-          const sanitized = sanitizePageTitle(raw);
-          return sanitized || raw;
-        };
-        installedTitleGetter.__pi_enh_title__ = true;
-        installedTitleGetter.__pi_enh_orig_get = origGet;
-
-        installedTitleSetter = function (val) {
-          window.__PI_WEB_NATIVE_TITLE_RAW__ = val;
-          // Preserve the native title before sanitizing the enhanced display.
-          // Legacy cores publish it through document.title, newer cores also
-          // provide __PI_WEB_NATIVE_TITLE_BASE__ directly.
-          if (
-            typeof val === "string" &&
-            (/^(?:π\+\s*)?Pi\s*Web(?:\s+Plus|\+)?$/i.test(val.trim()) ||
-             /\s-\s(?:π\+\s*)?Pi\s*Web(?:\s+Plus|\+)?$/i.test(val.trim()))
-          ) {
-            window.__PI_WEB_NATIVE_TITLE_BASE__ = val;
-          }
-
-          if (!isProjectStatusIndicatorActive()) {
-            origSet.call(this, val);
-            return;
-          }
-
-          const cleanBase = sanitizePageTitle(val);
-          // A sanitized enhancer write must not replace an authoritative native base.
-          if (!window.__PI_WEB_NATIVE_TITLE_BASE__ && cleanBase && !/^(?:🔵|🟠|🔴|🟢|⚠️)/.test(cleanBase)) {
-            window.__PI_WEB_NATIVE_TITLE_BASE__ = cleanBase;
-          }
-
-          // 状态前缀保护：若当前 val 本身已带有状态前缀（如 🔵、🟠 需要确认、🟢 已完成等），直接使用 cleanBase
-          let targetTitle = cleanBase;
-          const hasStatusPrefix = /^(?:🔵|🟠|🔴|🟢|⚠️)/.test(cleanBase);
-
-          if (!hasStatusPrefix && typeof window.__PI_ENH_COMPOSE_WINDOW_TITLE__ === "function") {
-            try {
-              const composed = window.__PI_ENH_COMPOSE_WINDOW_TITLE__(cleanBase);
-              if (composed) targetTitle = composed;
-            } catch (e) {}
-          }
-
-          if (!targetTitle) {
-            targetTitle = cleanBase || (val ? sanitizePageTitle(val) : "") || "work";
-          }
-
-          // 获取当前底层真实的 title，若已等于目标值则禁止重复写入（防止与原生 MutationObserver 死循环）
-          const currentTitle = origGet ? origGet.call(this) : (document.querySelector("title")?.textContent || "");
-          if (currentTitle === targetTitle) {
-            return;
-          }
-
-          if (isSettingTitleInternally) {
-            origSet.call(this, targetTitle);
-            return;
-          }
-
-          isSettingTitleInternally = true;
-          try {
-            origSet.call(this, targetTitle);
-          } finally {
-            isSettingTitleInternally = false;
-          }
-        };
-        installedTitleSetter.__pi_enh_title__ = true;
-        installedTitleSetter.__pi_enh_orig_set = origSet;
-
-        Object.defineProperty(document, "title", {
-          configurable: true,
-          enumerable: true,
-          get: installedTitleGetter,
-          set: installedTitleSetter,
-        });
-
-        // 初始若已有标题且开启增强，同步一次净化
-        if (isProjectStatusIndicatorActive() && document.title) {
-          const initClean = sanitizePageTitle(document.title);
-          if (initClean && initClean !== document.title) {
-            installedTitleSetter.call(document, document.title);
-          }
-        }
-      }
-
-      let isSanitizingDomTitle = false;
-      const cleanDomTitle = () => {
-        if (isDisposed || isSanitizingDomTitle) return;
-        if (!isProjectStatusIndicatorActive()) return;
-        const titleEl = document.querySelector("title");
-        if (!titleEl) return;
-        const currentText = titleEl.textContent || "";
-        if (!/Pi\s*Web/i.test(currentText)) return;
-        let cleaned = sanitizePageTitle(currentText);
-        if (!cleaned) return;
-        const hasStatus = /^(?:🔵|🟠|🔴|🟢|⚠️)/.test(cleaned);
-        if (!hasStatus && typeof window.__PI_ENH_COMPOSE_WINDOW_TITLE__ === "function") {
-          try {
-            const composed = window.__PI_ENH_COMPOSE_WINDOW_TITLE__(cleaned);
-            if (composed) cleaned = composed;
-          } catch (e) {}
-        }
-        if (titleEl.textContent !== cleaned) {
-          isSanitizingDomTitle = true;
-          try {
-            titleEl.textContent = cleaned;
-          } finally {
-            isSanitizingDomTitle = false;
-          }
-        }
-      };
-
-      if (typeof MutationObserver !== "undefined") {
-        titleObserver = new MutationObserver(cleanDomTitle);
-        const attachTitleObserver = () => {
-          if (isDisposed) return;
-          const t = document.querySelector("title");
-          if (t) {
-            titleObserver.observe(t, { childList: true, characterData: true, subtree: true });
-            cleanDomTitle();
-          }
-        };
-
-        if (document.head) {
-          headObserver = new MutationObserver(() => {
-            if (isDisposed) return;
-            const t = document.querySelector("title");
-            if (t) {
-              attachTitleObserver();
-            }
-          });
-          headObserver.observe(document.head, { childList: true });
-        }
-        attachTitleObserver();
-      }
-    }
-  } catch (e) {}
 
   // --- Managed Lifecycle & Zero-Leak Teardown Registry ---
   const activeCleanups = [];

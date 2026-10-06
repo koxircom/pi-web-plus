@@ -274,40 +274,35 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
 
   const captureQuotedSelection = useCallback(() => {
     if (quoteInputOpen) return;
+    const clearSelection = () => {
+      if (quotedRangeRef.current) closeQuotedSelection();
+    };
+    const enhancer = window as Window & {
+      __PI_ENH_IS_PLUGIN_ENABLED__?: (pluginId: string) => boolean;
+    };
+    const quickQuote = Boolean(enhancer.__PI_ENH_IS_PLUGIN_ENABLED__?.("quick-quote"));
+    if (!quickQuote && !quoteSelectionEnabled) {
+      clearSelection();
+      return;
+    }
     const selection = window.getSelection();
     const range = selection?.rangeCount ? selection.getRangeAt(0) : null;
     const root = messageContentRef.current;
     if (!selection || selection.isCollapsed || !range || !root || !root.contains(range.commonAncestorContainer)) {
-      quotedRangeRef.current = null;
-      window.dispatchEvent(new CustomEvent("pi-web:native-selection-change", { detail: null }));
-      setQuotedSelection(null);
-      return;
-    }
-    const text = selection.toString().trim();
-    const rect = range.getBoundingClientRect();
-    if (!text || (!rect.width && !rect.height)) {
-      quotedRangeRef.current = null;
-      window.dispatchEvent(new CustomEvent("pi-web:native-selection-change", { detail: null }));
-      setQuotedSelection(null);
+      clearSelection();
       return;
     }
     const selectedElement = range.commonAncestorContainer.nodeType === Node.ELEMENT_NODE
       ? range.commonAncestorContainer as Element
       : range.commonAncestorContainer.parentElement;
     if (selectedElement?.closest("input, textarea, [contenteditable='true'], .pi-enh-annotation-editor, .pi-enh-annotation-list")) {
-      quotedRangeRef.current = null;
-      window.dispatchEvent(new CustomEvent("pi-web:native-selection-change", { detail: null }));
-      setQuotedSelection(null);
+      clearSelection();
       return;
     }
-    const enhancer = window as Window & {
-      __PI_ENH_IS_PLUGIN_ENABLED__?: (pluginId: string) => boolean;
-    };
-    const quickQuote = Boolean(enhancer.__PI_ENH_IS_PLUGIN_ENABLED__?.("quick-quote"));
-    if (!quickQuote && !quoteSelectionEnabled) {
-      quotedRangeRef.current = null;
-      window.dispatchEvent(new CustomEvent("pi-web:native-selection-change", { detail: null }));
-      setQuotedSelection(null);
+    const text = selection.toString().trim();
+    const rect = range.getBoundingClientRect();
+    if (!text || (!rect.width && !rect.height)) {
+      clearSelection();
       return;
     }
     const clonedRange = range.cloneRange();
@@ -334,11 +329,43 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
       nativeQuote: quoteSelectionEnabled,
       sourceEntryId,
     });
-  }, [quoteSelectionEnabled, quoteInputOpen]);
+  }, [quoteSelectionEnabled, quoteInputOpen, closeQuotedSelection]);
 
   useEffect(() => {
-    // This component is the sole owner of text-selection observation. Pointer
-    // completion supplements selectionchange for mobile action-mode timing.
+    // Do not measure or publish intermediate ranges while a pointer is held.
+    // Coalesce completion events into one frame in this single selection owner.
+    let activePointer: number | null = null;
+    let selectionFrame: number | null = null;
+    const cancelSelectionFrame = () => {
+      if (selectionFrame !== null) cancelAnimationFrame(selectionFrame);
+      selectionFrame = null;
+    };
+    const scheduleSelection = () => {
+      if (activePointer !== null || quoteInputOpen || selectionFrame !== null) return;
+      selectionFrame = requestAnimationFrame(() => {
+        selectionFrame = null;
+        captureQuotedSelection();
+      });
+    };
+    const onPointerDown = (event: PointerEvent) => {
+      if (!event.isPrimary || event.button !== 0 || quoteInputOpen) return;
+      // Preserve the selected range when operating the toolbar itself.
+      if (event.target instanceof Node && quotePopoverRef.current?.contains(event.target)) return;
+      activePointer = event.pointerId;
+      cancelSelectionFrame();
+      if (quotedRangeRef.current) closeQuotedSelection();
+    };
+    const onPointerUp = (event: PointerEvent) => {
+      if (activePointer !== null && event.pointerId !== activePointer) return;
+      if (event.target instanceof Node && quotePopoverRef.current?.contains(event.target)) return;
+      activePointer = null;
+      scheduleSelection();
+    };
+    const cancelSelectionGesture = () => {
+      activePointer = null;
+      cancelSelectionFrame();
+      if (!quoteInputOpen && quotedRangeRef.current) closeQuotedSelection();
+    };
     const onContextMenu = (event: MouseEvent) => {
       if (event.target instanceof Element && event.target.closest("input, textarea, [contenteditable='true'], .pi-enh-annotation-editor, .pi-enh-annotation-list, .pi-enh-menu")) return;
       const enhancer = window as Window & { __PI_ENH_IS_MOBILE_ENV__?: () => boolean; __PI_ENH_IS_PLUGIN_ENABLED__?: (pluginId: string) => boolean };
@@ -346,21 +373,24 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
       const selection = window.getSelection();
       const hasSelection = Boolean(selection && !selection.isCollapsed && selection.toString().trim());
       if ((enhancer.__PI_ENH_IS_MOBILE_ENV__?.() ?? isMobile) || hasSelection) event.preventDefault();
-      if (hasSelection) captureQuotedSelection();
+      if (hasSelection) scheduleSelection();
     };
-    document.addEventListener("selectionchange", captureQuotedSelection);
-    document.addEventListener("pointerup", captureQuotedSelection);
-    document.addEventListener("touchend", captureQuotedSelection, { passive: true });
-    document.addEventListener("pointercancel", captureQuotedSelection);
+    document.addEventListener("selectionchange", scheduleSelection);
+    document.addEventListener("pointerdown", onPointerDown);
+    document.addEventListener("pointerup", onPointerUp);
+    document.addEventListener("pointercancel", cancelSelectionGesture);
     document.addEventListener("contextmenu", onContextMenu, true);
+    window.addEventListener("blur", cancelSelectionGesture);
     return () => {
-      document.removeEventListener("selectionchange", captureQuotedSelection);
-      document.removeEventListener("pointerup", captureQuotedSelection);
-      document.removeEventListener("touchend", captureQuotedSelection);
-      document.removeEventListener("pointercancel", captureQuotedSelection);
+      cancelSelectionFrame();
+      document.removeEventListener("selectionchange", scheduleSelection);
+      document.removeEventListener("pointerdown", onPointerDown);
+      document.removeEventListener("pointerup", onPointerUp);
+      document.removeEventListener("pointercancel", cancelSelectionGesture);
       document.removeEventListener("contextmenu", onContextMenu, true);
+      window.removeEventListener("blur", cancelSelectionGesture);
     };
-  }, [captureQuotedSelection, isMobile, quoteSelectionEnabled]);
+  }, [captureQuotedSelection, closeQuotedSelection, isMobile, quoteInputOpen, quoteSelectionEnabled]);
 
   useEffect(() => {
     if (!quoteInputOpen || !quotedSelection) return;
@@ -430,19 +460,14 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
 
   useEffect(() => {
     if (!quotedSelection) return;
-    const onPointerDown = (event: PointerEvent) => {
-      if (!quoteInputOpen && !quotePopoverRef.current?.contains(event.target as Node)) closeQuotedSelection();
-    };
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key !== "Escape" || event.isComposing) return;
       event.preventDefault();
       event.stopPropagation();
       if (!quoteSubmitting) closeQuotedSelection();
     };
-    document.addEventListener("pointerdown", onPointerDown);
     document.addEventListener("keydown", onKeyDown, true);
     return () => {
-      document.removeEventListener("pointerdown", onPointerDown);
       document.removeEventListener("keydown", onKeyDown, true);
     };
   }, [quotedSelection, quoteInputOpen, quoteSubmitting, closeQuotedSelection]);
@@ -1071,6 +1096,16 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
     <ChatInput
       ref={chatInputRef}
       columnEndInset={columnEndInset}
+      extensionPanel={(extensionDialog || extensionCustomUi) && (
+          <div className="pi-native-extension-dock">
+            <div className="pi-native-extension-column">
+              {extensionDialog && (extensionDialog.method === "input" || extensionDialog.method === "editor"
+                ? <AskUserTextPanel key={extensionDialog.id} request={extensionDialog} onRespond={respondToExtensionUi} />
+                : <ExtensionDialog key={extensionDialog.id} request={extensionDialog} onRespond={respondToExtensionUi} />)}
+              {extensionCustomUi && <AskUserSurface key={extensionCustomUi.id} request={extensionCustomUi} onInput={sendExtensionCustomInput} fallback={<ExtensionCustomPanel request={extensionCustomUi} onInput={sendExtensionCustomInput} />} />}
+            </div>
+          </div>
+      )}
       onSend={handleSend}
       onAbort={handleAbort}
       onSteer={agentRunning ? handleSteer : undefined}
@@ -1725,16 +1760,6 @@ export function ChatWindow({ session, searchTarget, onSearchTargetHandled, initi
       )}
 
       <div className="chat-composer-footer relative shrink-0" key="chat-input-container">
-        {(extensionDialog || extensionCustomUi) && (
-          <div className="pi-native-extension-dock" style={{ paddingRight: 16 + columnEndInset }}>
-            <div className="pi-native-extension-column">
-              {extensionDialog && (extensionDialog.method === "input" || extensionDialog.method === "editor"
-                ? <AskUserTextPanel key={extensionDialog.id} request={extensionDialog} onRespond={respondToExtensionUi} />
-                : <ExtensionDialog key={extensionDialog.id} request={extensionDialog} onRespond={respondToExtensionUi} />)}
-              {extensionCustomUi && <AskUserSurface key={extensionCustomUi.id} request={extensionCustomUi} onInput={sendExtensionCustomInput} fallback={<ExtensionCustomPanel request={extensionCustomUi} onInput={sendExtensionCustomInput} />} />}
-            </div>
-          </div>
-        )}
         {!isEmptyNew && (
           <div
             style={{

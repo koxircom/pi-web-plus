@@ -1,5 +1,5 @@
 /* Questions reserve space above the composer; they never cover the transcript. */
-.pi-native-extension-dock { padding: 0 16px 8px; min-width: 0; }
+.pi-native-extension-dock { padding: 0 0 8px; min-width: 0; }
 .pi-native-extension-column { width: 100%; min-width: 0; max-width: var(--chat-content-max-width, 820px); margin: 0 auto; }
 .pi-native-extension-host, .pi-native-ask-host { width: 100%; min-width: 0; }
 .pi-native-ask-card { width: 100%; max-height: min(360px, 42dvh); display: flex; flex-direction: column; min-width: 0; border: 1px solid var(--border); border-radius: 20px; color: var(--text); background: var(--bg-panel); overflow: hidden; font: 13px/1.45 var(--font-sans, system-ui, sans-serif); }

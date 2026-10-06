@@ -9,7 +9,9 @@ const {ComposerQueue}=await jiti.import("./ComposerQueue.tsx");
 test("first render uses the final queue structure for steering and follow-up",()=>{
  const html=renderToStaticMarkup(React.createElement(ComposerQueue,{sessionId:"fixture",queuedMessages:{steering:["优先任务"],followUp:["后续任务"]}}));
  assert.match(html,/data-pi-native-queue="true"/);
- assert.match(html,/待处理 · 2/); assert.match(html,/优先任务/); assert.match(html,/后续任务/);
+ assert.match(html,/优先任务/); assert.match(html,/后续任务/);
+ assert.match(html,/pi-enh-queue-promote/);
+ assert.doesNotMatch(html,/pi-enh-queue-header|待处理|全部编辑/);
  assert.doesNotMatch(html,/>steer<|>follow-up<|pi-enh-native-queue-hidden/);
 });
 test("pending steering uses the same final row with its image preserved",()=>{
@@ -31,6 +33,8 @@ test("reference row uses sort handles, quiet thumbnails and more actions", () =>
  assert.doesNotMatch(html,/pi-enh-queue-number|pi-enh-queue-edit|pi-enh-queue-img-label/);
  const css=readFileSync(new URL("./ComposerQueue.css",import.meta.url),"utf8");
  assert.doesNotMatch(css,/234, 179|translateY|pi-enh-queue-img-label/);
+ assert.doesNotMatch(css,/pi-enh-queue-header|pi-enh-queue-recall/);
+ assert.doesNotMatch(css,/\.pi-enh-queue-row\s*\{[^}]*transition\s*:\s*[^;}]*\b(?:all|height|margin|max-height)\b/);
  assert.match(css,/touch-action: none/);
 });
 test("composer adapters follow the semantic native host after refresh", () => {

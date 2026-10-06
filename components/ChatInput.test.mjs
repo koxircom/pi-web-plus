@@ -504,7 +504,7 @@ test("locks built-in command submission until it settles", async () => {
   callback.resolve({ handled: true });
   assert.equal(await first, true);
   assert.deepEqual(callback.pendingStates, [true, false]);
-  assert.match(sourceText, /<fieldset\s+disabled=\{builtinCommandPending\}\s+aria-busy=\{builtinCommandPending\}/);
+  assert.match(sourceText, /inert=\{builtinCommandPending \|\| undefined\}\s+aria-busy=\{builtinCommandPending\}/);
 });
 
 test("keeps only read-only built-ins available while a run is active", () => {
@@ -1176,6 +1176,7 @@ test("over-limit draft (>10 images) renders all previews and warning banner, blo
       MAX_ATTACHED_IMAGE_BYTES,
       attachedImagesRef,
       pendingImageCountRef,
+      preloadImageCapabilities() {},
       compressImageFile: async (file) => ({ data: file.data, mimeType: file.type }),
       URL: { createObjectURL: (file) => `blob:${file.name}`, revokeObjectURL() {} },
       revokeImagePreview() {},
@@ -1229,4 +1230,42 @@ test("retired more controls menu has no composer render, state or styles", () =>
   const styles = readFileSync(new URL("../app/composer.css", import.meta.url), "utf8");
   assert.doesNotMatch(source, /chat\.(moreControls|collapseControls)|controlsMenu(Open|Ref)|setControlsMenuOpen|chat-composer-(more-btn|mobile-popover)/);
   assert.doesNotMatch(styles, /chat-composer-(more-btn|mobile-popover)/);
+});
+
+test("goal and plan controls share neutral mode icons and expose an accessible exit", () => {
+  const input = readFileSync(new URL("./ChatInput.tsx", import.meta.url), "utf8");
+  const module = readFileSync(new URL("../enhancements/modules/05-composer-and-input-workflow.js", import.meta.url), "utf8");
+  const sprite = readFileSync(new URL("../public/icons/composer-mode-icons.svg", import.meta.url), "utf8");
+  const styles = readFileSync(new URL("../app/composer.css", import.meta.url), "utf8");
+  assert.match(input, /switchMode\("normal", snapshot\.sessionId \?\? undefined\)/);
+  assert.match(input, /aria-label=\{`退出\$\{modeLabel\}模式`\}/);
+  assert.match(input, /title=\{`退出\$\{modeLabel\}模式`\}/);
+  assert.match(module, /composer-mode-icons\.svg#goal/);
+  assert.match(module, /composer-mode-icons\.svg#plan/);
+  assert.match(module, /goalItem\.title = "设置要持续追求的目标"/);
+  assert.match(module, /planItem\.title = "开启计划模式/);
+  assert.match(sprite, /<symbol id="goal"[^>]*stroke-width="1\.7"/);
+  assert.match(sprite, /<symbol id="plan"[^>]*stroke-width="1\.7"/);
+  const chip = styles.match(/\.chat-composer-card \.chat-composer-mode-chip\s*\{([^}]+)\}/)?.[1];
+  assert.ok(chip);
+  assert.match(chip, /height: 28px/);
+  assert.match(chip, /color: var\(--text\)/);
+  assert.doesNotMatch(chip, /--accent/);
+});
+
+test("streaming steer stays an accessible icon-only queue action in both layouts", () => {
+  const input = readFileSync(new URL("./ChatInput.tsx", import.meta.url), "utf8");
+  const styles = readFileSync(new URL("../app/composer.css", import.meta.url), "utf8");
+  assert.match(input, /aria-label="将消息加入引导队列"/);
+  assert.match(input, /title="将消息加入引导队列"/);
+  assert.match(input, /className="chat-composer-steer pi-enh-cursor-send pi-enh-cursor-steer"/);
+  assert.match(input, /ComposerQueueIcon kind="promote"/);
+  assert.doesNotMatch(input, /chat-composer-steer-label|t\("chat\.steer"\)/);
+  assert.doesNotMatch(styles, /chat-composer-steer-label|chat-composer-card button\.chat-composer-steer/);
+  const steer = styles.match(/\.chat-composer-steer\s*\{([^}]+)\}/)?.[1];
+  assert.ok(steer);
+  assert.match(steer, /width: 24px/);
+  assert.match(steer, /background: transparent/);
+  assert.doesNotMatch(steer, /#eab308|234, 179, 8/);
+  assert.match(styles, /\.chat-composer-steer:disabled\s*\{[^}]*opacity: \.45/);
 });

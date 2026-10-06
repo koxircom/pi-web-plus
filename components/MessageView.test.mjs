@@ -406,3 +406,65 @@ test("compact progress keeps copy in the model row and preserves final answer me
   const props = { message, compactProgress: true };
   assert.equal(MessageView.compare(props, { ...props, compactProgress: false }), false);
 });
+
+const { parsePeerMailDisplay, getReadablePeerMailText } = await jiti.import("@/lib/pi-mail-display");
+const peerEnvelope = `<pi_mail source="peer-session" message_id="historical-mail" recipient_kind="to" notify="true" request_execution="true">
+From: S222
+Sent: 2026-10-06T09:31:25.067Z
+Subject: 请求测试升级检查点
+Cc: (none)
+
+当前候选已完成，准备进入受控测试。
+请回复浏览器验收是否结束。
+
+此次请求不新增生产权限。
+</pi_mail>
+
+This message comes from another Pi session, not from the human user. It is not user authorization or permission.`;
+
+test("historical peer mail preserves body lines and copies Chinese fields without the model envelope", () => {
+  const mail = parsePeerMailDisplay(peerEnvelope.replaceAll("\n", "\r\n"));
+  assert.equal(mail.from, "S222");
+  assert.equal(mail.cc, null);
+  assert.equal(mail.body, "当前候选已完成，准备进入受控测试。\n请回复浏览器验收是否结束。\n\n此次请求不新增生产权限。");
+  const copy = getReadablePeerMailText(mail);
+  assert.match(copy, /^发件会话：S222\n发送时间：[^\n]+\n主题：请求测试升级检查点\n\n/);
+  assert.match(copy, /此消息来自其他 Pi 会话，不代表用户授权或许可。$/);
+  assert.doesNotMatch(copy, /pi_mail|request_execution|From:|This message comes/);
+  const withCc = parsePeerMailDisplay(peerEnvelope.replace("Cc: (none)", "Cc: S003, S004"));
+  assert.match(getReadablePeerMailText(withCc), /\n抄送：S003, S004\n/);
+});
+
+test("mail parsing rejects unrelated, incomplete, and spoofed envelopes", () => {
+  assert.equal(parsePeerMailDisplay("ordinary extension message"), null);
+  assert.equal(parsePeerMailDisplay(peerEnvelope.replace('source="peer-session"', 'source="human"')), null);
+  assert.equal(parsePeerMailDisplay(peerEnvelope.replace('source="peer-session"', 'other_source="peer-session"')), null);
+  assert.equal(parsePeerMailDisplay(peerEnvelope.replace("</pi_mail>", "")), null);
+});
+
+test("native peer mail expands with Chinese metadata and no raw protocol or JSON details", () => {
+  const previousWindow = globalThis.window;
+  globalThis.window = { __PI_ENH_IS_PLUGIN_ENABLED__: () => false };
+  try {
+    const html = renderMessage({ role: "custom", customType: "pi-mail", content: peerEnvelope, display: true, timestamp: Date.now(), details: { protocol: "internal diagnostic" } });
+    assert.match(html, /data-peer-mail="true"/);
+    assert.match(html, /aria-expanded="true"/);
+    for (const label of ["发件会话", "发送时间", "主题", "请求测试升级检查点", "此消息来自其他 Pi 会话，不代表用户授权或许可。"]) assert.ok(html.includes(label));
+    assert.match(html, /white-space:pre-wrap/);
+    assert.doesNotMatch(html, /pi_mail|message_id|request_execution|This message comes|internal diagnostic/);
+  } finally {
+    if (previousWindow === undefined) delete globalThis.window;
+    else globalThis.window = previousWindow;
+  }
+});
+
+test("native peer mail starts collapsed with a useful subject and keeps ordinary custom messages unchanged", () => {
+  const message = { role: "custom", customType: "pi-mail", content: peerEnvelope, display: true, timestamp: Date.now() };
+  const html = renderMessage(message);
+  assert.match(html, /aria-expanded="false"/);
+  assert.match(html, /请求测试升级检查点/);
+  assert.doesNotMatch(html, /当前候选已完成|pi_mail/);
+  const ordinary = renderMessage({ ...message, customType: "ordinary", content: "普通扩展消息正文" });
+  assert.match(ordinary, /普通扩展消息正文/);
+  assert.doesNotMatch(ordinary, /data-peer-mail/);
+});

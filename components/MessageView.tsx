@@ -6,6 +6,8 @@ import { MarkdownBody } from "./MarkdownBody";
 import { ImagePreview } from "./ImagePreview";
 import { ThinkingIcon } from "./ThinkingIcon";
 import { copyText } from "@/lib/clipboard";
+import { parsePeerMailDisplay, formatPeerMailTime, getReadablePeerMailText, PEER_MAIL_NOTICE } from "@/lib/pi-mail-display";
+import { isEnhancementPluginEnabled } from "@/lib/enhancement-chat-bridge";
 import { useI18n } from "@/hooks/useI18n";
 import { parseCompactionSummary } from "@/lib/compaction-summary";
 import { getAssistantErrorMessage, getThinkingPreview, isAssistantTruncated, isEmptyThinkingBlock } from "@/lib/message-display";
@@ -1652,19 +1654,31 @@ function CompactionFileList({ title, files }: { title: string; files: string[] }
 
 function CustomMessageView({ message, cwd, onOpenFile }: { message: CustomMessage; cwd?: string; onOpenFile?: (filePath: string, page?: number) => void }) {
   const { t } = useI18n();
+  const text = getMessageText(message.content);
+  const mail = useMemo(() => message.customType === "pi-mail" ? parsePeerMailDisplay(text) : null, [message.customType, text]);
   const isHiddenDisplay = message.display === false;
-  const [contentExpanded, setContentExpanded] = useState(!isHiddenDisplay);
+  const [contentExpanded, setContentExpanded] = useState(() => mail ? !isEnhancementPluginEnabled("pi-mail-auto-collapse") : !isHiddenDisplay);
   const [detailsExpanded, setDetailsExpanded] = useState(false);
   const [copied, setCopied] = useState(false);
-  const text = getMessageText(message.content);
   const images = getMessageImages(message.content);
-  const hasDetails = message.details !== undefined;
+  const hasDetails = !mail && message.details !== undefined;
   const detailsText = hasDetails ? safeJson(message.details) : "";
-  const title = formatCustomType(message.customType);
+  const title = mail ? "协作消息 · 已收到" : formatCustomType(message.customType);
   const time = formatTime(message.timestamp);
 
+  useEffect(() => {
+    if (!mail) return;
+    const sync = () => setContentExpanded(!isEnhancementPluginEnabled("pi-mail-auto-collapse"));
+    window.addEventListener("pi-mail-collapse-change", sync);
+    window.addEventListener("storage", sync);
+    return () => {
+      window.removeEventListener("pi-mail-collapse-change", sync);
+      window.removeEventListener("storage", sync);
+    };
+  }, [mail]);
+
   const copyContent = () => {
-    copyText(text || detailsText).then(() => {
+    copyText(mail ? getReadablePeerMailText(mail) : text || detailsText).then(() => {
       setCopied(true);
       setTimeout(() => setCopied(false), 1500);
     });
@@ -1673,6 +1687,7 @@ function CustomMessageView({ message, cwd, onOpenFile }: { message: CustomMessag
   return (
     <div style={{ marginBottom: 16 }}>
       <div
+        data-peer-mail={mail ? "true" : undefined}
         style={{
           border: "1px solid var(--border)",
           borderRadius: 8,
@@ -1693,11 +1708,15 @@ function CustomMessageView({ message, cwd, onOpenFile }: { message: CustomMessag
             fontSize: 12,
           }}
         >
-          <span style={{ color: "var(--text-muted)", fontFamily: "var(--font-mono)", fontSize: 11, fontWeight: 650 }}>
+          <span style={{ color: "var(--text-muted)", fontFamily: mail ? "inherit" : "var(--font-mono)", fontSize: 11, fontWeight: 650 }}>
             {title}
           </span>
-           {isHiddenDisplay && <span style={{ color: "var(--text-dim)", fontSize: 11 }}>{t("i18n.hiddenExtensionMessage")}</span>}
+           {!mail && isHiddenDisplay && <span style={{ color: "var(--text-dim)", fontSize: 11 }}>{t("i18n.hiddenExtensionMessage")}</span>}
+          {mail && !contentExpanded && <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1 }}>{mail.subject}</span>}
           {time && <span style={{ marginLeft: "auto", color: "var(--text-dim)", fontSize: 10 }}>{time}</span>}
+          {mail && <button type="button" aria-expanded={contentExpanded} aria-label={contentExpanded ? "收起协作消息" : "展开协作消息"} onClick={() => setContentExpanded(v => !v)} style={{ border: "none", background: "transparent", color: "var(--text-muted)", cursor: "pointer", padding: 4, flexShrink: 0 }}>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true"><path d={contentExpanded ? "m6 15 6-6 6 6" : "m6 9 6 6 6-6"} /></svg>
+          </button>}
         </div>
 
         {contentExpanded ? (
@@ -1720,9 +1739,18 @@ function CustomMessageView({ message, cwd, onOpenFile }: { message: CustomMessag
                 })}
               </div>
             )}
-             {text ? <MarkdownBody className="markdown-custom-message" cwd={cwd} onOpenFile={onOpenFile}>{text}</MarkdownBody> : <span style={{ color: "var(--text-dim)", fontSize: 12 }}>{t("i18n.noMessage")}</span>}
+             {mail ? <div style={{ fontSize: "var(--chat-content-font-size, 14px)", lineHeight: 1.65, overflowWrap: "anywhere" }}>
+               <div style={{ display: "grid", gridTemplateColumns: "auto minmax(0, 1fr)", columnGap: 10, rowGap: 4, marginBottom: 12 }}>
+                 <span style={{ color: "var(--text-dim)" }}>发件会话</span><span>{mail.from}</span>
+                 <span style={{ color: "var(--text-dim)" }}>发送时间</span><time dateTime={mail.sent}>{formatPeerMailTime(mail.sent)}</time>
+                 <span style={{ color: "var(--text-dim)" }}>主题</span><span style={{ fontWeight: 600 }}>{mail.subject}</span>
+                 {mail.cc && <><span style={{ color: "var(--text-dim)" }}>抄送</span><span>{mail.cc}</span></>}
+               </div>
+               <div style={{ whiteSpace: "pre-wrap" }}>{mail.body}</div>
+               <div style={{ color: "var(--text-dim)", fontSize: 12, marginTop: 12 }}>{PEER_MAIL_NOTICE}</div>
+             </div> : text ? <MarkdownBody className="markdown-custom-message" cwd={cwd} onOpenFile={onOpenFile}>{text}</MarkdownBody> : <span style={{ color: "var(--text-dim)", fontSize: 12 }}>{t("i18n.noMessage")}</span>}
           </div>
-        ) : (
+        ) : !mail ? (
           <button
             onClick={() => setContentExpanded(true)}
             style={{
@@ -1739,8 +1767,9 @@ function CustomMessageView({ message, cwd, onOpenFile }: { message: CustomMessag
           >
              {text ? previewText(text) : t("i18n.showExtensionMessage")}
           </button>
-        )}
+        ) : null}
 
+        {(!mail || contentExpanded) && (
         <div
           style={{
             display: "flex",
@@ -1788,6 +1817,7 @@ function CustomMessageView({ message, cwd, onOpenFile }: { message: CustomMessag
             </button>
           )}
         </div>
+        )}
 
         {hasDetails && ((isHiddenDisplay && contentExpanded) || (!isHiddenDisplay && detailsExpanded)) && (
           <pre

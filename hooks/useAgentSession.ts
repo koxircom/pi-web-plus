@@ -1237,7 +1237,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         ));
         break;
       case "setTitle":
-        if (request.title) document.title = request.title;
+        if (request.title) {
+          window.dispatchEvent(new CustomEvent("pi-enh-title-change", { detail: { title: request.title } }));
+        }
         break;
       case "set_editor_text":
         opts.chatInputRef?.current?.insertText(request.text);
@@ -1878,23 +1880,25 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         preparationRef.current = null;
         promptRequestStarted = true;
         bumpSessionEpoch(sid);
-        await sendAgentCommand(sid, {
+        const result = await sendAgentCommand<{ stopped?: boolean } | null>(sid, {
           type: "prompt",
           message,
           ...(piImages?.length ? { images: piImages } : {}),
         });
         promoteNewSession(1, message);
+        if (result?.stopped) await reconcileAgentState(sid);
       } else if (session) {
         sentSessionId = session.id;
         await prepare(ensureEventsConnected(session.id));
         preparationRef.current = null;
         promptRequestStarted = true;
         bumpSessionEpoch(session.id);
-        await sendAgentCommand(session.id, {
+        const result = await sendAgentCommand<{ stopped?: boolean } | null>(session.id, {
           type: "prompt",
           message,
           ...(piImages?.length ? { images: piImages } : {}),
         });
+        if (result?.stopped) await reconcileAgentState(session.id);
       } else {
         throw new Error("No active session for the prompt");
       }
@@ -1911,6 +1915,31 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       if (!definitivelyRejected && sentSessionId) {
         void waitForPromptSettlement(sentSessionId, promptRunId);
         return;
+      }
+      if (cancelledBeforeDispatch) {
+        // Stop cancels execution, not the submitted message. Finish only session
+        // creation and retain it natively; never reconnect or replay the prompt.
+        try {
+          const sid = sentSessionId ?? sessionIdRef.current ?? await ensuringNewSessionRef.current;
+          if (!sid) throw new Error("尚未建立会话，消息已退回输入框。");
+          await sendAgentCommand(sid, {
+            type: "retain_stopped_prompt", requestId: crypto.randomUUID(), message,
+            ...(piImages?.length ? { images: piImages } : {}),
+          });
+          if (optimisticUserMessageRef.current?.message === userMsg) optimisticUserMessageRef.current = null;
+          rpcPromptPendingRef.current = false;
+          agentRunningRef.current = false;
+          setAgentRunning(false);
+          setStopRequested(false);
+          setAgentPhase(null);
+          dispatch({ type: "end" });
+          if (isNew) promoteNewSession(1, message);
+          await loadSession(sid);
+          closeEvents();
+          return;
+        } catch (saveError) {
+          addNotice({ type: "error", message: `停止后保存消息失败，内容已退回输入框：${saveError instanceof Error ? saveError.message : String(saveError)}` });
+        }
       }
       if (sourceDraftKey) onSessionSubmissionChange?.(sourceDraftKey, null);
       rpcPromptPendingRef.current = false;
@@ -1938,7 +1967,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } finally {
       if (preparationRef.current === preparation) preparationRef.current = null;
     }
-  }, [isNew, newSessionCwd, newSessionDraftKey, newSessionModel, session, ensureNewSession, ensureEventsConnected, promoteNewSession, waitForPromptSettlement, addNotice, cancelEventStreamGrace, closeEvents, composerDraftKey, reconcileAgentState, restoreSubmission, onSessionSubmissionChange]);
+  }, [isNew, newSessionCwd, newSessionDraftKey, newSessionModel, session, ensureNewSession, ensureEventsConnected, promoteNewSession, waitForPromptSettlement, addNotice, cancelEventStreamGrace, closeEvents, composerDraftKey, reconcileAgentState, restoreSubmission, onSessionSubmissionChange, loadSession]);
 
   const executeBash = useCallback(async (command: string, excludeFromContext: boolean) => {
     if (agentRunningRef.current || bashRunningRef.current) return;
@@ -1979,6 +2008,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
   const handleAbort = useCallback(async () => {
     if (preparationRef.current) {
+      setStopRequested(true);
       preparationRef.current.abort();
       return;
     }
@@ -2097,7 +2127,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       setCurrentModelOverride(previousOverride);
       addNotice({
         type: "error",
-        message: `Failed to switch model: ${e instanceof Error ? e.message : String(e)}`,
+        message: `切换模型失败：${e instanceof Error ? e.message : String(e)}`,
       });
       // A failed response can still follow a server-side write (for example, a
       // dropped connection), so let the session file settle the displayed model.
@@ -2476,8 +2506,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } catch (e) {
       console.error("Failed to set thinking level:", e);
       setCurrentThinkingOverride(null);
+      addNotice({ type: "error", message: `设置思考深度失败：${e instanceof Error ? e.message : String(e)}` });
     }
-  }, [isNew]);
+  }, [addNotice, isNew]);
 
   const handleToolPresetChange = useCallback(async (preset: ToolPreset) => {
     const toolNames = getToolNamesForPreset(preset);

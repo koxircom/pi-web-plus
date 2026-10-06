@@ -2258,10 +2258,9 @@ function UnreadSessionIndicator() {
     >
       <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true" style={{ display: "block" }}>
         <circle cx="7" cy="7" r="2.5" fill="currentColor" />
-        <circle cx="7" cy="7" r="3" stroke="currentColor" strokeWidth="1.4" opacity="0.32">
-          <animate attributeName="r" values="3;6;3" dur="1.6s" repeatCount="indefinite" />
-          <animate attributeName="opacity" values="0.32;0;0.32" dur="1.6s" repeatCount="indefinite" />
-        </circle>
+        {/* Unread is a persistent state, not ongoing work. Animating SVG radius
+            invalidates the whole document's layout every frame while idle. */}
+        <circle cx="7" cy="7" r="5" stroke="currentColor" strokeWidth="1.4" opacity="0.32" />
       </svg>
     </span>
   );

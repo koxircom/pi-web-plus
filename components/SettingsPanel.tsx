@@ -962,7 +962,20 @@ export function SettingsPanel({
           <div className="settings-sidebar-resizer-line" />
         </div>
 
-        {/* 主内容区域与弹窗关闭按钮 */}
+        {/* 关闭按钮占用独立布局行，不覆盖可滚动的设置控件。 */}
+        <div className="settings-dialog-toolbar">
+          <button
+          type="button"
+          onClick={onClose}
+          title={t("i18n.close")}
+          aria-label={t("i18n.close")}
+          className="config-close-button settings-dialog-close"
+        >
+          ×
+          </button>
+        </div>
+
+        {/* 主内容区域 */}
         <main className="settings-dialog-main">
           {sectionHost(
             "general",
@@ -1012,15 +1025,7 @@ export function SettingsPanel({
           )}
         </main>
 
-        <button
-          type="button"
-          onClick={onClose}
-          title={t("i18n.close")}
-          aria-label={t("i18n.close")}
-          className="config-close-button settings-dialog-close"
-        >
-          ×
-        </button>
+
 
         {/* 弹窗尺寸缩放手柄（东、南、东南），支持 pointer 与键盘 */}
         <div

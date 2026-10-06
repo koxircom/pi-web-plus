@@ -1224,12 +1224,23 @@ export function AppShell() {
   const activeFileTab = fileTabs.find((tab) => tab.id === activeFileTabId) ?? null;
   const activeCwdName = activeCwd ? getFileName(activeCwd) || activeCwd : null;
   const windowTitle = activeCwdName ? `${activeCwdName} - ${BRAND_NAME}` : BRAND_NAME;
+  const extensionWindowTitleRef = useRef<{ projectCwd: string | null; title: string } | null>(null);
 
   useEffect(() => {
     const win = window as unknown as Record<string, any>;
     win.__PI_WEB_NATIVE_TITLE_BASE__ = windowTitle;
-    const syncWindowTitle = () => {
-      const targetTitle = composeEnhancementWindowTitle(windowTitle, win);
+    if (extensionWindowTitleRef.current?.projectCwd !== activeCwd) {
+      extensionWindowTitleRef.current = null;
+    }
+    const syncWindowTitle = (event?: Event) => {
+      const requestedTitle = (event as CustomEvent<{ title?: unknown }> | undefined)?.detail?.title;
+      if (typeof requestedTitle === "string") {
+        extensionWindowTitleRef.current = { projectCwd: activeCwd, title: requestedTitle };
+      }
+      const requestedBase = extensionWindowTitleRef.current?.projectCwd === activeCwd
+        ? extensionWindowTitleRef.current.title
+        : windowTitle;
+      const targetTitle = composeEnhancementWindowTitle(requestedBase, win);
       if (document.title !== targetTitle) document.title = targetTitle;
     };
 
@@ -1241,7 +1252,7 @@ export function AppShell() {
         delete win.__PI_WEB_NATIVE_TITLE_BASE__;
       }
     };
-  }, [windowTitle]);
+  }, [activeCwd, windowTitle]);
 
   useEffect(() => {
     return registerEnhancementOpenSettings((section) => {

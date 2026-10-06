@@ -3289,6 +3289,44 @@
     return text.trim() ? `${text}${extraText}` : extraText.trim();
   }
 
+  // Decode the existing submission format, only for a contiguous attachment
+  // suffix. Ordinary fenced code elsewhere in the message remains plain text.
+  function parseSubmittedComposerAttachments(body) {
+    const text = String(body || "");
+    const pattern = /(?:\n\n|^)(?:### `([^`\n]+)`\n```[^`\n]*\n([\s\S]*?)```\n?|\[附件: @([^\]\n]+)\])/g;
+    const matches = Array.from(text.matchAll(pattern));
+    if (!matches.length || text.slice(matches.at(-1).index + matches.at(-1)[0].length).trim()) return { text, attachments: [] };
+    let first = matches.length - 1;
+    while (first > 0) {
+      const preceding = matches[first - 1];
+      if (text.slice(preceding.index + preceding[0].length, matches[first].index).trim()) break;
+      first -= 1;
+    }
+    const attachments = matches.slice(first).map((match) => match[3] ? {
+      name: extractOriginalFilename(match[3]), serverRelativePath: match[3],
+      type: getMimeTypeFromExt(extractOriginalFilename(match[3])), isText: false,
+    } : {
+      name: match[1], textContent: match[2], isText: true,
+      size: new TextEncoder().encode(match[2]).length, type: getMimeTypeFromExt(match[1]),
+    });
+    return { text: text.slice(0, matches[first].index), attachments };
+  }
+
+  function restoreSubmittedComposerAttachments(body) {
+    if (!isPluginEnabled("composer-file-paste")) return String(body || "");
+    // Never replace a draft's own files with historical attachments.
+    if (pendingComposerAttachments.length) return null;
+    const restored = parseSubmittedComposerAttachments(body);
+    pendingComposerAttachments = restored.attachments.map((attachment) => ({
+      ...attachment, id: "restored-" + crypto.randomUUID(),
+    }));
+    notifyComposerSubmissionStateChange();
+    syncComposerAttachmentBar(findComposerTextarea());
+    return restored.text;
+  }
+
+  window.__PI_ENH_RESTORE_COMPOSER_ATTACHMENTS__ = restoreSubmittedComposerAttachments;
+
   function prepareComposerSubmission(kind, body) {
     const attachmentSnapshot = isPluginEnabled("composer-file-paste")
       ? pendingComposerAttachments.slice()
@@ -5219,13 +5257,12 @@
   let composerModeFetchToken = 0;
   let lastComposerGoalMismatchKey = null;
 
-  // SVG 目标：同心圆右上缺口 + 向右上箭头的截图形态
-  const SVG_GOAL_ICON = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3a9 9 0 1 0 9 9"></path><path d="M12 7a5 5 0 1 0 5 5"></path><line x1="12" y1="12" x2="21" y2="3"></line><polyline points="16 3 21 3 21 8"></polyline></svg>`;
-  // SVG 计划：完整灯泡含底座与 5 短射线
-  const SVG_PLAN_ICON = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="2" y1="11" x2="4.5" y2="11"></line><line x1="4.93" y1="4.93" x2="6.7" y2="6.7"></line><line x1="12" y1="1.5" x2="12" y2="4"></line><line x1="19.07" y1="4.93" x2="17.3" y2="6.7"></line><line x1="22" y1="11" x2="19.5" y2="11"></line><path d="M9 17h6M10 20h4M12 6a5.5 5.5 0 0 0-4.8 8.2c.9 1.4 1.8 2.3 1.8 2.8h6c0-.5.9-1.4 1.8-2.8A5.5 5.5 0 0 0 12 6z"></path></svg>`;
+  // Shared same-origin SVG geometry keeps the native menu and React controls aligned.
+  const SVG_GOAL_ICON = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true" focusable="false"><use href="/icons/composer-mode-icons.svg#goal"></use></svg>`;
+  const SVG_PLAN_ICON = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true" focusable="false"><use href="/icons/composer-mode-icons.svg#plan"></use></svg>`;
   const SVG_ATTACH_ICON = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"></path></svg>`;
   const SVG_IMAGE_ICON = `<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect><circle cx="8.5" cy="8.5" r="1.5"></circle><polyline points="21 15 16 10 5 21"></polyline></svg>`;
-  const SVG_CHECK_ICON = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#22c55e" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>`;
+  const SVG_CHECK_ICON = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>`;
 
   function parseExtensionStatus(data, key) {
     const statuses = data?.extensionStatuses || data?.data?.extensionStatuses;
@@ -5381,17 +5418,18 @@
         display: flex !important; align-items: center !important; gap: 7px !important;
         padding: 6px 8px !important; border-radius: 6px !important; background: transparent !important;
         border: none !important; color: var(--text, #f4f4f5) !important; cursor: pointer !important;
-        text-align: left !important; width: 100% !important; font-size: 12.5px !important;
+        text-align: left !important; width: 100% !important; font-size: 13px !important;
         font-weight: 500 !important; box-sizing: border-box !important;
       }
       .pi-enh-composer-menu-item:hover { background: color-mix(in srgb, var(--text, #fff) 8%, transparent) !important; }
       .pi-enh-composer-menu-item.active { background: color-mix(in srgb, var(--text, #fff) 12%, transparent) !important; }
-      .pi-enh-composer-menu-icon { display: inline-flex !important; align-items: center !important; justify-content: center !important; width: 18px !important; height: 18px !important; flex-shrink: 0 !important; }
+      .pi-enh-composer-menu-item:focus-visible { outline: 2px solid var(--text-muted, #a1a1aa); outline-offset: 1px; }
+      .pi-enh-composer-menu-icon { display: inline-flex !important; align-items: center !important; justify-content: center !important; width: 18px !important; height: 18px !important; flex-shrink: 0 !important; color: var(--text-muted, #a1a1aa) !important; }
       .pi-enh-composer-menu-label { display: flex !important; align-items: center !important; flex: 1 1 auto !important; min-width: 0 !important; }
-      .pi-enh-composer-menu-title { white-space: nowrap !important; font-size: 12.5px !important; }
-      .pi-enh-composer-menu-desc { font-size: 11.5px !important; color: var(--text-dim, #71717a) !important; margin-left: 6px !important; white-space: nowrap !important; overflow: hidden !important; text-overflow: ellipsis !important; }
+      .pi-enh-composer-menu-title { white-space: nowrap !important; font-size: 13px !important; }
+      .pi-enh-composer-menu-desc { font-size: 12px !important; color: var(--text-dim, #71717a) !important; margin-left: 6px !important; white-space: nowrap !important; overflow: hidden !important; text-overflow: ellipsis !important; }
       .pi-enh-composer-menu-kbd { margin-left: auto !important; font-size: 10px !important; color: var(--text-dim, #71717a) !important; padding: 1px 4px !important; border-radius: 3px !important; border: 1px solid var(--border, #3f3f46) !important; line-height: 1.2 !important; flex-shrink: 0 !important; }
-      .pi-enh-composer-menu-check { margin-left: 4px !important; display: flex !important; align-items: center !important; color: #22c55e !important; flex-shrink: 0 !important; }
+      .pi-enh-composer-menu-check { margin-left: 4px !important; display: flex !important; align-items: center !important; color: var(--text-muted, #a1a1aa) !important; flex-shrink: 0 !important; }
       .pi-enh-composer-modes-disabled-notice { display: inline-flex !important; align-items: center !important; gap: 8px !important; padding: 4px 10px !important; margin: 4px 0 !important; border-radius: 6px !important; background: color-mix(in srgb, var(--warning, #f59e0b) 15%, transparent) !important; border: 1px solid color-mix(in srgb, var(--warning, #f59e0b) 40%, transparent) !important; color: var(--text, #f4f4f5) !important; font-size: 12px !important; }
       .pi-enh-composer-modes-disabled-notice button { background: color-mix(in srgb, var(--warning, #f59e0b) 30%, transparent) !important; border: 1px solid color-mix(in srgb, var(--warning, #f59e0b) 60%, transparent) !important; color: var(--text, #f4f4f5) !important; border-radius: 4px !important; padding: 2px 8px !important; font-size: 11px !important; cursor: pointer !important; }
       html[data-pi-composer-modes-active="true"] .extension-status-line[aria-label*='"version":1'] .extension-status-text,
@@ -5505,6 +5543,7 @@
     const fileItem = document.createElement("button");
     fileItem.type = "button";
     fileItem.className = "pi-enh-composer-menu-item";
+    fileItem.title = "添加任意类型的文件";
     fileItem.innerHTML = `
       <span class="pi-enh-composer-menu-icon">${SVG_ATTACH_ICON}</span>
       <span class="pi-enh-composer-menu-label">
@@ -5523,6 +5562,8 @@
     const goalItem = document.createElement("button");
     goalItem.type = "button";
     goalItem.className = `pi-enh-composer-menu-item${currentMode === "goal" ? " active" : ""}`;
+    goalItem.setAttribute("aria-label", "目标模式：设置要持续追求的目标");
+    goalItem.title = "设置要持续追求的目标";
     goalItem.innerHTML = `
       <span class="pi-enh-composer-menu-icon">${SVG_GOAL_ICON}</span>
       <span class="pi-enh-composer-menu-label">
@@ -5543,6 +5584,8 @@
     const planItem = document.createElement("button");
     planItem.type = "button";
     planItem.className = `pi-enh-composer-menu-item${currentMode === "plan" ? " active" : ""}`;
+    planItem.setAttribute("aria-label", "计划模式：开启计划模式");
+    planItem.title = "开启计划模式；快捷键 Shift+Tab";
     planItem.innerHTML = `
       <span class="pi-enh-composer-menu-icon">${SVG_PLAN_ICON}</span>
       <span class="pi-enh-composer-menu-label">
@@ -5571,6 +5614,7 @@
 
   async function requestSwitchComposerMode(targetMode, targetSessionId) {
     if (!["normal", "plan", "goal"].includes(targetMode)) return false;
+    findComposerTextarea()?.focus();
     const sessionId = targetSessionId || getEffectiveComposerSessionId();
     if (!sessionId) {
       pendingNewComposerMode = targetMode === "normal" ? null : {mode: targetMode, project: getCurrentProjectStatusKey()};
@@ -5585,80 +5629,19 @@
     composerModeSwitching = true;
 
     try {
-      // 1. 切换前先调用 get_state 检查会话是否忙碌
-      const preStateRes = await window.fetch(`/api/agent/${encodeURIComponent(sessionId)}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ type: "get_state" }),
-      });
-      if (!preStateRes.ok) {
-        showToast("无法获取会话状态，请检查网络", null, 2500);
-        return false;
-      }
-      const preStateData = await preStateRes.json().catch(() => null);
-      if (preStateData?.success !== true || !preStateData.data) {
-        showToast("会话状态无效，模式未切换", null, 2500);
-        return false;
-      }
-      const preState = preStateData.data;
-      if (
-        preState.isPromptRunning ||
-        preState.isStreaming ||
-        preState.isCompacting ||
-        preState.isBashRunning ||
-        (!targetSessionId && isChatSessionRunning(sessionId))
-      ) {
-        showToast("当前会话正在执行中，无法切换主输入框模式", null, 3000);
-        return false;
-      }
-
-      // 2. 检查后端扩展命令是否注册
-      const cmdRes = await window.fetch(`/api/agent/${encodeURIComponent(sessionId)}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ type: "get_commands" }),
-      });
-      if (!cmdRes.ok) {
-        showToast("无法获取会话命令列表", null, 2500);
-        return false;
-      }
-      const cmdData = await cmdRes.json().catch(() => null);
-      const commands = cmdData?.data?.commands || [];
-      const hasComposerMode = Array.isArray(commands) && commands.some(
-        (c) => c?.name === "composer-mode" || c?.name === "/composer-mode"
-      );
-      if (!hasComposerMode) {
-        showToast("该会话未加载 composer-modes 扩展，需等待空闲后输入 /reload 重新加载", null, 4000);
-        return false;
-      }
-
-      // 3. 发送切换命令
-      const promptRes = await window.fetch(`/api/agent/${encodeURIComponent(sessionId)}`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ type: "prompt", message: `/composer-mode ${targetMode}` }),
-      });
-      if (!promptRes.ok) {
-        showToast("切换模式请求失败，请稍后重试", null, 2500);
-        return false;
-      }
-      const promptData = await promptRes.json().catch(() => null);
-      if (promptData && promptData.success === false) {
-        showToast(`切换模式被拒绝: ${promptData.error || "未知原因"}`, null, 3000);
-        return false;
-      }
-
-      // 4. 回读状态确认（必须读取真实模式核对，不更新假状态）
+      // One atomic request saves the next-input mode and reads the extension's
+      // authoritative result; no prompt execution or speculative UI state.
+      composerModeFetchToken++;
       const postStateRes = await window.fetch(`/api/agent/${encodeURIComponent(sessionId)}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ type: "get_state" }),
+        body: JSON.stringify({ type: "set_composer_mode", mode: targetMode }),
       });
-      if (!postStateRes.ok) {
-        showToast("回读会话状态失败，未更新模式", null, 2500);
+      const postStateData = await postStateRes.json().catch(() => null);
+      if (!postStateRes.ok || postStateData?.success !== true) {
+        showToast(postStateData?.error || "模式切换失败，请检查网络后重试", null, 3000);
         return false;
       }
-      const postStateData = await postStateRes.json().catch(() => null);
       const parsed = parseExtensionStatus(postStateData, "composer-modes");
       const realMode = parsed?.mode;
 
@@ -5691,47 +5674,6 @@
       return false;
     } finally {
       composerModeSwitching = false;
-    }
-  }
-
-  function handleComposerModesKeydown(event) {
-    if (!isPluginEnabled("composer-modes")) return;
-
-    // 严格限制：无 Ctrl/Alt/Meta，无 IME 合成输入
-    if (event.ctrlKey || event.altKey || event.metaKey || event.isComposing || event.keyCode === 229) {
-      return;
-    }
-
-    if (event.shiftKey && (event.key === "Tab" || event.keyCode === 9)) {
-      const activeEl = document.activeElement;
-      if (!activeEl) return;
-
-      // 绝对不劫持按钮！如果焦点在按钮或链接上，直接放行
-      if (activeEl.tagName === "BUTTON" || activeEl.tagName === "A" || activeEl.closest("button")) {
-        return;
-      }
-
-      const textarea = findComposerTextarea();
-      const isEditorFocused = Boolean(textarea && (activeEl === textarea || textarea.contains(activeEl)));
-
-      if (isEditorFocused) {
-        // 先消费事件，防止默认焦点跳动
-        event.preventDefault();
-        event.stopPropagation();
-        if (typeof event.stopImmediatePropagation === "function") {
-          event.stopImmediatePropagation();
-        }
-
-        // repeat 守卫：在 preventDefault 后拦截长按事件，既不切模式也不移动焦点
-        if (event.repeat) {
-          return;
-        }
-
-        const sid = getEffectiveComposerSessionId();
-        const currentMode = getSessionComposerMode(sid);
-        const target = currentMode === "plan" ? "normal" : "plan";
-        void requestSwitchComposerMode(target);
-      }
     }
   }
 
@@ -6505,7 +6447,6 @@
   function bindComposerModesEvents() {
     if (!composerModesEventsBound) {
       composerModesEventsBound = true;
-      window.addEventListener("keydown", handleComposerModesKeydown, true);
       document.addEventListener("click", handleComposerModesDocClick, true);
       document.addEventListener("keydown", handleComposerModesDocKeydown, true);
       window.addEventListener("resize", handleComposerModesResize);
@@ -6517,7 +6458,6 @@
 
   function unbindComposerModesEvents() {
     if (composerModesEventsBound) {
-      window.removeEventListener("keydown", handleComposerModesKeydown, true);
       document.removeEventListener("click", handleComposerModesDocClick, true);
       document.removeEventListener("keydown", handleComposerModesDocKeydown, true);
       window.removeEventListener("resize", handleComposerModesResize);
