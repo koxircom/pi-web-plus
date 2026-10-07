@@ -17,6 +17,51 @@ const { ModelSelector } = await jiti.import("./ModelSelector.tsx");
 const { clearDraft, getDraft, mergeRestoredSubmissionDraft, mergeRestoredSubmissionText, rekeyDraft, setDraft } = await jiti.import("@/lib/draft-store.ts");
 const { I18nProvider } = await jiti.import("@/hooks/useI18n");
 
+test("native textarea grows to eight visual lines and preserves manual sizing", () => {
+  const source = ts.createSourceFile("ChatInput.tsx", readFileSync(new URL("./ChatInput.tsx", import.meta.url), "utf8"), ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  const declaration = source.statements.find(node => ts.isFunctionDeclaration(node) && node.name?.text === "resizeChatInputTextarea");
+  const script = new Script(ts.transpileModule(declaration.getText(source), {
+    compilerOptions: { target: ts.ScriptTarget.ES2020, module: ts.ModuleKind.CommonJS },
+  }).outputText);
+  const metrics = { paddingTop: "4px", paddingBottom: "4px", borderTopWidth: "1px", borderBottomWidth: "1px", lineHeight: "24px", fontSize: "15px" };
+  const context = { exports: {}, getComputedStyle: () => metrics };
+  script.runInNewContext(context);
+  const resize = context.exports.resizeChatInputTextarea;
+  let manual = false;
+  let native = true;
+  const textarea = { value: "文字", style: { height: "auto" }, scrollHeight: 32,
+    closest(selector) { return selector === ".chat-composer-custom-height" ? manual : native; } };
+  resize(textarea);
+  assert.equal(textarea.style.height, "34px", "one visual line includes padding and borders");
+  textarea.scrollHeight = 200;
+  resize(textarea);
+  assert.equal(textarea.style.height, "202px", "eight visual lines fit");
+  textarea.scrollHeight = 296;
+  resize(textarea);
+  assert.equal(textarea.style.height, "202px", "overflow, including wrapped text, is capped at eight lines");
+  metrics.lineHeight = "32px";
+  resize(textarea);
+  assert.equal(textarea.style.height, "266px", "cap follows the rendered font, not a fixed pixel height");
+  textarea.scrollHeight = 40;
+  resize(textarea);
+  assert.equal(textarea.style.height, "42px", "deleting text shrinks the input");
+  textarea.value = "";
+  resize(textarea);
+  assert.equal(textarea.style.height, "auto", "empty input returns to its CSS minimum");
+  manual = true;
+  for (const height of ["60px", "360px"]) {
+    textarea.value = "多行文字";
+    textarea.scrollHeight = 600;
+    textarea.style.height = height;
+    resize(textarea);
+    assert.equal(textarea.style.height, height, "manual height wins above and below the automatic cap");
+  }
+  manual = false;
+  native = false;
+  resize(textarea);
+  assert.equal(textarea.style.height, "200px", "classic layout keeps its existing cap");
+});
+
 test("preserves pasted HTML links as Markdown without changing plain text layout", () => {
   const link = (label, href, occurrence = 0) => ({ label, href, occurrence });
 

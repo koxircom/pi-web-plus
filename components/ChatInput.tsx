@@ -344,6 +344,20 @@ function NativeComposerModeControls({ onModeChange }: { onModeChange: (mode: Com
   );
 }
 
+export function resizeChatInputTextarea(textarea: HTMLTextAreaElement): void {
+  // A saved or in-progress drag owns the height until the user changes it.
+  if (textarea.closest(".chat-composer-custom-height")) return;
+  textarea.style.height = "auto";
+  if (!textarea.value) return;
+
+  const style = getComputedStyle(textarea);
+  const padding = parseFloat(style.paddingTop) + parseFloat(style.paddingBottom);
+  const border = parseFloat(style.borderTopWidth) + parseFloat(style.borderBottomWidth);
+  const lineHeight = parseFloat(style.lineHeight) || parseFloat(style.fontSize) * 1.6;
+  const maxHeight = textarea.closest(".chat-composer-card") ? lineHeight * 8 + padding + border : 200;
+  textarea.style.height = `${Math.min(textarea.scrollHeight + border, maxHeight)}px`;
+}
+
 export function getUpwardMenuMaxHeight(menuBottom: number, visibleTop: number, gap = ANCHORED_MENU_GAP): number {
   return Math.max(0, Math.floor(menuBottom - visibleTop - gap));
 }
@@ -901,8 +915,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
       requestAnimationFrame(() => {
         if (!ta) return;
         focusEditable(ta);
-        ta.style.height = "auto";
-        ta.style.height = `${Math.min(ta.scrollHeight, 200)}px`;
+        resizeChatInputTextarea(ta);
       });
     },
     replaceMessage(message: UserMessage) {
@@ -930,8 +943,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
       requestAnimationFrame(() => {
         if (!ta) return;
         focusEditable(ta);
-        ta.style.height = "auto";
-        ta.style.height = `${Math.min(ta.scrollHeight, 200)}px`;
+        resizeChatInputTextarea(ta);
       });
     },
     prependText(text: string) {
@@ -948,8 +960,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
         if (!ta) return;
         focusEditable(ta);
         ta.setSelectionRange(combined.length, combined.length);
-        ta.style.height = "auto";
-        ta.style.height = `${Math.min(ta.scrollHeight, 200)}px`;
+        resizeChatInputTextarea(ta);
       });
     },
     rekeyDraft(previousKey: string, nextKey: string) {
@@ -1036,8 +1047,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
         if (!ta) return;
         focusEditable(ta);
         ta.setSelectionRange(ta.value.length, ta.value.length);
-        ta.style.height = "auto";
-        ta.style.height = `${Math.min(ta.scrollHeight, 200)}px`;
+        resizeChatInputTextarea(ta);
       });
     },
     insertText(text: string) {
@@ -1060,8 +1070,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
         const pos = start + sep.length + text.length;
         ta.setSelectionRange(pos, pos);
         focusEditable(ta);
-        ta.style.height = "auto";
-        ta.style.height = `${Math.min(ta.scrollHeight, 200)}px`;
+        resizeChatInputTextarea(ta);
       });
     },
     addImages(files: File[]) {
@@ -1169,11 +1178,9 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const resizeTextarea = useCallback(() => {
     const ta = textareaRef.current;
     if (!ta) return;
-    ta.style.height = "auto";
-    if (ta.value) ta.style.height = `${Math.min(ta.scrollHeight, 200)}px`;
+    resizeChatInputTextarea(ta);
   }, []);
 
-  useLayoutEffect(resizeTextarea, [value, fontSize, resizeTextarea]);
 
   useEffect(() => {
     const ta = textareaRef.current;
@@ -1398,8 +1405,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
       if (!el) return;
       focusEditable(el);
       el.setSelectionRange(newPos, newPos);
-      el.style.height = "auto";
-      el.style.height = `${Math.min(el.scrollHeight, 200)}px`;
+      resizeChatInputTextarea(el);
     });
   }, [atQuery, value]);
 
@@ -1443,8 +1449,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
       if (!ta) return;
       focusEditable(ta);
       ta.setSelectionRange(text.length, text.length);
-      ta.style.height = "auto";
-      ta.style.height = `${Math.min(ta.scrollHeight, 200)}px`;
+      resizeChatInputTextarea(ta);
     });
   }, []);
 
@@ -1458,8 +1463,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
       if (!ta) return;
       focusEditable(ta);
       ta.setSelectionRange(nextValue.length, nextValue.length);
-      ta.style.height = "auto";
-      ta.style.height = `${Math.min(ta.scrollHeight, 200)}px`;
+      resizeChatInputTextarea(ta);
     });
   }, []);
 
@@ -1786,8 +1790,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const handleInput = useCallback(() => {
     const ta = textareaRef.current;
     if (!ta) return;
-    ta.style.height = "auto";
-    ta.style.height = `${Math.min(ta.scrollHeight, 200)}px`;
+    resizeChatInputTextarea(ta);
   }, []);
 
   const handlePaste = useCallback((e: React.ClipboardEvent<HTMLTextAreaElement>) => {
@@ -2019,6 +2022,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   }, []);
 
   const isCodexActive = codexLayoutEnabled && !compact;
+  useLayoutEffect(resizeTextarea, [value, fontSize, isCodexActive, effectiveCustomHeight, resizeTextarea]);
   const hasUserContent = Boolean(value && value.trim().length > 0);
 
   const rootClassName = isCodexActive
