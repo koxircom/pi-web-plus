@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback, useRef, useEffect, useLayoutEffect, useMemo, useReducer, useSyncExternalStore } from "react";
+import { useState, useCallback, useRef, useEffect, useEffectEvent, useLayoutEffect, useMemo, useReducer, useSyncExternalStore } from "react";
 import type {
   AgentMessage,
   BlockingExtensionUiRequest,
@@ -757,10 +757,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       if (!includeState) return null;
 
       try {
+        const stateRunId = promptRunIdRef.current;
+        const stateRevision = agentStateRevisionRef.current;
         const stateRes = await fetch(`/api/sessions/${encodeURIComponent(sid)}/state`, options?.signal ? { signal: options.signal } : undefined);
         if (!stateRes.ok) throw new Error(`HTTP ${stateRes.status}`);
         const agentState = await stateRes.json() as { running: boolean; state?: AgentStateResponse };
-        if (!isCurrentRead()) return null;
+        if (!isCurrentRead() || promptRunIdRef.current !== stateRunId
+          || agentStateRevisionRef.current !== stateRevision) return null;
 
         const liveState = agentState.state;
         syncLiveModel(liveState);
@@ -1355,19 +1358,22 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
   }, [loadSession, notifyPromptStage, scheduleEventStreamClose, settleUiStage]);
 
-  const waitForPromptSettlement = useCallback(async (sid: string, runId?: number) => {
+  const waitForPromptSettlement = useCallback(async (sid: string, runId = promptRunIdRef.current) => {
     await delay(PROMPT_SETTLE_INITIAL_DELAY_MS);
     const startedAt = Date.now();
 
     while (agentRunningRef.current && Date.now() - startedAt < PROMPT_SETTLE_MAX_MS) {
-      if (runId !== undefined && promptRunIdRef.current !== runId) return;
+      if (promptRunIdRef.current !== runId || sessionIdRef.current !== sid) return;
       try {
+        const revision = agentStateRevisionRef.current;
         const res = await fetch(`/api/agent/${encodeURIComponent(sid)}`);
         if (res.ok) {
           const data = await res.json() as { running?: boolean; state?: AgentStateResponse };
+          if (promptRunIdRef.current !== runId || sessionIdRef.current !== sid) return;
+          if (agentStateRevisionRef.current !== revision) continue;
           const state = data.state;
           syncLiveModel(state);
-          if (!data.running || !state || (!state.isStreaming && !state.isPromptRunning)) {
+          if (!data.running || !state || (!state.isStreaming && !state.isPromptRunning && !state.isCompacting)) {
             await finishPromptWithoutStream(sid, runId);
             return;
           }
@@ -1434,6 +1440,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       setIsCompacting(state?.isCompacting ?? false);
       setAutoCompactionEnabled(state?.autoCompactionEnabled ?? true);
       setQueuedMessages(normalizeQueuedMessages(state?.queuedMessages));
+      if (state) {
+        if (state.contextUsage !== undefined) setContextUsage(state.contextUsage ?? null);
+        if (state.systemPrompt !== undefined) setSystemPrompt(state.systemPrompt ?? null);
+        if (state.extensionStatuses !== undefined) setExtensionStatuses(state.extensionStatuses ?? []);
+        if (state.extensionWidgets !== undefined) setExtensionWidgets(state.extensionWidgets ?? []);
+      }
       const busy = data.running && state
         && (state.isStreaming || state.isPromptRunning || state.isCompacting);
       if (busy) {
@@ -1442,12 +1454,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         return;
       }
       if (!agentRunningRef.current) return;
-      if (state) {
-        if (state.contextUsage !== undefined) setContextUsage(state.contextUsage ?? null);
-        if (state.systemPrompt !== undefined) setSystemPrompt(state.systemPrompt ?? null);
-        if (state.extensionStatuses !== undefined) setExtensionStatuses(state.extensionStatuses ?? []);
-        if (state.extensionWidgets !== undefined) setExtensionWidgets(state.extensionWidgets ?? []);
-      }
+      // An idle snapshot can belong to the previous turn while the user's
+      // next prompt is still connecting or awaiting admission. The durable
+      // submission receipt owns that uncertainty; do not end it optimistically.
+      if (preparationRef.current || getPendingPromptSubmissions().some(
+        (row) => row.sessionId === sid && row.status === "sending",
+      )) return;
       await finishPromptWithoutStream(sid, runId);
     } catch {
       // Network still down — the next poll / visibility / online tick retries.
@@ -1457,26 +1469,35 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // Recovery net for missed SSE events: while the agent is running, verify
   // against the server periodically and whenever the tab returns to the
   // foreground or the network comes back.
+  // Metadata refreshes change completion callbacks. They must not restart the
+  // recovery clock, or a busy sidebar can postpone the first check forever.
+  const reconcileRunningAgent = useEffectEvent(() => {
+    const sid = sessionIdRef.current;
+    if (sid) void reconcileAgentState(sid);
+  });
+  const previousSessionRunningRef = useRef(opts.sessionRunning);
+  useEffect(() => {
+    const wasRunning = previousSessionRunningRef.current;
+    previousSessionRunningRef.current = opts.sessionRunning;
+    // The sidebar's authoritative running snapshot is an early completion
+    // signal, not permission to clear a newly submitted prompt. Confirm it
+    // through the same run-guarded runtime read before settling the composer.
+    if (wasRunning === true && opts.sessionRunning === false) reconcileRunningAgent();
+  }, [opts.sessionRunning]);
   useEffect(() => {
     if (!agentRunning) return;
-    const reconcile = () => {
-      // Read the ref on every tick: for brand-new sessions the id is
-      // assigned only after ensure_session returns.
-      const sid = sessionIdRef.current;
-      if (sid) void reconcileAgentState(sid);
-    };
     const onVisible = () => {
-      if (document.visibilityState === "visible") reconcile();
+      if (document.visibilityState === "visible") reconcileRunningAgent();
     };
-    const interval = setInterval(reconcile, AGENT_STATE_RECONCILE_MS);
+    const interval = setInterval(reconcileRunningAgent, AGENT_STATE_RECONCILE_MS);
     document.addEventListener("visibilitychange", onVisible);
-    window.addEventListener("online", reconcile);
+    window.addEventListener("online", reconcileRunningAgent);
     return () => {
       clearInterval(interval);
       document.removeEventListener("visibilitychange", onVisible);
-      window.removeEventListener("online", reconcile);
+      window.removeEventListener("online", reconcileRunningAgent);
     };
-  }, [agentRunning, reconcileAgentState]);
+  }, [agentRunning]);
 
   useEffect(() => {
     agentRunningRef.current = agentRunning;
@@ -1532,20 +1553,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         setRetryInfo(null);
         dispatch({ type: "end" });
         if (sessionIdRef.current) {
-          loadSession(sessionIdRef.current);
-          fetch(`/api/agent/${encodeURIComponent(sessionIdRef.current)}`)
-            .then((r) => r.json())
-            .then((d: { state?: AgentStateResponse }) => {
-              syncLiveModel(d.state);
-              if (d.state?.contextUsage !== undefined) setContextUsage(d.state.contextUsage ?? null);
-              if (d.state?.systemPrompt !== undefined) setSystemPrompt(d.state.systemPrompt ?? null);
-              if (d.state?.extensionStatuses !== undefined) setExtensionStatuses(d.state.extensionStatuses ?? []);
-              if (d.state?.extensionWidgets !== undefined) setExtensionWidgets(d.state.extensionWidgets ?? []);
-              // Aborted turns can leave messages queued in pi (delivered with the
-              // next turn); dead wrapper (no state) means the queue is gone.
-              setQueuedMessages(normalizeQueuedMessages(d.state?.queuedMessages));
-            })
-            .catch(() => {});
+          void loadSession(sessionIdRef.current);
+          void reconcileAgentState(sessionIdRef.current);
         }
         break;
       case "agent_settled": {
@@ -1584,6 +1593,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             settleUiStage();
             notifyPromptStage(runId);
             if (sid) scheduleEventStreamClose(sid);
+          } else if (sid) {
+            // prompt_done can survive a lost agent_settled event. Verify the
+            // runtime so its stale SDK flag cannot leave Stop visible; a real
+            // extension continuation still reports busy and stays active.
+            void reconcileAgentState(sid);
           }
         }
         break;
@@ -2724,7 +2738,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             setAgentPhase(agentState.state.isStreaming ? { kind: "waiting_model" } : { kind: "running_command" });
             dispatch({ type: "resume" });
             if (!agentState.state.isStreaming && agentState.state.isPromptRunning) {
-              void waitForPromptSettlement(session.id);
+              void waitForPromptSettlement(session.id, promptRunIdRef.current);
             }
           }
           if (agentState.state?.isBashRunning) {
