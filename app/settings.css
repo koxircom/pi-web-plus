@@ -1535,6 +1535,45 @@
   scrollbar-width: thin;
 }
 
+.settings-nav-group {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  margin-bottom: 8px;
+}
+
+.settings-nav-group-title {
+  display: flex;
+  align-items: center;
+  height: 20px;
+  padding: 0 8px;
+  margin-bottom: 2px;
+  font-size: 10.5px;
+  font-weight: 600;
+  color: var(--text-dim);
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  user-select: none;
+}
+
+.settings-nav-group-items {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+}
+
+.settings-dialog-surface.is-collapsed .settings-nav-group-title {
+  display: none;
+}
+
+.settings-dialog-surface.is-collapsed .settings-nav-group {
+  margin-bottom: 6px;
+  align-items: center;
+}
+
 .settings-dialog-surface.is-collapsed .settings-section-tabs {
   align-items: center;
   padding: 2px 0 8px 0;
@@ -1873,7 +1912,7 @@
   display: grid;
   gap: 16px;
   margin-top: 24px;
-  max-width: 720px;
+  max-width: 100%;
 }
 
 .settings-loading-skeleton > div {
@@ -1895,121 +1934,187 @@
 }
 
 .settings-general-maintenance-host {
-  margin-top: 24px;
+  margin-top: 20px;
 }
 
-.settings-general {
-  width: 100%;
-  max-height: 100%;
-  max-width: 680px;
-  padding: 26px clamp(18px, 4vw, 40px) 40px;
-  overflow-y: auto;
-}
-
-.settings-general-dashboard {
-  max-width: none;
-  scrollbar-gutter: stable;
-}
-
-.settings-general-dashboard > .settings-general-section,
-.settings-general-dashboard .settings-general-maintenance-host > .settings-general-section {
-  min-width: 0;
-  padding: 18px 20px;
-  background: color-mix(in srgb, var(--bg-panel) 65%, transparent);
+.settings-general-maintenance-host > .settings-general-section {
+  background: var(--bg-panel);
   border: 1px solid var(--border);
-  border-radius: 12px;
+  border-radius: 10px;
+  padding: 14px 16px;
+  margin-top: 16px;
+  box-sizing: border-box;
 }
 
-.settings-general-dashboard :is(.settings-theme-options, .settings-chat-options,
-  .settings-language-options, .settings-shell-option) {
-  max-width: none;
-}
-
-.settings-general-dashboard > [data-settings-area="signout"] {
-  display: flex;
-  justify-content: flex-end;
-  padding: 0;
-  background: transparent;
-  border: 0;
-}
-
-@media (max-width: 640px) {
-  .settings-general-title { display: none; }
-  .settings-general-dashboard .settings-theme-options {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
-}
-
-@container settings-main (min-width: 760px) {
-  .settings-general-dashboard {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    align-content: start;
-    align-items: start;
-    gap: 24px 28px;
-  }
-
-  .settings-general-dashboard > .settings-general-title,
-  .settings-general-dashboard > [data-settings-area="signout"],
-  .settings-general-dashboard > .settings-general-maintenance-host {
-    grid-column: 1 / -1;
-  }
-
-  .settings-general-dashboard > .settings-general-section,
-  .settings-general-dashboard > .settings-general-section:first-of-type,
-  .settings-general-dashboard > .settings-general-maintenance-host,
-  .settings-general-dashboard .settings-general-maintenance-host > .settings-general-section {
-    margin-top: 0;
-  }
-
-  .settings-general-dashboard > [data-settings-area="signout"] {
-    order: 1;
-  }
-
-  .settings-general-dashboard .settings-general-maintenance-host:not([hidden]) {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 28px;
-    align-items: start;
-  }
-}
-
-.settings-general-title {
-  margin: 0;
-  color: var(--text);
-  font-size: 18px;
-  font-weight: 700;
-}
-
-.settings-general-section {
-  margin-top: 30px;
-}
-
-.settings-general-section:first-of-type {
-  margin-top: 24px;
+.settings-general-maintenance-host > .settings-general-section:first-child {
+  margin-top: 0;
 }
 
 .settings-general-heading {
-  margin: 0 0 5px;
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin: 0 0 6px;
   color: var(--text);
   font-size: 13px;
-  font-weight: 650;
+  font-weight: 600;
+  line-height: 1.4;
 }
 
 .settings-general-description {
   margin: 0 0 12px;
   color: var(--text-dim);
-  font-size: 11px;
-  line-height: 1.5;
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+
+.settings-general-maintenance-host .pi-enh-service-actions-row {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.settings-general {
+  width: 100%;
+  max-height: 100%;
+  max-width: none;
+  padding: 20px clamp(16px, 3vw, 32px) 36px;
+  overflow-y: auto;
+  box-sizing: border-box;
+}
+
+.settings-general-title {
+  margin: 0 0 18px;
+  color: var(--text);
+  font-size: 16px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+
+.settings-general-section {
+  min-width: 0;
+}
+
+.settings-card {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+  margin-top: 18px;
+  box-sizing: border-box;
+}
+
+.settings-card:first-of-type {
+  margin-top: 0;
+}
+
+.settings-card-header {
+  padding: 10px 16px 8px;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+  background: color-mix(in srgb, var(--bg-panel) 85%, var(--bg));
+  box-sizing: border-box;
+}
+
+.settings-card-title {
+  margin: 0;
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.settings-card-body {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+}
+
+.settings-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 11px 16px;
+  min-height: 52px;
+  border-bottom: 1px solid color-mix(in srgb, var(--border) 60%, transparent);
+  box-sizing: border-box;
+}
+
+.settings-row:last-child {
+  border-bottom: none;
+}
+
+.settings-row-info {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding-right: 8px;
+}
+
+.settings-row-label {
+  display: block;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text);
+  line-height: 1.4;
+}
+
+.settings-row-description {
+  font-size: 11.5px;
+  color: var(--text-dim);
+  line-height: 1.45;
+  margin-top: 2px;
+}
+
+.settings-row-control {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  min-width: 140px;
+}
+
+.settings-row.is-switch-row .settings-row-control {
+  min-width: 0;
+  width: auto;
+  flex: 0 0 auto;
+}
+
+.settings-select {
+  height: 32px;
+  min-width: 150px;
+  max-width: 240px;
+  padding: 0 10px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 12px;
+  outline: none;
+  cursor: pointer;
+  transition: border-color 0.15s ease;
+  box-sizing: border-box;
+}
+
+.settings-select:focus-visible {
+  border-color: var(--accent);
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
 }
 
 .settings-theme-options {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 3px;
-  width: 100%;
-  max-width: 420px;
-  padding: 3px;
+  gap: 2px;
+  width: 276px;
+  max-width: 100%;
+  padding: 2px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  box-sizing: border-box;
 }
 
 .settings-theme-option {
@@ -2017,17 +2122,20 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 7px;
+  gap: 5px;
   min-width: 0;
-  min-height: 44px;
-  padding: 0 6px;
+  min-height: 28px;
+  height: 28px;
+  padding: 0 4px;
   border: 0;
-  border-radius: 5px;
+  border-radius: 4px;
   background: transparent;
   color: var(--text-muted);
   cursor: pointer;
-  font-size: 12px;
+  font-size: 11.5px;
   font-weight: 400;
+  user-select: none;
+  box-sizing: border-box;
 }
 
 .settings-theme-option:has(input:checked) {
@@ -2047,144 +2155,100 @@
 
 .settings-theme-option-label {
   min-width: 0;
-  overflow-wrap: anywhere;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .settings-chat-options {
   display: flex;
   flex-direction: column;
-  gap: 12px;
   width: 100%;
-  max-width: 420px;
 }
 
 .settings-chat-option {
-  width: 100%;
-  color: var(--text);
   font-size: 12px;
+  color: var(--text);
 }
 
-.settings-chat-switch-option {
+.settings-chat-range-control {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
+  width: 276px;
+  max-width: 100%;
+  box-sizing: border-box;
+}
+
+.settings-chat-range-track {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  min-height: 28px;
+  justify-content: flex-end;
+  gap: 6px;
 }
 
-.settings-chat-range-option {
-  padding: 0;
-}
-
-.settings-chat-range-header {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto 28px;
-  align-items: center;
-  gap: 8px;
-}
-
-.settings-chat-range-header output {
+.settings-chat-range-track output {
   color: var(--text-muted);
   font-family: var(--font-mono);
   font-size: 11px;
+  min-width: 44px;
+  text-align: right;
 }
 
 .settings-chat-reset {
-  width: 28px;
-  height: 28px;
+  width: 24px;
+  height: 24px;
   padding: 0;
+  flex-shrink: 0;
 }
 
-.settings-chat-range-option input {
+.settings-chat-range-control input[type="range"] {
   display: block;
   width: 100%;
-  margin-top: 2px;
+  margin: 2px 0 0;
   accent-color: var(--accent);
-}
-
-.settings-language-options {
-  display: flex;
-  flex-direction: column;
-  gap: 3px;
-  width: 100%;
-  max-width: 420px;
-}
-
-.settings-language-option {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  height: 44px;
-  padding: 0 10px;
-  border: 0;
-  border-radius: 5px;
-  background: transparent;
-  color: var(--text);
   cursor: pointer;
-  font-size: 12px;
-  text-align: left;
-}
-
-.settings-language-option[aria-checked="true"] {
-  background: var(--bg-selected);
-}
-
-.settings-language-option:not([aria-checked="true"]):hover,
-.settings-language-option:focus-visible {
-  background: var(--bg-hover);
-  outline: none;
-}
-
-.settings-language-radio {
-  display: grid;
-  flex-shrink: 0;
-  place-items: center;
-  width: 16px;
-  height: 16px;
-  border: 1px solid var(--border);
-  border-radius: 50%;
-}
-
-.settings-language-option[aria-checked="true"] .settings-language-radio {
-  border-color: var(--accent);
-}
-
-.settings-language-radio-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--accent);
-}
-
-.settings-language-label {
-  flex: 1;
-}
-
-.settings-language-code {
-  color: var(--text-dim);
-  font-family: var(--font-mono);
-  font-size: 10px;
-}
-
-.settings-shell-option {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  width: 100%;
-  max-width: 420px;
-  min-height: 44px;
-  padding: 0 10px;
-  border-radius: 5px;
-  background: var(--bg-panel);
-  color: var(--text);
-  font-size: 12px;
 }
 
 .settings-general-error {
-  margin: 8px 0 0;
+  margin: 6px 0 0;
   color: #ef4444;
   font-size: 11px;
+}
+
+@container settings-main (max-width: 580px) {
+  .settings-row:not(.is-switch-row) {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+    padding: 12px 14px;
+  }
+
+  .settings-row:not(.is-switch-row) .settings-row-control {
+    width: 100%;
+    min-width: 0;
+    justify-content: stretch;
+  }
+
+  .settings-row:not(.is-switch-row) .settings-select {
+    width: 100%;
+    max-width: 100%;
+  }
+
+  .settings-row:not(.is-switch-row) .settings-chat-range-control {
+    width: 100%;
+  }
+
+  .settings-theme-options {
+    width: 100%;
+  }
+}
+
+@container settings-main (max-width: 360px) {
+  .settings-theme-options {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 @media (max-width: 640px) {
@@ -2296,6 +2360,60 @@
 
   .settings-dialog-main {
     grid-column: 1 / -1;
+  }
+
+  .settings-general {
+    padding: 16px 14px 28px;
+  }
+
+  .settings-general-title {
+    display: none;
+  }
+
+  .settings-row:not(.is-switch-row) {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 8px;
+    padding: 12px 14px;
+  }
+
+  .settings-row:not(.is-switch-row) .settings-row-control {
+    width: 100%;
+    min-width: 0;
+    justify-content: stretch;
+  }
+
+  .settings-row:not(.is-switch-row) .settings-select {
+    width: 100%;
+    max-width: 100%;
+  }
+
+  .settings-row:not(.is-switch-row) .settings-chat-range-control {
+    width: 100%;
+  }
+
+  .settings-row.is-switch-row {
+    flex-direction: row;
+    align-items: center;
+    justify-content: space-between;
+    gap: 16px;
+  }
+
+  .settings-row.is-switch-row .settings-row-info {
+    flex: 1 1 auto;
+    min-width: 0;
+    padding-right: 0;
+  }
+
+  .settings-row.is-switch-row .settings-row-control {
+    flex: 0 0 auto;
+    min-width: 0;
+    width: auto;
+    justify-content: flex-end;
+  }
+
+  .settings-theme-options {
+    width: 100%;
   }
 }
 

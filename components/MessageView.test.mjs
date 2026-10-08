@@ -468,3 +468,51 @@ test("native peer mail starts collapsed with a useful subject and keeps ordinary
   assert.match(ordinary, /普通扩展消息正文/);
   assert.doesNotMatch(ordinary, /data-peer-mail/);
 });
+
+test("renders dedicated empty speed host grouped with model label and title ellipsis", () => {
+  const message = {
+    role: "assistant",
+    provider: "gateway",
+    model: "claude-sonnet-5",
+    timestamp: Date.now(),
+    content: [{ type: "text", text: "模型回答正文" }],
+  };
+  const html = renderMessage(message);
+  // 正例：必须渲染 data-pi-model-speed-host 且内容为空（由插件独占）
+  assert.match(html, /data-pi-model-speed-host=""/);
+  assert.match(html, /<span data-pi-model-speed-host=""[^>]*><\/span>/);
+  // 模型名在小组内，具有完整的 title 和截断样式
+  assert.match(html, /title="gateway\/claude-sonnet-5"/);
+  assert.match(html, /text-overflow:ellipsis/);
+  // 模型名和 host 位于同一 inline-flex 容器
+  const modelIdx = html.indexOf('gateway/claude-sonnet-5');
+  const hostIdx = html.indexOf('data-pi-model-speed-host');
+  assert.ok(modelIdx > 0 && hostIdx > modelIdx, "speed host must follow model name immediately");
+});
+
+test("omits model speed host and label when provider is absent", () => {
+  const message = {
+    role: "assistant",
+    timestamp: Date.now(),
+    content: [{ type: "text", text: "无 provider 消息" }],
+  };
+  const html = renderMessage(message);
+  // 反例：无 provider 消息绝不渲染 speed host
+  assert.doesNotMatch(html, /data-pi-model-speed-host/);
+});
+
+test("preserves streaming token estimates while retiring native old tps span", () => {
+  const message = {
+    role: "assistant",
+    provider: "gateway",
+    model: "claude-sonnet-5",
+    timestamp: Date.now(),
+    content: [{ type: "text", text: "流式输出部分文本" }],
+  };
+  const html = renderMessage(message, { isStreaming: true });
+  assert.match(html, /data-pi-model-speed-host=""/);
+  // 确认旧原生 tps 不再渲染
+  assert.doesNotMatch(html, /\d+\.\d+\s+t\/s/);
+  assert.doesNotMatch(html, /#53b3cb|#9bc53d|#f9c22e|#e01a4f/);
+});
+

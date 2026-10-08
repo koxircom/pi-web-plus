@@ -8,6 +8,14 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
+const bootstrapRequire = createRequire(import.meta.url);
+try {
+  const { prepareWindowsShellEnvironment } = bootstrapRequire("./windows-shells.cjs");
+  prepareWindowsShellEnvironment();
+} catch (error) {
+  console.warn("[pi-web] Failed to prepare Windows shell environment:", error);
+}
+
 function sha256Hex(bufferOrString) {
   return crypto.createHash("sha256").update(bufferOrString).digest("hex");
 }

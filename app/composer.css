@@ -170,31 +170,37 @@ body:has(.settings-dialog-backdrop, .settings-dialog-surface, [role="dialog"][ar
   max-width: min(100%, 34vw);
   flex-shrink: 0;
 }
-.chat-composer-card .chat-composer-mode-chip {
+/* Mode and model controls share one size and interaction treatment. */
+.chat-composer-card .chat-composer-control-capsule {
   display: inline-flex;
   align-items: center;
-  justify-content: flex-start;
-  gap: 6px;
-  height: 28px;
-  padding: 0 9px;
+  height: 24px;
   box-sizing: border-box;
-  color: var(--text);
-  background: color-mix(in srgb, var(--text) 10%, transparent);
+  font: inherit;
+  font-size: 12px;
+  line-height: 1;
+  background: transparent;
   border: 1px solid transparent;
   border-radius: 999px;
-  font: inherit;
-  font-size: 13px;
-  line-height: 1;
-  white-space: nowrap;
-  cursor: pointer;
-  transition: background-color 0.12s ease;
+  transition: background-color 0.12s, border-color 0.12s;
 }
-.chat-composer-card .chat-composer-mode-chip:hover {
-  background: color-mix(in srgb, var(--text) 15%, transparent);
+.chat-composer-card .chat-composer-control-capsule:hover,
+.chat-composer-card .chat-composer-control-capsule:has(button[aria-expanded="true"]) {
+  background: var(--bg-hover);
+  border-color: var(--border);
 }
-.chat-composer-card .chat-composer-mode-chip:focus-visible {
+.chat-composer-card .chat-composer-control-capsule:focus-visible,
+.chat-composer-card .chat-composer-control-capsule:has(button:focus-visible) {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
+}
+.chat-composer-card .chat-composer-mode-chip {
+  justify-content: flex-start;
+  gap: 6px;
+  padding: 0 7px;
+  color: var(--text);
+  white-space: nowrap;
+  cursor: pointer;
 }
 .chat-composer-card .chat-composer-mode-chip svg {
   display: block;
@@ -260,26 +266,9 @@ body:has(.settings-dialog-backdrop, .settings-dialog-surface, [role="dialog"][ar
   grid-row: 3;
   justify-self: end;
   align-self: center;
-  display: inline-flex;
-  align-items: center;
   gap: 0;
   min-width: 0;
-  height: 24px;
-  box-sizing: border-box;
   padding: 0 2px;
-  background: transparent;
-  border: 1px solid transparent;
-  border-radius: 999px;
-  transition: background-color 0.12s, border-color 0.12s;
-}
-.chat-composer-card .chat-composer-model-controls:hover,
-.chat-composer-card .chat-composer-model-controls:has(button[aria-expanded="true"]) {
-  background: var(--bg-hover);
-  border-color: var(--border);
-}
-.chat-composer-card .chat-composer-model-controls:has(button:focus-visible) {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
 }
 .chat-composer-card .chat-composer-model-controls .model-selector {
   display: inline-flex;

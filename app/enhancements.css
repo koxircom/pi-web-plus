@@ -2136,11 +2136,11 @@
     }
 
     /* 编辑状态下：严禁强行显示模型名字，隐藏置顶图钉与标签徽标以提供最大输入空间 */
-    .pi-enh-session-row-host:has(input) .pi-enh-session-model-badge,
+    .pi-enh-session-row-host:has(input:not([type="checkbox"])) .pi-enh-session-model-badge,
     .pi-enh-session-row-host[data-pi-enh-editing="true"] .pi-enh-session-model-badge,
-    .pi-enh-session-row-host:has(input) .pi-enh-session-pinned-indicator,
+    .pi-enh-session-row-host:has(input:not([type="checkbox"])) .pi-enh-session-pinned-indicator,
     .pi-enh-session-row-host[data-pi-enh-editing="true"] .pi-enh-session-pinned-indicator,
-    .pi-enh-session-row-host:has(input) .pi-enh-session-tags-row,
+    .pi-enh-session-row-host:has(input:not([type="checkbox"])) .pi-enh-session-tags-row,
     .pi-enh-session-row-host[data-pi-enh-editing="true"] .pi-enh-session-tags-row {
       display: none !important;
     }
@@ -2444,7 +2444,7 @@
        Odoo 插件更新状态胶囊药丸 (Odoo Addon Update Badges)
        纯白外框、圆形胶囊药丸、纯白字体、底纹微光发光质感
        ========================================== */
-    .pi-enh-session-row-host:has(input) .pi-enh-session-odoo-addons,
+    .pi-enh-session-row-host:has(input:not([type="checkbox"])) .pi-enh-session-odoo-addons,
     .pi-enh-session-row-host[data-pi-enh-editing="true"] .pi-enh-session-odoo-addons {
       display: none !important;
     }
@@ -5024,7 +5024,7 @@
     }
 
     /* 快捷操作动作栏与双重保险 (Quick Actions & Fallback Trigger) */
-    button[data-pi-enh-quick-reply],
+    [data-pi-native-composer-layout] button[data-pi-enh-quick-reply],
     .pi-enh-cursor-composer button.pi-enh-cursor-send[data-pi-enh-quick-reply] {
       background: var(--accent, #a5c4f2) !important;
       color: var(--bg, #18181b) !important;
@@ -5046,7 +5046,7 @@
       justify-content: center !important;
       opacity: 1 !important;
     }
-    button[data-pi-enh-quick-reply]::before,
+    [data-pi-native-composer-layout] button[data-pi-enh-quick-reply]::before,
     .pi-enh-cursor-composer button.pi-enh-cursor-send[data-pi-enh-quick-reply]::before {
       display: none !important;
       content: none !important;
@@ -6816,3 +6816,26 @@
       overscroll-behavior-y: auto !important;
       -webkit-overflow-scrolling: touch !important;
     }
+
+    /* 助手消息模型速度宿主与徽标 (Model Generation Speed Host & Badge) */
+    [data-pi-model-speed-host] {
+      display: inline-flex;
+      align-items: center;
+      flex-shrink: 0;
+      white-space: nowrap;
+    }
+
+    [data-pi-model-speed-host]:empty {
+      display: none !important;
+    }
+
+    .pi-enh-model-speed {
+      display: inline-flex;
+      align-items: center;
+      flex-shrink: 0;
+      white-space: nowrap;
+      font-size: 11px;
+      font-weight: 400;
+      line-height: 1.2;
+    }
+

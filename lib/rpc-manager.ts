@@ -12,7 +12,8 @@ import { resolveVisibleModels, selectInitialModelScope } from "./model-scope";
 import {
   createProjectCommandBashExtension,
   createProjectCommandBashOperations,
-  preferUserBashExtension,
+  createProjectCommandPowerShellExtension,
+  preferUserShellExtensions,
 } from "./project-command-env";
 import { cacheSessionPath, getLatestModelChange, invalidateSessionListCache, readLatestSessionEntryId, resolveSessionPath } from "./session-reader";
 import { getProjectTrustStatus, projectTrustReloadOptions } from "./project-trust";
@@ -276,9 +277,11 @@ export function resolveActiveToolNames(
 
   const codingToolNames = new Set(CODING_TOOL_NAMES);
   const registered = new Map(session.getAllTools().map((tool) => [tool.name, tool]));
+  const shellPath = session.settingsManager.getShellPath();
   const selectedToolNames = resolveShellTools(
     requested.filter((name) => codingToolNames.has(name)),
     session.settingsManager.getDefaultTools(),
+    { shellPath },
   );
   const carriedToolNames = carry.filter((name) => {
     const tool = registered.get(name);
@@ -2685,7 +2688,26 @@ export async function startRpcSession(
                 }
               : {}),
             appendSystemPrompt: subagentResources.appendSystemPrompt,
-            ...(usesExactSystemPrompt ? { extensionFactories: [exactSystemPromptExtension] } : {}),
+            extensionFactories: [
+              ...(!chatOnly
+                ? [
+                    createProjectCommandBashExtension({
+                      cwd: sessionCwd,
+                      settings: settingsManager,
+                    }),
+                    ...(process.platform === "win32"
+                      ? [
+                          createProjectCommandPowerShellExtension({
+                            cwd: sessionCwd,
+                            settings: settingsManager,
+                          }),
+                        ]
+                      : []),
+                  ]
+                : []),
+              ...(usesExactSystemPrompt ? [exactSystemPromptExtension] : []),
+            ],
+            ...(!chatOnly ? { extensionsOverride: (base) => preferUserShellExtensions(base) } : {}),
           }
         : chatOnly
           ? { ...CHAT_ONLY_RESOURCE_LOADER_OPTIONS, extensionFactories: [exactSystemPromptExtension] }
@@ -2698,13 +2720,21 @@ export async function startRpcSession(
                 cwd: sessionCwd,
                 settings: settingsManager,
               }),
+              ...(process.platform === "win32"
+                ? [
+                    createProjectCommandPowerShellExtension({
+                      cwd: sessionCwd,
+                      settings: settingsManager,
+                    }),
+                  ]
+                : []),
               createSubagentExtension(
                 SUBAGENT_CONTROLLER.extensionRuntime,
                 () => listSubagentProfiles(sessionCwd),
                 isBuiltInSubagentsEnabled,
               ),
             ],
-            extensionsOverride: (base) => preferUserBashExtension(preferPiWebSubagentExtension(base)),
+            extensionsOverride: (base) => preferUserShellExtensions(preferPiWebSubagentExtension(base)),
           },
       ...(trustReloadOptions ? { resourceLoaderReloadOptions: trustReloadOptions } : {}),
     });

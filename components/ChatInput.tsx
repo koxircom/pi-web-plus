@@ -296,7 +296,7 @@ function NativeComposerModeControls({ onModeChange }: { onModeChange: (mode: Com
         <div className="chat-composer-mode-status" data-mode={snapshot.mode}>
           <button
             type="button"
-            className="chat-composer-mode-chip"
+            className="chat-composer-mode-chip chat-composer-control-capsule"
             aria-label={`退出${modeLabel}模式`}
             title={`退出${modeLabel}模式`}
             onClick={exitMode}
@@ -2813,7 +2813,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
               marginLeft: isMobile ? 0 : "auto",
             }}
           >
-            <div className={isCodexActive ? "chat-composer-model-controls" : undefined} style={!isCodexActive ? { display: "flex", alignItems: "center", gap: 2 } : undefined}>
+            <div className={isCodexActive ? "chat-composer-model-controls chat-composer-control-capsule" : undefined} style={!isCodexActive ? { display: "flex", alignItems: "center", gap: 2 } : undefined}>
             {/* Codex 模式下模型选择器位于 Row 3 倒数第 4 列 */}
             {isCodexActive && (modelsLoading || modelOptions.length > 0 || model || modelError) && onModelChange && (
               <ModelSelector

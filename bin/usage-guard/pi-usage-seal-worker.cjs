@@ -25,8 +25,8 @@ function acquireLock(lockFile, timeoutMs = 8000) {
   return acquireUsageLock(lockFile, { timeoutMs });
 }
 
-function releaseLock(lockFile) {
-  releaseUsageLock(lockFile);
+function releaseLock(lockFile, fd = null) {
+  releaseUsageLock(lockFile, fd);
 }
 
 function parseFirstLineJson(filePath) {
@@ -46,7 +46,11 @@ function parseFirstLineJson(filePath) {
 async function main() {
   let rawInput = "";
   try {
-    rawInput = fs.readFileSync(0, "utf8");
+    const chunks = [];
+    for await (const chunk of process.stdin) {
+      chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
+    }
+    rawInput = Buffer.concat(chunks).toString("utf8");
   } catch (err) {
     console.error("[pi-usage-seal-worker] Failed to read from stdin:", err.message);
     process.exit(1);
@@ -152,8 +156,9 @@ async function main() {
 
   // 2. 独占锁竞争
   const lockTimeoutMs = typeof payload.lockTimeoutMs === "number" ? payload.lockTimeoutMs : 8000;
+  let lockFd = null;
   try {
-    acquireLock(lockFile, lockTimeoutMs);
+    lockFd = acquireLock(lockFile, lockTimeoutMs);
   } catch (err) {
     console.error(`[pi-usage-seal-worker] Failed to acquire lock ${lockFile}: ${err.message}`);
     process.exit(1);
@@ -210,14 +215,17 @@ async function main() {
     atomicWrite(stateFile, state);
     atomicWrite(outputFile, ledger);
 
-    releaseLock(lockFile);
+    releaseLock(lockFile, lockFd);
     locked = false;
+    lockFd = null;
 
     process.stdout.write(JSON.stringify({ ok: true, version: GUARD_VERSION, targets: fingerprints }));
     process.exit(0);
   } catch (err) {
     if (locked) {
-      releaseLock(lockFile);
+      releaseLock(lockFile, lockFd);
+      locked = false;
+      lockFd = null;
     }
     console.error(`[pi-usage-seal-worker] Seal failed: ${err.message}`);
     process.exit(1);

@@ -147,8 +147,8 @@ test("offers five palettes and system theme selection with native radios", () =>
 
 test("keeps language selection in General settings", () => {
   assert.match(panelSource, /t\("common\.language"\)/);
-  assert.match(panelSource, /className="settings-language-options"/);
-  assert.match(panelSource, /setLocale\(plugin\.id/);
+  assert.match(panelSource, /className="settings-select settings-language-select"/);
+  assert.match(panelSource, /setLocale\(event\.target\.value/);
 });
 
 test("groups chat display controls together without row backgrounds", () => {
@@ -266,4 +266,46 @@ test("enforces safe resizing lifecycle: no animating timers, pointercancel rever
   // 4. activateSection verifies target availability
   assert.match(panelSource, /if \(!target\) return false;/);
   assert.match(panelSource, /if \(target\.requiresProject && !cwd(?:Ref\.current)?\) return false;/);
+});
+
+test("groups navigation sections into three categories on sidebar and mobile picker", () => {
+  assert.match(panelSource, /SETTINGS_NAV_GROUPS/);
+  assert.match(panelSource, /<optgroup key=\{group\.id\} label=\{group\.label\}>/);
+  assert.match(panelSource, /className="settings-nav-group"/);
+  assert.match(panelSource, /className="settings-nav-group-title"/);
+});
+
+test("renders compact cards and unified settings rows in General settings", () => {
+  assert.match(panelSource, /className="settings-general-section settings-card"/);
+  assert.match(panelSource, /className="settings-card-header"/);
+  assert.match(panelSource, /className="settings-card-title"/);
+  assert.match(panelSource, /className="settings-chat-option settings-row"/);
+  assert.match(panelSource, /className="settings-row-control settings-chat-range-control"/);
+});
+
+test("nav groups and system permissions use dedicated dictionary keys without uppercase drift", () => {
+  assert.match(panelSource, /titleKey: "settings\.groupGeneral"/);
+  assert.match(panelSource, /titleKey: "settings\.groupAgents"/);
+  assert.match(panelSource, /titleKey: "settings\.groupData"/);
+  assert.match(panelSource, /t\("settings\.systemPermissions"\)/);
+  assert.doesNotMatch(panelSource, /locale\.startsWith\("zh"\)/);
+});
+
+test("general styles enforce full main width, 276px themes, switch row sizing and maintenance host styles", () => {
+  // 1. General full main width without decorative 820px clamp
+  assert.match(cssSource, /\.settings-general\s*\{[\s\S]*?max-width:\s*none;/);
+
+  // 2. Switch row control retains compact width
+  assert.match(cssSource, /\.settings-row\.is-switch-row\s+\.settings-row-control\s*\{[\s\S]*?min-width:\s*0;/);
+
+  // 3. ThemeOptions widened to ~276px and responsive via container query
+  assert.match(cssSource, /\.settings-theme-options\s*\{[\s\S]*?width:\s*276px;/);
+  assert.match(cssSource, /@container\s+settings-main/);
+
+  // 4. Nav group title no uppercase drift
+  assert.doesNotMatch(cssSource, /\.settings-nav-group-title\s*\{[^}]*text-transform:\s*uppercase;/);
+
+  // 5. Restored maintenance host shared headings and descriptions
+  assert.match(cssSource, /\.settings-general-heading\s*\{/);
+  assert.match(cssSource, /\.settings-general-description\s*\{/);
 });

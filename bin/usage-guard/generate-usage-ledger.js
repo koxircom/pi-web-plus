@@ -34,6 +34,9 @@ function atomicWrite(file, value) {
     } catch (_) {}
     throw err;
   }
+  if (process.platform === "win32") {
+    return;
+  }
   try {
     const dirFd = fs.openSync(dir, "r");
     try {
@@ -168,8 +171,8 @@ function acquireLock(lockFile) {
   return acquireUsageLock(lockFile, { timeoutMs: 8000 });
 }
 
-function releaseLock(lockFile) {
-  releaseUsageLock(lockFile);
+function releaseLock(lockFile, fd = null) {
+  releaseUsageLock(lockFile, fd);
 }
 
 function readState(file) {
@@ -593,7 +596,7 @@ async function generateUsageLedger(options = {}) {
   const lockFile = resolvedPaths.lockFile;
   const root = options.sessionsRoot || process.env.PI_SESSIONS_DIR || path.join(agentDir, "sessions");
 
-  acquireLock(lockFile);
+  const lockFd = acquireLock(lockFile);
   try {
     let oldState = null;
     if (fs.existsSync(stateFile)) {
@@ -670,7 +673,7 @@ async function generateUsageLedger(options = {}) {
     console.log(`[usage] ${source}: ${files.length} files, ${Object.keys(state.events).length} retained events; ${ledger.totals.totalTokens} tokens`);
     return { state, ledger };
   } finally {
-    releaseLock(lockFile);
+    releaseLock(lockFile, lockFd);
   }
 }
 

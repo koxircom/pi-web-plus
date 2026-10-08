@@ -307,13 +307,6 @@
   }
   window.__PI_ENH_KNOWN_STEP_SPEEDS__ = knownStepSpeeds;
 
-  function findAssistantHeader(msg) {
-    if (!msg) return null;
-    const firstChild = msg.firstElementChild;
-    if (firstChild && firstChild.querySelector && firstChild.querySelector("span")) return firstChild;
-    return msg.querySelector('div[style*="font-size: 11px"], div[style*="fontSize: 11px"]');
-  }
-
   function modelSpeedColor(tps) {
     if (tps >= 50) return "#0369a1";
     if (tps >= 30) return "#3f6212";
@@ -322,44 +315,52 @@
   }
 
   function upsertModelSpeedBadge(msg, metrics) {
-    const header = findAssistantHeader(msg);
-    if (!header) return;
-    let badge = header.querySelector(".pi-enh-model-speed");
+    if (!msg || typeof msg.querySelectorAll !== "function") return;
+    const hosts = msg.querySelectorAll('[data-pi-model-speed-host]');
+    if (!hosts || hosts.length === 0) return;
 
-    // Only completed steps with provider usage and reliable timestamps qualify.
-    if (!metrics || !(metrics.tps > 0)) {
-      if (badge) badge.remove();
-      return;
+    for (let h = 0; h < hosts.length; h++) {
+      const host = hosts[h];
+      const badges = host.querySelectorAll(".pi-enh-model-speed");
+      let badge = badges[0] || null;
+      for (let i = 1; i < badges.length; i++) {
+        badges[i].remove();
+      }
+
+      // Only completed steps with provider usage and reliable timestamps qualify.
+      if (!metrics || !(metrics.tps > 0)) {
+        if (badge) badge.remove();
+        continue;
+      }
+
+      const tps = Math.max(0, metrics.tps);
+      const text = `${tps.toFixed(1)} t/s`;
+      const isLive = Boolean(metrics.live);
+      const title = isLive
+        ? `运行中实时平均速度：${tps.toFixed(1)} t/s（当前供应商输出 Tokens ÷ 本次模型请求已用时间）`
+        : `已完成单步端到端平均速度：${tps.toFixed(1)} t/s（供应商输出 Tokens ÷ 请求总耗时）`;
+      const bg = modelSpeedColor(tps);
+
+      if (!badge) {
+        badge = document.createElement("span");
+        badge.className = "pi-enh-model-speed";
+        badge.style.padding = "1px 6px";
+        badge.style.borderRadius = "4px";
+        badge.style.color = "#fff";
+        badge.style.fontSize = "11px";
+        badge.style.fontWeight = "400";
+        badge.style.display = "inline-flex";
+        badge.style.alignItems = "center";
+        badge.style.cursor = "default";
+        host.appendChild(badge);
+      }
+
+      if (badge.textContent !== text) badge.textContent = text;
+      if (badge.style.background !== bg) badge.style.background = bg;
+      if (badge.getAttribute("title") !== title) badge.setAttribute("title", title);
+      badge.setAttribute("data-live", isLive ? "true" : "false");
+      badge.setAttribute("data-output-tokens", String(Math.round(metrics.output || 0)));
     }
-
-    const tps = Math.max(0, metrics.tps);
-    const text = `${tps.toFixed(1)} t/s`;
-    const isLive = Boolean(metrics.live);
-    const title = isLive
-      ? `运行中实时平均速度：${tps.toFixed(1)} t/s（当前供应商输出 Tokens ÷ 本次模型请求已用时间）`
-      : `已完成单步端到端平均速度：${tps.toFixed(1)} t/s（供应商输出 Tokens ÷ 请求总耗时）`;
-    const bg = modelSpeedColor(tps);
-
-    if (!badge) {
-      badge = document.createElement("span");
-      badge.className = "pi-enh-model-speed";
-      badge.style.marginLeft = "4px";
-      badge.style.padding = "1px 6px";
-      badge.style.borderRadius = "4px";
-      badge.style.color = "#fff";
-      badge.style.fontSize = "11px";
-      badge.style.fontWeight = "400";
-      badge.style.display = "inline-flex";
-      badge.style.alignItems = "center";
-      badge.style.cursor = "default";
-      header.appendChild(badge);
-    }
-
-    if (badge.textContent !== text) badge.textContent = text;
-    if (badge.style.background !== bg) badge.style.background = bg;
-    if (badge.getAttribute("title") !== title) badge.setAttribute("title", title);
-    badge.setAttribute("data-live", isLive ? "true" : "false");
-    badge.setAttribute("data-output-tokens", String(Math.round(metrics.output || 0)));
   }
 
   function getMessageEntryId(el) {

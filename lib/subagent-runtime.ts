@@ -35,7 +35,13 @@ import { buildSubagentPromptPlan } from "./subagent-prompt";
 import { createExactSystemPromptExtension } from "./exact-system-prompt";
 import { appendSubagentInputFiles, loadSubagentInputFiles } from "./subagent-input";
 import { projectTrustReloadOptions } from "./project-trust";
-import { resolveShellTools } from "./powershell-settings";
+import { resolveShellTools, type ShellAvailability } from "./powershell-settings";
+import {
+  createProjectCommandBashExtension,
+  createProjectCommandPowerShellExtension,
+  isHostShellExtensionPath,
+  preferUserShellExtensions,
+} from "./project-command-env";
 import { isBuiltInSubagentsEnabled, readSubagentSettings } from "./subagent-settings";
 import { SubagentQueue } from "./subagent-queue";
 import { addWorktree, removeWorktree } from "./worktree";
@@ -201,6 +207,36 @@ async function cleanupWorktree(
   }
 }
 
+export function resolveSubagentActiveTools(options: {
+  profileTools: readonly string[];
+  loadExtensions: boolean;
+  extensionTools?: readonly string[];
+  extensions: readonly { path: string; sourceInfo?: { source?: string }; tools: Map<string, unknown> }[];
+  defaultTools?: readonly string[];
+  shellPath?: string;
+  platform?: NodeJS.Platform;
+  availability?: ShellAvailability;
+}): string[] {
+  const userExtensions = options.extensions.filter(
+    (extension) => !isHostShellExtensionPath(extension.path),
+  );
+  const extensionToolNames = options.loadExtensions
+    ? options.extensionTools?.length
+      ? selectSubagentExtensionTools(userExtensions, options.extensionTools)
+      : userExtensions.flatMap((extension) => [...extension.tools.keys()])
+    : [];
+
+  return resolveShellTools(
+    withSubagentExtensionTools(options.profileTools, extensionToolNames),
+    options.defaultTools,
+    {
+      shellPath: options.shellPath,
+      platform: options.platform,
+      availability: options.availability,
+    },
+  );
+}
+
 export function createSubagentController(
   dependencies: SubagentRuntimeDependencies,
 ): SubagentController {
@@ -260,6 +296,22 @@ export function createSubagentController(
       });
       const { chatOnly, appendSystemPrompt, delegatedTask } = promptPlan;
       if (!chatOnly) initTheme();
+      const hostExecutionAdapters = !chatOnly
+        ? [
+            createProjectCommandBashExtension({
+              cwd: childCwd,
+              settings: settingsManager,
+            }),
+            ...(process.platform === "win32"
+              ? [
+                  createProjectCommandPowerShellExtension({
+                    cwd: childCwd,
+                    settings: settingsManager,
+                  }),
+                ]
+              : []),
+          ]
+        : [];
       const services = await createAgentSessionServices({
         cwd: childCwd,
         agentDir,
@@ -279,24 +331,27 @@ export function createSubagentController(
             : {}),
           appendSystemPrompt,
           // The exact prompt is sent through before_agent_start; see lib/exact-system-prompt.ts.
-          ...(promptPlan.exactSystemPrompt !== undefined
-            ? { extensionFactories: [createExactSystemPromptExtension(() => promptPlan.exactSystemPrompt)] }
-            : {}),
+          extensionFactories: [
+            ...hostExecutionAdapters,
+            ...(promptPlan.exactSystemPrompt !== undefined
+              ? [createExactSystemPromptExtension(() => promptPlan.exactSystemPrompt)]
+              : []),
+          ],
+          extensionsOverride: (base) => preferUserShellExtensions(base),
         },
         ...((profile.loadExtensions || profile.loadSkills)
           ? { resourceLoaderReloadOptions: projectTrustReloadOptions(childCwd, agentDir) }
           : {}),
       });
 
-      const extensionToolNames = profile.loadExtensions
-        ? profile.extensionTools?.length
-          ? selectSubagentExtensionTools(services.resourceLoader.getExtensions().extensions, profile.extensionTools)
-          : services.resourceLoader.getExtensions().extensions.flatMap((extension) => [...extension.tools.keys()])
-        : [];
-      const activeTools = resolveShellTools(
-        withSubagentExtensionTools(profile.tools, extensionToolNames),
-        settingsManager.getDefaultTools(),
-      );
+      const activeTools = resolveSubagentActiveTools({
+        profileTools: profile.tools,
+        loadExtensions: profile.loadExtensions,
+        extensionTools: profile.extensionTools,
+        extensions: services.resourceLoader.getExtensions().extensions,
+        defaultTools: settingsManager.getDefaultTools(),
+        shellPath: settingsManager.getShellPath(),
+      });
 
       const sessionManager = isolatedWorktree
         ? SessionManager.create(childCwd, undefined, { parentSession: parent.sessionFile })

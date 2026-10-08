@@ -210,13 +210,19 @@ export function NewSessionBrandHeader({
           <NewSessionUpdateLink label={getReleaseLabel} updateData={updateData} installedVersion={appVersion} />
           </div>
           <div data-pi-element="pi-version-row" style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 6, minWidth: 0, maxWidth: "100%" }}>
-            <span
+            <a
+              href="https://pi.dev/"
+              target="_blank"
+              rel="noopener noreferrer"
               data-pi-element="pi-version"
-              title={`当前已安装的 Pi Agent 版本：v${piVersion}`}
-              style={{ fontSize: 11, color: "var(--text-muted)", whiteSpace: "nowrap", flexShrink: 0 }}
+              title={`当前已安装的 Pi Agent 版本：v${piVersion}；打开 Pi Agent 官方网站`}
+              aria-label={`Pi Agent 当前版本 v${piVersion}，在新标签页打开官方网站`}
+              style={{ fontSize: 11, color: "var(--text-muted)", whiteSpace: "nowrap", flexShrink: 0, textDecoration: "none", cursor: "pointer", transition: "opacity 0.15s" }}
+              onMouseEnter={(e) => (e.currentTarget.style.opacity = "0.75")}
+              onMouseLeave={(e) => (e.currentTarget.style.opacity = "1")}
             >
               pi <span style={{ color: "var(--text)" }}>v{piVersion}</span>
-            </span>
+            </a>
             {piRelease?.latestVersion && piRelease.releaseUrl && isNewerReleaseVersion(piRelease.latestVersion, piVersion) ? (
               <a
                 href={piRelease.releaseUrl}

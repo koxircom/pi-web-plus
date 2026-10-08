@@ -2399,7 +2399,7 @@
   function renderSessionModelLabel(row, metadata) {
     const existing = row.querySelector(".pi-enh-session-model-badge");
     // 关键守卫：若当前行处于编辑状态（包含 input 或标记为 editing），严禁强行显示模型名字
-    if (row.querySelector("input") || row.getAttribute("data-pi-enh-editing") === "true") {
+    if (row.querySelector('input:not([type="checkbox"])') || row.getAttribute("data-pi-enh-editing") === "true") {
       existing?.remove();
       return;
     }
@@ -4326,7 +4326,7 @@
     if (!row || !sessionId) return;
 
     // 行内重命名守卫：处于编辑状态时隐藏标签
-    if (!isPluginEnabled("session-tags") || row.querySelector("input") || row.getAttribute("data-pi-enh-editing") === "true") {
+    if (!isPluginEnabled("session-tags") || row.querySelector('input:not([type="checkbox"])') || row.getAttribute("data-pi-enh-editing") === "true") {
       row.querySelector(".pi-enh-session-tags-row")?.remove();
       row.removeAttribute("data-pi-enh-has-tags");
       return;
@@ -14990,7 +14990,7 @@
   // 会话行内重命名焦点与失焦自愈联动：聚焦即刻隐藏模型徽标，失焦即刻精准恢复
   addManagedListener(document, "focusin", (event) => {
     const input = event.target;
-    if (input?.tagName === "INPUT" && input.closest?.(".pi-enh-session-row-host")) {
+    if (input?.tagName === "INPUT" && input.type === "text" && input.closest?.(".pi-enh-session-row-host")) {
       const row = input.closest(".pi-enh-session-row-host");
       row?.setAttribute("data-pi-enh-editing", "true");
       row?.querySelector(".pi-enh-session-model-badge")?.remove();
@@ -15008,7 +15008,7 @@
   // 2. 当用户在会话名称输入框按下回车提交空文本时，阻止清空、弹出温和提示并自动恢复原标题
   addManagedListener(document, "keydown", (event) => {
     const input = event.target;
-    if (input?.tagName !== "INPUT" || !input.closest?.(".pi-enh-session-row-host")) return;
+    if (input?.tagName !== "INPUT" || input.type !== "text" || !input.closest?.(".pi-enh-session-row-host")) return;
 
     // 1. Ctrl+Z / Cmd+Z 一键还原初始标题文本
     if ((event.ctrlKey || event.metaKey) && (event.key === "z" || event.key === "Z") && !event.shiftKey) {
@@ -15066,7 +15066,7 @@
 
   addManagedListener(document, "focusout", (event) => {
     const input = event.target;
-    if (input?.tagName === "INPUT" && input.closest?.(".pi-enh-session-row-host")) {
+    if (input?.tagName === "INPUT" && input.type === "text" && input.closest?.(".pi-enh-session-row-host")) {
       const row = input.closest(".pi-enh-session-row-host");
       const rawVal = input.value || "";
       if (!rawVal.trim()) {
@@ -15091,7 +15091,7 @@
       }
 
       setTimeout(() => {
-        if (row && !row.querySelector("input")) {
+        if (row && !row.querySelector('input:not([type="checkbox"])')) {
           row.removeAttribute("data-pi-enh-editing");
         }
         if (typeof syncSessionModelLabels === "function") syncSessionModelLabels();
@@ -19537,8 +19537,17 @@
     return true;
   }
 
+  function isNativeComposerLayoutButton(button) {
+    if (!button || typeof button.closest !== "function") return false;
+    const layout = button.closest("[data-pi-native-composer-layout]");
+    if (!layout) return false;
+    if (button.closest(".pi-native-ask-host, .pi-native-ask-card")) return false;
+    return true;
+  }
+
   function isNativeComposerSendButton(button) {
     if (!button || button.disabled) return false;
+    if (!isNativeComposerLayoutButton(button)) return false;
     const className = String(button.className || "");
     if (/\bpi-enh-quick-(?:start-button|fallback-trigger|menu-item)\b/.test(className)) return false;
 
@@ -19553,13 +19562,9 @@
 
   function findNativeComposerSendButton(textarea) {
     if (!textarea) return null;
-    const roots = [
-      textarea.closest?.("[data-pi-native-composer-host]"),
-      textarea.closest?.("form"),
-      textarea.closest?.(".chat-input-container"),
-      textarea.parentElement,
-      textarea.parentElement?.parentElement,
-    ].filter(Boolean);
+    const layout = textarea.closest?.("[data-pi-native-composer-layout]");
+    if (!layout) return null;
+    const roots = [layout];
     const visited = new Set();
 
     for (const root of roots) {
@@ -19616,6 +19621,7 @@
 
   function isEmptySendContinueButton(button) {
     if (!button) return false;
+    if (!isNativeComposerLayoutButton(button)) return false;
     const className = String(button.className || "");
     if (/\bpi-enh-quick-(?:start-button|fallback-trigger|menu-item)\b/.test(className)) return false;
     const labels = [
@@ -19630,12 +19636,9 @@
 
   function getEmptySendContinueButtons(textarea) {
     if (!textarea) return [];
-    const roots = [
-      textarea.closest?.("form"),
-      textarea.closest?.(".chat-input-container"),
-      textarea.parentElement,
-      textarea.parentElement?.parentElement,
-    ].filter(Boolean);
+    const layout = textarea.closest?.("[data-pi-native-composer-layout]");
+    if (!layout) return [];
+    const roots = [layout];
     const buttons = [];
     const visited = new Set();
     for (const root of roots) {
@@ -27393,23 +27396,53 @@
   let batchDragTargetState = true;
   let batchDeleteInFlight = false;
 
-  function getAllActiveSessionIds() {
+  let cachedActiveSessionIds = null;
+  let cachedLatestGroupsRef = null;
+  let cachedGroupsLength = 0;
+
+  function getAllActiveSessionIds(forceRefresh = false) {
+    const currentGroups = Array.isArray(latestKnownSessionGroups) && latestKnownSessionGroups.length > 0
+      ? latestKnownSessionGroups
+      : null;
+
+    if (
+      !forceRefresh &&
+      currentGroups !== null &&
+      cachedActiveSessionIds !== null &&
+      cachedLatestGroupsRef === currentGroups &&
+      cachedGroupsLength === currentGroups.length
+    ) {
+      return cachedActiveSessionIds;
+    }
+
     const ids = new Set();
-    if (Array.isArray(latestKnownSessionGroups) && latestKnownSessionGroups.length > 0) {
-      for (const group of latestKnownSessionGroups) {
-        const rootId = group?.root?.id;
-        if (rootId && !ids.has(rootId)) {
+    if (currentGroups) {
+      for (let i = 0; i < currentGroups.length; i++) {
+        const rootId = currentGroups[i]?.root?.id;
+        if (rootId) {
           ids.add(rootId);
         }
       }
     }
-    for (const row of document.querySelectorAll(".pi-enh-session-row-host[data-pi-enh-session-id]")) {
-      const sid = row.getAttribute("data-pi-enh-session-id");
-      if (sid && !ids.has(sid)) {
+    const currentDomRows = document.querySelectorAll(".pi-enh-session-row-host[data-pi-enh-session-id]");
+    for (let i = 0; i < currentDomRows.length; i++) {
+      const sid = currentDomRows[i].getAttribute("data-pi-enh-session-id");
+      if (sid) {
         ids.add(sid);
       }
     }
-    return Array.from(ids);
+
+    const result = Array.from(ids);
+    if (currentGroups) {
+      cachedActiveSessionIds = result;
+      cachedLatestGroupsRef = currentGroups;
+      cachedGroupsLength = currentGroups.length;
+    } else {
+      cachedActiveSessionIds = null;
+      cachedLatestGroupsRef = null;
+      cachedGroupsLength = 0;
+    }
+    return result;
   }
 
   function getSessionTitleForBatch(sessionId) {
@@ -27517,7 +27550,7 @@
           </button>
         </div>
       `;
-      bar.querySelector('input').addEventListener("change", (e) => {
+      bar.querySelector('input[data-action="batch-select-all"]').addEventListener("change", (e) => {
         e.stopPropagation();
         toggleSelectAllBatch(e.currentTarget.checked);
       });
@@ -27533,22 +27566,33 @@
       mainCol.insertBefore(bar, listContainer);
     }
 
-    const total = getAllActiveSessionIds().length;
+    const total = getAllActiveSessionIds(false).length;
     const selectedCount = selectedSessionBatchIds.size;
-    const selectAll = bar.querySelector('input');
-    selectAll.checked = total > 0 && selectedCount >= total;
-    selectAll.indeterminate = selectedCount > 0 && selectedCount < total;
-    selectAll.disabled = batchDeleteInFlight;
+    const selectAll = bar.querySelector('input[data-action="batch-select-all"]');
+    if (selectAll) {
+      const isChecked = total > 0 && selectedCount >= total;
+      const isIndeterminate = selectedCount > 0 && selectedCount < total;
+      if (selectAll.checked !== isChecked) selectAll.checked = isChecked;
+      if (selectAll.indeterminate !== isIndeterminate) selectAll.indeterminate = isIndeterminate;
+      if (selectAll.disabled !== batchDeleteInFlight) selectAll.disabled = batchDeleteInFlight;
+    }
+
     const count = bar.querySelector('[data-batch-selection-count]');
-    const countText = selectedCount ? `已选 ${selectedCount} 项` : "未选择";
-    if (count.textContent !== countText) count.textContent = countText;
+    if (count) {
+      const countText = selectedCount ? `已选 ${selectedCount} 项` : "未选择";
+      if (count.textContent !== countText) count.textContent = countText;
+    }
+
     const copy = bar.querySelector('[data-action="batch-copy-ids"]');
     const remove = bar.querySelector('[data-action="batch-delete"]');
-    copy.disabled = remove.disabled = selectedCount === 0 || batchDeleteInFlight;
+    const isActionDisabled = selectedCount === 0 || batchDeleteInFlight;
+    if (copy && copy.disabled !== isActionDisabled) copy.disabled = isActionDisabled;
+    if (remove && remove.disabled !== isActionDisabled) remove.disabled = isActionDisabled;
+
     const copyTitle = selectedCount ? `复制已选 ${selectedCount} 个会话 ID（每行一个）` : "请先勾选要复制 ID 的会话";
     const deleteTitle = selectedCount ? `彻底删除已选 ${selectedCount} 个会话` : "请先勾选要删除的会话";
-    if (copy.title !== copyTitle) copy.title = copyTitle;
-    if (remove.title !== deleteTitle) remove.title = deleteTitle;
+    if (copy && copy.title !== copyTitle) copy.title = copyTitle;
+    if (remove && remove.title !== deleteTitle) remove.title = deleteTitle;
   }
 
   function removeSessionBatchBar() {
@@ -27556,11 +27600,52 @@
     if (bar) bar.remove();
   }
 
+  function ensureBatchCheckboxOnRow(row, sessionId) {
+    let wrap = row.querySelector(".pi-enh-session-batch-checkbox-wrap");
+    if (!wrap) {
+      wrap = document.createElement("label");
+      wrap.className = "pi-enh-session-batch-checkbox-wrap";
+      wrap.setAttribute("title", "选择会话（按住 Shift 连续多选）");
+      const checkbox = document.createElement("input");
+      checkbox.type = "checkbox";
+      checkbox.className = "pi-enh-session-batch-checkbox";
+      checkbox.setAttribute("data-session-id", sessionId);
+      wrap.appendChild(checkbox);
+      row.insertBefore(wrap, row.firstElementChild);
+    }
+    return wrap;
+  }
+
+  function updateSingleBatchRow(sessionId, isSelected, explicitRow = null) {
+    const row = explicitRow || (typeof CSS !== "undefined" && CSS.escape
+      ? document.querySelector(`.pi-enh-session-row-host[data-pi-enh-session-id="${CSS.escape(sessionId)}"]`)
+      : getSessionRowById(sessionId));
+    if (!row) return;
+
+    if (!isSessionBatchMode) {
+      const wrap = row.querySelector(".pi-enh-session-batch-checkbox-wrap");
+      if (wrap) wrap.remove();
+      row.classList.remove("is-batch-selected");
+      return;
+    }
+
+    let wrap = row.querySelector(".pi-enh-session-batch-checkbox-wrap");
+    if (!wrap) {
+      wrap = ensureBatchCheckboxOnRow(row, sessionId);
+    }
+    const checkbox = wrap.querySelector(".pi-enh-session-batch-checkbox");
+    if (checkbox && checkbox.checked !== isSelected) {
+      checkbox.checked = isSelected;
+    }
+    row.classList.toggle("is-batch-selected", isSelected);
+  }
+
   function syncSessionBatchRowStates() {
     const enabled = isPluginEnabled("session-batch-actions");
     const rows = document.querySelectorAll(".pi-enh-session-row-host[data-pi-enh-session-id]");
 
-    for (const row of rows) {
+    for (let i = 0; i < rows.length; i++) {
+      const row = rows[i];
       const sessionId = row.getAttribute("data-pi-enh-session-id");
       if (!sessionId) continue;
 
@@ -27573,16 +27658,7 @@
       }
 
       if (!wrap) {
-        wrap = document.createElement("label");
-        wrap.className = "pi-enh-session-batch-checkbox-wrap";
-        wrap.setAttribute("title", "选择会话（按住 Shift 连续多选）");
-        const checkbox = document.createElement("input");
-        checkbox.type = "checkbox";
-        checkbox.className = "pi-enh-session-batch-checkbox";
-        checkbox.setAttribute("data-session-id", sessionId);
-        wrap.appendChild(checkbox);
-
-        row.insertBefore(wrap, row.firstElementChild);
+        wrap = ensureBatchCheckboxOnRow(row, sessionId);
       }
 
       const isSelected = selectedSessionBatchIds.has(sessionId);
@@ -27595,48 +27671,72 @@
     }
   }
 
-  function toggleSessionBatchSelect(sessionId, targetChecked, isShift) {
+  function toggleSessionBatchSelect(sessionId, targetChecked, isShift, explicitRow = null) {
     if (batchDeleteInFlight) return;
     if (!sessionId) return;
-    const allIds = getAllActiveSessionIds();
-    const currIndex = allIds.indexOf(sessionId);
 
-    if (isShift && lastBatchClickedSessionId && allIds.includes(lastBatchClickedSessionId) && currIndex !== -1) {
+    if (isShift && lastBatchClickedSessionId && lastBatchClickedSessionId !== sessionId) {
+      const allIds = getAllActiveSessionIds(false);
       const prevIndex = allIds.indexOf(lastBatchClickedSessionId);
-      const start = Math.min(prevIndex, currIndex);
-      const end = Math.max(prevIndex, currIndex);
-      for (let i = start; i <= end; i++) {
-        const id = allIds[i];
-        if (targetChecked) {
-          selectedSessionBatchIds.add(id);
-        } else {
-          selectedSessionBatchIds.delete(id);
+      const currIndex = allIds.indexOf(sessionId);
+
+      if (prevIndex !== -1 && currIndex !== -1) {
+        const start = Math.min(prevIndex, currIndex);
+        const end = Math.max(prevIndex, currIndex);
+        const affectedIds = new Set();
+        for (let i = start; i <= end; i++) {
+          const id = allIds[i];
+          affectedIds.add(id);
+          if (targetChecked) {
+            selectedSessionBatchIds.add(id);
+          } else {
+            selectedSessionBatchIds.delete(id);
+          }
         }
-      }
-    } else {
-      if (targetChecked) {
-        selectedSessionBatchIds.add(sessionId);
-      } else {
-        selectedSessionBatchIds.delete(sessionId);
+        lastBatchClickedSessionId = sessionId;
+
+        withMutationGuard(() => {
+          syncSessionBatchBar();
+          const rows = document.querySelectorAll(".pi-enh-session-row-host[data-pi-enh-session-id]");
+          for (let i = 0; i < rows.length; i++) {
+            const sid = rows[i].getAttribute("data-pi-enh-session-id");
+            if (sid && affectedIds.has(sid)) {
+              updateSingleBatchRow(sid, targetChecked, rows[i]);
+            }
+          }
+        });
+        return;
       }
     }
 
+    if (targetChecked) {
+      selectedSessionBatchIds.add(sessionId);
+    } else {
+      selectedSessionBatchIds.delete(sessionId);
+    }
     lastBatchClickedSessionId = sessionId;
-    syncSessionBatchBar();
-    syncSessionBatchRowStates();
+
+    withMutationGuard(() => {
+      updateSingleBatchRow(sessionId, targetChecked, explicitRow);
+      syncSessionBatchBar();
+    });
   }
 
   function toggleSelectAllBatch(checked) {
     if (batchDeleteInFlight) return;
-    const allIds = getAllActiveSessionIds();
     if (checked) {
-      for (const id of allIds) selectedSessionBatchIds.add(id);
+      const allIds = getAllActiveSessionIds(true);
+      for (let i = 0; i < allIds.length; i++) {
+        selectedSessionBatchIds.add(allIds[i]);
+      }
     } else {
       selectedSessionBatchIds.clear();
     }
     lastBatchClickedSessionId = null;
-    syncSessionBatchBar();
-    syncSessionBatchRowStates();
+    withMutationGuard(() => {
+      syncSessionBatchBar();
+      syncSessionBatchRowStates();
+    });
   }
 
   function setSessionBatchMode(active) {
@@ -27646,12 +27746,15 @@
     if (!isSessionBatchMode) {
       selectedSessionBatchIds.clear();
       lastBatchClickedSessionId = null;
+      isBatchDragging = false;
       closeBatchDeleteModal();
     }
 
-    syncSessionBatchTriggerButton();
-    syncSessionBatchBar();
-    syncSessionBatchRowStates();
+    withMutationGuard(() => {
+      syncSessionBatchTriggerButton();
+      syncSessionBatchBar();
+      syncSessionBatchRowStates();
+    });
   }
 
   function closeBatchDeleteModal() {
@@ -27821,7 +27924,6 @@
     }
   }
 
-
   // 鼠标点击捕获监听：快捷激活批量模式与单选/连选
   addManagedListener(document, "click", (event) => {
     if (!isPluginEnabled("session-batch-actions")) return;
@@ -27838,7 +27940,7 @@
       event.stopPropagation();
       if (typeof event.stopImmediatePropagation === "function") event.stopImmediatePropagation();
       setSessionBatchMode(true);
-      toggleSessionBatchSelect(sessionId, true, false);
+      toggleSessionBatchSelect(sessionId, true, false, row);
       return;
     }
 
@@ -27848,17 +27950,29 @@
       if (target.closest(".pi-enh-session-overflow, .pi-enh-session-menu, [data-session-action]")) {
         return;
       }
-      // 阻止原生会话切换
-      event.preventDefault();
-      event.stopPropagation();
-      if (typeof event.stopImmediatePropagation === "function") event.stopImmediatePropagation();
 
-      const checkbox = row.querySelector(".pi-enh-session-batch-checkbox");
-      let nextChecked = !selectedSessionBatchIds.has(sessionId);
-      if (target === checkbox) {
-        nextChecked = checkbox.checked;
+      const isDirectCheckbox = Boolean(
+        target.matches?.(".pi-enh-session-batch-checkbox") ||
+        target.classList?.contains("pi-enh-session-batch-checkbox")
+      );
+
+      if (isDirectCheckbox) {
+        // 直接 input 点击：不要 preventDefault，避免 browser canceled activation 回滚
+        // 保留 stopPropagation 阻止 native navigation
+        event.stopPropagation();
+        if (typeof event.stopImmediatePropagation === "function") event.stopImmediatePropagation();
+
+        const targetChecked = Boolean(target.checked);
+        toggleSessionBatchSelect(sessionId, targetChecked, event.shiftKey, row);
+      } else {
+        // label / row 点击：照常 preventDefault 阻止二次 click 与原生导航
+        event.preventDefault();
+        event.stopPropagation();
+        if (typeof event.stopImmediatePropagation === "function") event.stopImmediatePropagation();
+
+        const nextChecked = !selectedSessionBatchIds.has(sessionId);
+        toggleSessionBatchSelect(sessionId, nextChecked, event.shiftKey, row);
       }
-      toggleSessionBatchSelect(sessionId, nextChecked, event.shiftKey);
     }
   }, true);
 
@@ -27886,14 +28000,23 @@
     const sessionId = row.getAttribute("data-pi-enh-session-id");
     if (!sessionId) return;
 
+    // 状态无变化直接跳过，避免高频无谓重复渲染与全量扫描
+    const currentlySelected = selectedSessionBatchIds.has(sessionId);
+    if (currentlySelected === batchDragTargetState) {
+      return;
+    }
+
     if (batchDragTargetState) {
       selectedSessionBatchIds.add(sessionId);
     } else {
       selectedSessionBatchIds.delete(sessionId);
     }
     lastBatchClickedSessionId = sessionId;
-    syncSessionBatchBar();
-    syncSessionBatchRowStates();
+
+    withMutationGuard(() => {
+      updateSingleBatchRow(sessionId, batchDragTargetState, row);
+      syncSessionBatchBar();
+    });
   }, true);
 
   addManagedListener(window, "mouseup", () => {
@@ -27993,6 +28116,7 @@
 
   function isNativeSendButton(button) {
     if (!button) return false;
+    if (!isNativeComposerLayoutButton(button)) return false;
     const className = String(button.className || "");
     if (/\bpi-enh-quick-(?:start-button|fallback-trigger|menu-item)\b/.test(className)) return false;
     const labels = [
@@ -28007,13 +28131,9 @@
 
   function findNativeSendButtons(textarea) {
     if (!textarea) return [];
-    const roots = [
-      textarea.closest?.("form"),
-      textarea.closest?.(".chat-input-container"),
-      textarea.closest?.("[data-pi-native-composer-host]"),
-      textarea.parentElement,
-      textarea.parentElement?.parentElement,
-    ].filter(Boolean);
+    const layout = textarea.closest?.("[data-pi-native-composer-layout]");
+    if (!layout) return [];
+    const roots = [layout];
     const buttons = [];
     const visited = new Set();
     for (const root of roots) {
@@ -28109,6 +28229,7 @@
   function consumeQuickReplyClick(event) {
     if (quickReplyPassthrough) return false;
     const button = event?.target?.closest?.("button");
+    if (!isNativeComposerLayoutButton(button)) return false;
     const stop = () => { event.preventDefault?.(); event.stopPropagation?.(); event.stopImmediatePropagation?.(); };
     if (quickReplySending && button === quickReplySendingButton) { stop(); return true; }
     if (!button?.hasAttribute(QUICK_REPLY_BUTTON_ATTR)) return false;
@@ -28655,13 +28776,6 @@
   }
   window.__PI_ENH_KNOWN_STEP_SPEEDS__ = knownStepSpeeds;
 
-  function findAssistantHeader(msg) {
-    if (!msg) return null;
-    const firstChild = msg.firstElementChild;
-    if (firstChild && firstChild.querySelector && firstChild.querySelector("span")) return firstChild;
-    return msg.querySelector('div[style*="font-size: 11px"], div[style*="fontSize: 11px"]');
-  }
-
   function modelSpeedColor(tps) {
     if (tps >= 50) return "#0369a1";
     if (tps >= 30) return "#3f6212";
@@ -28670,44 +28784,52 @@
   }
 
   function upsertModelSpeedBadge(msg, metrics) {
-    const header = findAssistantHeader(msg);
-    if (!header) return;
-    let badge = header.querySelector(".pi-enh-model-speed");
+    if (!msg || typeof msg.querySelectorAll !== "function") return;
+    const hosts = msg.querySelectorAll('[data-pi-model-speed-host]');
+    if (!hosts || hosts.length === 0) return;
 
-    // Only completed steps with provider usage and reliable timestamps qualify.
-    if (!metrics || !(metrics.tps > 0)) {
-      if (badge) badge.remove();
-      return;
+    for (let h = 0; h < hosts.length; h++) {
+      const host = hosts[h];
+      const badges = host.querySelectorAll(".pi-enh-model-speed");
+      let badge = badges[0] || null;
+      for (let i = 1; i < badges.length; i++) {
+        badges[i].remove();
+      }
+
+      // Only completed steps with provider usage and reliable timestamps qualify.
+      if (!metrics || !(metrics.tps > 0)) {
+        if (badge) badge.remove();
+        continue;
+      }
+
+      const tps = Math.max(0, metrics.tps);
+      const text = `${tps.toFixed(1)} t/s`;
+      const isLive = Boolean(metrics.live);
+      const title = isLive
+        ? `运行中实时平均速度：${tps.toFixed(1)} t/s（当前供应商输出 Tokens ÷ 本次模型请求已用时间）`
+        : `已完成单步端到端平均速度：${tps.toFixed(1)} t/s（供应商输出 Tokens ÷ 请求总耗时）`;
+      const bg = modelSpeedColor(tps);
+
+      if (!badge) {
+        badge = document.createElement("span");
+        badge.className = "pi-enh-model-speed";
+        badge.style.padding = "1px 6px";
+        badge.style.borderRadius = "4px";
+        badge.style.color = "#fff";
+        badge.style.fontSize = "11px";
+        badge.style.fontWeight = "400";
+        badge.style.display = "inline-flex";
+        badge.style.alignItems = "center";
+        badge.style.cursor = "default";
+        host.appendChild(badge);
+      }
+
+      if (badge.textContent !== text) badge.textContent = text;
+      if (badge.style.background !== bg) badge.style.background = bg;
+      if (badge.getAttribute("title") !== title) badge.setAttribute("title", title);
+      badge.setAttribute("data-live", isLive ? "true" : "false");
+      badge.setAttribute("data-output-tokens", String(Math.round(metrics.output || 0)));
     }
-
-    const tps = Math.max(0, metrics.tps);
-    const text = `${tps.toFixed(1)} t/s`;
-    const isLive = Boolean(metrics.live);
-    const title = isLive
-      ? `运行中实时平均速度：${tps.toFixed(1)} t/s（当前供应商输出 Tokens ÷ 本次模型请求已用时间）`
-      : `已完成单步端到端平均速度：${tps.toFixed(1)} t/s（供应商输出 Tokens ÷ 请求总耗时）`;
-    const bg = modelSpeedColor(tps);
-
-    if (!badge) {
-      badge = document.createElement("span");
-      badge.className = "pi-enh-model-speed";
-      badge.style.marginLeft = "4px";
-      badge.style.padding = "1px 6px";
-      badge.style.borderRadius = "4px";
-      badge.style.color = "#fff";
-      badge.style.fontSize = "11px";
-      badge.style.fontWeight = "400";
-      badge.style.display = "inline-flex";
-      badge.style.alignItems = "center";
-      badge.style.cursor = "default";
-      header.appendChild(badge);
-    }
-
-    if (badge.textContent !== text) badge.textContent = text;
-    if (badge.style.background !== bg) badge.style.background = bg;
-    if (badge.getAttribute("title") !== title) badge.setAttribute("title", title);
-    badge.setAttribute("data-live", isLive ? "true" : "false");
-    badge.setAttribute("data-output-tokens", String(Math.round(metrics.output || 0)));
   }
 
   function getMessageEntryId(el) {

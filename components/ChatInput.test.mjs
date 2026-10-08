@@ -1293,7 +1293,8 @@ test("goal and plan controls share neutral mode icons and expose an accessible e
   assert.match(sprite, /<symbol id="plan"[^>]*stroke-width="1\.7"/);
   const chip = styles.match(/\.chat-composer-card \.chat-composer-mode-chip\s*\{([^}]+)\}/)?.[1];
   assert.ok(chip);
-  assert.match(chip, /height: 28px/);
+  const capsule = styles.match(/\.chat-composer-card \.chat-composer-control-capsule\s*\{([^}]+)\}/)?.[1];
+  assert.match(capsule, /height: 24px/);
   assert.match(chip, /color: var\(--text\)/);
   assert.doesNotMatch(chip, /--accent/);
 });

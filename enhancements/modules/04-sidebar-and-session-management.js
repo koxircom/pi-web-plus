@@ -1476,7 +1476,7 @@
   // 会话行内重命名焦点与失焦自愈联动：聚焦即刻隐藏模型徽标，失焦即刻精准恢复
   addManagedListener(document, "focusin", (event) => {
     const input = event.target;
-    if (input?.tagName === "INPUT" && input.closest?.(".pi-enh-session-row-host")) {
+    if (input?.tagName === "INPUT" && input.type === "text" && input.closest?.(".pi-enh-session-row-host")) {
       const row = input.closest(".pi-enh-session-row-host");
       row?.setAttribute("data-pi-enh-editing", "true");
       row?.querySelector(".pi-enh-session-model-badge")?.remove();
@@ -1494,7 +1494,7 @@
   // 2. 当用户在会话名称输入框按下回车提交空文本时，阻止清空、弹出温和提示并自动恢复原标题
   addManagedListener(document, "keydown", (event) => {
     const input = event.target;
-    if (input?.tagName !== "INPUT" || !input.closest?.(".pi-enh-session-row-host")) return;
+    if (input?.tagName !== "INPUT" || input.type !== "text" || !input.closest?.(".pi-enh-session-row-host")) return;
 
     // 1. Ctrl+Z / Cmd+Z 一键还原初始标题文本
     if ((event.ctrlKey || event.metaKey) && (event.key === "z" || event.key === "Z") && !event.shiftKey) {
@@ -1552,7 +1552,7 @@
 
   addManagedListener(document, "focusout", (event) => {
     const input = event.target;
-    if (input?.tagName === "INPUT" && input.closest?.(".pi-enh-session-row-host")) {
+    if (input?.tagName === "INPUT" && input.type === "text" && input.closest?.(".pi-enh-session-row-host")) {
       const row = input.closest(".pi-enh-session-row-host");
       const rawVal = input.value || "";
       if (!rawVal.trim()) {
@@ -1577,7 +1577,7 @@
       }
 
       setTimeout(() => {
-        if (row && !row.querySelector("input")) {
+        if (row && !row.querySelector('input:not([type="checkbox"])')) {
           row.removeAttribute("data-pi-enh-editing");
         }
         if (typeof syncSessionModelLabels === "function") syncSessionModelLabels();

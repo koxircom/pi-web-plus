@@ -1,3 +1,4 @@
+import { createRequire } from "node:module";
 import {
   defaultToolEntries,
   getGlobalSettingsPath,
@@ -5,16 +6,77 @@ import {
   updateGlobalSettings,
 } from "./global-settings-file";
 
+const require = createRequire(import.meta.url);
+const {
+  discoverWindowsGitBash,
+  discoverWindowsPowerShell,
+} = require("../bin/windows-shells.cjs");
+
 const DEFAULT_TOOLS = ["read", "bash", "edit", "write"];
 const SHELL_TOOLS = new Set(["bash", "powershell"]);
 
+export type ShellAvailability = {
+  hasBash?: boolean;
+  hasPowerShell?: boolean;
+};
+
+export type ShellSelectionOptions = {
+  availability?: ShellAvailability;
+  platform?: NodeJS.Platform;
+  shellPath?: string;
+};
+
+function isToolModifier(entry: string): boolean {
+  return entry.startsWith("+") || entry.startsWith("-");
+}
+
+function hasExplicitShellSelection(defaultTools: readonly string[]): boolean {
+  const plain = defaultTools.filter((t) => !isToolModifier(t));
+  if (plain.length > 0 || defaultTools.length === 0) {
+    return true;
+  }
+  return defaultTools.some((t) => {
+    const name = t.slice(1);
+    return SHELL_TOOLS.has(name);
+  });
+}
+
 export function isPowerShellToolEnabled(
   defaultTools: readonly string[] | undefined,
-  platform: NodeJS.Platform = process.platform,
+  options?: NodeJS.Platform | ShellSelectionOptions,
 ): boolean {
-  return platform === "win32"
-    && defaultTools?.includes("powershell") === true
-    && !defaultTools.includes("bash");
+  const platform = typeof options === "string" ? options : options?.platform ?? process.platform;
+  if (platform !== "win32") return false;
+
+  const availability = typeof options === "object" ? options.availability : undefined;
+  const shellPath = typeof options === "object" ? options.shellPath : undefined;
+
+  if (defaultTools !== undefined && hasExplicitShellSelection(defaultTools)) {
+    const finalTools = resolveDefaultToolEntries(defaultTools);
+    const hasBash = finalTools.includes("bash");
+    const hasPowerShell = finalTools.includes("powershell");
+
+    if (hasBash) return false;
+    if (hasPowerShell) return true;
+    return false;
+  }
+
+  // SDK shellPath belongs to Bash; never silently discard a configured
+  // executable merely because its filename resembles PowerShell.
+  if (shellPath) return false;
+
+  let hasBash = availability?.hasBash;
+  let hasPowerShell = availability?.hasPowerShell;
+  if (hasBash === undefined) {
+    hasBash = Boolean(discoverWindowsGitBash({ platform: "win32" }));
+  }
+  if (hasPowerShell === undefined) {
+    hasPowerShell = Boolean(discoverWindowsPowerShell({ platform: "win32" }));
+  }
+
+  if (hasBash) return false;
+  if (hasPowerShell) return true;
+  return false;
 }
 
 export function replaceShellTool(
@@ -33,17 +95,14 @@ export function replaceShellTool(
 export function resolveShellTools(
   toolNames: readonly string[],
   defaultTools: readonly string[] | undefined,
-  platform: NodeJS.Platform = process.platform,
+  options?: NodeJS.Platform | ShellSelectionOptions,
 ): string[] {
-  return replaceShellTool(toolNames, isPowerShellToolEnabled(defaultTools, platform));
+  if (toolNames.length === 0) return [];
+  return replaceShellTool(toolNames, isPowerShellToolEnabled(defaultTools, options));
 }
 
 export function getPowerShellSettingsPath(agentDir?: string): string {
   return getGlobalSettingsPath(agentDir);
-}
-
-function isToolModifier(entry: string): boolean {
-  return entry.startsWith("+") || entry.startsWith("-");
 }
 
 /**
@@ -74,9 +133,17 @@ function configuredTools(settings: Record<string, unknown>): string[] | undefine
 
 export async function readPowerShellToolEnabled(
   settingsPath = getPowerShellSettingsPath(),
-  platform: NodeJS.Platform = process.platform,
+  options?: NodeJS.Platform | ShellSelectionOptions,
 ): Promise<boolean> {
-  return readGlobalSettings(settingsPath, (settings) => isPowerShellToolEnabled(configuredTools(settings), platform));
+  const platform = typeof options === "string" ? options : options?.platform ?? process.platform;
+  return readGlobalSettings(settingsPath, (settings) => {
+    const rawEntries = defaultToolEntries(settings);
+    const selection = typeof options === "object" ? options : { platform };
+    return isPowerShellToolEnabled(rawEntries, {
+      ...selection,
+      shellPath: selection.shellPath ?? (typeof settings.shellPath === "string" ? settings.shellPath : undefined),
+    });
+  });
 }
 
 export async function writePowerShellToolEnabled(

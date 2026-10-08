@@ -147,6 +147,62 @@ export function SettingsSectionIcon({ section, size = 16, strokeWidth = 1.8 }: {
   return <svg {...common}><circle cx="12" cy="12" r="9" /></svg>;
 }
 
+interface NavGroupDef {
+  id: "general" | "agent" | "data";
+  titleKey: string;
+  sectionIds: readonly SettingsSection[];
+}
+
+const SETTINGS_NAV_GROUPS: readonly NavGroupDef[] = [
+  {
+    id: "general",
+    titleKey: "settings.groupGeneral",
+    sectionIds: ["general", "notifications"],
+  },
+  {
+    id: "agent",
+    titleKey: "settings.groupAgents",
+    sectionIds: ["models", "skills", "agents", "plugins", "mcp", "enhancements"],
+  },
+  {
+    id: "data",
+    titleKey: "settings.groupData",
+    sectionIds: ["usage", "archived", "tags"],
+  },
+];
+
+function SettingsRow({
+  label,
+  description,
+  htmlFor,
+  className,
+  isSwitch = false,
+  children,
+}: {
+  label: ReactNode;
+  description?: ReactNode;
+  htmlFor?: string;
+  className?: string;
+  isSwitch?: boolean;
+  children: ReactNode;
+}) {
+  return (
+    <div className={`settings-row${isSwitch ? " is-switch-row" : ""}${className ? ` ${className}` : ""}`}>
+      <div className="settings-row-info">
+        {htmlFor ? (
+          <label htmlFor={htmlFor} className="settings-row-label">{label}</label>
+        ) : (
+          <span className="settings-row-label">{label}</span>
+        )}
+        {description ? <div className="settings-row-description">{description}</div> : null}
+      </div>
+      <div className="settings-row-control">
+        {children}
+      </div>
+    </div>
+  );
+}
+
 interface SettingsHostContextProps {
   onClose: () => void;
   activateSection: (id: string) => boolean;
@@ -280,191 +336,249 @@ function GeneralSettings({
     <div className={`settings-general${dashboardEnabled ? " settings-general-dashboard" : ""}`}>
       <h2 className="settings-general-title">{t("settings.general")}</h2>
 
-      <section className="settings-general-section" data-settings-area="appearance">
-        <h3 className="settings-general-heading">{t("settings.appearance")}</h3>
-        <div role="radiogroup" aria-label={t("settings.appearance")} className="settings-theme-options">
-          {THEME_OPTIONS.map((option) => {
-            const selected = preference === option.id;
-            return (
-              <label
-                key={option.id}
-                className="settings-theme-option"
-              >
-                <input
-                  type="radio"
-                  name="theme"
-                  value={option.id}
-                  checked={selected}
-                  onChange={() => setThemePreference(option.id)}
-                  className="sr-only"
-                />
-                <ThemeIcon preference={option.id} />
-                <span className="settings-theme-option-label">{t(option.label)}</span>
-              </label>
-            );
-          })}
+      {/* 常规设置卡片 */}
+      <section className="settings-general-section settings-card" data-settings-area="appearance">
+        <div className="settings-card-header">
+          <h3 className="settings-card-title">{t("settings.general")}</h3>
+        </div>
+        <div className="settings-card-body">
+          {/* 原生语言选择 */}
+          <SettingsRow
+            label={t("common.language")}
+            description={t("settings.languageDescription")}
+            htmlFor="settings-language-select"
+            className="settings-language-row"
+          >
+            <select
+              id="settings-language-select"
+              className="settings-select settings-language-select"
+              value={locale}
+              onChange={(event) => setLocale(event.target.value as typeof locale)}
+              aria-label={t("common.language")}
+            >
+              {supportedLocales.map((plugin) => (
+                <option key={plugin.id} value={plugin.id}>
+                  {plugin.label} ({plugin.id})
+                </option>
+              ))}
+            </select>
+          </SettingsRow>
+
+          {/* 外观三段选择 */}
+          <SettingsRow
+            label={t("settings.appearance")}
+            description={t("settings.appearanceDescription")}
+            className="settings-appearance-row"
+          >
+            <div role="radiogroup" aria-label={t("settings.appearance")} className="settings-theme-options">
+              {THEME_OPTIONS.map((option) => {
+                const selected = preference === option.id;
+                return (
+                  <label
+                    key={option.id}
+                    className="settings-theme-option"
+                  >
+                    <input
+                      type="radio"
+                      name="theme"
+                      value={option.id}
+                      checked={selected}
+                      onChange={() => setThemePreference(option.id)}
+                      className="sr-only"
+                    />
+                    <ThemeIcon preference={option.id} />
+                    <span className="settings-theme-option-label">{t(option.label)}</span>
+                  </label>
+                );
+              })}
+            </div>
+          </SettingsRow>
         </div>
       </section>
 
-      <section className="settings-general-section" data-settings-area="chat">
-        <h3 className="settings-general-heading">{t("settings.chat")}</h3>
+      {/* 聊天设置卡片 */}
+      <section className="settings-general-section settings-card" data-settings-area="chat">
+        <div className="settings-card-header">
+          <h3 className="settings-card-title">{t("settings.chat")}</h3>
+        </div>
         <div className="settings-chat-options">
-          <div className="settings-chat-option settings-chat-switch-option">
-            <span>{t("settings.thinkingExpandedDefault")}</span>
-            <ConfigSwitch
-              checked={thinkingExpanded}
-              label={t("settings.thinkingExpandedDefault")}
-              onChange={(enabled) => {
-                setThinkingExpandedByDefault(enabled);
-                setThinkingExpanded(enabled);
-              }}
-            />
-          </div>
-          <div className="settings-chat-option settings-chat-range-option">
-            <div className="settings-chat-range-header">
-              <label htmlFor="settings-chat-content-width">{t("settings.chatContentWidth")}</label>
-              <output htmlFor="settings-chat-content-width">{chatContentWidth}px</output>
-              <ConfigButton
-                variant="ghost"
-                size="small"
-                className="settings-chat-reset"
-                title={t("settings.resetChatContentWidth")}
-                aria-label={t("settings.resetChatContentWidth")}
-                disabled={chatContentWidth === CHAT_CONTENT_WIDTH_DEFAULT}
-                onClick={() => setChatContentWidth(CHAT_CONTENT_WIDTH_DEFAULT)}
-              >
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                  <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8M3 3v5h5" />
-                </svg>
-              </ConfigButton>
+          {/* 宽度滑块 */}
+          <div className="settings-chat-option settings-row">
+            <div className="settings-row-info">
+              <label htmlFor="settings-chat-content-width" className="settings-row-label">
+                {t("settings.chatContentWidth")}
+              </label>
+              <div className="settings-row-description">
+                {t("settings.chatContentWidthDescription")}
+              </div>
             </div>
-            <input
-              id="settings-chat-content-width"
-              type="range"
-              min={CHAT_CONTENT_WIDTH_MIN}
-              max={CHAT_CONTENT_WIDTH_MAX}
-              step={10}
-              value={chatContentWidth}
-              onChange={(event) => setChatContentWidth(Number(event.target.value))}
-            />
-          </div>
-          <div className="settings-chat-option settings-chat-range-option">
-            <div className="settings-chat-range-header">
-              <label htmlFor="settings-chat-content-font-size">{t("settings.chatContentFontSize")}</label>
-              <output htmlFor="settings-chat-content-font-size">{fontSize}px</output>
-              <ConfigButton
-                variant="ghost"
-                size="small"
-                className="settings-chat-reset"
-                title={t("settings.resetChatContentFontSize")}
-                aria-label={t("settings.resetChatContentFontSize")}
-                disabled={fontSize === CHAT_CONTENT_FONT_SIZE_DEFAULT}
-                onClick={() => setFontSize(CHAT_CONTENT_FONT_SIZE_DEFAULT)}
-              >
-                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-                  <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8M3 3v5h5" />
-                </svg>
-              </ConfigButton>
+            <div className="settings-row-control settings-chat-range-control">
+              <div className="settings-chat-range-track">
+                <output htmlFor="settings-chat-content-width">{chatContentWidth}px</output>
+                <ConfigButton
+                  variant="ghost"
+                  size="small"
+                  className="settings-chat-reset"
+                  title={t("settings.resetChatContentWidth")}
+                  aria-label={t("settings.resetChatContentWidth")}
+                  disabled={chatContentWidth === CHAT_CONTENT_WIDTH_DEFAULT}
+                  onClick={() => setChatContentWidth(CHAT_CONTENT_WIDTH_DEFAULT)}
+                >
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                    <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8M3 3v5h5" />
+                  </svg>
+                </ConfigButton>
+              </div>
+              <input
+                id="settings-chat-content-width"
+                type="range"
+                min={CHAT_CONTENT_WIDTH_MIN}
+                max={CHAT_CONTENT_WIDTH_MAX}
+                step={10}
+                value={chatContentWidth}
+                onChange={(event) => setChatContentWidth(Number(event.target.value))}
+              />
             </div>
-            <input
-              id="settings-chat-content-font-size"
-              type="range"
-              min={CHAT_CONTENT_FONT_SIZE_MIN}
-              max={CHAT_CONTENT_FONT_SIZE_MAX}
-              step={1}
-              value={fontSize}
-              onChange={(event) => setFontSize(Number(event.target.value))}
-            />
           </div>
-          <div className="settings-chat-option settings-chat-switch-option">
-            <span>{t("settings.quoteSelection")}</span>
-            <ConfigSwitch
-              checked={quoteSelectionEnabled}
-              label={t("settings.quoteSelection")}
-              onChange={onQuoteSelectionChange}
-            />
+
+          {/* 字号滑块 */}
+          <div className="settings-chat-option settings-row">
+            <div className="settings-row-info">
+              <label htmlFor="settings-chat-content-font-size" className="settings-row-label">
+                {t("settings.chatContentFontSize")}
+              </label>
+            </div>
+            <div className="settings-row-control settings-chat-range-control">
+              <div className="settings-chat-range-track">
+                <output htmlFor="settings-chat-content-font-size">{fontSize}px</output>
+                <ConfigButton
+                  variant="ghost"
+                  size="small"
+                  className="settings-chat-reset"
+                  title={t("settings.resetChatContentFontSize")}
+                  aria-label={t("settings.resetChatContentFontSize")}
+                  disabled={fontSize === CHAT_CONTENT_FONT_SIZE_DEFAULT}
+                  onClick={() => setFontSize(CHAT_CONTENT_FONT_SIZE_DEFAULT)}
+                >
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                    <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8M3 3v5h5" />
+                  </svg>
+                </ConfigButton>
+              </div>
+              <input
+                id="settings-chat-content-font-size"
+                type="range"
+                min={CHAT_CONTENT_FONT_SIZE_MIN}
+                max={CHAT_CONTENT_FONT_SIZE_MAX}
+                step={1}
+                value={fontSize}
+                onChange={(event) => setFontSize(Number(event.target.value))}
+              />
+            </div>
+          </div>
+
+          {/* 展开思考 */}
+          <div className="settings-chat-option settings-row is-switch-row">
+            <div className="settings-row-info">
+              <span className="settings-row-label">{t("settings.thinkingExpandedDefault")}</span>
+              <div className="settings-row-description">{t("settings.thinkingDisplayDescription")}</div>
+            </div>
+            <div className="settings-row-control">
+              <ConfigSwitch
+                checked={thinkingExpanded}
+                label={t("settings.thinkingExpandedDefault")}
+                onChange={(enabled) => {
+                  setThinkingExpandedByDefault(enabled);
+                  setThinkingExpanded(enabled);
+                }}
+              />
+            </div>
+          </div>
+
+          {/* 划词提问 */}
+          <div className="settings-chat-option settings-row is-switch-row">
+            <div className="settings-row-info">
+              <span className="settings-row-label">{t("settings.quoteSelection")}</span>
+            </div>
+            <div className="settings-row-control">
+              <ConfigSwitch
+                checked={quoteSelectionEnabled}
+                label={t("settings.quoteSelection")}
+                onChange={onQuoteSelectionChange}
+              />
+            </div>
           </div>
         </div>
       </section>
 
-      {shellSettings?.isWindows && (
-        <section className="settings-general-section" data-settings-area="shell">
-          <h3 className="settings-general-heading">{t("settings.shellTool")}</h3>
-          <p className="settings-general-description">{t("settings.shellToolDescription")}</p>
-          <div className="settings-shell-option">
-            <span>{t("settings.usePowerShell")}</span>
-            <ConfigSwitch
-              checked={shellSettings.powerShellEnabled}
-              loading={shellSaving}
-              label={t("settings.usePowerShell")}
-              onChange={(enabled) => void togglePowerShell(enabled)}
-            />
-          </div>
-          {shellError && <p role="alert" className="settings-general-error">{shellError}</p>}
-        </section>
-      )}
-
-      <section className="settings-general-section" data-settings-area="push">
-        <h3 className="settings-general-heading">{t("settings.pushPermission")}</h3>
-        <p className="settings-general-description">{t("settings.pushPermissionDescription")}</p>
-        <div className="settings-shell-option">
-          <span>{t("settings.pushPermission")}</span>
-          <button
-            type="button"
-            className="config-button config-button-small config-button-secondary"
-            disabled={pushRegistering}
-            onClick={() => void registerPush()}
-          >
-            {pushRegistering ? t("settings.pushRegisterLoading") : t("settings.pushRegister")}
-          </button>
+      {/* 系统权限卡片 */}
+      <section className="settings-general-section settings-card" data-settings-area="system">
+        <div className="settings-card-header">
+          <h3 className="settings-card-title">{t("settings.systemPermissions")}</h3>
         </div>
-        {pushStatus && (
-          <p
-            role="status"
-            className="settings-general-error"
-            style={pushStatus.kind === "ok" ? { color: "var(--accent)" } : undefined}
-          >
-            {pushStatus.message}
-          </p>
-        )}
-      </section>
+        <div className="settings-card-body">
+          {shellSettings?.isWindows && (
+            <div className="settings-row is-switch-row" data-settings-area="shell">
+              <div className="settings-row-info">
+                <span className="settings-row-label">{t("settings.shellTool")}</span>
+                <div className="settings-row-description">{t("settings.shellToolDescription")}</div>
+                {shellError && <p role="alert" className="settings-general-error">{shellError}</p>}
+              </div>
+              <div className="settings-row-control">
+                <ConfigSwitch
+                  checked={shellSettings.powerShellEnabled}
+                  loading={shellSaving}
+                  label={t("settings.usePowerShell")}
+                  onChange={(enabled) => void togglePowerShell(enabled)}
+                />
+              </div>
+            </div>
+          )}
 
-      <section className="settings-general-section" data-settings-area="language">
-        <h3 className="settings-general-heading">{t("common.language")}</h3>
-        <div role="radiogroup" aria-label={t("common.language")} className="settings-language-options">
-          {supportedLocales.map((plugin) => {
-            const selected = locale === plugin.id;
-            return (
+          <div className="settings-row" data-settings-area="push">
+            <div className="settings-row-info">
+              <span className="settings-row-label">{t("settings.pushPermission")}</span>
+              <div className="settings-row-description">{t("settings.pushPermissionDescription")}</div>
+              {pushStatus && (
+                <p
+                  role="status"
+                  className="settings-general-error"
+                  style={pushStatus.kind === "ok" ? { color: "var(--accent)" } : undefined}
+                >
+                  {pushStatus.message}
+                </p>
+              )}
+            </div>
+            <div className="settings-row-control">
               <button
-                key={plugin.id}
                 type="button"
-                role="radio"
-                aria-checked={selected}
-                onClick={() => setLocale(plugin.id as typeof locale)}
-                className="settings-language-option"
+                className="config-button config-button-small config-button-secondary"
+                disabled={pushRegistering}
+                onClick={() => void registerPush()}
               >
-                <span className="settings-language-radio">
-                  {selected && <span className="settings-language-radio-dot" />}
-                </span>
-                <span className="settings-language-label">{plugin.label}</span>
-                <span className="settings-language-code">{plugin.id}</span>
+                {pushRegistering ? t("settings.pushRegisterLoading") : t("settings.pushRegister")}
               </button>
-            );
-          })}
+            </div>
+          </div>
+
+          {webAuthEnabled && (
+            <div className="settings-row" data-settings-area="signout">
+              <div className="settings-row-info">
+                <span className="settings-row-label">{t("auth.logOut")}</span>
+                {logoutError && <p role="alert" className="settings-general-error">{logoutError}</p>}
+              </div>
+              <div className="settings-row-control">
+                <ConfigButton variant="secondary" disabled={loggingOut} onClick={() => void logOut()}>
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                    <path d="M10 17l5-5-5-5M15 12H3M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4" />
+                  </svg>
+                  {loggingOut ? t("auth.loggingOut") : t("auth.logOut")}
+                </ConfigButton>
+              </div>
+            </div>
+          )}
         </div>
       </section>
-
-      {webAuthEnabled && (
-        <section className="settings-general-section" data-settings-area="signout">
-          <ConfigButton variant="secondary" disabled={loggingOut} onClick={() => void logOut()}>
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-              <path d="M10 17l5-5-5-5M15 12H3M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4" />
-            </svg>
-            {loggingOut ? t("auth.loggingOut") : t("auth.logOut")}
-          </ConfigButton>
-          {logoutError && <p role="alert" className="settings-general-error">{logoutError}</p>}
-        </section>
-      )}
 
       {/* 原生 General 提供的独占维护卡片宿主（React 拥有且无孩子） */}
       <MaintenanceHost
@@ -553,6 +667,25 @@ export function SettingsPanel({
       })),
     ];
   }, [nativeSections, enabledExtensions]);
+
+  // 三类分组结构（常规设置、Agent与扩展、数据与记录）
+  const groupedSections = useMemo(() => {
+    return SETTINGS_NAV_GROUPS.map((group) => {
+      const items = sections.filter((s) => {
+        if (group.sectionIds.includes(s.id)) return true;
+        if (group.id === "agent") {
+          const inOtherGroup = SETTINGS_NAV_GROUPS[0].sectionIds.includes(s.id) || SETTINGS_NAV_GROUPS[2].sectionIds.includes(s.id);
+          return !inOtherGroup;
+        }
+        return false;
+      });
+      return {
+        ...group,
+        label: t(group.titleKey),
+        items,
+      };
+    }).filter((g) => g.items.length > 0);
+  }, [sections, t]);
 
   // 3. 导航与激活状态
   const [section, setSection] = useState<SettingsSection>(initialSection);
@@ -905,39 +1038,52 @@ export function SettingsPanel({
             onChange={(event) => activateSection(event.target.value as SettingsSection)}
             className="settings-mobile-section-picker"
           >
-            {sections.map((item) => (
-              <option key={item.id} value={item.id} disabled={item.requiresProject && !cwd}>
-                {item.label}
-              </option>
+            {groupedSections.map((group) => (
+              <optgroup key={group.id} label={group.label}>
+                {group.items.map((item) => (
+                  <option key={item.id} value={item.id} disabled={item.requiresProject && !cwd}>
+                    {item.label}
+                  </option>
+                ))}
+              </optgroup>
             ))}
           </select>
 
           <nav aria-label={t("settings.title")} className="settings-section-tabs">
-            {sections.map((item) => {
-              const selected = section === item.id;
-              const disabled = item.requiresProject && !cwd;
-              const legacyTabAttr = "legacyTabAttr" in item ? item.legacyTabAttr : undefined;
-              return (
-                <div key={item.id} className="settings-section-tab-row">
-                  <button
-                    type="button"
-                    className="settings-section-tab"
-                    disabled={disabled}
-                    title={disabled ? t("settings.projectRequired") : isSettingsPluginEnabled("settings-tab-shortcuts") ? `${item.label}（双击添加／取消快捷入口）` : item.label}
-                    aria-current={selected ? "page" : undefined}
-                    data-section-id={item.id}
-                    data-pi-enh-tab={legacyTabAttr}
-                    onClick={() => activateSection(item.id)}
-                    onDoubleClick={() => settingsExtensionRegistry.invokeTabAction(item.id)}
-                    onPointerEnter={() => { if (!disabled) preloadSettingsSection(item.id); }}
-                    onFocus={() => { if (!disabled) preloadSettingsSection(item.id); }}
-                  >
-                    <SettingsSectionIcon section={item.id} />
-                    <span>{item.label}</span>
-                  </button>
+            {groupedSections.map((group) => (
+              <div key={group.id} className="settings-nav-group">
+                <div className="settings-nav-group-title" title={group.label}>
+                  <span>{group.label}</span>
                 </div>
-              );
-            })}
+                <div className="settings-nav-group-items">
+                  {group.items.map((item) => {
+                    const selected = section === item.id;
+                    const disabled = item.requiresProject && !cwd;
+                    const legacyTabAttr = "legacyTabAttr" in item ? item.legacyTabAttr : undefined;
+                    return (
+                      <div key={item.id} className="settings-section-tab-row">
+                        <button
+                          type="button"
+                          className="settings-section-tab"
+                          disabled={disabled}
+                          title={disabled ? t("settings.projectRequired") : isSettingsPluginEnabled("settings-tab-shortcuts") ? `${item.label}（双击添加／取消快捷入口）` : item.label}
+                          aria-current={selected ? "page" : undefined}
+                          data-section-id={item.id}
+                          data-pi-enh-tab={legacyTabAttr}
+                          onClick={() => activateSection(item.id)}
+                          onDoubleClick={() => settingsExtensionRegistry.invokeTabAction(item.id)}
+                          onPointerEnter={() => { if (!disabled) preloadSettingsSection(item.id); }}
+                          onFocus={() => { if (!disabled) preloadSettingsSection(item.id); }}
+                        >
+                          <SettingsSectionIcon section={item.id} />
+                          <span>{item.label}</span>
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            ))}
           </nav>
         </header>
 

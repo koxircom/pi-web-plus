@@ -31,24 +31,10 @@ export function AskUserSurface({ request, onInput, fallback }: { request: Reques
   return enabled && question ? <AskUserPanel key={request.id} request={request} question={question} onInput={onInput} /> : fallback;
 }
 
-function AskQuestionHeader({ question, collapsed, onToggle }: { question: string; collapsed: boolean; onToggle: () => void }) {
-  return <header className="pi-native-ask-header">
-    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
-      <path d="M4 18.5 3 22l4-1.5A10 10 0 1 0 4 18.5Z" /><path d="M9.5 9a2.5 2.5 0 0 1 5 .5c0 1.5-2.5 1.5-2.5 3" /><path d="M12 16h.01" />
-    </svg>
-    <span className="pi-native-ask-heading">{collapsed ? question : "问题"}</span>
-    <button type="button" className="pi-native-ask-close" aria-label={collapsed ? "展开问题" : "收起问题"} title={collapsed ? "展开问题" : "收起问题"} aria-expanded={!collapsed} onClick={onToggle}>
-      {collapsed ? <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" aria-hidden="true"><path d="m6 9 6 6 6-6" /></svg>
-        : <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" aria-hidden="true"><path d="m6 6 12 12M18 6 6 18" /></svg>}
-    </button>
-  </header>;
-}
-
 // The same question surface handles plain input/editor requests, without a terminal overlay.
 type TextRequest = Extract<ExtensionUiRequest, { method: "input" | "editor" }>;
 export function AskUserTextPanel({ request, onRespond }: { request: TextRequest; onRespond: (request: TextRequest, response: { value: string } | { cancelled: true }) => void }) {
   const [value, setValue] = useState(request.method === "editor" ? request.prefill ?? "" : "");
-  const [collapsed, setCollapsed] = useState(false);
   const [now, setNow] = useState(() => Date.now());
   const sending = useRef(false);
   useEffect(() => {
@@ -61,51 +47,81 @@ export function AskUserTextPanel({ request, onRespond }: { request: TextRequest;
   const title = contextMarker < 0 ? request.title : request.title.slice(0, contextMarker);
   const context = contextMarker < 0 ? "" : request.title.slice(contextMarker + "\n\nContext:\n".length);
   const canSend = request.method === "editor" || Boolean(value.trim());
+  const expiresHint = request.expiresAt === undefined ? "" : `${Math.max(0, Math.ceil((request.expiresAt - now) / 1000))} 秒后到期`;
   const respond = (skip = false) => {
     if (sending.current || (!skip && !canSend)) return;
     sending.current = true;
     onRespond(request, skip ? { cancelled: true } : { value });
   };
   return <div className="pi-native-extension-host pi-native-ask-host">
-    <section className="pi-native-ask-card" role="dialog" aria-label={title} data-collapsed={collapsed || undefined} onKeyDown={event => {
+    <section className="pi-native-ask-card" role="dialog" aria-label={title} onKeyDown={event => {
       if (event.nativeEvent.isComposing || event.repeat) return;
-      if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); setCollapsed(true); }
-      if (event.key === "Enter" && (request.method === "input" || event.ctrlKey || event.metaKey) && (event.target as HTMLElement).matches("input,textarea")) {
-        event.preventDefault(); respond();
+      if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); return; }
+      if (event.key === "Enter") {
+        if ((event.target as HTMLElement).matches("input")) {
+          event.preventDefault(); respond();
+        } else if ((event.ctrlKey || event.metaKey) && (event.target as HTMLElement).matches("textarea")) {
+          event.preventDefault(); respond();
+        }
       }
     }}>
-      <AskQuestionHeader question={title} collapsed={collapsed} onToggle={() => setCollapsed(current => !current)} />
-      <div className="pi-native-ask-question-row" hidden={collapsed}><h2 className="pi-native-ask-question">{title}</h2></div>
-      <div className="pi-native-ask-body" hidden={collapsed}>
-        {context && <details className="pi-native-ask-context"><summary>查看背景与方案</summary><div>{context}</div></details>}
-        <div className="pi-native-ask-notes">
-          {request.method === "input" ? <input aria-label="回答" autoFocus={allowsAutomaticEditableFocus()} placeholder={request.placeholder || "输入你的回答…"} value={value} onChange={event => setValue(event.target.value)} />
-            : <textarea aria-label="回答" autoFocus={allowsAutomaticEditableFocus()} placeholder="输入你的回答…" rows={3} value={value} onChange={event => setValue(event.target.value)} />}
+      <div className="pi-native-ask-question-row"><h2 className="pi-native-ask-question">{title}</h2></div>
+      {(context || request.method === "editor") && (
+        <div className="pi-native-ask-body">
+          {context && <details className="pi-native-ask-context"><summary>查看背景与方案</summary><div>{context}</div></details>}
+          {request.method === "editor" && (
+            <div className="pi-native-ask-notes">
+              <textarea aria-label="回答" autoFocus={allowsAutomaticEditableFocus()} placeholder="输入你的回答…" rows={3} value={value} onChange={event => setValue(event.target.value)} />
+            </div>
+          )}
         </div>
-      </div>
-      <footer className="pi-native-ask-footer" hidden={collapsed}>
-        <span className="pi-native-ask-hint" role="status">{request.expiresAt === undefined ? "" : `${Math.max(0, Math.ceil((request.expiresAt - now) / 1000))} 秒后到期`}</span>
-        <button type="button" className="pi-native-ask-cancel" onClick={() => respond(true)}>跳过</button>
-        <button type="button" className="pi-native-ask-submit" disabled={!canSend} onClick={() => respond()}>发送</button>
+      )}
+      <footer className="pi-native-ask-footer">
+        {expiresHint ? <div className="pi-native-ask-hint" role="status">{expiresHint}</div> : null}
+        <div className="pi-native-ask-footer-actions">
+          {request.method === "input" && (
+            <input
+              type="text"
+              className="pi-native-ask-input"
+              aria-label="回答"
+              autoFocus={allowsAutomaticEditableFocus()}
+              placeholder={request.placeholder || "输入你的回答…"}
+              value={value}
+              onChange={event => setValue(event.target.value)}
+            />
+          )}
+          <div className="pi-native-ask-footer-main">
+            <button type="button" className="pi-native-ask-cancel" onClick={() => respond(true)}>
+              <span className="pi-native-ask-button-label">取消</span>
+            </button>
+            <button type="button" className="pi-native-ask-submit" disabled={!canSend} onClick={() => respond()}>
+              <span className="pi-native-ask-button-label">发送</span>
+            </button>
+          </div>
+        </div>
       </footer>
     </section>
   </div>;
 }
 
 export function AskUserPanel({ request, question, onInput }: { request: Request; question: AskUserQuestion; onInput: Input }) {
-  const [collapsed, setCollapsed] = useState(false);
   const [selected, setSelected] = useState<number[]>(() => {
     const checked = readAskTerminal(request.lines).options.flatMap((option, index) => option.checked ? [index] : []);
     return readAskTerminal(request.lines).mode === "freeform" ? [] : checked.length ? checked : question.options.length ? [0] : [];
   });
-  const freeform = question.allowFreeform && selected.length === 0;
-  const [notesOpen, setNotesOpen] = useState(question.options.length === 0);
   const [notes, setNotes] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const sending = useRef(false);
   const firstOption = useRef<HTMLButtonElement>(null);
   const terminalMode = readAskTerminal(request.lines).mode;
+  const hint = error || (busy ? "正在提交，等待确认…" : "");
+
+  const hasNotes = Boolean(notes.trim());
+  const freeform = Boolean(question.allowFreeform && hasNotes);
+  const hasCustomInput = question.allowFreeform || question.allowComment;
+
+  const canSubmit = !busy && (freeform || selected.length > 0);
 
   useEffect(() => {
     if (allowsAutomaticEditableFocus()) firstOption.current?.focus({ preventScroll: true });
@@ -128,15 +144,15 @@ export function AskUserPanel({ request, question, onInput }: { request: Request;
   // Do not replace the card with a terminal dialog or clear the draft.
   useEffect(() => {
     if (terminalMode !== "select") {
-      sending.current = false; setBusy(false); setNotesOpen(true);
+      sending.current = false; setBusy(false);
       if (terminalMode === "freeform") setSelected([]);
     }
   }, [terminalMode]);
 
   function submit() {
-    if (sending.current) return;
+    if (sending.current || busy) return;
     try { void send(buildAskAnswerInputs(question, request.lines, selected, notes, freeform)); }
-    catch (cause) { setError(cause instanceof Error ? cause.message : "请选择答案"); }
+    catch (cause) { setError(cause instanceof Error ? cause.message : (freeform ? "请输入自定义回答" : "请选择答案")); }
   }
 
   function choose(index: number, toggle = true) {
@@ -148,17 +164,17 @@ export function AskUserPanel({ request, question, onInput }: { request: Request;
   }
 
   return <div className="pi-native-ask-host" data-pi-native-ask-owner={request.id}>
-    <section className="pi-native-ask-card" role="dialog" aria-label={question.question} aria-busy={busy} data-ask-user-picker data-collapsed={collapsed || undefined}
+    <section className="pi-native-ask-card" role="dialog" aria-label={question.question} aria-busy={busy} data-ask-user-picker
       onKeyDown={event => {
         if (event.nativeEvent.isComposing || event.repeat || busy) return;
-        if ((event.target as HTMLElement).matches("textarea")) {
-          if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) { event.preventDefault(); submit(); }
-          if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); setCollapsed(true); }
+        const target = event.target as HTMLElement;
+        if (target.matches("input")) {
+          if (event.key === "Enter") { event.preventDefault(); submit(); }
+          if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); }
           return;
         }
-        const option = (event.target as HTMLElement).closest<HTMLButtonElement>("[data-ask-option]");
-        if (event.key === "Escape") { event.preventDefault(); setCollapsed(true); return; }
-        if (collapsed) return;
+        const option = target.closest<HTMLButtonElement>("[data-ask-option]");
+        if (event.key === "Escape") { event.preventDefault(); event.stopPropagation(); return; }
         if (/^[1-9]$/.test(event.key) && Number(event.key) <= question.options.length) {
           event.preventDefault(); choose(Number(event.key) - 1, false); return;
         }
@@ -172,31 +188,49 @@ export function AskUserPanel({ request, question, onInput }: { request: Request;
         }
         if (option && event.key === "Enter") { event.preventDefault(); submit(); }
       }}>
-      <AskQuestionHeader question={question.question} collapsed={collapsed} onToggle={() => setCollapsed(value => !value)} />
-      <div className="pi-native-ask-question-row" hidden={collapsed}><h2 className="pi-native-ask-question">{question.question}</h2></div>
-      <div className="pi-native-ask-body" hidden={collapsed}>
+      <div className="pi-native-ask-question-row"><h2 className="pi-native-ask-question">{question.question}</h2></div>
+      <div className="pi-native-ask-body">
         {question.context && <details className="pi-native-ask-context"><summary>查看背景与方案</summary><div>{question.context}</div></details>}
         <div className="pi-native-ask-options" role="group" aria-label={question.allowMultiple ? "多选答案" : "单选答案"}>
-          {question.options.map((option, index) => <button key={index} ref={index === 0 ? firstOption : undefined} type="button" className="pi-native-ask-option" data-ask-option={index} aria-pressed={!freeform && selected.includes(index)} disabled={busy} onClick={() => choose(index)}>
-            <span className="pi-native-ask-index">{index + 1}</span>
-            <span className="pi-native-ask-copy"><span className="pi-native-ask-label">{option.title}</span>{option.description && <span className="pi-native-ask-description">{option.description}</span>}</span>
-            <span className="pi-native-ask-check" aria-hidden="true">{!freeform && selected.includes(index) ? "✓" : ""}</span>
-          </button>)}
+          {question.options.map((option, index) => {
+            const isSelected = !freeform && selected.includes(index);
+            return <button key={index} ref={index === 0 ? firstOption : undefined} type="button" className="pi-native-ask-option" data-ask-option={index} aria-pressed={isSelected} disabled={busy} onClick={() => choose(index)}>
+              <span className="pi-native-ask-index">{index + 1}</span>
+              <span className="pi-native-ask-copy"><span className="pi-native-ask-label">{option.title}</span>{option.description && <span className="pi-native-ask-description">{option.description}</span>}</span>
+              <span className="pi-native-ask-check" aria-hidden="true">
+                {isSelected ? (
+                  <svg width="13" height="13" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M3.5 8.5L6.5 11.5L12.5 4.5" />
+                  </svg>
+                ) : null}
+              </span>
+            </button>;
+          })}
         </div>
-        {(question.allowFreeform || question.allowComment) && <>
-          {question.options.length > 0 && <div className="pi-native-ask-answer-tools">
-            <button type="button" className="pi-native-ask-link" aria-expanded={notesOpen || freeform} disabled={busy || freeform} onClick={() => setNotesOpen(value => !value)}>{freeform ? "回答" : notesOpen ? "收起补充回答" : "＋ 补充回答"}</button>
-            {question.allowFreeform && !freeform && <button type="button" className="pi-native-ask-link" disabled={busy} onClick={() => { setSelected([]); setNotesOpen(true); setError(""); }}>直接回答</button>}
-          </div>}
-          <div className="pi-native-ask-notes" hidden={!(notesOpen || freeform)}>
-            <textarea aria-label="回答" placeholder={freeform ? "输入你的回答…" : "补充你的要求（可选）…"} rows={2} value={notes} disabled={busy} onChange={event => setNotes(event.target.value)} />
-          </div>
-        </>}
       </div>
-      <footer className="pi-native-ask-footer" hidden={collapsed}>
-        <span className="pi-native-ask-hint" role="status">{error || (busy ? "正在提交，等待确认…" : "")}</span>
-        <button type="button" className="pi-native-ask-cancel" disabled={busy} onClick={() => void send(["\x03"])}>跳过</button>
-        <button type="button" className="pi-native-ask-submit" disabled={busy || (freeform ? !notes.trim() : !selected.length)} onClick={submit}>{busy ? "发送中…" : "发送"}</button>
+      <footer className="pi-native-ask-footer">
+        {hint ? <div className="pi-native-ask-hint" role="status">{hint}</div> : null}
+        <div className="pi-native-ask-footer-actions">
+          {hasCustomInput && (
+            <input
+              type="text"
+              className="pi-native-ask-input"
+              aria-label="自定义回答"
+              placeholder={question.allowFreeform ? "自定义回答…" : "补充说明…"}
+              value={notes}
+              disabled={busy}
+              onChange={event => { setNotes(event.target.value); setError(""); }}
+            />
+          )}
+          <div className="pi-native-ask-footer-main">
+            <button type="button" className="pi-native-ask-cancel" disabled={busy} onClick={() => void send(["\x03"])}>
+              <span className="pi-native-ask-button-label">取消</span>
+            </button>
+            <button type="button" className="pi-native-ask-submit" disabled={!canSubmit} onClick={submit}>
+              <span className="pi-native-ask-button-label">{busy ? "发送中…" : "发送"}</span>
+            </button>
+          </div>
+        </div>
       </footer>
     </section>
   </div>;

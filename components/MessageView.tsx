@@ -647,8 +647,6 @@ function AssistantMessageView({
   const providerError = getAssistantErrorMessage(message, { isStreaming });
   const truncated = isAssistantTruncated(message, { isStreaming });
   const [copied, setCopied] = useState(false);
-  const streamStartRef = useRef<number | null>(null);
-  const [tps, setTps] = useState<number | null>(null);
   const blockItemsRef = useRef(blockItems);
   blockItemsRef.current = blockItems;
   const tokenEstimateCacheRef = useRef<Map<number, TokenEstimateCacheEntry>>(new Map());
@@ -669,8 +667,6 @@ function AssistantMessageView({
     tokenEstimateCacheRef.current = nextCache;
     return total;
   }, [blockItems, isStreaming]);
-  const estimatedTokensRef = useRef(estimatedTokens);
-  estimatedTokensRef.current = estimatedTokens;
 
   // Streaming-based timing for thinking blocks
   const blockStartTimesRef = useRef<Map<number, number>>(new Map());
@@ -722,8 +718,6 @@ function AssistantMessageView({
         }
         return next;
       });
-      streamStartRef.current = null;
-      setTps(null);
       return;
     }
     const tick = () => {
@@ -751,12 +745,6 @@ function AssistantMessageView({
         }
         return changed ? next : prev;
       });
-
-      const tokens = estimatedTokensRef.current;
-      if (tokens === 0) return;
-      if (streamStartRef.current === null) streamStartRef.current = now;
-      const elapsed = (now - streamStartRef.current) / 1000;
-      if (elapsed > 0.5) setTps(tokens / elapsed);
     };
     const id = setInterval(tick, 300);
     return () => clearInterval(id);
@@ -817,30 +805,53 @@ function AssistantMessageView({
           gap: 6,
         }}
       >
-        {message.provider && (
-          <span>{getModelDisplayName(message.provider, message.model, modelNames)}</span>
-        )}
+        {message.provider && (() => {
+          const modelDisplayName = getModelDisplayName(message.provider, message.model, modelNames);
+          return (
+            <span
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 6,
+                maxWidth: "100%",
+                minWidth: 0,
+              }}
+            >
+              <span
+                title={modelDisplayName}
+                style={{
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                  minWidth: 0,
+                }}
+              >
+                {modelDisplayName}
+              </span>
+              <span
+                data-pi-model-speed-host=""
+                style={{
+                  display: "inline-flex",
+                  alignItems: "center",
+                  flexShrink: 0,
+                  whiteSpace: "nowrap",
+                }}
+              />
+            </span>
+          );
+        })()}
         {isStreaming && (() => {
           const est = Math.round(estimatedTokens);
           return (
             <>
-
               {est > 0 && (
-                <span style={{ display: "flex", alignItems: "center", gap: 4, color: "var(--text)" }} title={t("i18n.estimatedTokens")}>
+                <span style={{ display: "flex", alignItems: "center", gap: 4, color: "var(--text)", flexShrink: 0 }} title={t("i18n.estimatedTokens")}>
                   <span style={{ display: "flex", alignItems: "center", gap: 2, fontSize: 11, fontWeight: 400 }}>
                     <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" strokeLinejoin="round">
                       <line x1="5" y1="1.5" x2="5" y2="8.5" /><polyline points="2 6 5 8.5 8 6" />
                     </svg>
                     {est}
                   </span>
-                  {tps !== null && (() => {
-                    const bg = tps >= 50 ? "#53b3cb" : tps >= 30 ? "#9bc53d" : tps >= 15 ? "#f9c22e" : "#e01a4f";
-                    return (
-                      <span style={{ marginLeft: 6, padding: "1px 6px", borderRadius: 4, background: bg, color: "#fff", fontSize: 11, fontWeight: 400 }}>
-                        {tps.toFixed(1)} t/s
-                      </span>
-                    );
-                  })()}
                 </span>
               )}
             </>
